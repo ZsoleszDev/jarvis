@@ -146,6 +146,8 @@ class WorkDesk:
                            if self.browser_ready and sites else None)
         self.current: tuple[str, str] | None = None   # (tárgy, oldal), amit épp feltölt
         self.approved = False    # feltöltés közben jóváhagytál-e egy kattintást (pl. a közzétételt)
+        # (tárgy, oldal), amiről a modell épp megnézi, fent van-e: ilyenkor újra feltölteni nem szabad.
+        self.checking: tuple[str, str] | None = None
         self._settings_path = self.root / "beallitasok.json"
         self.settings = self._load_settings()
         # Begyakorolt lépések: a modell sikeres feltöltéseiből és levételeiből tanul (replay.py).
@@ -280,6 +282,29 @@ class WorkDesk:
         return (f"Töltsd fel a(z) „{item.name}” tárgyat (azonosító: {item.id}) a(z) {site.name} oldalra "
                 f"(platform: {site.key}). Kezdd az item_post eszközzel, a végén jelöld meg az item_mark eszközzel.")
 
+    def unmarked_publish(self, item_id: str, key: str) -> bool:
+        """A közzétételt jóváhagytad, de a tárgy nincs megjelölve feltöltöttnek (pl. a modell válasza
+        félbemaradt). Ilyenkor meg kell nézni, fent van-e: az Újra gomb különben másodszor is feltöltené."""
+        if not self.approved:
+            return False
+        try:
+            item = self.store.get(item_id)
+        except ItemError:
+            return False
+        return item.platforms.get(key, {}).get("status") != POSTED
+
+    def check_request(self, item: Item, key: str) -> str:
+        """A modell nézze meg, fent van-e a hirdetés, amit közzétett, de nem jelölt meg."""
+        site = self.platforms[key]
+        return (f"A(z) „{item.name}” hirdetés (azonosító: {item.id}) közzétételét a felhasználó jóváhagyta a(z) "
+                f"{site.name} oldalon, de a tárgy még nincs megjelölve. Nézd meg a böngészőben nyitott oldalt "
+                "(browser_read vagy browser_look). Ha a hirdetés fent van (pl. az oldal szerint feltöltve, vagy ott "
+                "van a hirdetéseid között), most jelöld meg az item_mark eszközzel (status: feltöltve, platform: "
+                f"{key}, és ha látod, a hirdetés webcíme). Ha hibaüzenet van (pl. hiányzó kötelező mező), javítsd ki "
+                "a hirdetés adataival (item_get), és tedd közzé újra. Ha nem tudod eldönteni, ne jelöld meg. Az "
+                "item_post eszközt ne használd: új hirdetést kezdene, és a tárgy kétszer kerülne fel. Röviden mondd "
+                "el az eredményt.")
+
     def finish_post(self, item_id: str, key: str, last_reply: str = "") -> bool:
         """Egy oldal feltöltése után: ha nem jelölte meg feltöltöttnek, hibának jelöljük."""
         self.current = None
@@ -325,6 +350,7 @@ class WorkDesk:
         self.recorder = None
         self.delisting = None
         self.replay_preview = []
+        self.checking = None
 
     def _on_browser_action(self, event: dict[str, Any]) -> None:
         if self.recorder is not None:
@@ -711,7 +737,11 @@ class WorkDesk:
                                          ("ár", found.price), ("fotó", found.photos)) if not ok]
         if missing:
             raise ToolError(f"A feltöltéshez még hiányzik: {', '.join(missing)}. Kérdezd meg a felhasználót.")
+        if self.checking == (found.id, platform):
+            raise ToolError("Ezt a hirdetést már közzétetted (a felhasználó jóváhagyta), újra ne töltsd fel, mert "
+                            "kétszer kerülne fel. Nézd meg a nyitott oldalt, és ha fent van, jelöld meg (item_mark).")
         self._tool_gap(found.id, platform)
+        self.store.clear_note(found.id, platform)   # az előző próbálkozás megjegyzése már nem érvényes
         self.current = (found.id, platform)
         self.approved = False
         self.begin_trail()

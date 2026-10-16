@@ -12,12 +12,14 @@ import base64
 import functools
 import importlib.machinery
 import io
+import json
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -475,6 +477,129 @@ class VisionAndToolTests(unittest.TestCase):
             self.assertFalse(box._browser)
         finally:
             site.close()
+
+
+# --- az oldal adatkérései: kivárja őket, de nem marad utánuk semmi a memóriában --------------------------
+
+NETWORK_PAGES = {
+    # A találatok későn jönnek, és közben semmi nem változik a lapon (nincs „Betöltés…” felirat sem).
+    "/lassu.html": """<!doctype html><html><head><meta charset="utf-8"><title>Webshop</title></head><body>
+<h1>Találatok</h1><ul id="lista"></ul>
+<script>fetch('/adat').then(r => r.json()).then(d => { for (const t of d) {
+  const li = document.createElement('li'); li.textContent = t; document.getElementById('lista').appendChild(li); } });
+</script></body></html>""",
+    # Mint egy hirdetési oldal analitikája: sok apró kérés.
+    "/sok.html": """<!doctype html><html><head><meta charset="utf-8"><title>Sok kérés</title></head><body>
+<h1>Profil</h1><script>window.kesz = false;
+const keresek = Array.from({length: 300}, (_, i) => fetch('/apro?i=' + i).then(r => r.text()));
+Promise.all(keresek).then(() => window.kesz = true);
+</script></body></html>""",
+}
+
+
+class _NetworkHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/adat":
+            time.sleep(1.5)
+            body, kind = json.dumps(["Kávéfőző X200 – 39 990 Ft"]).encode("utf-8"), "application/json"
+        elif path == "/apro":
+            body, kind = b"ok", "text/plain"
+        elif path in NETWORK_PAGES:
+            body, kind = NETWORK_PAGES[path].encode("utf-8"), "text/html; charset=utf-8"
+        else:
+            body, kind = b"", "text/plain"
+        self.send_response(200 if body else 404)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class NetworkBusyTests(unittest.TestCase):
+    def test_a_request_that_never_ends_is_not_waited_for_forever(self):
+        page = types.SimpleNamespace(_jarvis_inflight={"regi": time.monotonic() - 100, "uj": time.monotonic()})
+        self.assertTrue(BrowserController._network_busy(page))
+        self.assertEqual(list(page._jarvis_inflight), ["uj"], "a régóta függőt elengedte")
+        page._jarvis_inflight.clear()
+        self.assertFalse(BrowserController._network_busy(page))
+        self.assertFalse(BrowserController._network_busy(types.SimpleNamespace()), "figyelés nélkül sem hiba")
+
+
+@unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
+class NetworkWaitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _NetworkHandler)
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.profile = tempfile.TemporaryDirectory()
+        cfg = load_config(ROOT / "config.toml").browser
+        cfg.headless = True
+        cfg.profile_dir = cls.profile.name
+        cfg.pace = 0.0
+        cls.browser = BrowserController(cfg, allow_local=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.profile.cleanup()
+
+    def url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}{path}"
+
+    def test_waits_for_data_that_arrives_late(self):
+        view = self.browser.open(self.url("/lassu.html"))
+        self.assertIn("Kávéfőző X200", view, "megvárta a lassú adatkérést")
+        self.assertFalse(BrowserController._network_busy(self.browser.page))
+
+    def test_requests_leave_nothing_behind(self):
+        # Régen a Playwright minden kérésről és válaszról tartott egy Python-objektumot (típusonként 10 000-ig):
+        # egy hosszabb böngészésnél több száz MB, és egyszer MemoryError lett belőle.
+        self.browser.open(self.url("/sok.html"))
+        page = self.browser.page
+        page.wait_for_function("() => window.kesz === true", timeout=30000)
+        self.browser.snapshot()    # a közben jött események feldolgozása
+        objects = getattr(getattr(getattr(page, "_impl_obj", None), "_connection", None), "_objects", None)
+        if objects is None:
+            self.skipTest("a Playwright belső szerkezete megváltozott")
+        self.assertLess(len(objects), 150, "300 kérés után sem maradt utánuk objektum (régen kérésenként kettő)")
+
+    def test_the_dossier_screenshot_is_tried_again(self):
+        self.browser.open(self.url("/lassu.html"))
+        page = self.browser.page
+        original, calls = page.screenshot, []
+
+        def flaky(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:   # pl. egy korábbi eseménykezelő hibája, amit a Playwright a következő hívásnál dob
+                raise MemoryError()
+            return original(**kwargs)
+
+        page.screenshot = flaky
+        try:
+            shot, view = self.browser.capture()
+        finally:
+            del page.screenshot
+        self.assertTrue(shot.startswith(b"\xff\xd8"), "másodszorra elkészült")
+        self.assertFalse(calls[1]["full_page"], "másodszor csak a látható részről")
+        self.assertEqual(self.browser.capture_error, "")
+        self.assertIn("Találatok", view)
+
+        def broken(**kwargs):
+            raise MemoryError()
+
+        page.screenshot = broken
+        try:
+            shot, _view = self.browser.capture()
+        finally:
+            del page.screenshot
+        self.assertIsNone(shot)
+        self.assertEqual(self.browser.capture_error, "MemoryError", "a hibacsomagban látszik, miért nincs kép")
 
 
 if __name__ == "__main__":

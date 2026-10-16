@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_offline import reply, tool_reply  # noqa: E402
-from test_replay import ReplayHarness, click, form  # noqa: E402
+from test_replay import ReplayHarness, click, form, last_tool  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
 from jarvis_core.dossier import Dossiers, format_conversation, format_steps  # noqa: E402
@@ -111,6 +111,24 @@ class DossierUnitTests(unittest.TestCase):
                                                mode="modell"))
         self.assertEqual((folder / "oldal.txt").read_text(encoding="utf-8"), "(a böngésző nem futott)")
         self.assertEqual((folder / "beszelgetes.txt").read_text(encoding="utf-8"), "(a modell ennél nem dolgozott)")
+
+    def test_the_reason_for_a_missing_screenshot_is_kept(self):
+        class NoScreenshot(FakeBrowser):
+            capture_error = "MemoryError"
+
+            def capture(self):
+                return None, "Oldal: zsoleszdev - member profile | Vinted"
+
+        dossiers = Dossiers(self.root)
+        folder = dossiers.path(dossiers.create(task="post", platform="vinted", item=FakeItem(), reason="x",
+                                               mode="modell", browser=NoScreenshot()))
+        info = json.loads((folder / "info.json").read_text(encoding="utf-8"))
+        self.assertEqual(info["capture_error"], "MemoryError", "látszik, miért nincs kép")
+        self.assertFalse((folder / "kepernyo.jpg").exists())
+        self.assertIn("member profile", (folder / "oldal.txt").read_text(encoding="utf-8"))
+        folder = dossiers.path(dossiers.create(task="post", platform="vinted", item=FakeItem("e5f6a7b8"), reason="y",
+                                               mode="modell", browser=FakeBrowser()))
+        self.assertNotIn("capture_error", json.loads((folder / "info.json").read_text(encoding="utf-8")))
 
     def test_only_the_last_ones_are_kept(self):
         dossiers = Dossiers(self.root, keep=3)
@@ -253,6 +271,101 @@ class DossierFlowTests(ReplayHarness, unittest.TestCase):
             self.assertIn("már nincs meg", data["error"])
         finally:
             server.stop()
+
+
+# --- a közzététel megtörtént, de a modell nem jelölte meg ------------------------------------------------
+
+@unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
+class PublishCheckTests(ReplayHarness, unittest.TestCase):
+    """A hibacsomag esete (Vinted): a hirdetés felkerült, de a modell válasza félbemaradt, és a tárgyat nem
+    jelölte meg. Régen ez „hiba” lett, és az Újra gomb másodszor is feltöltötte volna."""
+
+    TRUNCATED = "A hirdetés sikeresen feltöltődött! A hirdetés a „Processing” állapotban van (30-as link:"
+
+    def publish_then(self, item, ending, *check):
+        self.fake.chat_script = [tool_reply("item_post", {"item": item.id, "platform": "vinted"}),
+                                 click("Feltöltés"), ending, *check]
+        self.app.run_work({"action": "post", "ids": [item.id], "platform": "vinted"})
+        self.assertEqual(self.fake.chat_script, [], "minden modell-lépés lefutott")
+
+    def mark(self, item, seen=None):
+        def step(body):
+            if seen is not None:
+                seen.append(body)
+            return 200, tool_reply("item_mark", {"item": item.id, "status": "feltöltve", "platform": "vinted",
+                                                 "url": self.site.url("kesz.html")})
+        return step
+
+    def checks(self) -> list[str]:
+        return [e[1] for e in self.ui.of("info") if e[1].startswith("Ellenőrzés:")]
+
+    def test_an_unmarked_publish_is_checked_not_failed(self):
+        item = self.item()
+        seen: list[dict] = []
+        self.publish_then(item, reply(self.TRUNCATED), self.mark(item, seen), reply("Fent van a Vinteden."))
+        state = self.store.get(item.id).platforms["vinted"]
+        self.assertEqual(state["status"], POSTED)
+        self.assertTrue(state["url"].startswith(self.site.url("kesz.html")))
+        self.assertEqual(self.work.dossiers.names(), [], "ami sikerült, arról nem készül hibacsomag")
+        self.assertEqual(self.checks(), ["Ellenőrzés: Zara fekete póló, L → Vinted"])
+        request = seen[0]["messages"][-1]["content"]
+        self.assertIn("közzétételét a felhasználó jóváhagyta", request)
+        self.assertIn("item_post eszközt ne használd", request)
+        self.assertTrue(any(m["content"].startswith("Töltsd fel") for m in seen[0]["messages"] if m["role"] == "user"),
+                        "ugyanabban a beszélgetésben: a modell látja, mit csinált")
+        self.assertEqual(len(self.confirms()), 1, "egyszer tette közzé")
+
+    def test_a_check_that_cannot_tell_leaves_a_dossier(self):
+        item = self.item()
+        self.publish_then(item, reply(self.TRUNCATED), reply("Nem tudom eldönteni, fent van-e."))
+        state = self.store.get(item.id).platforms["vinted"]
+        self.assertEqual(state["status"], FAILED)
+        self.assertIn("Lehet, hogy mégis fent van", state["note"], "a kártya szól: nem az Újra kell")
+        self.assertIn("Nem tudom eldönteni", state["note"])
+        talk = (self.work.dossiers.path(state["dossier"]) / "beszelgetes.txt").read_text(encoding="utf-8")
+        self.assertIn("(30-as link:", talk, "a hibacsomagban az eredeti feltöltés is benne van")
+        self.assertIn("közzétételét a felhasználó jóváhagyta", talk)
+
+    def test_no_second_upload_while_checking(self):
+        item = self.item()
+        results: list[str] = []
+
+        def after_refusal(body):
+            results.append(last_tool(body))
+            return self.mark(item)(body)
+
+        self.publish_then(item, reply(self.TRUNCATED), tool_reply("item_post", {"item": item.id, "platform": "vinted"}),
+                          after_refusal, reply("Fent van."))
+        self.assertIn("újra ne töltsd fel", results[0])
+        self.assertEqual(self.store.get(item.id).platforms["vinted"]["status"], POSTED)
+        self.assertEqual(len(self.confirms()), 1, "nem tette közzé másodszor")
+        self.assertIsNone(self.work.checking)
+
+    def test_a_reply_cut_off_after_publishing_is_checked_too(self):
+        item = self.item()
+        cut = reply(self.TRUNCATED)
+        cut["stream_cut"] = True   # az Ollama a válasz vége előtt lezárta a kapcsolatot
+        self.publish_then(item, cut, self.mark(item), reply("Fent van a Vinteden."))
+        self.assertEqual(self.store.get(item.id).platforms["vinted"]["status"], POSTED)
+        self.assertEqual(self.ui.of("error"), [], "az ellenőrzés rendben volt: nem hibaként végződik")
+
+    def test_no_check_without_an_approved_publish(self):
+        item = self.item()
+        self.fake.chat_script = [tool_reply("item_post", {"item": item.id, "platform": "vinted"}),
+                                 reply("Be kell jelentkezned a Vintedre.")]
+        self.app.run_work({"action": "post", "ids": [item.id], "platform": "vinted"})
+        self.assertEqual(self.fake.chat_script, [])
+        self.assertEqual(self.checks(), [])
+        self.assertEqual(self.store.get(item.id).platforms["vinted"]["note"], "Be kell jelentkezned a Vintedre.")
+
+    def test_a_new_attempt_does_not_see_the_old_note(self):
+        item = self.item()
+        self.store.mark(item.id, "vinted", FAILED, note="A Vinted frissített felhasználói feltételeket kér.")
+        self.app.toolbox.call("item_post", {"item": item.id, "platform": "vinted"})
+        entry = self.store.get(item.id).platforms["vinted"]
+        self.assertEqual(entry["status"], FAILED, "az állapot marad, amíg ki nem derül, sikerült-e")
+        self.assertNotIn("note", entry, "az előző próbálkozás megjegyzése nem vezeti félre a modellt")
+        self.assertNotIn("feltételeket", self.app.toolbox.call("item_get", {"item": item.id}))
 
 
 if __name__ == "__main__":

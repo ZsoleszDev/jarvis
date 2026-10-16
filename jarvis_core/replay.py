@@ -64,7 +64,9 @@ CONDITION_WORDS = {"uj", "uj cimkevel", "uj cimke nelkul", "cimkevel", "bontatla
 COLOR_WORDS = {"fekete", "feher", "szurke", "piros", "kek", "zold", "sarga", "barna", "bezs", "lila",
                "rozsaszin", "narancs", "narancssarga", "arany", "ezust", "sotetkek", "vilagoskek", "khaki",
                "bordo", "turkiz", "tarka", "tobbszinu", "krem", "menta", "korall"}
-SIZE_RE = re.compile(r"^(xxs|xs|s|m|l|xl|xxl|xxxl|[2-6]xl|\d{2}([.,]5)?|\d{2} ?[-/] ?\d{2}|egy meret|one size)$")
+# A méretrendszer is előtte lehet (a Vinteden pl. „EU 40”): az is méret, nem a kategória része.
+SIZE_RE = re.compile(r"^((eu|uk|us|fr|it|de|int)\s?)?"
+                     r"(xxs|xs|s|m|l|xl|xxl|xxxl|[2-6]xl|\d{2}([.,]5)?|\d{2} ?[-/] ?\d{2}|egy meret|one size)$")
 
 
 def norm_text(text: str) -> str:
@@ -94,7 +96,8 @@ def url_shape(url: str) -> str:
 
 def field_for(text: str) -> str:
     """Melyik mező választója ez a felirat vagy mezőnév (üres, ha egyiké sem)."""
-    folded = fold(text or "")
+    # A mezőnevekben kötőjel vagy aláhúzás is elválaszthatja a szavakat (Vinted: „package-size-1”).
+    folded = fold(text or "").replace("-", " ").replace("_", " ")
     for name, words in FIELD_WORDS:
         if any(re.search(r"(?<![a-z])" + re.escape(word), folded) for word in words):
             return name
@@ -210,6 +213,8 @@ class FlowRecorder:
         risky_seen = False
         form_url = ""
         item_words = {w for w in norm_text(values.get("title", "")).split() if len(w) >= 4}
+        stayed = False        # az utolsó közzététel-kattintás után ugyanazon az oldalon maradt
+        edited_after = False  # ... és utána még mezőt töltött ki vagy választott
 
         def close() -> None:
             nonlocal group
@@ -227,6 +232,16 @@ class FlowRecorder:
 
         for ev in self.events:
             do = ev.get("do")
+            if do == "click" and ev.get("risky"):
+                # Feltöltésnél egy közzététel, ami után még pótolni kellett valamit (pl. a Vinted: „Fill in
+                # colour to continue”), majd újra közzé kellett tenni: a visszajátszás a félkész űrlapnál
+                # kérne jóváhagyást. (Levételnél a törlés és a megerősítés két kattintás, az rendben van.)
+                if self.task == "post" and stayed and edited_after:
+                    return None, "a közzététel elsőre nem ment át (pl. hiányzott egy kötelező mező)"
+                stayed = (ev.get("url_after") or "") == (ev.get("url") or "")
+                edited_after = False
+            elif do in ("type", "upload", "click"):
+                edited_after = True
             if do == "scroll":
                 continue
             if do == "back":
@@ -266,6 +281,11 @@ class FlowRecorder:
                     else:
                         steps.append({"do": "type", "el": el, "text": text})   # állandó, pl. „Fix áras”
                     continue
+                if group is not None and not ev.get("search") and match_field(text, values) not in ("", group["field"]):
+                    # Egy másik mező értéke (pl. az ár), csak a választás maradt nyitva, mert az oldal
+                    # mást ír ki (Vinted: „Very good …” a „Nagyon jó”). Nem a választás része, különben
+                    # minden ilyen állapotú tárgynál ez a szöveg (pl. ez az ár) kerülne a hirdetésbe.
+                    close()
                 if group is not None and (ev.get("search") or not by_label or by_label == group["field"]):
                     current = values.get(group["field"], "")
                     if current and norm_text(text) == norm_text(current):

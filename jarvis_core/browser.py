@@ -30,6 +30,11 @@ _CHALLENGE_RE = re.compile(
     r"are you a robot|captcha|cf-chl|egy pillanat|ellenőrizzük, hogy|nem vagy robot|access denied",
     re.IGNORECASE)
 CHALLENGE_WAIT = 12.0      # ennyit vár, hogy a köztes oldal magától továbbengedjen
+# Ennél régebben indult, be nem fejezett adatkérésre nem várunk (pl. egy hosszan nyitva tartott kapcsolat,
+# vagy egy kérés, aminek a vége elveszett, mert közben átnavigált az oldal).
+STUCK_REQUEST_SECONDS = 15.0
+# Az oldal adatkéréseit (XHR, fetch, dokumentum, szkript) a Chromium hálózati eseményeiből számoljuk.
+_TRACKED_TYPES = {"XHR", "Fetch", "Document", "Script"}
 _CLOSED_RE = re.compile(r"has been closed|target closed|browser closed|browser has disconnected|"
                         r"connection closed", re.IGNORECASE)
 
@@ -535,6 +540,7 @@ class BrowserController:
         self.on_action: Callable[[dict[str, Any]], None] | None = None
         # Előre megadott jóváhagyás (pl. a levételt már jóváhagytad): (felirat, webcím) → igaz/hamis.
         self.approve_hook: Callable[[str, str], bool] | None = None
+        self.capture_error = ""   # a hibacsomaghoz: miért nem készült képernyőkép (capture)
         self._locate_seq = 9000
         # Emberi tempó (humanize.py). Az `auto` igaz, amíg modell nélküli lépéssor fut (begyakorolt
         # lépések): akkor gondolkodási és olvasási szüneteket is tart, mert nincs modell, ami lassítana.
@@ -621,23 +627,52 @@ class BrowserController:
     # --- segédek ------------------------------------------------------------------
 
     def _watch_network(self, page: Any) -> None:
-        """Számolja az oldal folyamatban lévő adatkéréseit (a webshopok így töltik a találatokat)."""
+        """Számolja az oldal folyamatban lévő adatkéréseit (a webshopok így töltik a találatokat).
+
+        A Chromium saját hálózati eseményeiből (külön CDP-munkamenet), nem a Playwright request-eseményeiből:
+        azoknál a Playwright minden kéréshez és válaszhoz Python-objektumot készít, és típusonként 10 000-et
+        meg is tart. Egy hosszabb böngészésnél (pl. a Vinted egy oldala több száz kérés) ez több száz MB, és
+        amíg a modell gondolkodik, az események feltorlódnak, majd egyszerre jönnek: egyszer MemoryError lett
+        belőle. A CDP-eseményekből nem marad meg semmi, csak a kérés azonosítója, amíg tart."""
         if getattr(page, "_jarvis_watched", False):
             return
         page._jarvis_watched = True
-        page._jarvis_inflight = set()
-        kinds = {"xhr", "fetch", "document", "script"}
+        inflight: dict[str, float] = {}     # kérésazonosító -> mikor indult
+        page._jarvis_inflight = inflight
+        try:
+            session = page.context.new_cdp_session(page)
+            try:
+                # A válaszok tartalmát ez a munkamenet nem őrzi meg, a feltöltött fotókat sem kéri vissza.
+                session.send("Network.enable", {"maxTotalBufferSize": 0, "maxResourceBufferSize": 0,
+                                                "maxPostDataSize": 0})
+            except Exception:  # noqa: BLE001 - ha a böngésző ezeket nem ismeri, az alapbeállítással
+                session.send("Network.enable")
+        except Exception:  # noqa: BLE001 - pl. nem Chromium: akkor csak a szöveg megnyugvását figyeljük
+            return
 
-        def started(request: Any) -> None:
-            if request.resource_type in kinds:
-                page._jarvis_inflight.add(request)
+        def started(params: dict[str, Any]) -> None:
+            if params.get("type") in _TRACKED_TYPES and params.get("requestId"):
+                inflight[params["requestId"]] = time.monotonic()
 
-        def finished(request: Any) -> None:
-            page._jarvis_inflight.discard(request)
+        def finished(params: dict[str, Any]) -> None:
+            inflight.pop(params.get("requestId"), None)
 
-        page.on("request", started)
-        page.on("requestfinished", finished)
-        page.on("requestfailed", finished)
+        session.on("Network.requestWillBeSent", started)
+        session.on("Network.loadingFinished", finished)
+        session.on("Network.loadingFailed", finished)
+        page._jarvis_network = session
+
+    @staticmethod
+    def _network_busy(page: Any) -> bool:
+        """Folyamatban van-e adatkérés az oldalon (a régóta függőket elengedi, lásd STUCK_REQUEST_SECONDS)."""
+        inflight = getattr(page, "_jarvis_inflight", None)
+        if not inflight:
+            return False
+        now = time.monotonic()
+        for request_id, started in list(inflight.items()):
+            if now - started > STUCK_REQUEST_SECONDS:
+                inflight.pop(request_id, None)
+        return bool(inflight)
 
     def _settle(self, page: Any, max_wait: float = 5.0) -> None:
         """Megvárja, amíg az oldal betölt és a tartalma megnyugszik.
@@ -662,7 +697,7 @@ class BrowserController:
             except Exception:  # noqa: BLE001 - épp navigál
                 stable = 0
                 continue
-            busy = bool(getattr(page, "_jarvis_inflight", ())) or loading
+            busy = self._network_busy(page) or loading
             stable = stable + 1 if size == previous and size > 0 and not busy else 0
             previous = size
             if stable >= 2:
@@ -753,7 +788,9 @@ class BrowserController:
 
     def capture(self) -> tuple[bytes | None, str]:
         """A hibacsomaghoz: képernyőkép (JPEG, ha nem túl hosszú, az egész oldalról) és oldalnézet.
-        Ha a böngésző nem fut (vagy bezárták az ablakát), nem indítja el: (None, "")."""
+        Ha a böngésző nem fut (vagy bezárták az ablakát), nem indítja el: (None, "").
+        Ha a kép nem készül el, a capture_error mondja meg, miért."""
+        self.capture_error = ""
         page = self.page
         if not self.running or page is None:
             return None, ""
@@ -763,11 +800,17 @@ class BrowserController:
         except Exception:  # noqa: BLE001
             return None, ""
         shot = None
-        try:
-            height = int(page.evaluate("() => document.documentElement.scrollHeight") or 0)
-            shot = page.screenshot(type="jpeg", quality=70, full_page=0 < height <= 9000, timeout=10000)
-        except Exception:  # noqa: BLE001 - kép nélkül is hasznos a csomag
-            shot = None
+        # Ha az egész oldal képe nem megy, még egyszer a látható részről. Egy korábbi eseménykezelő hibáját
+        # (pl. MemoryError) a Playwright a következő hívásnál dobja: ilyenkor a második próba már sikerül.
+        for whole in (True, False):
+            try:
+                height = int(page.evaluate("() => document.documentElement.scrollHeight") or 0) if whole else 0
+                shot = page.screenshot(type="jpeg", quality=70, full_page=0 < height <= 9000, timeout=10000)
+                self.capture_error = ""
+                break
+            except Exception as exc:  # noqa: BLE001 - kép nélkül is hasznos a csomag
+                detail = str(exc).strip().splitlines()
+                self.capture_error = type(exc).__name__ + (f": {detail[0][:200]}" if detail else "")
         try:
             view = self.snapshot()
         except Exception as exc:  # noqa: BLE001

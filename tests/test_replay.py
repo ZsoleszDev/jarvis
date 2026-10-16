@@ -237,8 +237,79 @@ class RecorderTests(unittest.TestCase):
         self.assertIn("Kategória", replayer.plan_problem())
         self.assertEqual(Replayer(None, recording, VALUES, ["1.jpg"]).plan_problem(), "")
 
+    # A hibacsomagból (Vinted, angol felület): kategória, „EU 40” méret, „Very good …” állapot, és utána az ár.
+    JEANS = {**VALUES, "title": "Hosszú farmer 40-es méret", "description": "40-es méretű hosszú farmer.",
+             "price": "4000", "brand": "NoName", "size": "40", "color": "", "category": "Nők > Ruhák > Farmerek",
+             "product": "hosszú farmer"}
+
+    def vinted_jeans(self, *ending):
+        return self.recorder([
+            {"do": "upload", "el": None, "count": 1},
+            {"do": "type", "el": el("input:text", "Title", "title title"), "text": "Hosszú farmer 40-es méret"},
+            {"do": "type", "el": el("textarea", "Description", "description description"),
+             "text": "40-es méretű hosszú farmer."},
+            {"do": "click", "el": el("input:text", "Category", "category category")},
+            {"do": "click", "el": el("button", "Women", "catalog-1904")},
+            {"do": "click", "el": el("button", "Clothing", "catalog-4")},
+            {"do": "click", "el": el("button", "Jeans", "catalog-183")},
+            {"do": "click", "el": el("radio", "Straight jeans", "catalog-1845")},
+            {"do": "click", "el": el("button", "EU")},
+            {"do": "click", "el": el("checkbox", "EU 40")},
+            {"do": "click", "el": el("input:text", "Condition", "condition condition")},
+            {"do": "click", "el": el("radio", "Very good A lightly used item that may have slight imperfections",
+                                     "condition-2")},
+            {"do": "type", "el": el("input:text", "Price", "price price"), "text": "4000"},
+            {"do": "click", "el": el("button", "Small For items that’d fit in a large envelope.", "package-size-1")},
+            *ending,
+        ])
+
+    def test_vinted_size_and_price_are_not_baked_into_other_choices(self):
+        rec = self.vinted_jeans({"do": "click", "el": el("button", "Upload"), "risky": True,
+                                 "url": "https://www.vinted.hu/items/new",
+                                 "url_after": "https://www.vinted.hu/member/240394916?promo_shown=true"})
+        recording, reason = rec.build(self.JEANS)
+        self.assertIsNotNone(recording, reason)
+        memory = recording["memory"]
+        category = [a["el"]["label"] for a in memory["category"][replay.vkey(self.JEANS["category"])]]
+        self.assertNotIn("EU 40", category, "a méret nem a kategória része (különben minden farmer 40-es lenne)")
+        self.assertEqual([a["el"]["label"] for a in memory["size"]["40"]], ["EU 40"])
+        self.assertIn("price", [s.get("value") for s in recording["steps"] if s["do"] == "type"],
+                      "az ár a tárgyé, nem az állapot választásáé")
+        self.assertNotIn("4000", str(memory), "sehol nincs beégetett ár")
+        self.assertIn("nagyon jo", memory["condition"])
+        self.assertEqual(recording["success"], {"url": "www.vinted.hu/member/#"})
+        self.assertIn("Méret", Replayer(None, recording, {**self.JEANS, "size": "38"}, ["1.jpg"]).plan_problem(),
+                      "más méretnél nem kattint vakon az „EU 40”-re: azt a modell csinálja (és megtanulja)")
+        self.assertEqual(Replayer(None, recording, {**self.JEANS, "price": "3500"}, ["1.jpg"]).plan_problem(), "")
+
+    def test_a_publish_that_needed_fixing_is_not_learned(self):
+        # Az első Upload után a Vinted: „Fill in brand / colour to continue”; a modell pótolta, és újra közzétette.
+        rec = self.vinted_jeans(
+            {"do": "click", "el": el("button", "Upload"), "risky": True, "url": "https://www.vinted.hu/items/new",
+             "url_after": "https://www.vinted.hu/items/new"},
+            {"do": "type", "el": el("input:text", "Search brands", "brand-search-input"), "text": "NoName"},
+            {"do": "click", "el": el("input:text", "Colours", "color color")},
+            {"do": "click", "el": el("button", "Upload"), "risky": True, "url": "https://www.vinted.hu/items/new",
+             "url_after": "https://www.vinted.hu/member/240394916?promo_shown=true"})
+        recording, reason = rec.build(self.JEANS)
+        self.assertIsNone(recording)
+        self.assertIn("elsőre nem ment át", reason)
+
+    def test_two_step_publishing_and_delisting_are_still_learned(self):
+        confirm = [{"do": "click", "el": el("button", "Feltöltés"), "risky": True, "url": "a", "url_after": "a"},
+                   {"do": "click", "el": el("button", "Megerősítés"), "risky": True, "url": "a", "url_after": "b"}]
+        recording, reason = self.recorder(confirm).build(VALUES)
+        self.assertIsNotNone(recording, "közzététel, majd rögtön a megerősítése: rendben van")
+        delist = [{"do": "click", "el": el("button", "Törlés"), "risky": True, "url": "a", "url_after": "a"},
+                  {"do": "click", "el": el("input:radio", "Máshol adtam el")},
+                  {"do": "click", "el": el("button", "Igen, törlöm"), "risky": True, "url": "a", "url_after": "b"}]
+        recording, reason = self.recorder(delist, task="delist").build(VALUES)
+        self.assertIsNotNone(recording, reason)
+
     def test_helpers(self):
         self.assertEqual(field_for("Csomagméret"), "parcel_size", "nem a „méret”")
+        self.assertEqual(field_for("package-size-1"), "parcel_size", "a Vinted mezőneve: ez sem a „méret”")
+        self.assertEqual(field_for("brand-search-input"), "brand")
         self.assertEqual(field_for("Válassz kategóriát"), "category")
         self.assertEqual(match_field("Zara fekete póló L", VALUES), "title", "kicsit átfogalmazva is")
         self.assertEqual(match_field("500", VALUES), "price")

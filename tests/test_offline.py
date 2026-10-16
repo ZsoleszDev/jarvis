@@ -126,6 +126,8 @@ class FakeOllama:
                 if obj.get("stream_error"):   # a válasz közben leáll (pl. az Ollama modellfolyamata)
                     line({"error": obj["stream_error"]})
                     return
+                if obj.get("stream_cut"):     # a kapcsolat a válasz vége („done”) előtt, hibaüzenet nélkül zárul
+                    return
                 if msg.get("tool_calls"):
                     line({"message": {"role": "assistant", "content": "", "tool_calls": msg["tool_calls"]},
                           "done": False})

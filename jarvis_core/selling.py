@@ -124,6 +124,8 @@ NEEDS = [
     Need("condition", "állapot"),
     Need("brand", "márka", ("vinted",), clothing_only=True),
     Need("size", "méret", ("vinted",), clothing_only=True),
+    # A Vinted a színt is kötelezően kéri („Fill in colour to continue”); ha nem kérdezzük meg, a modell kitalálná.
+    Need("color", "szín", ("vinted",), clothing_only=True),
     Need("location", "átvétel helye", ("jofogas", "hardverapro"), setting="city"),
     Need("shipping", "szállítás módja és díja", ("vatera", "hardverapro"), setting="shipping"),
 ]
@@ -486,6 +488,17 @@ class ItemStore:
                 item.sold = bool(sold)
             return self._changed(item)
 
+    def clear_note(self, item_id: str, platform: str) -> Item:
+        """Egy új próbálkozás előtt: az előzőről szóló megjegyzés (pl. „el kell fogadni a feltételeket”) már
+        nem érvényes, és a modellt csak félrevezetné."""
+        with self._lock:
+            item = self.get(item_id)
+            entry = item.platforms.get(platform)
+            if entry is None or "note" not in entry:
+                return item
+            del entry["note"]
+            return self._changed(item)
+
     def attach_dossier(self, item_id: str, platform: str, name: str) -> Item:
         """Egy oldal sorához hozzáköti a hibacsomagot (a felületen megnyitható)."""
         with self._lock:
@@ -586,6 +599,7 @@ EXTRACT_SYSTEM = (
     "Videókártyák”.\n"
     "- condition: ezek egyike: " + "; ".join(CONDITIONS) + ". Csak ha a leírásból kiderül (pl. "
     "„egyszer hordott” = Nagyon jó, „bontatlan” = Új), különben üres.\n"
+    "- color: a szín magyarul (pl. „fekete”, „világoskék”), csak ha a leírásból kiderül, különben üres.\n"
     "- price: forintban, egész szám (pl. „500 Ft-ért” = 500, „5 ezer” = 5000); ha nincs megadva, 0.\n"
     "- location: csak ha az eladó említ átvételi helyet (pl. „Debrecenben”). shipping: csak ha említ "
     "szállítást (pl. „csak személyes átvétel”, „Foxpost-tal is”).\n"

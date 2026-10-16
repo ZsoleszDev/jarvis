@@ -113,6 +113,8 @@ class Dossiers:
                 shot, view = browser.capture()
             except Exception as exc:  # noqa: BLE001 - a csomag kép nélkül is hasznos
                 info["capture_error"] = f"{type(exc).__name__}: {exc}"
+            if not shot and getattr(browser, "capture_error", ""):
+                info.setdefault("capture_error", browser.capture_error)   # miért nincs képernyőkép
         if shot:
             (folder / "kepernyo.jpg").write_bytes(shot)
         (folder / "oldal.txt").write_text(view or "(a böngésző nem futott)", encoding="utf-8")

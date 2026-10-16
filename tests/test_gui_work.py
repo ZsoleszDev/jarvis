@@ -222,7 +222,7 @@ class WorkBrowserTests(unittest.TestCase):
         page.check('#w-sites input[value="vinted"]')
         page.check('#w-sites input[value="jofogas"]')
         needs = page.inner_text("#w-needs")
-        self.assertIn("Vinted, ha ruha, cipő vagy kiegészítő: márka, méret.", needs)
+        self.assertIn("Vinted, ha ruha, cipő vagy kiegészítő: márka, méret, szín.", needs)
         self.assertIn("Jófogás: átvétel helye – írd a leírásba, vagy add meg egyszer az Alapadatoknál.", needs)
         page.click("#w-go")
         self.assertIn("Adj hozzá legalább egy fotót", page.inner_text("#w-compose-msg"))

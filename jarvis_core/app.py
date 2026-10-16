@@ -1459,11 +1459,11 @@ class JarvisApp:
         self.work_assistant.reset()
         last = ""
         cancelled = False
+        work.checking = (item_id, key)   # közzététel után: újra feltölteni nem szabad (kétszer kerülne fel)
         try:
             self.answer(work.verify_request(item, key, task, outcome), via="auto", mode="work",
                         shown=f"Ellenőrzés: {item.name} → {site.name}")
-            history = self.work_assistant.history
-            last = next((m.get("content", "") for m in reversed(history) if m.get("role") == "assistant"), "")
+            last = self._last_work_reply()
         except Cancelled:
             cancelled = True
             raise
@@ -1471,6 +1471,7 @@ class JarvisApp:
             last = model_problem(exc, short=True)
             raise
         finally:
+            work.checking = None
             ok = work.finish_post(item_id, key, last) if task == "post" else work.finish_delist(item_id, key, last)
             if not ok and not cancelled:
                 self._dossier(item_id, key, task, last or "az ellenőrzés nem sikerült", "modell (ellenőrzés)")
@@ -1495,23 +1496,52 @@ class JarvisApp:
         last = ""
         site = self.work.platforms[key].name
         cancelled = False
+        failure: OllamaError | None = None
         try:
-            self.answer(self.work.post_request(item, key), via="auto", mode="work",
-                        shown=f"Feltöltés: {item.name} → {site}")
-            history = self.work_assistant.history
-            last = next((m.get("content", "") for m in reversed(history) if m.get("role") == "assistant"), "")
+            try:
+                self.answer(self.work.post_request(item, key), via="auto", mode="work",
+                            shown=f"Feltöltés: {item.name} → {site}")
+                last = self._last_work_reply()
+            except OllamaError as exc:
+                last, failure = model_problem(exc, short=True), exc
+            if self.work.unmarked_publish(item_id, key):
+                last = self._check_publish(item_id, key) or last
         except Cancelled:
             last = "Megszakítottad. Az Újra gombbal folytatom."
             cancelled = True
-            raise
-        except OllamaError as exc:
-            last = model_problem(exc, short=True)
             raise
         finally:
             ok = self.work.finish_post(item_id, key, last)
             if not ok and not cancelled:
                 self._dossier(item_id, key, "post", last or "nem sikerült végigcsinálni", "modell")
+        if failure is not None and not ok:
+            raise failure
         return ok
+
+    def _last_work_reply(self) -> str:
+        """A Munka menü beszélgetésében a modell utolsó szöveges válasza."""
+        history = self.work_assistant.history if self.work_assistant is not None else []
+        return next((m.get("content", "") for m in reversed(history) if m.get("role") == "assistant"), "")
+
+    def _check_publish(self, item_id: str, key: str) -> str:
+        """A közzétételt jóváhagytad, de a tárgy nincs megjelölve (pl. a modell válasza félbemaradt, vagy
+        elfelejtette): a modell még egyszer megnézi az oldalt, és ha fent van, megjelöli. Újra feltölteni nem
+        szabad, mert kétszer kerülne fel. Visszaadja az ellenőrzés válaszát (üres, ha az sem sikerült)."""
+        assert self.work is not None
+        work = self.work
+        item = work.store.get(item_id)
+        site = work.platforms[key].name
+        work.checking = (item_id, key)
+        try:
+            # Ugyanabban a beszélgetésben: a modell tudja, mit csinált, és a hibacsomagba is minden belekerül.
+            self.answer(work.check_request(item, key), via="auto", mode="work",
+                        shown=f"Ellenőrzés: {item.name} → {site}")
+        except OllamaError as exc:
+            self.ui.warn(f"Az ellenőrzés nem sikerült: {model_problem(exc, short=True)}")
+            return ""
+        finally:
+            work.checking = None
+        return self._last_work_reply()
 
     def _respect_gap(self, item_id: str, key: str) -> None:
         """Emberi tempó: ugyanazon az oldalon két közzététel (vagy levétel) között pár perc teljen el
@@ -1620,8 +1650,7 @@ class JarvisApp:
             self.work_assistant.reset()
             self.answer(work.delist_request(item, key), via="auto", mode="work",
                         shown=f"Levétel: {item.name} → {site.name}")
-            history = self.work_assistant.history
-            last = next((m.get("content", "") for m in reversed(history) if m.get("role") == "assistant"), "")
+            last = self._last_work_reply()
         except Cancelled:
             last = "Megszakítottad."
             cancelled = True

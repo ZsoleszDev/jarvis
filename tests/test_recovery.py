@@ -107,6 +107,16 @@ class ClientRetryTests(unittest.TestCase):
         self.assertEqual(self.restarts, [], "a félig elhangzott választ nem kezdi újra")
         self.assertEqual(len(self.fake.chat_script), 1)
 
+    def test_a_reply_cut_before_its_end_is_not_a_reply(self):
+        cut = reply("A hirdetés sikeresen feltöltődött! A hirdetés a „Processing” állapotban van (30-as link:")
+        cut["stream_cut"] = True
+        self.fake.chat_script = [cut]
+        heard: list[str] = []
+        with self.assertRaisesRegex(OllamaError, "félbeszakadt"):
+            self.client.chat([{"role": "user", "content": "töltsd fel"}], on_text=heard.append)
+        self.assertTrue("".join(heard).endswith("(30-as link:"), "ami megjött, az elhangzott")
+        self.assertEqual(self.restarts, [], "a félig elhangzott választ nem kezdi újra")
+
     def test_a_second_crash_is_reported(self):
         self.fake.chat_script = [crash(), crash(), reply("nem jut ide")]
         with self.assertRaisesRegex(OllamaError, "unexpectedly stopped"):

@@ -245,11 +245,14 @@ class NeedsTests(unittest.TestCase):
         self.assertEqual(self.missing(self.item(["vatera"])),
                          [("product", []), ("price", []), ("condition", []), ("shipping", ["Vatera"])])
 
-    def test_vinted_needs_brand_and_size_only_for_clothes(self):
+    def test_vinted_needs_brand_size_and_colour_only_for_clothes(self):
         base = dict(product="póló", price=500, condition="Jó")
         self.assertEqual(self.missing(self.item(["vinted"], kind="ruha", **base)),
-                         [("brand", ["Vinted"]), ("size", ["Vinted"])])
-        self.assertEqual(self.missing(self.item(["vinted"], kind="cipő", brand="Nike", size="42", **base)), [])
+                         [("brand", ["Vinted"]), ("size", ["Vinted"]), ("color", ["Vinted"])])
+        self.assertEqual(self.missing(self.item(["vinted"], kind="cipő", brand="Nike", size="42", color="fehér",
+                                                **base)), [])
+        self.assertEqual(self.missing(self.item(["vinted"], kind="ruha", brand="NoName", size="40", **base)),
+                         [("color", ["Vinted"])], "a Vinted a színt is kötelezően kéri, ne a modell találja ki")
         self.assertEqual(self.missing(self.item(["vinted"], kind="elektronika", **base)), [],
                          "egy videókártyának nincs mérete")
         self.assertEqual(self.missing(self.item(["jofogas", "vatera", "hardverapro"], kind="ruha", location="Pécs",
@@ -265,7 +268,7 @@ class NeedsTests(unittest.TestCase):
     def test_question_says_what_is_missing_and_where(self):
         item = self.item(["vinted", "jofogas"], product="fekete póló", kind="ruha", price=500)
         text = question_for(item, missing_needs(item, {}))
-        self.assertTrue(text.startswith("A(z) „fekete póló” feltöltéséhez még kell: állapot; márka, méret "
+        self.assertTrue(text.startswith("A(z) „fekete póló” feltöltéséhez még kell: állapot; márka, méret, szín "
                                         "(Vinted); átvétel helye (Jófogás)."), text)
         self.assertIn("Alapadatok", text)
         self.assertTrue(text.endswith("Írd meg, és folytatom."))

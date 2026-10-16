@@ -490,6 +490,11 @@ class OllamaClient:
                 raise OllamaError(f"Megszakadt a kapcsolat az Ollamával ({type(exc).__name__}).") from exc
             except ValueError as exc:
                 raise OllamaError("Érvénytelen válasz érkezett az Ollamától.") from exc
+        if not final and not (cancel is not None and cancel.is_set()):
+            # A válasz vége ("done") nélkül zárult le: a félbemaradt szöveg nem kész válasz (különben pl. egy
+            # feltöltés végén a megjelölés helyett egy félbehagyott mondat lenne az eredmény).
+            raise OllamaError("A nyelvi modell válasza félbeszakadt: az Ollama a válasz vége előtt lezárta "
+                              "a kapcsolatot.")
         final["message"] = {"role": "assistant", "content": "".join(content),
                             "thinking": "".join(thinking), "tool_calls": tool_calls}
         return final
