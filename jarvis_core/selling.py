@@ -1,0 +1,809 @@
+"""Adás/Vétel: eladásra szánt tárgyak, hirdetési oldalak, és a hirdetés adatai a leírásodból.
+
+A menet: kiválasztod, hova kerüljön (Vinted, Jófogás, Vatera, Hardverapró), feltöltöd a
+fotókat, és leírod egy-két mondatban, mit adsz el („Zara L-es fekete póló, egyszer hordott,
+500 Ft”). Jarvis ebből egyetlen modellhívással kiolvassa az adatokat (a fotókat nem nézi, az
+sok idő lenne). Ha valami hiányzik ahhoz, amit a kiválasztott oldalak kérnek, visszakérdez;
+különben indulhat a feltöltés. Kérésre előtte megnézi, mennyiért kínálnak hasonlót.
+
+Egy tárgy egy mappa a munka mappában: item.json (az adatok), a fotók (01.jpg, 02.jpg…) és a
+kis előnézetek (thumbs/). A törölt tárgy a _torolt mappába kerül, így vissza lehet hozni.
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import statistics
+import threading
+import time
+import urllib.parse
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+from typing import Any, Callable
+
+from .textutil import fold
+
+ITEM_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+PHOTO_RE = re.compile(r"^\d{2}\.jpg$")
+CONDITIONS = ["Új, címkével", "Új", "Nagyon jó", "Jó", "Elfogadható", "Hibás"]
+KINDS = ["ruha", "cipő", "kiegészítő", "elektronika", "egyéb"]
+CLOTHING = {"ruha", "cipő", "kiegészítő"}
+PARCEL_SIZES = ["kicsi", "közepes", "nagy"]
+MAX_PHOTO_BYTES = 25 * 1024 * 1024
+PHOTO_MAX_SIDE = 1600
+THUMB_SIDE = 360
+MAX_PRICE = 10_000_000
+
+LISTING_FIELDS = ("product", "title", "description", "category", "brand", "size", "condition",
+                  "color", "material", "location", "shipping", "search_query")
+TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200, "brand": 80,
+               "size": 40, "condition": 40, "color": 60, "material": 120, "location": 80,
+               "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20}
+MULTILINE = {"description", "prompt"}
+POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
+
+
+class ItemError(Exception):
+    """Érthető hibaüzenet a tárgyakkal kapcsolatban."""
+
+
+# --- hirdetési oldalak -------------------------------------------------------------
+
+DEFAULT_DELIST_HINTS = (
+    "A saját hirdetésed oldalán (vagy a Hirdetéseim / Profilom listában) keresd a Törlés, Eltávolítás, "
+    "Inaktiválás, Lezárás vagy „Eladottként jelölés” lehetőséget; néha a ... vagy a Szerkesztés menü alatt "
+    "van. Ha az oldal megkérdezi, miért veszed le, válaszd, hogy máshol adtad el (vagy eladtad). A megerősítő "
+    "kérdésre (Biztosan?) válaszolj igennel: a felhasználó már jóváhagyta a levételt. Fizetős lehetőséget "
+    "(kiemelés, előresorolás) soha ne válassz."
+)
+
+
+@dataclass(frozen=True)
+class Platform:
+    key: str
+    name: str
+    home: str              # itt lehet bejelentkezni
+    new_url: str           # ahol a hirdetésfeladás kezdődik
+    search_url: str        # {q} = keresőszó; üres = itt nincs árkutatás
+    domains: tuple[str, ...]
+    hints: str             # tippek a Jarvisnak a kitöltéshez
+    delist_hints: str = DEFAULT_DELIST_HINTS  # tippek a levételhez (eladás után)
+
+
+PLATFORMS: dict[str, Platform] = {
+    "vinted": Platform(
+        "vinted", "Vinted", "https://www.vinted.hu/", "https://www.vinted.hu/items/new",
+        "https://www.vinted.hu/catalog?search_text={q}", ("vinted.hu",),
+        "1. Fotók: browser_upload_photos (elem nélkül, vagy a fotófeltöltő gomb számával). "
+        "2. Cím és leírás. 3. Kategória: kattints a mezőre, és lépkedj a szinteken (pl. Nők, Ruhák, "
+        "Pólók). 4. Márka: kezdd el begépelni, és válaszd ki a listából. 5. Méret, állapot, szín (és ha "
+        "van, anyag) a listákból. 6. Ár forintban. 7. Csomagméret a megadott. 8. Végül a „Feltöltés” gomb."),
+    "jofogas": Platform(
+        "jofogas", "Jófogás", "https://www.jofogas.hu/", "https://www.jofogas.hu/",
+        "https://www.jofogas.hu/magyarorszag?q={q}", ("jofogas.hu",),
+        "1. Kattints a hirdetésfeladás gombra. 2. Kategória: a legközelebbi. 3. Cím, leírás, ár. "
+        "4. Fotók: browser_upload_photos. 5. Állapot, ha kéri. 6. Helyszín: a megadott város. "
+        "7. Az elérhetőséget az oldal a fiókból tölti ki; ha üres és kötelező, állj meg, és kérdezd meg. "
+        "8. Végül a hirdetés feladása gomb."),
+    "vatera": Platform(
+        "vatera", "Vatera", "https://www.vatera.hu/", "https://www.vatera.hu/",
+        "https://www.vatera.hu/listings/index.php?q={q}", ("vatera.hu",),
+        "1. Bejelentkezve keresd meg az eladás vagy termékfeltöltés gombot. 2. Kategória: a "
+        "legközelebbi. 3. Cím (ha hosszabbat kér, egészítsd ki a márkával és az állapottal) és leírás. "
+        "4. Állapot: Új, Felújított, Használt – kiváló / jó / sérült közül a legközelebbi. 5. Eladás "
+        "módja: fix áras (azonnal megvehető), az ár, darabszám 1. 6. Fotók (legfeljebb 8). 7. Szállítás: "
+        "a megadott módok és díjak; fizetésnél amit az oldal alapból ajánl. 8. Végül a feltöltés gomb."),
+    "hardverapro": Platform(
+        "hardverapro", "Hardverapró", "https://hardverapro.hu/", "https://hardverapro.hu/",
+        "https://hardverapro.hu/aprok/keres.php?stext={q}", ("hardverapro.hu",),
+        "1. Bejelentkezve kattints a hirdetésfeladás gombra. 2. Kategória: a legközelebbi. 3. Cím, ár, "
+        "állapot (új, használt vagy hibás). 4. Leírás. 5. Település: a megadott város. 6. Szállítás: a "
+        "megadott módok (pl. személyes átvétel, postázás, Foxpost). 7. Fotók: browser_upload_photos. "
+        "8. Végül a feladás gomb."),
+}
+
+
+# --- mit kér az egyes oldal ---------------------------------------------------------
+
+@dataclass(frozen=True)
+class Need:
+    field: str
+    label: str
+    sites: tuple[str, ...] = ()    # üres = mindegyik oldal kéri
+    clothing_only: bool = False    # csak ruhánál, cipőnél, kiegészítőnél
+    setting: str = ""              # az Alapadatokból is jöhet (city, shipping)
+
+
+NEEDS = [
+    Need("product", "mit adsz el"),
+    Need("price", "ár"),
+    Need("condition", "állapot"),
+    Need("brand", "márka", ("vinted",), clothing_only=True),
+    Need("size", "méret", ("vinted",), clothing_only=True),
+    Need("location", "átvétel helye", ("jofogas", "hardverapro"), setting="city"),
+    Need("shipping", "szállítás módja és díja", ("vatera", "hardverapro"), setting="shipping"),
+]
+
+
+def needs_for(targets: list[str]) -> list[Need]:
+    return [n for n in NEEDS if not n.sites or any(site in targets for site in n.sites)]
+
+
+# --- egy tárgy ---------------------------------------------------------------------
+
+@dataclass
+class Item:
+    id: str
+    created: float
+    updated: float
+    photos: list[str] = field(default_factory=list)
+    targets: list[str] = field(default_factory=list)     # hova töltse fel
+    prompt: str = ""                  # a leírásod, és ha visszakérdezett, a válaszaid
+    research_wanted: bool = False     # nézzen utána, mennyiért adják máshol (csak ajánlás)
+    product: str = ""                 # mi ez, röviden
+    kind: str = ""                    # ruha, cipő, kiegészítő, elektronika, egyéb
+    title: str = ""
+    description: str = ""
+    category: str = ""
+    brand: str = ""
+    size: str = ""
+    condition: str = ""
+    color: str = ""
+    material: str = ""
+    price: int | None = None          # forint
+    location: str = ""                # ha eltér az Alapadatoktól
+    shipping: str = ""
+    search_query: str = ""
+    edited: list[str] = field(default_factory=list)      # kézzel átírt mezők: Jarvis nem írja felül
+    research: dict[str, Any] = field(default_factory=dict)
+    platforms: dict[str, dict[str, Any]] = field(default_factory=dict)
+    pending: dict[str, Any] = field(default_factory=dict)  # visszakérdezés vagy árdöntés
+    sold: bool = False
+    reminded: float = 0.0             # mikor szólt utoljára, hogy régóta fent van és nem kelt el
+    busy: str = ""                    # épp min dolgozik a Jarvis (nem mentjük)
+
+    @property
+    def name(self) -> str:
+        if self.title:
+            return self.title
+        if self.product:
+            return self.product
+        first = " ".join(self.prompt.split())[:50]
+        return first or "Új tárgy"
+
+    @property
+    def status(self) -> str:
+        if self.sold:
+            return "eladva"
+        if self.pending.get("kind") == "info":
+            return "kérdés"
+        if self.pending.get("kind") == "price":
+            return "árdöntés"
+        up = [t for t in self.targets if self.platforms.get(t, {}).get("status") == POSTED]
+        if up and len(up) == len(self.targets):
+            return "fent"
+        if up:
+            return "részben fent"
+        return "vázlat"
+
+    def public(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["name"] = self.name
+        data["status"] = self.status
+        data["verdict"] = price_verdict(self).text if self.research.get("at") else ""
+        return data
+
+    def stored(self) -> dict[str, Any]:
+        data = asdict(self)
+        data.pop("busy", None)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Item:
+        known = {f.name for f in fields(cls)}
+        values = {k: v for k, v in data.items() if k in known}
+        if not values.get("prompt") and data.get("notes"):   # a 0.5-ös változat mezője
+            values["prompt"] = str(data["notes"])
+        values["busy"] = ""
+        values["photos"] = [p for p in values.get("photos") or [] if isinstance(p, str) and PHOTO_RE.match(p)]
+        return cls(**values)
+
+
+def format_price(value: int | float | None) -> str:
+    if value is None:
+        return "nincs ár"
+    return f"{int(round(value)):,}".replace(",", " ") + " Ft"
+
+
+def parse_price(value: Any) -> int | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool):
+        raise ItemError("Az ár egy szám legyen, forintban.")
+    text = re.sub(r"(?i)\s|ft|huf|forint|\.(?=\d{3}\b)", "", str(value)).replace(",", ".")
+    try:
+        price = int(round(float(text)))
+    except ValueError:
+        raise ItemError("Az ár egy szám legyen, forintban (pl. 4500).") from None
+    if not 0 <= price <= MAX_PRICE:
+        raise ItemError("Az ár 0 és 10 millió forint között legyen.")
+    return price
+
+
+def closest_condition(value: str) -> str:
+    wanted = fold(value or "").strip()
+    if not wanted:
+        return ""
+    for option in CONDITIONS:
+        if fold(option) == wanted:
+            return option
+    for option in CONDITIONS:
+        if wanted in fold(option) or fold(option) in wanted:
+            return option
+    return ""
+
+
+# --- fotók ---------------------------------------------------------------------------
+
+_heif_checked = False
+
+
+def _enable_heif() -> None:
+    """Az iPhone-os HEIC képekhez a pillow-heif kell (nem kötelező)."""
+    global _heif_checked
+    if _heif_checked:
+        return
+    _heif_checked = True
+    try:
+        from pillow_heif import register_heif_opener  # type: ignore[import-not-found]
+        register_heif_opener()
+    except ImportError:
+        pass
+
+
+def _open_image(data: bytes) -> Any:
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    _enable_heif()
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError, ValueError) as exc:
+        raise ItemError("Ez nem kép, vagy ezt a formátumot nem ismerem. JPG, PNG és WEBP jó; "
+                        "az iPhone-os HEIC-hez: pip install pillow-heif") from exc
+    image = ImageOps.exif_transpose(image)   # a telefon által elforgatott képek álljanak jól
+    if image.mode in ("RGBA", "LA", "P"):
+        image = image.convert("RGBA")
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image, mask=image.split()[-1])
+        image = background
+    elif image.mode != "RGB":
+        image = image.convert("RGB")
+    return image
+
+
+def _jpeg(image: Any, side: int, quality: int) -> bytes:
+    from PIL import Image
+
+    copy = image.copy()
+    copy.thumbnail((side, side), Image.LANCZOS)
+    buffer = io.BytesIO()
+    copy.save(buffer, "JPEG", quality=quality, optimize=True)
+    return buffer.getvalue()
+
+
+def process_photo(data: bytes) -> tuple[bytes, bytes]:
+    """Feltöltéshez kész JPEG (legfeljebb 1600 px) és előnézet (360 px)."""
+    if len(data) > MAX_PHOTO_BYTES:
+        raise ItemError("A kép túl nagy (legfeljebb 25 MB lehet).")
+    image = _open_image(data)
+    return _jpeg(image, PHOTO_MAX_SIDE, 88), _jpeg(image, THUMB_SIDE, 80)
+
+
+# --- tárolás ---------------------------------------------------------------------------
+
+class ItemStore:
+    """Az eladásra szánt tárgyak. Több szálról is használható (felület és ágens)."""
+
+    def __init__(self, root: Path, max_photos: int = 20,
+                 on_change: Callable[[dict[str, Any]], None] | None = None,
+                 on_remove: Callable[[str], None] | None = None,
+                 platform_keys: list[str] | None = None):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.max_photos = max(1, int(max_photos))
+        self.on_change = on_change
+        self.on_remove = on_remove
+        self.platform_keys = list(platform_keys or PLATFORMS)
+        self._lock = threading.RLock()
+        self._items: dict[str, Item] = {}
+        self._load()
+
+    def _load(self) -> None:
+        for folder in sorted(self.root.iterdir()):
+            if not (folder.is_dir() and ITEM_ID_RE.match(folder.name)):
+                continue
+            try:
+                data = json.loads((folder / "item.json").read_text(encoding="utf-8"))
+                item = Item.from_dict(data)
+            except (OSError, ValueError, TypeError):
+                continue
+            item.id = folder.name
+            item.photos = [p for p in item.photos if (folder / p).is_file()]
+            self._items[item.id] = item
+
+    # --- belső -------------------------------------------------------------------------
+
+    def folder(self, item_id: str) -> Path:
+        if not ITEM_ID_RE.match(item_id or ""):
+            raise ItemError(f"Nincs ilyen tárgy: {item_id}")
+        return self.root / item_id
+
+    def _save(self, item: Item) -> None:
+        folder = self.folder(item.id)
+        folder.mkdir(parents=True, exist_ok=True)
+        tmp = folder / "item.json.tmp"
+        tmp.write_text(json.dumps(item.stored(), ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, folder / "item.json")
+
+    def _changed(self, item: Item, save: bool = True) -> Item:
+        item.updated = time.time()
+        if save:
+            self._save(item)
+        if self.on_change is not None:
+            try:
+                self.on_change(item.public())
+            except Exception:  # noqa: BLE001 - a felület hibája ne rontsa el a mentést
+                pass
+        return item
+
+    # --- lekérdezés ------------------------------------------------------------------------
+
+    def get(self, item_id: str) -> Item:
+        with self._lock:
+            item = self._items.get(item_id or "")
+            if item is None:
+                raise ItemError(f"Nincs ilyen tárgy: {item_id}")
+            return item
+
+    def find(self, ref: str) -> Item:
+        """Azonosító vagy (ha egyértelmű) a név része alapján."""
+        ref = (ref or "").strip()
+        with self._lock:
+            if ref in self._items:
+                return self._items[ref]
+            wanted = fold(ref)
+            matches = [i for i in self._items.values() if wanted and wanted in fold(i.name)]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise ItemError(f"Több tárgy is illik erre: {ref}. Az azonosítóval add meg (item_list).")
+        raise ItemError(f"Nincs ilyen tárgy: {ref}. A tárgyakat az item_list eszköz sorolja fel.")
+
+    def all(self) -> list[Item]:
+        with self._lock:
+            return sorted(self._items.values(), key=lambda i: i.created, reverse=True)
+
+    # --- módosítás -------------------------------------------------------------------------
+
+    def create(self, **values: Any) -> Item:
+        with self._lock:
+            item_id = secrets.token_hex(4)
+            while item_id in self._items or (self.root / item_id).exists():
+                item_id = secrets.token_hex(4)
+            now = time.time()
+            item = Item(id=item_id, created=now, updated=now)
+            self._apply(item, values)    # hibás adatnál ItemError, és nem jön létre semmi
+            self._items[item_id] = item
+            return self._changed(item)
+
+    def _apply(self, item: Item, values: dict[str, Any]) -> list[str]:
+        changed = []
+        for key, value in values.items():
+            if key == "price":
+                value = parse_price(value)
+            elif key == "condition":
+                value = closest_condition(str(value or "")) if value else ""
+            elif key == "kind":
+                value = fold(str(value or "")).strip()
+                value = next((k for k in KINDS if fold(k) == value), "egyéb" if value else "")
+            elif key == "targets":
+                if not isinstance(value, (list, tuple)):
+                    raise ItemError("A hirdetési oldalakat listában add meg.")
+                unknown = [t for t in value if t not in self.platform_keys]
+                if unknown:
+                    raise ItemError(f"Ismeretlen hirdetési oldal: {', '.join(map(str, unknown))}")
+                value = [t for t in self.platform_keys if t in value]
+            elif key == "research_wanted":
+                value = bool(value)
+            elif key in TEXT_LIMITS:
+                text = str(value or "")
+                if key in MULTILINE:
+                    text = "\n".join(" ".join(line.split()) for line in text.strip().splitlines())
+                    text = re.sub(r"\n{3,}", "\n\n", text)
+                else:
+                    text = " ".join(text.split())
+                value = text[:TEXT_LIMITS[key]]
+            else:
+                raise ItemError(f"Ezt nem lehet módosítani: {key}")
+            if getattr(item, key) != value:
+                setattr(item, key, value)
+                changed.append(key)
+        return changed
+
+    def update(self, item_id: str, user: bool = False, **values: Any) -> Item:
+        """Módosítás. `user=True`: a felhasználó írta át, ezért Jarvis később nem írja felül."""
+        with self._lock:
+            item = self.get(item_id)
+            if not user:
+                values = {k: v for k, v in values.items() if k not in item.edited}
+            changed = self._apply(item, values)
+            if user:
+                item.edited = sorted(set(item.edited) | {k for k in changed if k in (*LISTING_FIELDS, "price")})
+            return self._changed(item)
+
+    def set_busy(self, item_id: str, text: str) -> None:
+        with self._lock:
+            item = self._items.get(item_id)
+            if item is not None and item.busy != text:
+                item.busy = text
+                self._changed(item, save=False)
+
+    def set_pending(self, item_id: str, pending: dict[str, Any] | None) -> Item:
+        with self._lock:
+            item = self.get(item_id)
+            item.pending = dict(pending or {})
+            return self._changed(item)
+
+    def set_research(self, item_id: str, research: dict[str, Any]) -> Item:
+        with self._lock:
+            item = self.get(item_id)
+            item.research = research
+            return self._changed(item)
+
+    def mark(self, item_id: str, platform: str = "", status: str = POSTED, url: str = "",
+             note: str = "", sold: bool | None = None) -> Item:
+        with self._lock:
+            item = self.get(item_id)
+            if platform:
+                if platform not in self.platform_keys:
+                    raise ItemError(f"Ismeretlen oldal: {platform}. Lehet: {', '.join(self.platform_keys)}")
+                if status not in (POSTED, NOT_POSTED, FAILED):
+                    raise ItemError(f"Az állapot „{POSTED}”, „{NOT_POSTED}” vagy „{FAILED}” lehet.")
+                entry: dict[str, Any] = {"status": status, "at": time.time()}
+                if url.startswith(("http://", "https://")):
+                    entry["url"] = url[:300]
+                elif status == POSTED and item.platforms.get(platform, {}).get("url"):
+                    entry["url"] = item.platforms[platform]["url"]
+                if note:
+                    entry["note"] = note[:300]
+                item.platforms[platform] = entry
+            if sold is not None:
+                item.sold = bool(sold)
+            return self._changed(item)
+
+    def attach_dossier(self, item_id: str, platform: str, name: str) -> Item:
+        """Egy oldal sorához hozzáköti a hibacsomagot (a felületen megnyitható)."""
+        with self._lock:
+            item = self.get(item_id)
+            entry = item.platforms.get(platform)
+            if entry is None:
+                entry = item.platforms[platform] = {"status": NOT_POSTED, "at": time.time()}
+            entry["dossier"] = str(name)[:120]
+            return self._changed(item)
+
+    def set_reminded(self, item_id: str, when: float | None = None) -> Item:
+        """Feljegyzi, hogy szóltunk: régóta fent van, de még nem kelt el (hét napig nem szól újra)."""
+        with self._lock:
+            item = self.get(item_id)
+            item.reminded = time.time() if when is None else float(when)
+            return self._changed(item)
+
+    def delete(self, item_id: str) -> None:
+        """A tárgy a _torolt mappába kerül (onnan kézzel visszahozható)."""
+        with self._lock:
+            self.get(item_id)
+            trash = self.root / "_torolt"
+            trash.mkdir(exist_ok=True)
+            shutil.move(str(self.folder(item_id)), str(trash / f"{item_id}-{int(time.time())}"))
+            del self._items[item_id]
+        if self.on_remove is not None:
+            try:
+                self.on_remove(item_id)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # --- fotók -----------------------------------------------------------------------------
+
+    def photo_file(self, item_id: str, name: str, thumb: bool = False) -> Path:
+        if not PHOTO_RE.match(name or ""):
+            raise ItemError("Nincs ilyen fotó.")
+        item = self.get(item_id)
+        if name not in item.photos:
+            raise ItemError("Nincs ilyen fotó.")
+        folder = self.folder(item_id)
+        return folder / "thumbs" / name if thumb else folder / name
+
+    def photo_paths(self, item_id: str) -> list[Path]:
+        item = self.get(item_id)
+        folder = self.folder(item_id)
+        return [folder / name for name in item.photos]
+
+    def add_photo(self, item_id: str, data: bytes) -> Item:
+        full, thumb = process_photo(data)   # a lassabb rész zár nélkül
+        with self._lock:
+            item = self.get(item_id)
+            if len(item.photos) >= self.max_photos:
+                raise ItemError(f"Egy tárgyhoz legfeljebb {self.max_photos} fotó tartozhat.")
+            folder = self.folder(item_id)
+            (folder / "thumbs").mkdir(parents=True, exist_ok=True)
+            numbers = [int(p[:2]) for p in item.photos] or [0]
+            name = f"{max(numbers) + 1:02d}.jpg"
+            (folder / name).write_bytes(full)
+            (folder / "thumbs" / name).write_bytes(thumb)
+            item.photos.append(name)
+            return self._changed(item)
+
+    def remove_photo(self, item_id: str, name: str) -> Item:
+        with self._lock:
+            path = self.photo_file(item_id, name)
+            item = self.get(item_id)
+            item.photos.remove(name)
+            for file in (path, path.parent / "thumbs" / name):
+                try:
+                    file.unlink()
+                except OSError:
+                    pass
+            return self._changed(item)
+
+    def reorder_photos(self, item_id: str, names: list[str]) -> Item:
+        with self._lock:
+            item = self.get(item_id)
+            wanted = [n for n in names if n in item.photos]
+            rest = [n for n in item.photos if n not in wanted]
+            item.photos = list(dict.fromkeys(wanted)) + rest
+            return self._changed(item)
+
+
+# --- az adatok a leírásból ----------------------------------------------------------------
+
+EXTRACT_SYSTEM = (
+    "Az eladó leírásából kigyűjtöd egy használt (vagy új) holmi hirdetésének adatait, magyarul.\n"
+    "Szabályok:\n"
+    "- Csak azt írd, ami a leírásból kiderül. Amit nem mondott, hagyd üresen (az ár ilyenkor 0). "
+    "Ne találgass, és ne a fotók alapján gondolkodj, azokat nem látod.\n"
+    "- product: röviden, mi ez (pl. „fekete póló”, „RTX 3060 Ti videókártya”).\n"
+    "- kind: ezek egyike: " + ", ".join(KINDS) + " (a táska, öv, sapka, ékszer: kiegészítő).\n"
+    "- title: legfeljebb 60 karakter, amit a vevő keres: márka, típus, fontos tulajdonság, méret.\n"
+    "- description: 2–4 rövid, természetes mondat a leírásban szereplő adatokból (állapot, hibák, "
+    "méret, tartozékok). Ne ígérj olyat, amit az eladó nem mondott (szállítás, garancia, alku, csere), "
+    "és ne írj árat.\n"
+    "- category: a legvalószínűbb kategóriaút, pl. „Nők > Ruhák > Pólók” vagy „Számítástechnika > "
+    "Videókártyák”.\n"
+    "- condition: ezek egyike: " + "; ".join(CONDITIONS) + ". Csak ha a leírásból kiderül (pl. "
+    "„egyszer hordott” = Nagyon jó, „bontatlan” = Új), különben üres.\n"
+    "- price: forintban, egész szám (pl. „500 Ft-ért” = 500, „5 ezer” = 5000); ha nincs megadva, 0.\n"
+    "- location: csak ha az eladó említ átvételi helyet (pl. „Debrecenben”). shipping: csak ha említ "
+    "szállítást (pl. „csak személyes átvétel”, „Foxpost-tal is”).\n"
+    "- search_query: 2–4 szó a hasonló hirdetések kereséséhez (márka és típus, méret nélkül)."
+)
+
+EXTRACT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        **{key: {"type": "string"} for key in LISTING_FIELDS},
+        "kind": {"type": "string", "enum": KINDS},
+        "condition": {"type": "string", "enum": [*CONDITIONS, ""]},
+        "price": {"type": "integer"},
+    },
+    "required": [*LISTING_FIELDS, "kind", "price"],
+}
+
+
+class ListingExtractor:
+    """Az eladó egy-két mondatos leírásából kiolvassa a hirdetés adatait (egy modellhívás)."""
+
+    def __init__(self, llm: Any, store: ItemStore):
+        self.llm = llm
+        self.store = store
+
+    def extract(self, item_id: str) -> Item:
+        item = self.store.get(item_id)
+        if not item.prompt.strip():
+            raise ItemError("Írd le röviden, mit adsz el (pl. „Zara L-es fekete póló, 500 Ft”).")
+        messages = [{"role": "system", "content": EXTRACT_SYSTEM},
+                    {"role": "user", "content": f"Az eladó leírása:\n{item.prompt}"}]
+        data = self.llm.chat_json(messages, EXTRACT_SCHEMA, temperature=0.2)
+        values: dict[str, Any] = {key: str(data.get(key) or "").strip() for key in LISTING_FIELDS}
+        values["kind"] = str(data.get("kind") or "").strip()
+        try:
+            values["price"] = parse_price(data.get("price")) or None
+        except ItemError:
+            values["price"] = None
+        values = {k: v for k, v in values.items() if v not in ("", None)}   # amit nem mondott, nem törli
+        return self.store.update(item_id, **values)
+
+
+def missing_needs(item: Item, settings: dict[str, Any]) -> list[tuple[Need, list[str]]]:
+    """Ami a kiválasztott oldalakhoz még hiányzik: (igény, melyik oldalak kérik)."""
+    out = []
+    for need in needs_for(item.targets):
+        if need.clothing_only and item.kind not in CLOTHING:
+            continue
+        have = item.price if need.field == "price" else getattr(item, need.field)
+        if not have and need.setting:
+            have = settings.get(need.setting)
+        if not have:
+            sites = [PLATFORMS[s].name for s in need.sites if s in item.targets] if need.sites else []
+            out.append((need, sites))
+    return out
+
+
+def question_for(item: Item, missing: list[tuple[Need, list[str]]]) -> str:
+    """Pl.: „A(z) „póló” feltöltéséhez még kell: állapot; márka, méret (Vinted). Írd meg, és folytatom.”"""
+    groups: list[tuple[list[str], list[str]]] = []      # az azonos oldalakra vonatkozók együtt
+    for need, sites in missing:
+        if groups and groups[-1][1] == sites:
+            groups[-1][0].append(need.label)
+        else:
+            groups.append(([need.label], sites))
+    parts = [", ".join(labels) + (f" ({', '.join(sites)})" if sites else "") for labels, sites in groups]
+    what = f"A(z) „{item.product}” feltöltéséhez" if item.product else "A feltöltéshez"
+    text = f"{what} még kell: {'; '.join(parts)}."
+    if any(need.setting for need, _ in missing):
+        text += " A várost és a szállítást elég egyszer megadni az Alapadatoknál, akkor máskor nem kérdezem."
+    return text + " Írd meg, és folytatom."
+
+
+# --- árkutatás ---------------------------------------------------------------------------
+
+SELECT_SYSTEM = (
+    "Használt holmik árazásában segítesz. Megkapod az eladó tárgyát és hirdetési oldalak "
+    "találatait (számozva, árral). Válaszd ki azokat, amelyek tényleg hasonlók: ugyanaz a típus, "
+    "a márka, a méret és az állapot minél közelebb. A más dolgokat (más termék, kiegészítő, több "
+    "darab egy csomagban) hagyd ki. Javasolj reális árat forintban, amiért várhatóan gyorsan elkel; "
+    "használt holminál inkább a középérték körül vagy alatta. reason: egy rövid mondat magyarul."
+)
+
+SELECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "similar": {"type": "array", "items": {"type": "integer"}},
+        "suggested_price": {"type": "integer"},
+        "reason": {"type": "string"},
+    },
+    "required": ["similar", "suggested_price", "reason"],
+}
+
+
+def round_price(value: float) -> int:
+    """Kerek ár: 100 forintra (500 alatt 50-re)."""
+    step = 50 if value < 500 else 100
+    return int(max(step, round(value / step) * step))
+
+
+def describe_item(item: Item) -> str:
+    parts = [item.name]
+    for label, value in (("márka", item.brand), ("méret", item.size), ("állapot", item.condition),
+                         ("kategória", item.category)):
+        if value:
+            parts.append(f"{label}: {value}")
+    return "; ".join(parts)
+
+
+class PriceResearcher:
+    """Megnézi a hirdetési oldalakon, mennyiért kínálnak hasonlót."""
+
+    def __init__(self, llm: Any, store: ItemStore, browser: Callable[[], Any], sites: list[Platform]):
+        self.llm = llm
+        self.store = store
+        self.browser = browser
+        self.sites = [site for site in sites if site.search_url]
+
+    def query_for(self, item: Item) -> str:
+        if item.search_query:
+            return item.search_query
+        words = " ".join(p for p in (item.brand, item.product or item.title) if p).split()
+        return " ".join(words[:5])
+
+    def research(self, item_id: str, progress: Callable[[str], None] | None = None,
+                 only: list[str] | None = None) -> Item:
+        item = self.store.get(item_id)
+        query = self.query_for(item)
+        if not query:
+            raise ItemError("Az árkutatáshoz tudnom kell, mi ez (írd le röviden).")
+        sites = [s for s in self.sites if not only or s.key in only] or self.sites
+        if not sites:
+            raise ItemError("Nincs beállítva oldal az árkutatáshoz ([work] research_sites).")
+        results: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for site in sites:
+            if progress:
+                progress(f"{site.name}: „{query}”")
+            url = site.search_url.format(q=urllib.parse.quote(query))
+            try:
+                found = self.browser().extract_listings(url)
+            except Exception as exc:  # noqa: BLE001 - egy oldal hibája ne állítsa le a többit
+                errors.append(f"{site.name}: {str(exc).splitlines()[0][:160]}")
+                continue
+            if not found:
+                errors.append(f"{site.name}: nem találtam árakat (lehet, hogy ellenőrzést kér az oldal)")
+            for entry in found[:20]:
+                results.append({"site": site.name, "text": entry["text"][:180],
+                                "price": int(entry["price"]), "url": entry["url"]})
+        research: dict[str, Any] = {"query": query, "at": time.time(), "count": len(results),
+                                    "similar": [], "errors": errors}
+        if results:
+            if progress:
+                progress("a hasonlók kiválasztása")
+            research.update(self._judge(item, results))
+        return self.store.set_research(item_id, research)
+
+    def _judge(self, item: Item, results: list[dict[str, Any]]) -> dict[str, Any]:
+        listing = "\n".join(f"{n}. [{r['site']}] {r['text']} – {format_price(r['price'])}"
+                            for n, r in enumerate(results, 1))
+        messages = [
+            {"role": "system", "content": SELECT_SYSTEM},
+            {"role": "user", "content": f"A tárgy: {describe_item(item)}\n\nTalálatok:\n{listing}"},
+        ]
+        data = self.llm.chat_json(messages, SELECT_SCHEMA, temperature=0.2)
+        picked = []
+        for number in data.get("similar") or []:
+            try:
+                index = int(number) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(results) and results[index] not in picked:
+                picked.append(results[index])
+        out: dict[str, Any] = {"similar": picked[:12], "reason": str(data.get("reason") or "")[:300]}
+        if not picked:
+            out["reason"] = out["reason"] or "Nem találtam elég hasonló hirdetést."
+            return out
+        prices = sorted(r["price"] for r in picked)
+        median = statistics.median(prices)
+        out.update({"min": prices[0], "max": prices[-1], "median": int(median)})
+        try:
+            suggested = int(data.get("suggested_price") or 0)
+        except (TypeError, ValueError):
+            suggested = 0
+        if not prices[0] * 0.5 <= suggested <= prices[-1] * 1.2:
+            suggested = median   # irreális javaslat helyett a középérték
+        out["suggested"] = round_price(suggested)
+        return out
+
+
+@dataclass
+class Verdict:
+    pause: bool               # érdemes megállni, és megkérdezni az árat
+    text: str
+    suggested: int | None = None
+
+
+def price_verdict(item: Item) -> Verdict:
+    """Az árkutatás alapján: rendben van-e az ár. Csak ajánlás; a döntés az eladóé."""
+    r = item.research or {}
+    similar = r.get("similar") or []
+    prices = sorted(int(s["price"]) for s in similar if isinstance(s, dict) and isinstance(s.get("price"), (int, float)))
+    price = item.price or 0
+    if not price:
+        return Verdict(False, "Még nincs ár, ezért nem tudom összevetni a hasonlókkal.")
+    if len(prices) < 3:
+        found = (f"Csak {len(prices)} hasonló hirdetést találtam, ez kevés az összevetéshez"
+                 if prices else "Nem találtam hasonló hirdetést az összevetéshez")
+        return Verdict(False, f"{found}; marad az árad ({format_price(price)}).")
+    low, high = r.get("min") or prices[0], r.get("max") or prices[-1]
+    median = r.get("median") or int(statistics.median(prices))
+    span = f"{format_price(low)} és {format_price(high)} között (középérték {format_price(median)})"
+    if price > median * 1.25:
+        suggested = r.get("suggested") or round_price(median)
+        return Verdict(True, f"Hasonlót {span} kínálnak. {format_price(price)}-ért valószínűleg nehezen kel el, "
+                             f"én {format_price(suggested)}-ot kérnék. Maradjon a te árad, vagy legyen "
+                             f"{format_price(suggested)}?", suggested)
+    if price < median * 0.6:
+        return Verdict(False, f"Ennél többet is kérhetnél: hasonlót {span} kínálnak. Marad a te árad "
+                              f"({format_price(price)}).")
+    return Verdict(False, f"Az árad rendben van: hasonlót {span} kínálnak.")

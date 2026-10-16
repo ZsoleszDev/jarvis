@@ -1,0 +1,783 @@
+"""Grafikus felület: kis helyi webszerver és egy alkalmazásablak (Edge --app mód).
+
+Nem kell hozzá semmilyen külön csomag. A Jarvis az eseményeket (állapot, szöveg, eszközök)
+Server-Sent Events folyamon küldi az oldalnak; az oldal egyszerű POST-kérésekkel válaszol.
+
+Biztonság: csak a 127.0.0.1-en figyel, minden kéréshez egy induláskor generált véletlen kulcs
+kell, és ellenőrzi a Host és Origin fejlécet. Így egy weboldal (akár olyan, amit a Jarvis
+böngészője nyitott meg) nem tud parancsot küldeni a Jarvisnak.
+"""
+from __future__ import annotations
+
+import itertools
+import json
+import os
+import queue
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, quote, urlparse
+
+from . import console, creative_templates, instance
+from .app import STATE_TEXT, JarvisApp, tool_label
+from .config import GuiCfg, app_data
+from .creative import MAX_TEXT, StoryError
+from .dossier import open_folder
+from .selling import MAX_PHOTO_BYTES, ItemError
+from .tools import summarize_result
+
+UI_DIR = Path(__file__).resolve().parent / "ui"
+PAGE = UI_DIR / "index.html"
+STATIC = {"style.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
+          "work.js": "text/javascript; charset=utf-8", "creative.js": "text/javascript; charset=utf-8"}
+PHOTO_GET_RE = re.compile(r"^/api/work/photo/([0-9a-f]{8})/(\d{2}\.jpg)$")
+PHOTO_POST_RE = re.compile(r"^/api/work/items/([0-9a-f]{8})/photo$")
+# Amit a felületről át lehet írni egy tárgyon, és amit el lehet indítani.
+EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
+            "size", "condition", "color", "material", "price", "location", "shipping"}
+ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold"}
+IS_WINDOWS = sys.platform == "win32"
+CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+       "connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'")
+
+
+class EventBus:
+    """Az események szétosztása a megnyitott ablakoknak, újracsatlakozáskor visszajátszással."""
+
+    def __init__(self, limit: int = 400):
+        self._lock = threading.Lock()
+        self._clients: set[queue.Queue] = set()
+        self._history: list[dict[str, Any]] = []
+        self._limit = limit
+        self._state: dict[str, Any] | None = None
+        self._confirm: dict[str, Any] | None = None
+        self.hello: dict[str, Any] = {}
+        self.ever_connected = False
+        self.last_disconnect = time.monotonic()
+        self._listeners: list[Any] = []
+
+    def add_listener(self, listener: Any) -> None:
+        """Minden esemény ide is megy (pl. a telefonos eseménynaplóba)."""
+        self._listeners.append(listener)
+
+    def _notify_listeners(self, event: dict[str, Any]) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(event)
+            except Exception:  # noqa: BLE001 - egy figyelő hibája ne állítsa meg a felületet
+                pass
+
+    @property
+    def state(self) -> dict[str, Any] | None:
+        with self._lock:
+            return dict(self._state) if self._state else None
+
+    @property
+    def pending_confirm(self) -> dict[str, Any] | None:
+        with self._lock:
+            return dict(self._confirm) if self._confirm else None
+
+    @property
+    def client_count(self) -> int:
+        with self._lock:
+            return len(self._clients)
+
+    def _record(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "tool":  # egy eszközhívásnak csak a legutolsó állapota kell
+            self._history = [e for e in self._history
+                             if not (e.get("type") == "tool" and e.get("id") == event.get("id"))]
+        self._history.append(event)
+        del self._history[:-self._limit]
+
+    def publish(self, event: dict[str, Any], record: bool = True) -> None:
+        with self._lock:
+            if record:
+                self._record(event)
+            clients = list(self._clients)
+        for client in clients:
+            client.put(event)
+        self._notify_listeners(event)
+
+    def record(self, event: dict[str, Any]) -> None:
+        """Csak a visszajátszáshoz jegyzi fel (a nyitott ablakok már látták darabokban)."""
+        with self._lock:
+            self._record(event)
+        self._notify_listeners(event)
+
+    def set_state(self, event: dict[str, Any]) -> None:
+        with self._lock:
+            self._state = event
+        self.publish(event, record=False)
+
+    def set_hello(self, hello: dict[str, Any]) -> None:
+        with self._lock:
+            self.hello = hello
+        self.publish({"type": "hello", **hello, "replay": False}, record=False)
+
+    def set_confirm(self, event: dict[str, Any] | None) -> None:
+        with self._lock:
+            self._confirm = event
+        if event is not None:
+            self.publish(event, record=False)
+
+    def subscribe(self) -> queue.Queue:
+        client: queue.Queue = queue.Queue()
+        with self._lock:
+            client.put({"type": "hello", **self.hello, "replay": True})
+            for event in self._history:
+                client.put(event)
+            if self._state is not None:
+                client.put(self._state)
+            if self._confirm is not None:
+                client.put(self._confirm)
+            self._clients.add(client)
+            self.ever_connected = True
+        return client
+
+    def unsubscribe(self, client: queue.Queue) -> None:
+        with self._lock:
+            self._clients.discard(client)
+            self.last_disconnect = time.monotonic()
+
+
+class GuiUI:
+    """A Jarvis üzeneteit eseményekké alakítja az ablaknak, és a konzolra is naplóz.
+
+    A `channel` mondja meg, melyik menü naplójába kerül az üzenet (chat = Beszélgetés,
+    work = Munka); a JarvisApp állítja át, amíg egy Munka menüs kérésen dolgozik.
+    """
+
+    def __init__(self, bus: EventBus, name: str):
+        self.bus = bus
+        self.name = name
+        self.channel = "chat"
+        self._segment: list[str] = []
+        self._segment_channel = "chat"
+        self._lock = threading.Lock()
+        self._confirm_ids = itertools.count(1)
+        self._confirms: dict[int, dict[str, Any]] = {}
+        self.request_id: str | None = None   # a telefonról jött kérés azonosítója (amíg Jarvis rajta dolgozik)
+
+    def _publish(self, event: dict[str, Any], record: bool = True) -> None:
+        event.setdefault("channel", self.channel)
+        if self.request_id:
+            event.setdefault("request_id", self.request_id)
+        self.bus.publish(event, record=record)
+
+    def hello(self, info: dict[str, Any]) -> None:
+        """Megváltozott, mi fut (pl. Szünet után nincs hang): a felület és a telefon is megtudja."""
+        self.bus.set_hello(info)
+
+    def request_done(self, request_id: str) -> None:
+        self.bus.publish({"type": "request_done", "request_id": request_id}, record=False)
+
+    def notification(self, notice: dict[str, Any]) -> None:
+        self.bus.publish({"type": "notification", "notice": notice}, record=False)
+
+    def _close_segment(self) -> None:
+        with self._lock:
+            text = "".join(self._segment).strip()
+            self._segment.clear()
+            channel = self._segment_channel
+        if text:
+            event = {"type": "assistant", "text": text, "channel": channel}
+            if self.request_id:
+                event["request_id"] = self.request_id
+            self.bus.record(event)
+            self.bus.publish({"type": "segment_end", "channel": channel}, record=False)
+            console.assistant(self.name, text)
+
+    def state(self, state: str, detail: str = "") -> None:
+        self.bus.set_state({"type": "state", "state": state,
+                            "text": STATE_TEXT.get(state, state), "detail": detail})
+
+    def user(self, text: str, via: str) -> None:
+        self._publish({"type": "user", "text": text, "via": via})
+        console.user(text)
+
+    def delta(self, text: str) -> None:
+        with self._lock:
+            if not self._segment:
+                self._segment_channel = self.channel
+            self._segment.append(text)
+        self._publish({"type": "delta", "text": text}, record=False)
+
+    def assistant_end(self, text: str, streamed: bool) -> None:
+        if streamed:
+            self._close_segment()
+        else:
+            self._close_segment()
+            self._publish({"type": "assistant", "text": text})
+            console.assistant(self.name, text)
+
+    def assistant_abort(self) -> None:
+        self._close_segment()
+
+    def tool_start(self, call_id: int, name: str, args: dict[str, Any]) -> None:
+        self._close_segment()
+        self._publish({"type": "tool", "id": call_id, "label": tool_label(name, args),
+                       "status": "running", "summary": ""})
+
+    def tool_done(self, call_id: int, name: str, args: dict[str, Any], result: str) -> None:
+        failed = result.startswith("HIBA")
+        summary = summarize_result(result.removeprefix("HIBA: "), limit=160)
+        self._publish({"type": "tool", "id": call_id, "label": tool_label(name, args),
+                       "status": "failed" if failed else "done", "summary": summary})
+        console.tool(f"{name} -> {summary}")
+
+    def notice(self, text: str) -> None:
+        self._close_segment()
+        self._publish({"type": "assistant", "text": text})
+        console.assistant(self.name, text)
+
+    def info(self, text: str) -> None:
+        self._publish({"type": "info", "text": text.strip()})
+        console.info(text)
+
+    def warn(self, text: str) -> None:
+        self._publish({"type": "warn", "text": text})
+        console.warn(text)
+
+    def error(self, text: str) -> None:
+        self._publish({"type": "error", "text": text})
+        console.error(text)
+
+    def timing(self, text: str) -> None:
+        self._publish({"type": "timing", "text": text})
+
+    def work_item(self, item: dict[str, Any]) -> None:
+        """Egy tárgy megváltozott (a felület frissíti a kártyáját)."""
+        self.bus.publish({"type": "work_item", "item": item}, record=False)
+
+    def work_removed(self, item_id: str) -> None:
+        self.bus.publish({"type": "work_removed", "id": item_id}, record=False)
+
+    def creative_event(self, event: dict[str, Any]) -> None:
+        """A Kreatív menü eseménye (élő írás, egy történet változása); visszajátszani nem kell, a felület
+        újracsatlakozáskor lekéri a történetet."""
+        self.bus.publish(event, record=False)
+
+    def level(self, value: float) -> None:
+        self.bus.publish({"type": "level", "value": round(float(value), 3)}, record=False)
+
+    def confirm(self, prompt: str, stop_event: threading.Event) -> bool:
+        confirm_id = next(self._confirm_ids)
+        done = threading.Event()
+        entry = {"done": done, "approved": False}
+        self._confirms[confirm_id] = entry
+        self.bus.set_confirm({"type": "confirm", "id": confirm_id, "prompt": prompt})
+        console.warn(prompt + "  (jóváhagyás az ablakban)")
+        deadline = time.monotonic() + 300
+        while not done.wait(0.1):
+            if stop_event.is_set() or time.monotonic() > deadline:
+                break
+        self._confirms.pop(confirm_id, None)
+        self.bus.set_confirm(None)
+        approved = bool(entry["approved"])
+        self.bus.publish({"type": "confirm_done", "id": confirm_id, "approved": approved})
+        return approved
+
+    def resolve_confirm(self, confirm_id: int, approved: bool) -> bool:
+        entry = self._confirms.get(confirm_id)
+        if entry is None:
+            return False
+        entry["approved"] = bool(approved)
+        entry["done"].set()
+        return True
+
+
+class GuiServer:
+    def __init__(self, app: JarvisApp | None, ui: GuiUI, bus: EventBus, port: int = 0):
+        self.app = app
+        self.ui = ui
+        self.bus = bus
+        self.phone: Any = None      # a telefonos kapcsolat (api.ApiServer), ha fut
+        self.token = secrets.token_urlsafe(24)
+        self.closing = threading.Event()
+        handler = type("JarvisHandler", (_Handler,), {"gui": self})
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", int(port)), handler)
+        self.httpd.daemon_threads = True
+        self.port = self.httpd.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}/?t={self.token}"
+        self._thread = threading.Thread(target=self.httpd.serve_forever, name="jarvis-gui", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self.closing.set()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class _Handler(BaseHTTPRequestHandler):
+    gui: GuiServer
+    server_version = "Jarvis"
+
+    def log_message(self, *args: Any) -> None:  # a konzolt nem töltjük tele kérésnaplóval
+        pass
+
+    # --- ellenőrzések -----------------------------------------------------------------
+
+    def _allowed_hosts(self) -> set[str]:
+        port = self.gui.port
+        return {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def _host_ok(self) -> bool:
+        return self.headers.get("Host", "") in self._allowed_hosts()
+
+    def _origin_ok(self) -> bool:
+        origin = self.headers.get("Origin")
+        return origin is None or origin in {f"http://{h}" for h in self._allowed_hosts()}
+
+    def _token_ok(self, token: str | None) -> bool:
+        return bool(token) and secrets.compare_digest(token, self.gui.token)
+
+    def _send(self, status: int, body: bytes, content_type: str, extra: dict[str, str] | None = None) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, status: int, obj: dict[str, Any]) -> None:
+        self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _forbidden(self) -> None:
+        self._send(403, "Hiányzó vagy rossz kulcs. Nyisd meg a Jarvis által kiírt címet.".encode("utf-8"),
+                   "text/plain; charset=utf-8")
+
+    # --- kérések ----------------------------------------------------------------------
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        token = parse_qs(parsed.query).get("t", [""])[0]
+        if not self._host_ok():
+            return self._forbidden()
+        if parsed.path == "/":
+            if not self._token_ok(token):
+                return self._forbidden()
+            page = PAGE.read_bytes()
+            return self._send(200, page, "text/html; charset=utf-8",
+                              {"Content-Security-Policy": CSP, "Referrer-Policy": "no-referrer"})
+        if parsed.path == "/events":
+            if not self._token_ok(token):
+                return self._forbidden()
+            return self._stream_events()
+        if parsed.path.startswith("/ui/") and parsed.path[4:] in STATIC:
+            name = parsed.path[4:]
+            return self._send(200, (UI_DIR / name).read_bytes(), STATIC[name])
+        if parsed.path == "/favicon.ico":
+            return self._send(204, b"", "image/x-icon")
+        if parsed.path.startswith("/api/work/"):
+            if not self._token_ok(token):
+                return self._forbidden()
+            return self._work_get(parsed.path, parse_qs(parsed.query))
+        if parsed.path.startswith("/api/creative/"):
+            if not self._token_ok(token):
+                return self._forbidden()
+            return self._creative_get(parsed.path, parse_qs(parsed.query))
+        if parsed.path == "/api/phone":
+            if not self._token_ok(token):
+                return self._forbidden()
+            return self._json(200, self._phone_info())
+        if parsed.path == "/api/ping":
+            if not self._token_ok(token):
+                return self._forbidden()
+            return self._json(200, {"ok": True, "name": "Jarvis", "pid": os.getpid()})
+        self._send(404, b"", "text/plain")
+
+    def _phone_info(self) -> dict[str, Any]:
+        phone = self.gui.phone
+        if phone is None:
+            return {"ok": True, "enabled": False}
+        return {"ok": True, "enabled": True, "host": phone.host, "port": phone.port,
+                "devices": phone.auth.devices()}
+
+    def _work(self) -> Any:
+        app = self.gui.app
+        return app.work if app is not None and app.work_assistant is not None else None
+
+    def _work_get(self, path: str, query: dict[str, list[str]]) -> None:
+        work = self._work()
+        if work is None:
+            return self._json(503, {"ok": False, "error": "A Munka menü még indul."})
+        if path == "/api/work/items":
+            return self._json(200, {"ok": True, "items": [i.public() for i in work.store.all()],
+                                    **work.describe()})
+        match = PHOTO_GET_RE.match(path)
+        if match:
+            try:
+                file = work.store.photo_file(match.group(1), match.group(2),
+                                             thumb=query.get("thumb", [""])[0] == "1")
+                data = file.read_bytes()
+            except (ItemError, OSError):
+                return self._send(404, b"", "text/plain")
+            return self._send(200, data, "image/jpeg")
+        self._send(404, b"", "text/plain")
+
+    def _stream_events(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        client = self.gui.bus.subscribe()
+        try:
+            while not self.gui.closing.is_set():
+                try:
+                    event = client.get(timeout=3)
+                except queue.Empty:
+                    # Életjel: így néhány másodpercen belül kiderül, ha az ablakot bezárták.
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                data = json.dumps(event, ensure_ascii=False)
+                self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+                self.wfile.flush()
+        except OSError:  # az ablakot bezárták vagy frissítették
+            pass
+        finally:
+            self.gui.bus.unsubscribe(client)
+
+    def do_POST(self) -> None:
+        if not (self._host_ok() and self._origin_ok() and self._token_ok(self.headers.get("X-Jarvis-Token"))):
+            return self._forbidden()
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json(400, {"ok": False})
+        path = urlparse(self.path).path
+        upload = PHOTO_POST_RE.match(path)
+        if upload:   # fotó: nyers képadat, nem JSON
+            return self._work_photo(upload.group(1), length)
+        if length > 262144:
+            return self._json(413, {"ok": False})
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self._json(400, {"ok": False})
+        if not isinstance(body, dict):
+            return self._json(400, {"ok": False})
+        app = self.gui.app
+        if path == "/api/confirm":
+            ok = self.gui.ui.resolve_confirm(int(body.get("id", 0)), bool(body.get("approved")))
+            return self._json(200 if ok else 404, {"ok": ok})
+        if path.startswith("/api/phone/"):
+            return self._phone_post(path, body)
+        if path == "/api/quit":   # python jarvis.py --quit
+            if app is not None:
+                app.exit_requested.set()
+            return self._json(202, {"ok": True})
+        if app is None or app.assistant is None:
+            return self._json(503, {"ok": False, "error": "A Jarvis még indul."})
+        if path == "/api/pause":
+            app.submit_pause()
+            return self._json(202, {"ok": True})
+        if path == "/api/resume":
+            app.submit_resume()
+            return self._json(202, {"ok": True})
+        if path.startswith("/api/work/"):
+            return self._work_post(path, body)
+        if path.startswith("/api/creative/"):
+            return self._creative_post(path, body)
+        mode = str(body.get("mode") or "chat")
+        if path == "/api/send":
+            app.submit_text(str(body.get("text", ""))[:4000], mode=mode)
+        elif path == "/api/listen":
+            if not app.submit_voice("button"):
+                return self._json(409, {"ok": False, "error": "Nincs mikrofon."})
+        elif path == "/api/stop":
+            app.stop_current()
+        elif path == "/api/reset":
+            app.submit_reset(mode=mode)
+        elif path == "/api/mode":
+            app.set_mode(mode)
+        else:
+            return self._json(404, {"ok": False})
+        self._json(202, {"ok": True})
+
+    def _phone_post(self, path: str, body: dict[str, Any]) -> None:
+        phone = self.gui.phone
+        if phone is None:
+            return self._json(503, {"ok": False, "error": "A telefonos kapcsolat ki van kapcsolva ([api] enabled)."})
+        if path == "/api/phone/code":
+            return self._json(200, {"ok": True, **phone.auth.new_code()})
+        if path == "/api/phone/revoke":
+            ok = phone.auth.revoke(str(body.get("id") or ""))
+            return self._json(200 if ok else 404, {"ok": ok, "devices": phone.auth.devices()})
+        return self._json(404, {"ok": False})
+
+    def _work_photo(self, item_id: str, length: int) -> None:
+        work = self._work()
+        if work is None:
+            return self._json(503, {"ok": False, "error": "A Munka menü még indul."})
+        if length <= 0:
+            return self._json(400, {"ok": False, "error": "Üres kép."})
+        if length > MAX_PHOTO_BYTES:
+            return self._json(413, {"ok": False, "error": "A kép túl nagy (legfeljebb 25 MB)."})
+        data = self.rfile.read(length)
+        try:
+            item = work.store.add_photo(item_id, data)
+        except ItemError as exc:
+            return self._json(400, {"ok": False, "error": str(exc)})
+        self._json(200, {"ok": True, "item": item.public()})
+
+    def _work_post(self, path: str, body: dict[str, Any]) -> None:
+        app = self.gui.app
+        work = self._work()
+        if work is None:
+            return self._json(503, {"ok": False, "error": "A Munka menü még indul."})
+        item_id = str(body.get("id") or "")
+        try:
+            if path == "/api/work/new":
+                values = {"targets": body.get("targets") or [], "prompt": str(body.get("prompt") or ""),
+                          "research_wanted": bool(body.get("research_wanted"))}
+                return self._json(200, {"ok": True, "item": work.store.create(**values).public()})
+            if path == "/api/work/update":
+                fields = body.get("fields") if isinstance(body.get("fields"), dict) else {}
+                values = {k: v for k, v in fields.items() if k in EDITABLE}
+                item = work.store.update(item_id, user=True, **values)
+                return self._json(200, {"ok": True, "item": item.public()})
+            if path == "/api/work/photos":
+                if body.get("remove"):
+                    item = work.store.remove_photo(item_id, str(body["remove"]))
+                else:
+                    order = body.get("order") if isinstance(body.get("order"), list) else []
+                    item = work.store.reorder_photos(item_id, [str(n) for n in order])
+                return self._json(200, {"ok": True, "item": item.public()})
+            if path == "/api/work/delete":
+                work.store.delete(item_id)
+                return self._json(200, {"ok": True})
+            if path == "/api/work/mark":
+                sold = body.get("sold")
+                item = work.store.mark(item_id, platform=str(body.get("platform") or ""),
+                                       status=str(body.get("status") or "feltöltve"),
+                                       note=str(body.get("note") or "")[:300],
+                                       sold=None if sold is None else bool(sold))
+                return self._json(200, {"ok": True, "item": item.public()})
+            if path == "/api/work/action":
+                action = str(body.get("action") or "")
+                ids = [str(i) for i in body.get("ids") or [] if isinstance(i, str)][:50]
+                platform = str(body.get("platform") or "")
+                if action not in ACTIONS:
+                    return self._json(400, {"ok": False, "error": "Ismeretlen feladat."})
+                if action != "login":
+                    if not ids:
+                        return self._json(400, {"ok": False, "error": "Melyik tárgy?"})
+                    work.store.get(ids[0])   # ItemError, ha nincs ilyen
+                if action in ("post", "login") and platform not in work.platforms:
+                    return self._json(400, {"ok": False, "error": "Ismeretlen hirdetési oldal."})
+                extra: dict[str, Any] = {}
+                if action == "reply":
+                    extra["text"] = str(body.get("text") or "").strip()[:2000]
+                    if not extra["text"]:
+                        return self._json(400, {"ok": False, "error": "Üres válasz."})
+                if action == "price":
+                    choice = body.get("choice")
+                    extra["choice"] = choice if choice in ("keep", "suggested") else str(choice or "")[:20]
+                if action == "delist":
+                    extra["platforms"] = [str(p) for p in body.get("platforms") or [] if str(p) in work.platforms]
+                if action == "sold":
+                    extra["where"] = str(body.get("where") or "") if str(body.get("where") or "") in work.platforms else ""
+                    extra["delist"] = bool(body.get("delist"))
+                app.submit_work(action, ids, platform, **extra)
+                return self._json(202, {"ok": True})
+            if path == "/api/work/dossier":
+                item = work.store.get(item_id)
+                name = str(item.platforms.get(str(body.get("platform") or ""), {}).get("dossier") or "")
+                try:
+                    folder = work.dossiers.path(name)
+                except FileNotFoundError:
+                    return self._json(404, {"ok": False, "error": "Ez a hibacsomag már nincs meg (a régieket törlöm)."})
+                return self._json(200, {"ok": True, "path": str(folder), "opened": open_folder(folder)})
+            if path == "/api/work/settings":
+                values = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+                return self._json(200, {"ok": True, "settings": work.save_settings(values)})
+            if path == "/api/work/ack":
+                work.acknowledge(str(body.get("platform") or ""))
+                return self._json(200, {"ok": True, "acknowledged": work.settings.get("acknowledged", [])})
+        except ItemError as exc:
+            return self._json(400, {"ok": False, "error": str(exc)})
+        except OSError as exc:
+            return self._json(500, {"ok": False, "error": f"Nem sikerült: {exc}"})
+        self._json(404, {"ok": False})
+
+
+    # --- Kreatív menü ---------------------------------------------------------------------
+
+    def _creative(self) -> Any:
+        app = self.gui.app
+        return app.creative if app is not None else None
+
+    def _creative_get(self, path: str, query: dict[str, list[str]]) -> None:
+        desk = self._creative()
+        if desk is None:
+            return self._json(503, {"ok": False, "error": "A Kreatív menü még indul."})
+        story_id = query.get("id", [""])[0]
+        try:
+            if path == "/api/creative/stories":
+                return self._json(200, {"ok": True, "stories": desk.stories(), "templates": creative_templates.public(),
+                                        "language": desk.language})
+            if path == "/api/creative/story":
+                return self._json(200, {"ok": True, "story": desk.get(story_id)})
+            if path == "/api/creative/export":
+                name, text = desk.export(story_id)
+                plain = name.encode("ascii", "ignore").decode() or "tortenet.md"
+                return self._send(200, text.encode("utf-8"), "text/markdown; charset=utf-8", {
+                    "Content-Disposition": f"attachment; filename=\"{plain}\"; filename*=UTF-8''{quote(name)}"})
+        except StoryError as exc:
+            return self._json(404, {"ok": False, "error": str(exc)})
+        self._send(404, b"", "text/plain")
+
+    def _creative_post(self, path: str, body: dict[str, Any]) -> None:
+        app = self.gui.app
+        desk = self._creative()
+        if desk is None:
+            return self._json(503, {"ok": False, "error": "A Kreatív menü még indul."})
+        story_id = str(body.get("id") or "")
+        try:
+            if path == "/api/creative/new":
+                story, need = desk.create(body)
+                if need:
+                    app.submit_creative(need, story["id"])
+                return self._json(200, {"ok": True, "story": desk.get(story["id"])})
+            if path == "/api/creative/update":
+                fields = body.get("fields") if isinstance(body.get("fields"), dict) else {}
+                return self._json(200, {"ok": True, "story": desk.update(story_id, fields)})
+            if path == "/api/creative/act":
+                action = str(body.get("action") or "")
+                if action == "stop":
+                    if desk.busy(story_id):
+                        app.stop_current()
+                    return self._json(200, {"ok": True})
+                if action == "undo":
+                    return self._json(200, {"ok": True, "story": desk.undo(story_id)})
+                if action == "redo":
+                    return self._json(200, {"ok": True, "story": desk.redo(story_id)})
+                if action not in ("send", "continue", "retry", "summarize"):
+                    return self._json(400, {"ok": False, "error": "Ismeretlen művelet."})
+                desk.require_idle(story_id)
+                text = str(body.get("text") or "")[:MAX_TEXT]
+                if action == "send" and text.strip():
+                    desk.add_turn(story_id, str(body.get("kind") or ""), text)
+                if action == "retry":
+                    desk.check_retry(story_id)
+                task = {"send": "write", "continue": "write"}.get(action, action)
+                app.submit_creative(task, story_id)
+                return self._json(202, {"ok": True, "story": desk.get(story_id)})
+            if path == "/api/creative/entry":
+                story = desk.entry(story_id, str(body.get("entry") or ""), str(body.get("op") or ""),
+                                   str(body.get("text") or ""), int(body.get("index") or 0))
+                return self._json(200, {"ok": True, "story": story})
+            if path == "/api/creative/card":
+                card = body.get("card") if isinstance(body.get("card"), dict) else {}
+                return self._json(200, {"ok": True, "story": desk.card(story_id, str(body.get("op") or ""), card)})
+            if path == "/api/creative/memory":
+                story = desk.memory(story_id, str(body.get("op") or ""), str(body.get("memory") or ""),
+                                    str(body.get("text") or ""))
+                return self._json(200, {"ok": True, "story": story})
+            if path == "/api/creative/delete":
+                desk.delete(story_id)
+                return self._json(200, {"ok": True})
+        except StoryError as exc:
+            return self._json(409 if desk.busy(story_id) else 400, {"ok": False, "error": str(exc)})
+        except (TypeError, ValueError):
+            return self._json(400, {"ok": False, "error": "Hibás kérés."})
+        except OSError as exc:
+            return self._json(500, {"ok": False, "error": f"Nem sikerült menteni: {exc}"})
+        self._json(404, {"ok": False})
+
+
+def open_app_window(url: str, cfg: GuiCfg) -> bool:
+    """Alkalmazásablakként nyitja meg (címsor és fülek nélkül); ha nem megy, a böngészőben."""
+    if cfg.window and cfg.browser:
+        args = [f"--app={url}", "--window-size=1000,920"]
+        try:
+            if IS_WINDOWS:
+                subprocess.Popen(["cmd", "/c", "start", "", cfg.browser, *args],
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+                return True
+            exe = shutil.which(cfg.browser) or shutil.which("chromium") or shutil.which("google-chrome")
+            if exe:
+                subprocess.Popen([exe, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+        except OSError:
+            pass
+    return webbrowser.open(url)
+
+
+def run_gui(app: JarvisApp, ui: GuiUI, bus: EventBus, cfg: GuiCfg, open_window: bool = True,
+            standby: bool = False, info_path: Path | None = None) -> None:
+    """Elindítja a felületet, betölti a Jarvist, és addig fut, amíg az ablak nyitva van.
+
+    `standby`: készenléti indulás (a gép bekapcsolásakor): a modellek nem töltődnek be, ablak nem
+    nyílik, és az ablak bezárása sem állítja le (a telefonról és a következő megnyitásra vár).
+    `info_path`: ide írja az ablak címét, hogy a második indítás megnyithassa (instance.py)."""
+    server = GuiServer(app, ui, bus, port=cfg.port)
+    server.start()
+    if info_path is not None:
+        instance.write_info(info_path, server.url, standby)
+    bus.set_hello({"name": app.name, "model": app.cfg.llm.model, "stt": None, "voice": False,
+                   "speech": False, "wake_word": None, "examples": []})
+    console.info(f"A felület címe (ha nem nyílna meg magától): {server.url}")
+    phone = None
+    if app.cfg.api.enabled:
+        try:
+            from .api import start_api
+
+            phone = start_api(app, ui, bus, app_data(app.cfg))
+            server.phone = phone
+            console.info(f"Telefonos kapcsolat: http://{phone.host}:{phone.port}/api/v1 "
+                         "(párosítás: Telefon gomb a Jarvis ablakában)")
+        except OSError as exc:
+            console.warn(f"A telefonos kapcsolat nem indult el ({exc}). Másik port: [api] port a config.toml-ban.")
+    try:
+        if standby:
+            if app.start(standby=True):
+                app.start_agent()
+                bus.set_hello(app.describe())
+            else:
+                ui.error("A Jarvis nem tudott elindulni. A hibát javítás után indítsd újra.")
+            if open_window:
+                open_app_window(server.url, cfg)
+        else:
+            # Előbb a nyelvi modell, csak utána az ablak: a böngészőablak is foglal videómemóriát,
+            # és az Ollama a betöltés pillanatában szabad memóriához igazítja, mi kerül a kártyákra.
+            loaded = app.load_model()
+            if open_window:
+                open_app_window(server.url, cfg)
+            if loaded and app.start():
+                app.start_agent()
+                bus.set_hello(app.describe())
+                app.greet()
+            else:
+                ui.error("A Jarvis nem tudott elindulni. A hibát javítás után indítsd újra.")
+        while not app.exit_requested.is_set():
+            time.sleep(0.25)
+            # Az oldal frissítése is bontja a kapcsolatot egy pillanatra, ezért kis türelmi idő kell.
+            # Készenléti indulásnál az ablak bezárása nem állítja le (a telefon és a következő
+            # megnyitás is elérje); a modelleket a tétlenség után magától leállítja.
+            if (cfg.exit_on_close and not standby and bus.ever_connected and bus.client_count == 0
+                    and time.monotonic() - bus.last_disconnect > 4):
+                console.info("Az ablak bezárult, a Jarvis leáll.")
+                break
+        if app.exit_requested.is_set():
+            app.say_goodbye()
+    finally:
+        if phone is not None:
+            phone.stop()
+        server.stop()
+        if info_path is not None:
+            instance.clear_info(info_path, server.url)

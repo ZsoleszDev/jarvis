@@ -1,0 +1,83 @@
+"""Értesítések: amit Jarvis a háttérben talált (új találat egy figyelőben, régóta fent lévő
+hirdetés, sikeres vagy sikertelen levétel). Megmaradnak újraindítás után is, és a telefonos
+felület innen kérdezi le őket, olvasottnak is innen jelöli.
+"""
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+KINDS = ("watch", "stale", "delist", "work", "info")
+
+
+class NoticeBoard:
+    def __init__(self, path: Path, limit: int = 150,
+                 publish: Callable[[dict[str, Any]], None] | None = None):
+        self.path = Path(path)
+        self.limit = max(10, int(limit))
+        self.publish = publish
+        self._lock = threading.Lock()
+        self._items: list[dict[str, Any]] = self._load()
+
+    def _load(self) -> list[dict[str, Any]]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [n for n in data if isinstance(n, dict) and n.get("id")] if isinstance(data, list) else []
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._items, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def add(self, kind: str, title: str, text: str, **extra: Any) -> dict[str, Any]:
+        notice = {"id": secrets.token_hex(5), "at": time.time(), "kind": kind if kind in KINDS else "info",
+                  "title": str(title)[:120], "text": str(text)[:1500], "read": False}
+        notice.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        with self._lock:
+            self._items.append(notice)
+            del self._items[:-self.limit]
+            try:
+                self._save()
+            except OSError:
+                pass
+        if self.publish is not None:
+            try:
+                self.publish(dict(notice))
+            except Exception:  # noqa: BLE001 - a felület hibája ne vesszen el az értesítéssel
+                pass
+        return notice
+
+    def list(self, unread_only: bool = False, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            items = [dict(n) for n in self._items if not unread_only or not n.get("read")]
+        return list(reversed(items))[:max(1, int(limit))]
+
+    def unread_count(self) -> int:
+        with self._lock:
+            return sum(1 for n in self._items if not n.get("read"))
+
+    def mark_read(self, ids: list[str] | None = None) -> int:
+        """Olvasottnak jelöl (ids nélkül mindet; üres listával egyet sem). Visszaadja, hányat."""
+        if ids is not None and not ids:
+            return 0
+        wanted = set(ids or [])
+        changed = 0
+        with self._lock:
+            for notice in self._items:
+                if not notice.get("read") and (not wanted or notice["id"] in wanted):
+                    notice["read"] = True
+                    changed += 1
+            if changed:
+                try:
+                    self._save()
+                except OSError:
+                    pass
+        return changed

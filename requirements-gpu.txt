@@ -1,0 +1,4 @@
+# GPU-s beszédfelismeréshez (faster-whisper / CTranslate2): CUDA 12 cuBLAS + cuDNN 9.
+# Nem kell hozzá CUDA Toolkit telepítés, a Jarvis maga állítja be a DLL-ek elérési útját.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

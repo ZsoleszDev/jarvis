@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23000' stroke='%23666' stroke-width='1'/%3E%3Ccircle cx='16' cy='16' r='11' fill='%23f2f2f2'/%3E%3Cpath d='M16 16 L10 6.5 A11 11 0 0 1 22 6.5 Z' fill='%23111'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23000'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body data-state="starting" data-mode="chat">
+  <header class="top">
+    <div id="name">Jarvis</div>
+    <nav class="tabs" role="tablist" aria-label="Menü">
+      <button id="tab-chat" type="button" role="tab" aria-selected="true" aria-controls="log">Beszélgetés</button>
+      <button id="tab-work" type="button" role="tab" aria-selected="false" aria-controls="work" hidden>Munka</button>
+      <button id="tab-creative" type="button" role="tab" aria-selected="false" aria-controls="creative" hidden>Kreatív</button>
+    </nav>
+    <div id="meta"></div>
+  </header>
+
+  <section class="dial" aria-live="polite">
+    <svg id="eye" viewBox="0 0 200 200" aria-hidden="true">
+      <defs>
+        <radialGradient id="fan" cx="50%" cy="50%" r="50%">
+          <stop offset="0.3" stop-color="#161616"/>
+          <stop offset="0.62" stop-color="#a2a2a2"/>
+          <stop offset="1" stop-color="#ffffff"/>
+        </radialGradient>
+      </defs>
+      <circle cx="100" cy="100" r="86" fill="#000" stroke="#4d4d4d" stroke-width="1.2"/>
+      <g id="ticks" stroke="rgba(255,255,255,0.3)" stroke-width="1"></g>
+      <g id="glass">
+        <circle id="disk" cx="100" cy="100" r="62" fill="url(#fan)"/>
+        <path id="shadow" fill="#070707"/>
+      </g>
+      <circle cx="100" cy="100" r="19" fill="#000" stroke="#2a2a2a"/>
+    </svg>
+    <div id="state">Indulok</div>
+    <div id="detail"></div>
+  </section>
+
+  <main id="log" class="log" role="tabpanel" aria-labelledby="tab-chat" aria-live="polite">
+    <div id="empty" class="empty">
+      <p>Kérdezz bármit.</p>
+      <div id="examples" class="examples"></div>
+    </div>
+  </main>
+
+  <section id="work" class="work" role="tabpanel" aria-labelledby="tab-work" hidden>
+    <div class="workbar">
+      <nav class="subtabs" role="tablist" aria-label="Munkák">
+        <button id="job-sales" type="button" role="tab" aria-selected="true">Adás/Vétel</button>
+      </nav>
+      <div id="w-filters" class="filters" role="group" aria-label="Szűrés"></div>
+    </div>
+    <div id="w-area" class="workarea">
+      <div id="w-list-view">
+        <form id="w-compose" class="compose" autocomplete="off" aria-labelledby="w-compose-title">
+          <h2 id="w-compose-title" class="section-title">Új hirdetés</h2>
+          <fieldset class="sites">
+            <legend>Hova töltsem fel?</legend>
+            <div id="w-sites" class="checks"></div>
+          </fieldset>
+          <div id="w-needs" class="needs" aria-live="polite"></div>
+          <div id="w-new-photos" class="photos"></div>
+          <label for="w-prompt" class="field-label">Mit adsz el?</label>
+          <textarea id="w-prompt" rows="3"
+            placeholder="Pl. Zara L-es fekete póló, egyszer hordott, 500 Ft"></textarea>
+          <label class="check"><input id="w-research" type="checkbox">
+            Nézz utána, mennyiért adják máshol (csak ajánlás)</label>
+          <div class="row">
+            <button id="w-go" type="submit" class="primary">Mehet</button>
+            <span id="w-compose-msg" class="muted" role="status"></span>
+          </div>
+        </form>
+        <details id="w-setup" class="setup">
+          <summary>Alapadatok és bejelentkezés</summary>
+          <div id="w-setup-body"></div>
+        </details>
+        <h2 class="section-title">Hirdetéseim</h2>
+        <div id="w-list" class="items"></div>
+      </div>
+      <article id="w-detail" class="detail" hidden></article>
+      <!-- állandó fájlválasztó: a lap frissítése közben se vesszen el, amit kiválasztottál -->
+      <input id="w-file" type="file" accept="image/*" multiple hidden>
+    </div>
+    <aside id="w-logbox" class="worklog">
+      <button id="w-logtoggle" type="button" class="logtoggle" aria-expanded="true" aria-controls="w-log">
+        Munkanapló<span id="w-unread" class="unread"></span></button>
+      <div id="w-log" class="log" aria-live="polite"></div>
+    </aside>
+  </section>
+
+  <section id="creative" class="creative" role="tabpanel" aria-labelledby="tab-creative" hidden>
+    <!-- a történetek -->
+    <div id="c-library" class="c-library">
+      <div class="c-head">
+        <h2 class="section-title">Történetek</h2>
+        <button id="c-new" type="button" class="primary">Új történet</button>
+      </div>
+      <div id="c-list" class="c-list"></div>
+    </div>
+
+    <!-- új történet: típus, nyelv, kiindulás -->
+    <form id="c-create" class="c-create" autocomplete="off" hidden></form>
+
+    <!-- egy történet olvasása és írása -->
+    <div id="c-reader" class="c-reader" hidden>
+      <div class="c-bar">
+        <button id="c-back" type="button" class="quiet small" aria-label="Vissza a történetekhez"><span aria-hidden="true">‹</span><span class="c-back-text" aria-hidden="true"> Történetek</span></button>
+        <h2 id="c-title" class="c-title"></h2>
+        <span id="c-chips" class="c-chips"></span>
+        <button id="c-memtoggle" type="button" class="small" aria-expanded="false" aria-controls="c-memory">Emlékezet</button>
+      </div>
+      <div class="c-body">
+        <article id="c-story" class="c-story" aria-live="polite" aria-busy="false"></article>
+        <aside id="c-memory" class="c-memory" aria-label="Emlékezet" hidden></aside>
+      </div>
+      <div id="c-notes" class="c-notes" aria-live="polite"></div>
+      <form id="c-compose" class="c-compose" autocomplete="off">
+        <div id="c-kinds" class="c-kinds" role="radiogroup" aria-label="Mit írsz?">
+          <button type="button" role="radio" data-kind="do" aria-checked="true"
+            title="Amit a szereplőd tesz (pl. kinyitod az ajtót)">Tett</button>
+          <button type="button" role="radio" data-kind="say" aria-checked="false"
+            title="Amit a szereplőd mond">Mondás</button>
+          <button type="button" role="radio" data-kind="story" aria-checked="false"
+            title="Te írod a történetet, a mesélő onnan folytatja">Történet</button>
+        </div>
+        <div class="c-input">
+          <label for="c-text" hidden>A te köröd</label>
+          <textarea id="c-text" rows="1" enterkeyhint="send"></textarea>
+          <button id="c-send" type="submit" class="primary">Küldés</button>
+        </div>
+        <div class="row c-actions">
+          <button id="c-continue" type="button" title="A mesélő folytatja (üres Küldés is ezt teszi)">Folytasd</button>
+          <button id="c-retry" type="button" title="Az utolsó választ újraírja; a változatok között lapozhatsz">Másik változat</button>
+          <button id="c-undo" type="button" class="quiet">Visszavonás</button>
+          <button id="c-redo" type="button" class="quiet">Mégis</button>
+          <span id="c-status" class="c-status" role="status"></span>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <footer class="controls">
+    <form id="ask" autocomplete="off">
+      <label for="text" hidden>Kérés</label>
+      <input id="text" name="text" placeholder="Írd ide a kérdésed" enterkeyhint="send">
+      <button type="submit" class="primary">Küldés</button>
+    </form>
+    <div class="row">
+      <button id="listen" type="button" disabled>Hallgass meg</button>
+      <button id="stop" type="button" title="Esc">Állj</button>
+      <button id="reset" type="button">Új beszélgetés</button>
+      <span class="spacer"></span>
+      <button id="phone" type="button" class="quiet" title="A telefonod párosítása (Tailscale-en át)">Telefon</button>
+      <button id="pause" type="button"
+        title="Minden modellt leállít, bezárja a böngészőt, és felszabadítja a videókártyát és a memóriát (pl. játékhoz)">Szünet</button>
+    </div>
+  </footer>
+
+  <dialog id="confirm" aria-labelledby="confirm-title">
+    <h2 id="confirm-title">Jóváhagyás kell</h2>
+    <p id="confirm-text"></p>
+    <div class="row">
+      <button id="deny" type="button">Mégse</button>
+      <button id="allow" type="button" class="primary">Engedélyezem</button>
+    </div>
+  </dialog>
+
+  <dialog id="phone-dialog" aria-labelledby="phone-title">
+    <h2 id="phone-title">Telefon</h2>
+    <div id="phone-body"></div>
+    <div class="row">
+      <button id="phone-close" type="button">Bezárás</button>
+    </div>
+  </dialog>
+
+  <dialog id="sold-dialog" aria-labelledby="sold-title">
+    <h2 id="sold-title">Eladva</h2>
+    <p id="sold-text"></p>
+    <fieldset id="sold-where" class="checks"></fieldset>
+    <label class="check"><input id="sold-delist" type="checkbox" checked> Vegye le Jarvis a többi oldalról</label>
+    <div class="row">
+      <button id="sold-no" type="button">Mégse</button>
+      <button id="sold-yes" type="button" class="primary">Rendben</button>
+    </div>
+  </dialog>
+
+  <dialog id="ask-dialog" aria-labelledby="ask-title">
+    <h2 id="ask-title"></h2>
+    <p id="ask-text"></p>
+    <div class="row">
+      <button id="ask-no" type="button">Mégse</button>
+      <button id="ask-yes" type="button" class="primary">Rendben</button>
+    </div>
+  </dialog>
+
+<script src="/ui/app.js"></script>
+<script src="/ui/work.js"></script>
+<script src="/ui/creative.js"></script>
+</body>
+</html>

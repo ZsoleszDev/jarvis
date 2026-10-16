@@ -1,0 +1,362 @@
+/**
+ * Jarvis API – Angular-szolgáltatás a telefonos apphoz (Angular + Capacitor).
+ *
+ * Bemásolás: src/app/jarvis/jarvis-api.service.ts. Kell hozzá a HttpClient
+ * (provideHttpClient() az app.config.ts-ben, vagy HttpClientModule a régebbi modulos appban).
+ *
+ * Első indítás:
+ *   api.configure('https://gep-neve.tailnet.ts.net');           // a Tailscale-cím (tailscale serve status)
+ *   await firstValueFrom(api.pair('123456', 'Pixel 8'));          // a Jarvis ablakában kért kód
+ * Utána:
+ *   api.chat('Milyen idő lesz holnap?', { wait: 60 }).subscribe(r => console.log(r.reply));
+ *   api.events$().subscribe(e => ...);                            // élő napló (hosszú lekérdezés)
+ *
+ * A végpontok leírása: docs/telefon-api.md.
+ */
+import { Injectable } from '@angular/core';
+import { HttpClient, HttpHeaders, HttpParams } from '@angular/common/http';
+import { Observable, firstValueFrom, map } from 'rxjs';
+
+// --- adatok -----------------------------------------------------------------------------------
+
+export type Mode = 'chat' | 'work';
+export type JarvisState =
+  | 'starting' | 'idle' | 'listening' | 'transcribing' | 'thinking' | 'working' | 'speaking' | 'paused' | 'standby'
+  | 'error';
+export type ItemStatus = 'vázlat' | 'kérdés' | 'árdöntés' | 'részben fent' | 'fent' | 'eladva';
+export type PlatformStatus = 'feltöltve' | 'nincs fent' | 'hiba';
+export type Recency = '' | 'nap' | 'hét' | 'hónap' | 'év';
+
+export interface PairResult { ok: boolean; token: string; device_id: string; name: string; }
+
+export interface ConfirmRequest { type?: 'confirm'; id: number; prompt: string; }
+
+export interface SchedulerJob {
+  key: string; title: string; every_minutes: number; enabled: boolean;
+  last_run: number | null; next_run: number | null; result: string; error: string; running: boolean;
+}
+
+export interface SchedulerStatus {
+  enabled: boolean; blocked: string; free: boolean; snoozed_until: number | null;
+  running: string | null; jobs: SchedulerJob[];
+}
+
+export interface Status {
+  ok: boolean; api: number; name: string; ready: boolean;
+  state: { state?: JarvisState; text?: string; detail?: string };
+  paused: boolean; standby: boolean; busy: boolean; mode: Mode; model: string; voice: boolean; speech: boolean;
+  work: boolean;
+  confirm: ConfirmRequest | null; scheduler: SchedulerStatus | null; unread: number; last_event: number;
+}
+
+export interface ChatResult {
+  ok: boolean; request_id: string; done: boolean;
+  heard?: string; reply?: string; errors?: string[];
+}
+
+export interface JarvisEvent {
+  seq: number; at?: number;
+  type: 'hello' | 'state' | 'user' | 'assistant' | 'tool' | 'info' | 'warn' | 'error' | 'timing'
+    | 'confirm' | 'confirm_done' | 'work_item' | 'work_removed' | 'notification' | 'request_done' | 'gap';
+  channel?: Mode; request_id?: string; text?: string; via?: string;
+  state?: JarvisState; detail?: string;
+  id?: number | string; label?: string; status?: string; summary?: string;
+  prompt?: string; approved?: boolean;
+  item?: WorkItem; notice?: Notice;
+  [key: string]: unknown;
+}
+
+export interface EventsResponse { ok: boolean; events: JarvisEvent[]; last: number; gap: boolean; }
+
+export interface PlatformState { status: PlatformStatus; at: number; url?: string; note?: string; }
+
+export interface WorkItem {
+  id: string; name: string; status: ItemStatus; created: number; updated: number;
+  photos: string[]; targets: string[]; prompt: string; research_wanted: boolean;
+  product: string; kind: string; title: string; description: string; category: string;
+  brand: string; size: string; condition: string; color: string; material: string;
+  price: number | null; location: string; shipping: string;
+  edited: string[]; platforms: Record<string, PlatformState>;
+  pending: { kind?: 'info' | 'price'; question?: string; suggested?: number };
+  research: Record<string, unknown>; verdict: string; sold: boolean; busy: string;
+}
+
+export interface Platform { key: string; name: string; research: boolean; }
+
+export interface WorkOverview {
+  ok: boolean; items: WorkItem[]; platforms: Platform[];
+  needs: { label: string; sites: string[]; clothing_only: boolean; setting: string }[];
+  acknowledged: string[]; settings: { city: string; shipping: string; parcel_size: string };
+  parcel_sizes: string[]; research: boolean; browser: boolean; conditions: string[]; max_photos: number;
+}
+
+export interface Watch {
+  id: string; query: string; site: string; recency: string; label: string; created: number;
+  last_check: number; checks: number; error: string;
+  hits: { title: string; url: string; snippet: string; at: number }[];
+}
+
+export interface Notice {
+  id: string; at: number; kind: 'watch' | 'stale' | 'delist' | 'work' | 'info';
+  title: string; text: string; read: boolean; url?: string; item?: string; items?: string[]; watch?: string;
+}
+
+export interface Device { id: string; name: string; created: number; last_seen: number; current?: boolean; }
+
+export interface ApiError { ok: false; error: string; code: string; }
+
+// --- a szolgáltatás ------------------------------------------------------------------------------
+
+const BASE_KEY = 'jarvis.baseUrl';
+const TOKEN_KEY = 'jarvis.token';
+
+@Injectable({ providedIn: 'root' })
+export class JarvisApiService {
+  private baseUrl = '';
+  private token = '';
+
+  constructor(private http: HttpClient) {
+    // Éles appban inkább @capacitor/preferences vagy biztonságos tároló.
+    this.baseUrl = localStorage.getItem(BASE_KEY) ?? '';
+    this.token = localStorage.getItem(TOKEN_KEY) ?? '';
+  }
+
+  /** A Jarvis címe, pl. https://gep-neve.tailnet.ts.net (a /api/v1 nélkül). */
+  configure(baseUrl: string, token?: string): void {
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    localStorage.setItem(BASE_KEY, this.baseUrl);
+    if (token !== undefined) this.setToken(token);
+  }
+
+  get paired(): boolean { return !!this.baseUrl && !!this.token; }
+
+  forget(): void { this.setToken(''); }
+
+  private setToken(token: string): void {
+    this.token = token;
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  }
+
+  private url(path: string): string { return `${this.baseUrl}/api/v1${path}`; }
+
+  private headers(): HttpHeaders {
+    return new HttpHeaders(this.token ? { Authorization: `Bearer ${this.token}` } : {});
+  }
+
+  private get<T>(path: string, params?: Record<string, string | number | boolean>): Observable<T> {
+    return this.http.get<T>(this.url(path), { headers: this.headers(), params: toParams(params) });
+  }
+
+  private post<T>(path: string, body: unknown = {}, params?: Record<string, string | number | boolean>): Observable<T> {
+    return this.http.post<T>(this.url(path), body, { headers: this.headers(), params: toParams(params) });
+  }
+
+  // --- párosítás és állapot ---
+
+  ping(): Observable<{ ok: boolean; name: string; api: number }> {
+    return this.http.get<{ ok: boolean; name: string; api: number }>(this.url('/ping'));
+  }
+
+  /** A Jarvis ablakában (Telefon › Új párosító kód) kért 6 jegyű kóddal. A kulcsot el is tárolja. */
+  pair(code: string, device: string): Observable<PairResult> {
+    return this.http.post<PairResult>(this.url('/pair'), { code, device }).pipe(
+      map((result) => { this.setToken(result.token); return result; }));
+  }
+
+  status(): Observable<Status> { return this.get<Status>('/status'); }
+
+  // --- beszélgetés ---
+
+  /** wait > 0: megvárja a választ (legfeljebb ennyi mp-ig). speak: a gép hangszórója is szóljon. */
+  chat(text: string, opts: { mode?: Mode; wait?: number; speak?: boolean; resume?: boolean } = {}):
+      Observable<ChatResult> {
+    return this.post<ChatResult>('/chat', { text, mode: opts.mode ?? 'chat', wait: opts.wait ?? 60,
+                                            speak: opts.speak ?? false, resume: opts.resume ?? false });
+  }
+
+  /** Hangfelvétel (m4a, aac, webm, ogg, wav). A válaszban a felismert szöveg (heard) és a válasz (reply). */
+  voice(audio: Blob, opts: { mode?: Mode; wait?: number; speak?: boolean; resume?: boolean } = {}):
+      Observable<ChatResult> {
+    return this.http.post<ChatResult>(this.url('/voice'), audio, {
+      headers: this.headers().set('Content-Type', audio.type || 'application/octet-stream'),
+      params: toParams({ mode: opts.mode ?? 'chat', wait: opts.wait ?? 60, speak: opts.speak ? 1 : 0,
+                         resume: opts.resume ? 1 : 0 }),
+    });
+  }
+
+  /** Jarvis hangja WAV-ként (<audio [src]>-hoz; a kulcs a címben van, mert az <audio> nem küld fejlécet). */
+  ttsUrl(text: string): string {
+    return `${this.url('/tts')}?text=${encodeURIComponent(text)}&access_token=${encodeURIComponent(this.token)}`;
+  }
+
+  stop(): Observable<unknown> { return this.post('/stop'); }
+  /** Szünet: minden modell leáll, a gép videókártyája és memóriája felszabadul (pl. játékhoz). */
+  pause(): Observable<unknown> { return this.post('/pause'); }
+  /** Folytatás: újra betölti a modelleket (10–20 mp). */
+  resume(): Observable<unknown> { return this.post('/resume'); }
+  reset(mode: Mode = 'chat'): Observable<unknown> { return this.post('/reset', { mode }); }
+
+  pendingConfirm(): Observable<ConfirmRequest | null> {
+    return this.get<{ confirm: ConfirmRequest | null }>('/confirm').pipe(map((r) => r.confirm));
+  }
+
+  answerConfirm(id: number, approved: boolean): Observable<unknown> {
+    return this.post('/confirm', { id, approved });
+  }
+
+  /**
+   * Élő napló: hosszú lekérdezéssel követi a Jarvis eseményeit, amíg fel vagy iratkozva.
+   * Hiba után egyre ritkábban próbálkozik (1 mp → 30 mp). Ha közben események vesztek el,
+   * egy {type: 'gap'} eseményt ad: ilyenkor töltsd újra az állapotot és a tárgyakat.
+   */
+  events$(after = 0): Observable<JarvisEvent> {
+    return new Observable<JarvisEvent>((subscriber) => {
+      let stopped = false;
+      let delay = 1000;
+      let cursor = after;
+      const loop = async (): Promise<void> => {
+        while (!stopped) {
+          try {
+            const response = await firstValueFrom(this.get<EventsResponse>('/events', { after: cursor, wait: 25 }));
+            delay = 1000;
+            if (response.gap) subscriber.next({ seq: response.last, type: 'gap' });
+            for (const event of response.events) subscriber.next(event);
+            cursor = response.last;
+          } catch (error) {
+            if (stopped) break;
+            if (isUnauthorized(error)) { subscriber.error(error); break; }
+            await sleep(delay);
+            delay = Math.min(delay * 2, 30000);
+          }
+        }
+      };
+      void loop();
+      return () => { stopped = true; };
+    });
+  }
+
+  // --- Munka: Adás/Vétel ---
+
+  work(): Observable<WorkOverview> { return this.get<WorkOverview>('/work'); }
+
+  createItem(targets: string[], prompt: string, researchWanted = false): Observable<WorkItem> {
+    return this.post<{ item: WorkItem }>('/work/items', { targets, prompt, research_wanted: researchWanted })
+      .pipe(map((r) => r.item));
+  }
+
+  item(id: string): Observable<WorkItem> {
+    return this.get<{ item: WorkItem }>(`/work/items/${id}`).pipe(map((r) => r.item));
+  }
+
+  updateItem(id: string, fields: Partial<WorkItem>): Observable<WorkItem> {
+    return this.http.patch<{ item: WorkItem }>(this.url(`/work/items/${id}`), { fields }, { headers: this.headers() })
+      .pipe(map((r) => r.item));
+  }
+
+  deleteItem(id: string): Observable<unknown> {
+    return this.http.delete(this.url(`/work/items/${id}`), { headers: this.headers() });
+  }
+
+  /** Egy fotó (pl. a Capacitor Camera képe: fetch(photo.webPath).then(r => r.blob())). */
+  uploadPhoto(id: string, photo: Blob): Observable<WorkItem> {
+    return this.http.post<{ item: WorkItem }>(this.url(`/work/items/${id}/photos`), photo, {
+      headers: this.headers().set('Content-Type', photo.type || 'image/jpeg'),
+    }).pipe(map((r) => r.item));
+  }
+
+  photoUrl(id: string, name: string, thumb = true): string {
+    return `${this.url(`/work/items/${id}/photos/${name}`)}?thumb=${thumb ? 1 : 0}` +
+      `&access_token=${encodeURIComponent(this.token)}`;
+  }
+
+  deletePhoto(id: string, name: string): Observable<WorkItem> {
+    return this.http.delete<{ item: WorkItem }>(this.url(`/work/items/${id}/photos/${name}`), { headers: this.headers() })
+      .pipe(map((r) => r.item));
+  }
+
+  reorderPhotos(id: string, order: string[]): Observable<WorkItem> {
+    return this.post<{ item: WorkItem }>(`/work/items/${id}/photos/order`, { order }).pipe(map((r) => r.item));
+  }
+
+  /** Feltöltés a kiválasztott oldalakra (előbb acknowledge, ha 409 'acknowledge' jön). */
+  sell(id: string, resume = false): Observable<unknown> { return this.post(`/work/items/${id}/sell`, { resume }); }
+  reply(id: string, text: string): Observable<unknown> { return this.post(`/work/items/${id}/reply`, { text }); }
+  decidePrice(id: string, choice: 'keep' | 'suggested' | number): Observable<unknown> {
+    return this.post(`/work/items/${id}/price`, { choice });
+  }
+  cancelQuestion(id: string): Observable<unknown> { return this.post(`/work/items/${id}/cancel`); }
+  postTo(id: string, platform: string): Observable<unknown> { return this.post(`/work/items/${id}/post`, { platform }); }
+  research(id: string): Observable<unknown> { return this.post(`/work/items/${id}/research`); }
+
+  /** Eladva: hol kelt el (where), és vegye-e le Jarvis a többi oldalról (delist). */
+  markSold(id: string, where = '', delist = true):
+      Observable<{ item: WorkItem; still_posted: string[]; delisting: string[] }> {
+    return this.post<{ item: WorkItem; still_posted: string[]; delisting: string[] }>(
+      `/work/items/${id}/sold`, { where, delist });
+  }
+
+  unmarkSold(id: string): Observable<{ item: WorkItem }> {
+    return this.post<{ item: WorkItem }>(`/work/items/${id}/sold`, { sold: false });
+  }
+
+  delist(id: string, platforms?: string[]): Observable<{ platforms: string[] }> {
+    return this.post<{ platforms: string[] }>(`/work/items/${id}/delist`, platforms ? { platforms } : {});
+  }
+
+  markPlatform(id: string, platform: string, status: PlatformStatus, url = ''): Observable<{ item: WorkItem }> {
+    return this.post<{ item: WorkItem }>(`/work/items/${id}/mark`, { platform, status, url });
+  }
+
+  acknowledge(platform: string): Observable<{ acknowledged: string[] }> {
+    return this.post<{ acknowledged: string[] }>('/work/ack', { platform });
+  }
+
+  saveSettings(settings: { city?: string; shipping?: string; parcel_size?: string }): Observable<unknown> {
+    return this.http.put(this.url('/work/settings'), { settings }, { headers: this.headers() });
+  }
+
+  // --- háttérmunka, figyelők, értesítések, eszközök ---
+
+  jobs(): Observable<SchedulerStatus> { return this.get<SchedulerStatus>('/jobs'); }
+  runJob(key: 'watches' | 'stale' | string): Observable<unknown> { return this.post(`/jobs/${key}/run`); }
+  /** Ennyi percig nincs háttérmunka (0: újra mehet). */
+  snooze(minutes: number): Observable<{ snoozed_until: number | null }> {
+    return this.post<{ snoozed_until: number | null }>('/jobs/snooze', { minutes });
+  }
+
+  watches(): Observable<Watch[]> { return this.get<{ watches: Watch[] }>('/watches').pipe(map((r) => r.watches)); }
+  addWatch(query: string, site = '', recency: Recency = 'hét'): Observable<Watch> {
+    return this.post<{ watch: Watch }>('/watches', { query, site, recency }).pipe(map((r) => r.watch));
+  }
+  removeWatch(id: string): Observable<unknown> {
+    return this.http.delete(this.url(`/watches/${id}`), { headers: this.headers() });
+  }
+
+  notifications(unreadOnly = false, limit = 50): Observable<{ notifications: Notice[]; unread: number }> {
+    return this.get<{ notifications: Notice[]; unread: number }>('/notifications', { unread: unreadOnly ? 1 : 0, limit });
+  }
+  markRead(ids?: string[]): Observable<{ marked: number }> {
+    return this.post<{ marked: number }>('/notifications/read', ids ? { ids } : {});
+  }
+
+  devices(): Observable<Device[]> { return this.get<{ devices: Device[] }>('/devices').pipe(map((r) => r.devices)); }
+  revokeDevice(id: string): Observable<unknown> {
+    return this.http.delete(this.url(`/devices/${id}`), { headers: this.headers() });
+  }
+}
+
+// --- segédek -----------------------------------------------------------------------------------
+
+function toParams(values?: Record<string, string | number | boolean>): HttpParams | undefined {
+  if (!values) return undefined;
+  let params = new HttpParams();
+  for (const [key, value] of Object.entries(values)) params = params.set(key, String(value));
+  return params;
+}
+
+function sleep(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+function isUnauthorized(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { status?: number }).status === 401;
+}

@@ -1,0 +1,235 @@
+# Jarvis beállítások
+# Módosítás után indítsd újra a Jarvist. Ami innen hiányzik, az alapértéket kap.
+
+[assistant]
+name = "Jarvis"
+greeting = "Jarvis online. Miben segíthetek?"
+system_prompt_file = "system_prompt.txt"
+# Hány korábbi kérdés-válasz kört tartson meg (a modell kontextusa véges)
+max_history_turns = 12
+# Egy kérésen belül legfeljebb ennyi eszközhívási kör (böngészős feladatnál sok lépés kellhet)
+max_tool_rounds = 20
+# Hány legutóbbi oldalnézetet/találati listát tartson meg teljes egészében (a régebbiek kitömörítve)
+keep_page_views = 2
+# Kiírja, mennyi ideig tartott a felismerés és a válasz
+show_timings = true
+# Folyamatos válasz: már az első mondatnál megszólal, nem várja meg a teljes választ
+stream = true
+# Lassú lépés (keresés, böngészés) előtt rögtön mond valamit ("Egy pillanat.")
+fillers = true
+
+[llm]
+host = "http://localhost:11434"
+model = "qwen3.8:27b"
+# Gondolkodó mód: false = gyors válasz, true = alaposabb, de jóval lassabb
+think = false
+temperature = 0.6
+# -1 = amíg a Jarvis fut, a modell a videókártyán marad
+keep_alive = -1
+# Kilépéskor kiüríti a modellt a VRAM-ból (pl. ha a másik ülésen játszani akarnak)
+unload_on_exit = true
+# Kontextus (token). A böngészéshez 16384 a jó: egy oldalnézet 1–2 ezer token.
+# A Jarvis maga kéri az Ollamától, nem kell hozzá környezeti változó. 0 = az Ollama beállítása.
+num_ctx = 16384
+# Ha a modell így nem fér el teljesen a videókártyákon (lassú lenne), a Jarvis kisebb
+# kontextussal tölti be újra (12288, majd 8192), de ennél kisebbel nem. 0 = ne próbálkozzon.
+min_ctx = 8192
+request_timeout = 180
+# Induláskor (és Szünet után) előre feldolgozza a rendszerpromptot: gyorsabb az első válasz
+warm_up = true
+
+[stt]
+# "auto": GPU, ha a CUDA-könyvtárak telepítve vannak (requirements-gpu.txt), különben CPU
+# "cuda": mindenképp GPU    "cpu": mindenképp CPU
+device = "auto"
+language = "hu"
+# GPU-n: a "turbo" (large-v3-turbo) magyarul sokkal pontosabb, mint a kis modellek
+gpu_model = "turbo"
+gpu_compute_type = "int8_float16"
+# Melyik videókártyán fusson, az nvidia-smi sorszáma szerint.
+# A te gépeden: 0 = RTX 3060 Ti, 1 = RTX 5060 Ti (ezen van több szabad VRAM)
+gpu_device_index = 1
+# CPU-n: "small" (gyors) vagy "medium" (pontosabb, de pár másodperc)
+cpu_model = "small"
+cpu_compute_type = "int8"
+cpu_threads = 8
+beam_size = 1
+# Segíti a felismerést: ide írhatsz gyakran használt szavakat, neveket
+initial_prompt = "Jarvis, nyisd meg a Visual Studio Code-ot. Mennyi az idő? Keresd meg a számlát."
+
+[audio]
+# Mikrofon és hangszóró: üresen az alapértelmezett eszköz.
+# Lehet sorszám ("3") vagy névrészlet ("Headset"). A check_setup.py kilistázza őket.
+input_device = ""
+output_device = ""
+# Ennyi másodperc csend után áll le a felvétel (kisebb = gyorsabb, de mondat közben is levághat)
+silence_seconds = 0.8
+# Ha ennyi ideig nem szólalsz meg, a felvétel megszakad
+no_speech_timeout = 6.0
+# Válasz után ennyi másodpercig Enter nélkül is figyel, ha folytatnád (0 = kikapcsolva)
+follow_up_seconds = 4.0
+max_record_seconds = 30.0
+# A beszéd küszöbszintjének alsó határa. Ha nem veszi észre, hogy beszélsz, csökkentsd (pl. 0.005).
+min_threshold = 0.01
+# A háttérzaj hányszorosa számít beszédnek
+threshold_multiplier = 3.0
+
+[tts]
+# "piper" = magyar neurális hang, "none" = nincs felolvasás
+engine = "piper"
+# Magyar hangok: hu_HU-imre-medium (férfi), hu_HU-anna-medium, hu_HU-berta-medium (női)
+voice = "hu_HU-imre-medium"
+voices_dir = "voices"
+# Beszédtempó: 1.0 = normál, 0.9 = kicsit gyorsabb, 1.1 = lassabb
+length_scale = 1.0
+volume = 1.0
+
+[tools]
+# A fájlkereső, -olvasó és -megnyitó csak ezekben a mappákban dolgozhat.
+# Ha a OneDrive átirányítja a mappáidat, írd be a valódi utat, pl. "~/OneDrive/Dokumentumok".
+allowed_folders = ["~/Documents", "~/Downloads", "~/Desktop"]
+notes_dir = "~/Documents/Jarvis jegyzetek"
+max_read_chars = 6000
+# VESZÉLYES: tetszőleges PowerShell-parancs futtatása (minden futtatás előtt gépelt jóváhagyást kér)
+allow_powershell = false
+powershell_timeout = 30
+
+[web]
+# Webes keresés (DuckDuckGo, nem kell hozzá kulcs) és weboldalak olvasása
+search_region = "hu-hu"
+max_results = 5
+# Egy oldalból legfeljebb ennyi karaktert ad át a modellnek
+read_max_chars = 6000
+timeout = 15
+# Helyi címek (localhost, router, 192.168.x.x) megnyitása. Fejlesztéshez (pl. localhost:4200) kapcsold be.
+allow_local = false
+
+[browser]
+# Jarvis saját, általa vezérelt böngészője (Playwright). Látható ablakban fut, külön profillal.
+enabled = true
+headless = false
+# "msedge" = a gépen lévő Edge: valódi böngésző, a webshopok robotszűrői ritkábban akadnak bele
+# "" = a Playwright saját Chromiuma (playwright install chromium). Ha az Edge nem indul, ezt használja.
+channel = "msedge"
+# Más Chromium-alapú böngésző, pl. Brave (külön profillal fut, a saját Brave-edet nem zavarja):
+#   executable_path = 'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe'
+executable_path = ""
+# Itt maradnak a sütik és bejelentkezések: ha egyszer belépsz valahova (és bepipálod, hogy
+# maradj bejelentkezve), Jarvis legközelebb is be lesz jelentkezve.
+# Üresen a projektmappán kívül van (%LOCALAPPDATA%\Jarvis\browser_profile), így egy új verzió
+# kicsomagolása után is megmarad.
+profile_dir = ""
+width = 1280
+height = 800
+# Egy oldalnézetben legfeljebb ennyi kezelhető elem (link, gomb, mező)
+max_elements = 60
+# Vásárlás, küldés, törlés jellegű gombok és űrlapküldés előtt jóváhagyást kér
+confirm_risky = true
+# Emberi tempó: az egér odamegy az elemhez, a rövid szöveget billentyűnként gépeli, a hosszút
+# beilleszti; a modell nélküli lépéseknél (begyakorolt lépések, árkutatás) gondolkodási és olvasási
+# szüneteket is tart, hogy a hirdetési oldalak ne lássák gépiesnek.
+human_pace = true
+# A szünetek szorzója: 1.0 = átlagos tempó, 1.5 = ráérősebb, 0 = szünetek nélkül
+pace = 1.0
+
+[screen]
+# Képernyőnézés: Jarvis képet készít a monitorodról, és a Qwen megnézi (helyben, nem megy ki a gépről)
+enabled = true
+# 1 = fő monitor, 2 = második, 0 = mind együtt (a check_setup.py kilistázza)
+monitor = 1
+# Nagyobb képet erre kicsinyít (gyorsabb elemzés)
+max_width = 1600
+
+[gui]
+# Grafikus felület (python jarvis.py). Konzolos mód: python jarvis.py --console
+# Alkalmazásablakban nyíljon meg (Edge --app mód, címsor nélkül)
+window = true
+browser = "msedge"
+# 0 = szabad port automatikusan
+port = 0
+# Ha bezárod az ablakot, a Jarvis is leáll (és kiüríti a modellt a VRAM-ból)
+exit_on_close = true
+
+[wake_word]
+# "Hey Jarvis" ébresztőszó. Telepítés: pip install -r requirements-wakeword.txt
+enabled = true
+model = "hey_jarvis"
+# 0–1: nagyobb = kevesebb téves ébredés, de lehet, hogy hangosabban kell mondanod
+threshold = 0.5
+# Rövid csengés, amikor felébred
+chime = true
+# Ennyi másodpercig nem ébred fel újra
+cooldown = 2.0
+
+[work]
+# A Munka menü. Első munkája az Adás/Vétel: kipipálod, hova kerüljön, feltöltöd a fotókat, leírod,
+# mit adsz el, és Jarvis feltölti (ha valami hiányzik, visszakérdez).
+enabled = true
+# Itt vannak a tárgyak (tárgyanként egy mappa a fotókkal) és az Alapadatok. A törölt a _torolt-ba kerül.
+# Üresen a projektmappán kívül: %LOCALAPPDATA%\Jarvis\munka
+dir = ""
+prompt_file = "work_prompt.txt"
+# Hirdetési oldalak a felületen: vinted, jofogas, vatera, hardverapro
+platforms = ["vinted", "jofogas", "vatera", "hardverapro"]
+# A „Nézz utána, mennyiért adják máshol” pipánál ezeken keres (csak a kiválasztottak közül)
+research_sites = ["vinted", "jofogas", "vatera", "hardverapro"]
+# Egy feltöltés sok lépés (fotók, mezők, listák), ezért itt több lépést engedünk
+max_tool_rounds = 40
+# Egy tárgyhoz legfeljebb ennyi fotó (a Vinteden is 20; a Vatera 8-at vesz fel)
+max_photos = 20
+# Begyakorolt lépések: amit a modell egyszer sikeresen feltöltött vagy levett, azt legközelebb
+# modell nélkül, gyorsan visszajátssza (a közzététel előtt ugyanúgy kérdez)
+replay = true
+# Ugyanazon az oldalon két közzététel (vagy levétel) között legalább ennyi perc teljen el
+# (véletlenszerűen ±30%), ahogy egy embernél, aki egymás után tölt fel. 0 = nincs várakozás.
+publish_gap_minutes = 2.0
+
+[creative]
+# A Kreatív menü: közös történetmesélés (kaland, mint az AI Dungeon) és beszélgetés egy karakterrel
+# (mint a Character.AI). A történetek és az emlékeik itt vannak: %LOCALAPPDATA%\Jarvis\kreativ
+enabled = true
+# Az új történetek alapnyelve: "en" (angol, a modell így ír a legjobban) vagy "hu" (magyar).
+# Történetenként a felületen is átállítható.
+language = "en"
+
+[standby]
+# Készenléti indítás: python jarvis.py --standby (a gép bekapcsolásakor: python jarvis.py --autostart on).
+# Ilyenkor a modellek csak az első kérésnél töltődnek be, és ha ennyi percig nem használod a Jarvist,
+# újra készenlétbe áll (a videókártya felszabadul). 0 = nem áll vissza magától.
+idle_minutes = 15
+
+[scheduler]
+# Háttérmunka (figyelők, régóta fent lévő hirdetések): csak akkor, amikor a Jarvis ráér
+enabled = true
+# Az utolsó beszélgetés után ennyi percig nem indít háttérmunkát
+quiet_minutes = 5
+# Csak ebben az időszakban (pl. "08:00-20:00"); üresen bármikor, amíg a Jarvis fut
+active_hours = ""
+# A figyelők (mentett keresések) ellenőrzése ennyi percenként
+watch_minutes = 60
+# Ennyi nap után szól, ha egy hirdetés még nem kelt el (0 = soha)
+stale_days = 14
+# A háttérmunka eredményét fel is olvassa
+speak = true
+
+[api]
+# Telefonos kapcsolat a saját appodnak (lásd docs/telefon-api.md). A host maradjon 127.0.0.1:
+# a telefon a Tailscale-en át éri el (a gépen egyszer: tailscale serve --bg 8765).
+enabled = true
+host = "127.0.0.1"
+port = 8765
+# Böngészős (CORS) kérések ezekről az eredetekről jöhetnek (Capacitor iOS/Android, ng serve, Ionic)
+allowed_origins = ["capacitor://localhost", "ionic://localhost", "http://localhost", "https://localhost",
+                   "http://localhost:4200", "http://localhost:8100"]
+
+# Indítható programok: "név, ahogy kimondod" = "parancs vagy teljes elérési út"
+# Szóközös útnál használj aposztrófot és belül idézőjelet:
+#   "photoshop" = '"C:\Program Files\Adobe\Photoshop\Photoshop.exe"'
+[apps]
+"jegyzettömb" = "notepad.exe"
+"számológép" = "calc.exe"
+"fájlkezelő" = "explorer.exe"
+"feladatkezelő" = "taskmgr.exe"
+"terminál" = "wt.exe"
+"vs code" = "code"
+"brave böngésző" = "brave"
