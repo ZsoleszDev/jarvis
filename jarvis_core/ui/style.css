@@ -199,6 +199,7 @@ button.quiet { border-color: transparent; color: var(--ash); }
 button.quiet:hover { border-color: var(--steel); color: var(--paper); }
 button.small, .button.small { padding: 4px 10px; font-size: 13px; }
 #stop.active { border-color: var(--white); color: var(--white); }
+#listen.recording { border-color: var(--white); background: var(--white); color: var(--black); font-weight: 600; }
 #reset { margin-left: auto; border-color: transparent; color: var(--ash); }
 #reset:hover { border-color: var(--steel); }
 

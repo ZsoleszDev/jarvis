@@ -1,6 +1,7 @@
 """Értesítések: amit Jarvis a háttérben talált (új találat egy figyelőben, régóta fent lévő
-hirdetés, sikeres vagy sikertelen levétel). Megmaradnak újraindítás után is, és a telefonos
-felület innen kérdezi le őket, olvasottnak is innen jelöli.
+hirdetés), és amiről a telefonon is tudnod kell (kész vagy elakadt feltöltés és levétel, egy kérdés a
+tárgyról). Megmaradnak újraindítás után is, és a telefonos felület innen kérdezi le őket, olvasottnak
+is innen jelöli.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-KINDS = ("watch", "stale", "delist", "work", "info")
+KINDS = ("watch", "stale", "delist", "post", "question", "error", "work", "info")
 
 
 class NoticeBoard:

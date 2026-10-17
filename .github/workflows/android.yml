@@ -1,0 +1,68 @@
+# A Jarvis Android-alkalmazása (android/): APK-t fordít, és kiteszi a GitHub Releases-be (android-latest), ahonnan
+# a telefonra letölthető: https://github.com/<tulajdonos>/jarvis/releases/download/android-latest/jarvis.apk
+name: Android-alkalmazás
+
+on:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      # Saját aláíró kulcs (nem kötelező; lásd android/README.md). Enélkül a fordítógép hibakereső kulcsával
+      # írja alá, és egy új változat telepítése előtt a régit el kell távolítani a telefonról.
+      - name: Aláíró kulcs
+        env:
+          KEYSTORE_B64: ${{ secrets.JARVIS_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/jarvis.keystore"
+            echo "JARVIS_KEYSTORE=$RUNNER_TEMP/jarvis.keystore" >> "$GITHUB_ENV"
+          fi
+
+      - name: APK fordítása
+        working-directory: android
+        env:
+          JARVIS_KEYSTORE_PASSWORD: ${{ secrets.JARVIS_KEYSTORE_PASSWORD }}
+          JARVIS_KEY_ALIAS: ${{ secrets.JARVIS_KEY_ALIAS }}
+          JARVIS_KEY_PASSWORD: ${{ secrets.JARVIS_KEY_PASSWORD }}
+        run: gradle --no-daemon assembleRelease
+
+      - name: Átnevezés
+        run: cp android/app/build/outputs/apk/release/app-release.apk jarvis.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-apk
+          path: jarvis.apk
+
+      - name: Kiadás (android-latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete android-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create android-latest jarvis.apk --target "$GITHUB_SHA" --prerelease \
+            --title "Jarvis Android-alkalmazás (legfrissebb)" \
+            --notes "A legutóbb lefordított APK (${GITHUB_SHA::7}, ${GITHUB_REF_NAME}). Telepítés és párosítás: README, Telefonos és laptopos alkalmazás."

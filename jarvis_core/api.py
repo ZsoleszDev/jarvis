@@ -14,6 +14,7 @@ A végpontok listája a docs/telefon-api.md-ben van.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -24,8 +25,9 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
+from . import remote
 from .config import ApiCfg
 from .selling import FAILED, MAX_PHOTO_BYTES, NOT_POSTED, POSTED, ItemError
 from .watches import WatchError
@@ -33,6 +35,10 @@ from .watches import WatchError
 API_VERSION = 1
 MAX_JSON = 256 * 1024
 MAX_AUDIO = 15 * 1024 * 1024
+MAX_FORWARD = max(MAX_PHOTO_BYTES, MAX_AUDIO) + 64 * 1024   # a távoli ablak kérései (fotó, hangfelvétel)
+FORWARD_TIMEOUT = 60.0
+# A gép felületének válaszából ezeket a fejléceket adjuk tovább (pl. a történet letöltésénél a fájlnév).
+FORWARD_HEADERS = ("Content-Security-Policy", "Referrer-Policy", "Content-Disposition")
 CODE_SECONDS = 300
 CODE_TRIES = 5
 LOG_LIMIT = 800
@@ -188,6 +194,7 @@ class ApiServer:
         self.cfg = cfg
         self.auth = auth
         self.log = log
+        self.gui: Any = None      # a gép felülete (gui.GuiServer): a távoli ablak ennek adja tovább a kéréseket
         handler = type("JarvisApiHandler", (_ApiHandler,), {"api": self})
         self.httpd = ThreadingHTTPServer((cfg.host, int(cfg.port)), handler)
         self.httpd.daemon_threads = True
@@ -289,7 +296,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             if not path.startswith("/api/v1"):
-                raise ApiError(404, "not_found", "Nincs ilyen végpont.")
+                return self._remote(method, parsed)
             sub = path[len("/api/v1"):] or "/"
             if method == "GET" and sub == "/ping":
                 return self._json(200, {"ok": True, "name": "Jarvis", "api": API_VERSION})
@@ -389,6 +396,81 @@ class _ApiHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _flag(query: dict[str, list[str]], name: str) -> bool:
         return (query.get(name) or [""])[0].lower() in ("1", "true", "igen", "yes")
+
+    # --- a Jarvis ablaka távolról (telefon, laptop) ---------------------------------------------------
+
+    def _remote(self, method: str, parsed: Any) -> None:
+        """Ugyanaz a felület, mint a gépen (remote.py): a kéréseket az eszköz kulcsával fogadjuk, és a gépen
+        futó felületnek adjuk tovább a helyi kulccsal. A böngészős felület a kulcsot a címben (?t=) vagy az
+        X-Jarvis-Token fejlécben küldi, ugyanúgy, mint a gépen."""
+        path = parsed.path or "/"
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        static = remote.static_file(path)
+        if static is not None and method == "GET":
+            return self._send(200, static[0], static[1], {"Cache-Control": "no-cache"})
+        gui = self.api.gui
+        if gui is None:
+            raise ApiError(503, "no_window", "A Jarvis ablaka nem fut (konzolos módban nincs távoli ablak).")
+        if method == "GET" and path.startswith("/ui/"):
+            return self._forward(gui, method, path, query, device=False)   # a felület fájljai: nem titkosak
+        token = (query.get("t") or [""])[0] or self.headers.get("X-Jarvis-Token", "")
+        self.device = self.api.auth.check(token) if token else None
+        if self.device is None:
+            if method == "GET" and path == "/":
+                return self._send(200, remote.LOGIN_PAGE, "text/html; charset=utf-8",
+                                  {"Content-Security-Policy": remote.LOGIN_CSP, "Referrer-Policy": "no-referrer"})
+            raise ApiError(401, "unauthorized", "Párosítás kell.")
+        if remote.denied(path):
+            raise ApiError(403, "forbidden", "Ezt csak a gépen, a Jarvis ablakában lehet.")
+        if path not in ("/", "/events") and not path.startswith("/api/"):
+            raise ApiError(404, "not_found", "Nincs ilyen oldal.")
+        self._forward(gui, method, path, query, device=True)
+
+    def _forward(self, gui: Any, method: str, path: str, query: dict[str, list[str]], device: bool) -> None:
+        if device and "t" in query:
+            query = {**query, "t": [gui.token]}
+        target = path + ("?" + urlencode(query, doseq=True) if query else "")
+        body = self.rfile.read(self._length(MAX_FORWARD)) if method != "GET" else None
+        headers = {"Host": f"127.0.0.1:{gui.port}"}
+        for name in ("Content-Type", "Accept"):
+            if self.headers.get(name):
+                headers[name] = self.headers[name]
+        if device:
+            headers["X-Jarvis-Token"] = gui.token
+            headers["X-Jarvis-Remote"] = "1"     # távolról jött: pl. a gép ne olvassa fel a választ
+        connection = http.client.HTTPConnection("127.0.0.1", gui.port, timeout=FORWARD_TIMEOUT)
+        try:
+            connection.request(method, target, body=body, headers=headers)
+            response = connection.getresponse()
+            kind = response.getheader("Content-Type") or "application/octet-stream"
+            if kind.startswith("text/event-stream"):
+                return self._stream(response)
+            data = response.read()
+        except OSError:
+            raise ApiError(502, "no_window", "A Jarvis ablaka nem válaszol.") from None
+        finally:
+            connection.close()
+        if path == "/" and kind.startswith("text/html"):
+            data = remote.inject(data)
+        extra = {name: value for name in FORWARD_HEADERS if (value := response.getheader(name))}
+        self._send(response.status, data, kind, extra)
+
+    def _stream(self, response: Any) -> None:
+        """Az élő események (Server-Sent Events) folyamatosan, ahogy jönnek."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            while True:
+                chunk = response.read1(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except OSError:     # a távoli ablakot bezárták, vagy a gép felülete leállt
+            pass
 
     # --- nyilvános: párosítás -------------------------------------------------------------------
 

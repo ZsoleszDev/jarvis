@@ -42,6 +42,7 @@ STATIC = {"style.css": "text/css; charset=utf-8", "app.js": "text/javascript; ch
           "work.js": "text/javascript; charset=utf-8", "creative.js": "text/javascript; charset=utf-8"}
 PHOTO_GET_RE = re.compile(r"^/api/work/photo/([0-9a-f]{8})/(\d{2}\.jpg)$")
 PHOTO_POST_RE = re.compile(r"^/api/work/items/([0-9a-f]{8})/photo$")
+MAX_VOICE_BYTES = 15 * 1024 * 1024    # a telefon vagy a laptop mikrofonjával felvett kérdés (távoli ablak)
 # Amit a felületről át lehet írni egy tárgyon, és amit el lehet indítani.
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
             "size", "condition", "color", "material", "price", "location", "shipping"}
@@ -492,10 +493,15 @@ class _Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             return self._json(400, {"ok": False})
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        # A távoli ablakból (telefon, laptop) jött: a gép ne olvassa fel a választ (aki kérte, nincs itt).
+        remote = self.headers.get("X-Jarvis-Remote") == "1"
         upload = PHOTO_POST_RE.match(path)
         if upload:   # fotó: nyers képadat, nem JSON
             return self._work_photo(upload.group(1), length)
+        if path == "/api/voice":   # hangfelvétel a távoli ablakból: nyers hangadat, nem JSON
+            return self._voice(length, parse_qs(parsed.query).get("mode", ["chat"])[0], remote)
         if length > 262144:
             return self._json(413, {"ok": False})
         try:
@@ -523,14 +529,15 @@ class _Handler(BaseHTTPRequestHandler):
             app.submit_resume()
             return self._json(202, {"ok": True})
         if path.startswith("/api/work/"):
-            return self._work_post(path, body)
+            return self._work_post(path, body, remote)
         if path.startswith("/api/creative/"):
             return self._creative_post(path, body)
         if path.startswith("/api/jobs/"):
             return self._jobs_post(path, body)
         mode = str(body.get("mode") or "chat")
         if path == "/api/send":
-            app.submit_text(str(body.get("text", ""))[:4000], mode=mode)
+            app.submit_text(str(body.get("text", ""))[:4000], mode=mode, silent=remote,
+                            via="remote" if remote else "text")
         elif path == "/api/listen":
             if not app.submit_voice("button"):
                 return self._json(409, {"ok": False, "error": "Nincs mikrofon."})
@@ -542,6 +549,19 @@ class _Handler(BaseHTTPRequestHandler):
             app.set_mode(mode)
         else:
             return self._json(404, {"ok": False})
+        self._json(202, {"ok": True})
+
+    def _voice(self, length: int, mode: str, remote: bool) -> None:
+        app = self.gui.app
+        if app is None or app.assistant is None:
+            return self._json(503, {"ok": False, "error": "A Jarvis még indul."})
+        if length <= 0:
+            return self._json(400, {"ok": False, "error": "Üres hangfelvétel."})
+        if length > MAX_VOICE_BYTES:
+            return self._json(413, {"ok": False, "error": "Túl hosszú a hangfelvétel."})
+        if app.stt is None and not app.paused:
+            return self._json(409, {"ok": False, "error": "A beszédfelismerés nem fut; írd be a kérdést."})
+        app.submit_audio(self.rfile.read(length), mode=mode if mode in ("chat", "work") else "chat", silent=remote)
         self._json(202, {"ok": True})
 
     def _phone_post(self, path: str, body: dict[str, Any]) -> None:
@@ -593,7 +613,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(400, {"ok": False, "error": str(exc)})
         self._json(200, {"ok": True, "item": item.public()})
 
-    def _work_post(self, path: str, body: dict[str, Any]) -> None:
+    def _work_post(self, path: str, body: dict[str, Any], remote: bool = False) -> None:
         app = self.gui.app
         work = self._work()
         if work is None:
@@ -651,6 +671,8 @@ class _Handler(BaseHTTPRequestHandler):
                 if action == "sold":
                     extra["where"] = str(body.get("where") or "") if str(body.get("where") or "") in work.platforms else ""
                     extra["delist"] = bool(body.get("delist"))
+                if remote:
+                    extra["silent"] = True    # aki távolról indította, nincs a gép előtt: a gép ne beszéljen
                 app.submit_work(action, ids, platform, **extra)
                 return self._json(202, {"ok": True})
             if path == "/api/work/dossier":
@@ -798,6 +820,7 @@ def run_gui(app: JarvisApp, ui: GuiUI, bus: EventBus, cfg: GuiCfg, open_window: 
 
             phone = start_api(app, ui, bus, app_data(app.cfg))
             server.phone = phone
+            phone.gui = server    # a távoli ablak (telefon, laptop) ennek a felületnek adja tovább a kéréseket
             console.info(f"Telefonos kapcsolat: http://{phone.host}:{phone.port}/api/v1 "
                          "(párosítás: Telefon gomb a Jarvis ablakában)")
         except OSError as exc:

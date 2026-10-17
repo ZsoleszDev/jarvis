@@ -145,7 +145,7 @@ A feltöltés és a levétel menet közben jóváhagyást kérhet (közzététel
 | GET | `/watches` | | `{watches: [{id, query, site, recency, label, hits, last_check, error}]}` |
 | POST | `/watches` | `{query, site?, recency?: "nap"\|"hét"\|"hónap"\|"év"}` | új figyelő (201) |
 | DELETE | `/watches/{id}` | | |
-| GET | `/notifications?unread=1&limit=50` | | `{notifications: [{id, at, kind, title, text, read, url?, item?}], unread}` |
+| GET | `/notifications?unread=1&limit=50` | | `{notifications: [{id, at, kind, title, text, read, url?, item?}], unread}`; `kind`: `watch`, `stale`, `delist`, `post` (kész vagy elakadt feltöltés), `question` (kérdés egy tárgyról), `error`, `info` |
 | POST | `/notifications/read` | `{ids?: [...]}` | olvasottnak jelöl (ids nélkül mindet) |
 | GET | `/devices` | | párosított eszközök (`current`: ez az) |
 | DELETE | `/devices/{id}` | | visszavonás (a sajátodat is: kijelentkezés) |
@@ -219,3 +219,13 @@ hallgatja, és ugyanúgy válaszol, mintha mondtad volna. A válasz felolvasása
 - Eszközönkénti kulcs; a gépen csak a hash-e van meg (`%LOCALAPPDATA%\Jarvis\telefon.json`).
 - Jelszót és bankkártyaadatot a Jarvis a telefonról sem ír be; a kockázatos lépések (közzététel, törlés)
   ugyanúgy jóváhagyást kérnek, csak a telefonon is jóváhagyhatod őket.
+
+## A Jarvis ablaka (telefon, laptop)
+
+Ugyanezen a porton (a Tailscale-en át) a Jarvis teljes ablaka is elérhető: `GET /` párosítás nélkül a belépő oldal
+(itt a 6 jegyű kóddal párosíthatsz, a kulcs a böngésző tárában marad), a kulccsal (`/?t=<kulcs>`) a gép felülete.
+A felület kérései (`/events`, `/api/...`, kulccsal a címben vagy az `X-Jarvis-Token` fejlécben) a gépen futó
+felülethez mennek tovább; ami csak a gép előtt ülve szabad (kilépés, új párosító kód, a gép mikrofonja), az 403.
+Telepíthető alkalmazás (PWA): `/manifest.webmanifest`, `/sw.js`, `/icon-192.png`, `/icon-512.png`. Az
+Android-alkalmazás (android/) ezt mutatja, és a `GET /api/v1/events` hosszú lekérdezéssel értesít a háttérben
+(`confirm`, `confirm_done`, `notification`).

@@ -6,3 +6,10 @@ voices/*.onnx.json
 *.part
 browser_profile/
 munka/
+
+# Android-alkalmazás (fordítás)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.keystore

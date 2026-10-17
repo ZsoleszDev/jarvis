@@ -1,0 +1,48 @@
+plugins {
+    id "com.android.application"
+}
+
+// Aláírás: ha a GitHubon be van állítva a saját kulcs (JARVIS_KEYSTORE, lásd android/README.md), azzal; különben
+// a fordítógép hibakereső kulcsával (ilyenkor egy új változat előtt a régit el kell távolítani).
+def keystore = System.getenv("JARVIS_KEYSTORE")
+
+android {
+    namespace "hu.jarvis.app"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "hu.jarvis.app"
+        minSdk 26
+        targetSdk 34
+        versionCode Integer.parseInt(System.getenv("GITHUB_RUN_NUMBER") ?: "1")
+        versionName "1.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+    }
+
+    signingConfigs {
+        own {
+            if (keystore) {
+                storeFile file(keystore)
+                storePassword System.getenv("JARVIS_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("JARVIS_KEY_ALIAS") ?: "jarvis"
+                keyPassword System.getenv("JARVIS_KEY_PASSWORD") ?: System.getenv("JARVIS_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig keystore ? signingConfigs.own : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}

@@ -561,6 +561,15 @@ class JarvisApp:
         self.work.mark_reminded([i.id for i in stale])
         return f"{len(stale)} régóta fent lévő hirdetés."
 
+    def _tell(self, kind: str, title: str, text: str, **extra: Any) -> None:
+        """Értesítés a telefonra is (a naplóba nem kerül újra): pl. hogy egy feltöltés kész, vagy hogy Jarvis
+        kérdez valamit egy tárgyról. Ha a feladatot a telefonról adtad, így ott is megtudod."""
+        if self.notices is not None:
+            try:
+                self.notices.add(kind, title, text, **extra)
+            except Exception:  # noqa: BLE001 - az értesítés hibája ne rontsa el a munkát
+                pass
+
     def notify_event(self, kind: str, title: str, text: str, **extra: Any) -> None:
         """A háttérmunka üzenete: értesítés (a telefonnak is), a naplóba, és ha szabad, fel is olvassa."""
         if self.notices is not None:
@@ -1354,7 +1363,14 @@ class JarvisApp:
                     self.work.store.set_pending(item_id, None)
                     self.ui.info("Rendben, ezt most hagyom.")
                 elif action == "post":
-                    self._post_one(item_id, str(payload.get("platform") or ""))
+                    key = str(payload.get("platform") or "")
+                    ok = self._post_one(item_id, key)
+                    site = self.work.platforms.get(key)
+                    name = self.work.store.get(item_id).name
+                    self._tell("post", f"Feltöltés: {name}",
+                               f"{name}: " + (f"fent van ({site.name if site else key})." if ok else
+                                              f"nem sikerült ({site.name if site else key}); a kártyán látod, miért."),
+                               item=item_id)
                 elif action == "research":
                     self._research(item_id)
                 elif action == "login":
@@ -1371,10 +1387,12 @@ class JarvisApp:
             except ItemError as exc:
                 self.ui.error(str(exc))
                 self.say(str(exc))
+                self._tell("error", "Munka: hiba", str(exc), item=item_id)
             except OllamaError as exc:   # a Munka naplójába kerüljön, ne a Beszélgetésbe
                 text = model_problem(exc)
                 self.ui.error(text)
                 self.say(text)
+                self._tell("error", "Munka: hiba", text, item=item_id)
             finally:
                 if item_id and action in BUSY_ACTIONS:
                     self.work.store.set_busy(item_id, "")
@@ -1417,6 +1435,7 @@ class JarvisApp:
         if step.kind in ("ask", "price"):
             self.ui.notice(step.text)
             self.say(step.text)
+            self._tell("question", f"Kérdés: {store.get(item_id).name}", step.text, item=item_id)
             return
         if step.text:
             self.ui.notice(step.text)
@@ -1467,6 +1486,7 @@ class JarvisApp:
             summary = f"{item.name}: " + " ".join(parts)
             self.ui.notice(summary)
             self.say(summary)
+            self._tell("post", f"Feltöltés: {item.name}", summary, item=item_id)
 
     def _replay(self, item_id: str, key: str, task: str) -> bool | None:
         """A begyakorolt lépések visszajátszása modell nélkül.

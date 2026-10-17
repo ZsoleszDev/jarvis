@@ -1,0 +1,4 @@
+// A Jarvis Android-alkalmazása: a gépen futó Jarvis ablaka a telefonon, értesítésekkel.
+plugins {
+    id "com.android.application" version "8.7.3" apply false
+}

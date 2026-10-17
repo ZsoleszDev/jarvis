@@ -23,6 +23,8 @@ from test_background import FakeDDGS, install_fake_ddgs  # noqa: E402
 from test_offline import FakeOllama, make_cfg, reply  # noqa: E402
 from test_work import SHIRT, extracted, jpeg  # noqa: E402
 
+from test_web_browser import HAS_CHROMIUM  # noqa: E402
+
 from jarvis_core.api import start_api  # noqa: E402
 from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.gui import EventBus, GuiServer, GuiUI  # noqa: E402
@@ -47,6 +49,7 @@ class Harness:
         self.api = start_api(self.app, self.ui, self.bus, self.cfg.data_root)
         self.gui = GuiServer(self.app, self.ui, self.bus)
         self.gui.phone = self.api
+        self.api.gui = self.gui          # a távoli ablak (telefon, laptop) ennek adja tovább a kéréseket
         self.gui.start()
         self.bus.set_hello(self.app.describe())
         self.app.start_agent()
@@ -284,6 +287,144 @@ class ApiTests(unittest.TestCase):
         status, data, _ = h.request("POST", "/api/v1/pair", {"code": code, "device": "Tablet"}, token=None)
         self.assertEqual(status, 200)
         self.assertEqual(len(h.api.auth.devices()), 2)
+
+
+class RemoteWindowTests(unittest.TestCase):
+    """A Jarvis ablaka a telefonon és a laptopon (remote.py): belépés párosítással, ugyanaz a felület, minden a
+    gépen fut; ami csak a gép előtt ülve szabad (kilépés, új párosító kód, a gép mikrofonja), az tiltva."""
+
+    def setUp(self):
+        self.h = Harness()
+
+    def tearDown(self):
+        self.h.close()
+
+    def get(self, path: str, headers: dict | None = None):
+        return self.h.request("GET", path, token=None, headers=headers)
+
+    def post(self, path: str, body=None, raw: bytes | None = None, content_type: str = "application/json",
+             token: str | None = None):
+        return self.h.request("POST", path, body=body, raw=raw, token=None, content_type=content_type,
+                              headers={"X-Jarvis-Token": token or self.h.token})
+
+    def test_login_page_and_installable_app(self):
+        status, page, headers = self.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("Párosító kód".encode(), page)
+        self.assertIn("form-action 'none'", headers["Content-Security-Policy"])
+        self.assertIn("Párosító kód".encode(), self.get("/?t=rossz-kulcs")[1], "rossz kulccsal is a belépés jön")
+        status, manifest, _ = self.get("/manifest.webmanifest")
+        self.assertEqual((manifest["name"], manifest["start_url"], manifest["display"]), ("Jarvis", "/", "standalone"))
+        self.assertIn(b"notificationclick", self.get("/sw.js")[1])
+        from PIL import Image
+        import io
+        for path, size in (("/icon-192.png", 192), ("/icon-512.png", 512), ("/icon-maskable-512.png", 512)):
+            status, data, headers = self.get(path)
+            self.assertEqual((status, headers["Content-Type"]), (200, "image/png"))
+            self.assertEqual(Image.open(io.BytesIO(data)).size, (size, size))
+
+    def test_the_jarvis_window_with_the_device_key(self):
+        h = self.h
+        status, page, headers = self.get(f"/?t={h.token}")
+        self.assertEqual(status, 200)
+        self.assertIn(b'<meta name="jarvis-remote" content="1">', page)
+        self.assertIn(b'rel="manifest"', page)
+        self.assertIn("Beszélgetés".encode(), page)
+        self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
+        self.assertEqual(self.get("/ui/app.js")[0], 200, "a felület fájljai kulcs nélkül is jönnek")
+        status, data, _ = self.get(f"/api/jobs?t={h.token}")
+        self.assertEqual(status, 200)
+        self.assertIn("ready", data)
+        self.assertEqual(self.get("/api/jobs?t=rossz")[0], 401)
+        self.assertEqual(self.get("/nincs/ilyen")[0], 401)
+        self.assertEqual(self.get(f"/nincs/ilyen?t={h.token}")[0], 404)
+        h.fake.chat_script = [reply("Itt vagyok.")]
+        self.assertEqual(self.post("/api/send", {"text": "Ott vagy?", "mode": "chat"})[0], 202)
+        h.wait(lambda: h.app.busy)
+        h.idle()
+        client = h.bus.subscribe()                  # a visszajátszásban ott a teljes beszélgetés
+        events = [client.get_nowait() for _ in range(client.qsize())]
+        h.bus.unsubscribe(client)
+        sent = [e for e in events if e.get("type") == "user" and e.get("text") == "Ott vagy?"]
+        self.assertEqual([e["via"] for e in sent], ["remote"], "távolról jött: a gép nem olvassa fel")
+        self.assertTrue(any(e.get("type") == "assistant" and e.get("text") == "Itt vagyok." for e in events))
+
+    def test_only_at_the_computer(self):
+        h = self.h
+        self.assertEqual(self.post("/api/quit", {})[0], 403)
+        self.assertFalse(h.app.exit_requested.is_set(), "távolról nem lehet kilépni")
+        self.assertEqual(self.post("/api/phone/code", {})[0], 403, "új eszközt csak a gép előtt ülve")
+        self.assertEqual(self.get(f"/api/phone?t={h.token}")[0], 403)
+        self.assertEqual(self.post("/api/listen", {})[0], 403, "a gép mikrofonját nem")
+        self.assertEqual(self.post("/api/send", {"text": "szia"}, token="rossz")[0], 401)
+
+    def test_live_events_stream_through(self):
+        h = self.h
+        conn = http.client.HTTPConnection("127.0.0.1", h.api.port, timeout=10)
+        conn.request("GET", f"/events?t={h.token}")
+        response = conn.getresponse()
+        self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+        seen = b""
+        while b'"type": "hello"' not in seen:
+            seen += response.read1(65536)
+        h.ui.info("Üzenet a telefonnak")
+        while "Üzenet a telefonnak".encode() not in seen:
+            seen += response.read1(65536)
+        conn.close()
+
+    def test_voice_and_photos_from_the_phone(self):
+        h = self.h
+        status, data, _ = self.post("/api/voice?mode=chat", raw=b"\x1aE\xdf\xa3" + b"0" * 4000,
+                                    content_type="audio/webm")
+        self.assertEqual(status, 409, "beszédfelismerés nélkül szól")
+        self.assertIn("beszédfelismerés", data["error"])
+        calls = []
+        h.app.stt = object()
+        h.app.submit_audio = lambda data, mode="chat", request_id=None, silent=True: calls.append((len(data), mode, silent))
+        self.assertEqual(self.post("/api/voice?mode=work", raw=b"0" * 5000, content_type="audio/webm")[0], 202)
+        self.assertEqual(calls, [(5000, "work", True)])
+        item = h.app.work.store.create(targets=["vinted"], prompt="póló")
+        status, data, _ = self.post(f"/api/work/items/{item.id}/photo", raw=jpeg(), content_type="application/octet-stream")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["item"]["photos"]), 1, "a fotó a gépre került")
+
+
+@unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
+class RemoteWindowBrowserTests(unittest.TestCase):
+    """A távoli ablak egy valódi (láthatatlan) Chromiumban, telefonméretben: párosítás, beszélgetés."""
+
+    def test_pair_and_talk_from_a_phone(self):
+        from playwright.sync_api import sync_playwright
+
+        h = Harness()
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                page = browser.new_page(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+                errors: list[str] = []
+                page.on("pageerror", lambda exc: errors.append(str(exc)))
+                page.goto(f"http://127.0.0.1:{h.api.port}/")
+                page.fill("#code", h.api.auth.new_code()["code"])
+                page.fill("#device", "Pixel")
+                self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 390)
+                page.click("#go")
+                page.wait_for_selector("#text", timeout=15000)
+                self.assertTrue(page.locator("#phone").is_hidden(), "a párosítás gomb csak a gépen van")
+                self.assertIn("Pixel", [d["name"] for d in h.api.auth.devices()])
+                h.fake.chat_script = [reply("Szia! Itt vagyok a gépen.")]
+                page.fill("#text", "Szia")
+                page.press("#text", "Enter")
+                page.wait_for_selector("text=Szia! Itt vagyok a gépen.", timeout=15000)
+                self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 390,
+                                     "nem lóg ki oldalra a telefonon")
+                page.reload()                     # a kulcs a címben marad: újratöltés után is bent van
+                page.wait_for_selector("text=Szia! Itt vagyok a gépen.", timeout=15000)
+                page.goto(f"http://127.0.0.1:{h.api.port}/")   # a megjegyzett kulccsal egyből belép
+                page.wait_for_selector("#text", timeout=15000)
+                self.assertEqual(errors, [])
+                browser.close()
+        finally:
+            h.close()
 
 
 if __name__ == "__main__":
