@@ -150,6 +150,23 @@ A feltöltés és a levétel menet közben jóváhagyást kérhet (közzététel
 | GET | `/devices` | | párosított eszközök (`current`: ez az) |
 | DELETE | `/devices/{id}` | | visszavonás (a sajátodat is: kijelentkezés) |
 
+### Értesítés bezárt ablaknál (Web Push)
+
+A böngésző (pl. a laptopon az Edge) a gép kulcsával feliratkozik; a gép a `confirm` és a `notification`
+eseményeknél titkosított push-üzenetet küld a böngésző push-szolgáltatásának (RFC 8291, VAPID: RFC 8292). Ehhez a
+gépen a `cryptography` csomag kell. Csak az ismert push-szolgáltatók címei fogadhatók el (Microsoft, Google,
+Mozilla, Apple).
+
+| Módszer | Útvonal | Törzs | Megjegyzés |
+|---|---|---|---|
+| GET | `/push` | | `{available, key, reason, subscriptions}`: a gép VAPID-kulcsa (`applicationServerKey`); ha nincs, `reason` mondja meg, miért |
+| POST | `/push/subscribe` | `{subscription}` | a `PushSubscription.toJSON()`; eszközönként legfeljebb 4 |
+| POST | `/push/unsubscribe` | `{endpoint?}` | endpoint nélkül az eszköz minden feliratkozása |
+| POST | `/push/answer` | `{key, approved}` | **kulcs nélkül**: a jóváhagyó push-üzenet egyszer használható `answer` kulcsával (5 percig, vagy amíg a jóváhagyás vár) |
+
+A push-üzenet (JSON, titkosítva): `{kind: "notice", title, text, tag}` vagy `{kind: "confirm", id, title, text,
+answer, tag}`.
+
 ## Események (élő napló)
 
 A Jarvis minden lépése esemény: amit mondasz és amit válaszol, az eszközei, az állapota, a jóváhagyások,
@@ -228,4 +245,8 @@ A felület kérései (`/events`, `/api/...`, kulccsal a címben vagy az `X-Jarvi
 felülethez mennek tovább; ami csak a gép előtt ülve szabad (kilépés, új párosító kód, a gép mikrofonja), az 403.
 Telepíthető alkalmazás (PWA): `/manifest.webmanifest`, `/sw.js`, `/icon-192.png`, `/icon-512.png`. Az
 Android-alkalmazás (android/) ezt mutatja, és a `GET /api/v1/events` hosszú lekérdezéssel értesít a háttérben
-(`confirm`, `confirm_done`, `notification`).
+(`confirm`, `confirm_done`, `notification`, és a `state` alapján az állandó értesítés Szünet / Folytatás gombja).
+
+Párosítás QR-kóddal: a gép Telefon ablaka (ha a `tailscale serve` már átadja a portot) a `https://<gép>/#pair=<kód>`
+címet mutatja QR-kódként. A belépő oldal a `#` utáni kódot beírja (a gépnek nem megy el), Android-böngészőben pedig
+az alkalmazásnak is átadhatja: `intent://pair?server=…&code=…#Intent;scheme=jarvis;package=hu.jarvis.app;…`.

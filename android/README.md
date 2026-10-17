@@ -14,7 +14,14 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
   beállító oldal jön (`assets/setup.html`).
 - `NotifyService`: háttérszolgáltatás, a gép eseményeit kérdezi le (`/api/v1/events`, hosszú lekérdezéssel), és
   értesít. Firebase nem kell hozzá.
-- `ActionReceiver`: a jóváhagyás gombjai az értesítésben (`/api/v1/confirm`).
+- `ActionReceiver`: a jóváhagyás gombjai az értesítésben (`/api/v1/confirm`), és az állandó értesítés Szünet /
+  Folytatás gombja (`/api/v1/pause`, `/api/v1/resume`).
+- `VoiceTile`: gyorsbeállítás csempe a hangutasításhoz; `res/xml/shortcuts.xml`: parancsikonok (Hang, Új hirdetés).
+- Megosztás a Jarvisnak: a galériából megosztott fotókat a `MainActivity` a WebView-ban szolgálja ki
+  (`/__jarvis_shared/<köteg>/<sorszám>`, a HEIC-et JPEG-gé alakítva), a gép felülete (`work.js`) ezekből tölti ki
+  az új hirdetést; a szöveg a beszélgetésbe kerül. A kéréseket a felület a `JarvisApp.pending()` hívással kérdezi le.
+- Párosító link a gép QR-kódjából: `jarvis://pair?server=…&code=…` (a belépő oldal gombja adja át); kitölti a
+  beállító oldalt, a párosítást te indítod (így egy idegen link nem párosíthat észrevétlenül másik géphez).
 - `BootReceiver`: a telefon újraindulása után a háttérértesítések maguktól újraindulnak.
 
 Külső könyvtár nincs; Java 17, Android 8.0-tól (minSdk 26).

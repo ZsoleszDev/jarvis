@@ -603,6 +603,32 @@
 
   // --- események -----------------------------------------------------------------------------
 
+  // Az Android-alkalmazásból (app.js, takePending): a galériából megosztott fotók az új hirdetéshez, vagy az
+  // „Új hirdetés” parancsikon. A fotókat az alkalmazás a /__jarvis_shared/ címen adja (a telefonról, nem a gépről).
+  window.addEventListener("jarvis-share", async (event) => {
+    const wanted = event.detail || {};
+    openId = null;
+    render();
+    $("w-compose").scrollIntoView({ block: "start" });
+    const files = [];
+    for (let i = 0; i < (wanted.photos || 0); i++) {
+      try {
+        const response = await fetch(`/__jarvis_shared/${wanted.batch}/${i}`);
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        let name = `foto-${i + 1}.jpg`;
+        try { name = decodeURIComponent(response.headers.get("X-Jarvis-Name") || name); } catch { /* marad */ }
+        files.push(new File([blob], name, { type: blob.type || "image/jpeg" }));
+      } catch { /* ezt nem sikerült beolvasni */ }
+    }
+    $("w-prompt").focus();
+    if (!wanted.photos) return;
+    if (!files.length) { J.toast("Nem sikerült beolvasni a megosztott fotókat."); return; }
+    composePhotos = [...composePhotos, ...files].slice(0, maxPhotos);
+    renderComposePhotos();
+    J.toast(`${files.length} fotó a megosztásból: írd le, mit adsz el, és pipáld be, hova kerüljön.`);
+  });
+
   $("w-compose").addEventListener("submit", go);
   $("w-sites").addEventListener("change", () => {
     store("jarvis-sites", JSON.stringify(selectedSites()));

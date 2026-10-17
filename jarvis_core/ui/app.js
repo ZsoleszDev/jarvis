@@ -324,7 +324,8 @@ const escHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 let codeTimer = null;
 
-async function renderPhone(code) {
+// pairing: az épp érvényes párosító kód (code, és ha a gép címe ismert, a QR-kódja: qr), vagy null.
+async function renderPhone(pairing) {
   let info = {};
   try {
     const response = await fetch("/api/phone?t=" + encodeURIComponent(token));
@@ -347,7 +348,7 @@ async function renderPhone(code) {
       "meg (pl. <code>https://gep-neve.tailnet.ts.net</code>).</p>";
   body.innerHTML = `
     ${where}
-    ${code ? `<p>Írd be ezt a kódot a telefonon vagy a laptopon (5 percig érvényes):</p><div class="pair-code" aria-live="polite">${escHtml(code)}</div>`
+    ${pairing ? pairingBlock(pairing)
            : '<div class="row"><button type="button" id="phone-pair" class="primary">Új párosító kód</button></div>'}
     <h3 class="section-title">Párosított eszközök</h3>
     ${devices.length ? `<ul class="devices">${devices.map((d) =>
@@ -355,6 +356,15 @@ async function renderPhone(code) {
        utoljára: ${escHtml(date(d.last_seen))}</small></span>
        <button type="button" class="small" data-revoke="${escHtml(d.id)}">Törlés</button></li>`).join("")}</ul>`
       : '<p class="muted">Még nincs párosított eszköz.</p>'}`;
+}
+
+// A QR-kódot (a gép állítja elő, remote.pair_link + qr.svg) a telefon kamerája olvassa be: megnyitja a gép címét a
+// kóddal, és ott (vagy az Android-alkalmazásban) egy gombnyomással párosít.
+function pairingBlock(pairing) {
+  const code = `<div class="pair-code" aria-live="polite">${escHtml(pairing.code)}</div>`;
+  if (!pairing.qr) return `<p>Írd be ezt a kódot a telefonon vagy a laptopon (5 percig érvényes):</p>${code}`;
+  return `<div class="pair-qr">${pairing.qr}</div>` +
+    "<p>Olvasd be a telefon kamerájával (5 percig érvényes). Laptopon vagy kézzel ezt a kódot írd be:</p>" + code;
 }
 
 $("phone").addEventListener("click", () => {
@@ -366,7 +376,7 @@ $("phone-body").addEventListener("click", async (event) => {
   if (event.target.closest("#phone-pair")) {
     const result = await postJson("/api/phone/code", {});
     if (!result.ok) { toast(result.error || "Nem sikerült."); return; }
-    renderPhone(result.code);
+    renderPhone(result);
     clearTimeout(codeTimer);
     codeTimer = setTimeout(() => renderPhone(null), (result.seconds || 300) * 1000);
     return;
@@ -517,7 +527,11 @@ async function toggleRecording() {
   watchLevel(stream);
 }
 
-// A varázsszem a hangod erejével mozog, amíg itt veszed fel (ugyanúgy, mint a gépen).
+// A varázsszem a hangod erejével mozog, amíg itt veszed fel (ugyanúgy, mint a gépen). A felvétel magától
+// leáll, ha a beszéd után kb. két másodpercig csend van (vagy 45 másodperc után); a gombbal előbb is leállíthatod.
+const SILENCE_MS = 1800;
+const MAX_RECORD_MS = 45000;
+
 function watchLevel(stream) {
   const Context = window.AudioContext || window.webkitAudioContext;
   if (!Context) return;
@@ -525,12 +539,25 @@ function watchLevel(stream) {
   const analyser = context.createAnalyser();
   context.createMediaStreamSource(stream).connect(analyser);
   const samples = new Uint8Array(analyser.fftSize);
+  const started = performance.now();
+  let noise = 0;
+  let heard = false;
+  let quietSince = 0;
   const tick = () => {
     if (!recorder) { context.close(); return; }
     analyser.getByteTimeDomainData(samples);
     let peak = 0;
     for (const value of samples) peak = Math.max(peak, Math.abs(value - 128) / 128);
     eye.level = Math.max(eye.level, Math.min(1, peak * 2));
+    const now = performance.now();
+    if (now - started < 300) {
+      noise = Math.max(noise, peak);                        // az első pillanat: a háttérzaj
+    } else if (peak > Math.max(0.08, noise * 2.5)) {
+      heard = true;
+      quietSince = now;
+    }
+    const silent = heard && now - quietSince > SILENCE_MS;
+    if ((silent || now - started > MAX_RECORD_MS) && recorder.state === "recording") recorder.stop();
     requestAnimationFrame(tick);
   };
   tick();
@@ -550,16 +577,66 @@ function systemNotify(title, body, tag) {
   }
 }
 
+// Web Push: a gép akkor is értesít, ha az ablak be van zárva (webpush.py). A feliratkozás az eszköz kulcsával
+// megy a gépre; a böngésző push-szolgáltatása (Edge-nél a Microsofté, Chrome-nál a Google-é) csak titkosítva
+// kapja meg, amit a gép küld.
+const pushable = notifiable && "serviceWorker" in navigator && "PushManager" in window;
+
+function keyBytes(text) {
+  const raw = atob(text.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (text.length % 4)) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+function sameKey(subscription, key) {
+  const current = subscription.options && subscription.options.applicationServerKey;
+  if (!current) return false;
+  const a = new Uint8Array(current);
+  return a.length === key.length && a.every((value, i) => value === key[i]);
+}
+
+async function enablePush(explicit) {
+  if (!pushable || Notification.permission !== "granted") return;
+  const auth = { Authorization: "Bearer " + token };
+  try {
+    const info = await (await fetch("/api/v1/push", { headers: auth })).json();
+    if (!info.ok || !info.key) {
+      if (explicit && info.reason) toast(info.reason);
+      return;
+    }
+    const key = keyBytes(info.key);
+    const registration = await navigator.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    if (subscription && !sameKey(subscription, key)) {     // a gép kulcsa változott: új feliratkozás kell
+      await subscription.unsubscribe();
+      subscription = null;
+    }
+    if (!subscription) {
+      subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    }
+    const response = await fetch("/api/v1/push/subscribe", {
+      method: "POST", headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription: subscription.toJSON() }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) { if (explicit) toast(result.error || "A gép nem fogadta el a feliratkozást."); return; }
+    if (explicit) toast("Kész: a Jarvis akkor is szól, ha az ablak be van zárva.");
+  } catch {
+    if (explicit) toast("Ez a böngésző most nem tud értesítést fogadni bezárt ablaknál; nyitott ablaknál szólok.");
+  }
+}
+
 if (remote) {
   $("phone").hidden = true;   // új eszközt csak a gép előtt ülve lehet párosítani
   if (!inAndroid && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   if (notifiable && Notification.permission === "default") {
     $("notify").hidden = false;
     $("notify").addEventListener("click", async () => {
-      await Notification.requestPermission().catch(() => "denied");
+      const answer = await Notification.requestPermission().catch(() => "denied");
       $("notify").hidden = true;
+      if (answer === "granted") enablePush(true);
     });
   }
+  enablePush(false);          // ha már engedélyezted: a feliratkozás frissítése (pl. a gép új kulcsa után)
 }
 $("stop").addEventListener("click", () => post("/api/stop"));
 $("reset").addEventListener("click", () => { post("/api/reset", { mode }); clearLog(mode); });
@@ -836,6 +913,35 @@ function drawGpu(strip, now) {
 gpuTimer = setInterval(pollGpus, 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) pollGpus(); });
 
+// --- az Android-alkalmazás kérései ----------------------------------------------------------
+// Hangutasítás (parancsikon, gyorsbeállítás csempe, az értesítés gombja), megosztott szöveg vagy fotók, új hirdetés.
+// Az alkalmazás tárolja őket; mi kérdezzük le (indításkor, és amikor az alkalmazás szól: window.JarvisPending).
+
+function takePending() {
+  if (!inAndroid || !window.JarvisApp || !window.JarvisApp.pending) return;
+  let wanted = {};
+  try { wanted = JSON.parse(window.JarvisApp.pending()); } catch { wanted = {}; }
+  if (wanted.text) {
+    setMode("chat");
+    $("text").value = wanted.text;
+    $("text").focus();
+  }
+  if (wanted.photos || wanted.listing) {
+    if (workAvailable) {
+      setMode("work");
+      window.dispatchEvent(new CustomEvent("jarvis-share", { detail: wanted }));
+    } else {
+      toast("A Munka menü most nem érhető el a gépen.");
+    }
+  }
+  if (wanted.voice) {
+    if (paused) toast("Szünetelek: előbb nyomd meg a Folytatás gombot.");
+    else if (!voiceAvailable) toast("A gépen most nem fut beszédfelismerés; írd be, mit szeretnél.");
+    else if (!recorder) toggleRecording();
+  }
+}
+window.JarvisPending = takePending;
+
 // --- a Munka menünek (work.js) ----------------------------------------------------------
 
 window.Jarvis = {
@@ -863,4 +969,5 @@ helloHooks.push((e) => {
     savedMode = null;
   }
 });
+helloHooks.push(() => takePending());   // a menü visszaállítása után: egy megosztás oda visz, ahova kell
 $("text").focus();

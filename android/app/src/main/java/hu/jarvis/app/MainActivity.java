@@ -1,19 +1,23 @@
 package hu.jarvis.app;
 
 import android.Manifest;
+import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.ImageDecoder;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.PowerManager;
+import android.provider.OpenableColumns;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.URLUtil;
@@ -27,9 +31,18 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.json.JSONObject;
 
@@ -37,12 +50,23 @@ import org.json.JSONObject;
  * A Jarvis ablaka a telefonon: a gépen futó Jarvis felülete (ugyanaz, mint a gépen), a Tailscale-en át. Minden a
  * gépen fut; a telefon csak mutatja, és innen adod a feladatokat. Párosítás nélkül a beállító oldal
  * (assets/setup.html) jön; ha a gép nem érhető el, ugyanaz, a hibával.
+ *
+ * Indítási kérések (a gép felülete a JarvisApp.pending() hívással kérdezi le, és teljesíti):
+ * - hangutasítás: parancsikon, gyorsbeállítás csempe (VoiceTile), az állandó értesítés Hang gombja;
+ * - új hirdetés: parancsikon;
+ * - megosztás a Jarvisnak: fotók a galériából (az új hirdetéshez; a felület a /__jarvis_shared/ címről kéri le
+ *   őket, ezt a WebView-ban mi szolgáljuk ki), vagy szöveg, link (a beszélgetésbe);
+ * - párosító link a gép QR-kódjából (jarvis://pair): kitölti a beállító oldalt, a párosítást te indítod.
  */
 public class MainActivity extends Activity {
     /** Látszik-e az ablak: ilyenkor a háttérszolgáltatás nem értesít (a felületen úgyis látod). */
     static volatile boolean visible;
 
+    static final String ACTION_VOICE = "hu.jarvis.app.VOICE";
+    static final String ACTION_NEW_LISTING = "hu.jarvis.app.NEW_LISTING";
     private static final String SETUP = "file:///android_asset/setup.html";
+    private static final String SHARED_PATH = "/__jarvis_shared/";
+    private static final int MAX_SHARED = 20;
     private static final int PICK_FILES = 1;
     private static final int ASK_MIC = 2;
     private static final int ASK_NOTIFY = 3;
@@ -52,6 +76,15 @@ public class MainActivity extends Activity {
     private volatile String currentUrl = "";
     private ValueCallback<Uri[]> filesCallback;
     private PermissionRequest micRequest;
+    // A még nem teljesített indítási kérések (a WebView száláról is olvassuk).
+    private volatile boolean wantVoice;
+    private volatile boolean wantListing;
+    private volatile String sharedText = "";
+    private volatile List<Uri> sharedPhotos = Collections.emptyList();
+    private volatile int sharedBatch;
+    private volatile boolean photosNew;
+    private volatile String pairServer = "";
+    private volatile String pairCode = "";
 
     @Override
     protected void onCreate(Bundle state) {
@@ -73,7 +106,170 @@ public class MainActivity extends Activity {
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, ASK_NOTIFY);
         }
-        open();
+        // A legutóbbi alkalmazások közül (vagy újraindítás után) az eredeti kérést nem teljesítjük újra.
+        boolean fresh = state == null
+                && (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0;
+        if (fresh && take(getIntent())) {
+            web.loadUrl(SETUP + "#pair");
+        } else {
+            open();
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (take(intent)) {
+            web.loadUrl(SETUP + "#pair");
+        } else if (prefs.paired() && currentUrl.startsWith(prefs.server())) {
+            web.evaluateJavascript("window.JarvisPending && window.JarvisPending()", null);
+        } else {
+            open();
+        }
+    }
+
+    /** Egy indítás kérése (hang, új hirdetés, megosztás, párosító link); igaz, ha párosító link jött. */
+    private boolean take(Intent intent) {
+        String action = intent == null ? null : intent.getAction();
+        if (action == null) {
+            return false;
+        }
+        switch (action) {
+            case ACTION_VOICE:
+                wantVoice = true;
+                return false;
+            case ACTION_NEW_LISTING:
+                wantListing = true;
+                return false;
+            case Intent.ACTION_SEND:
+            case Intent.ACTION_SEND_MULTIPLE:
+                String type = intent.getType();
+                if (type != null && type.startsWith("image/")) {
+                    List<Uri> photos = sharedUris(intent);
+                    if (!photos.isEmpty()) {
+                        sharedPhotos = photos;
+                        sharedBatch++;
+                        photosNew = true;
+                    }
+                } else {
+                    CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+                    if (text != null) {
+                        sharedText = text.toString();
+                    }
+                }
+                return false;
+            case Intent.ACTION_VIEW:
+                Uri data = intent.getData();
+                if (data == null || !"jarvis".equals(data.getScheme())) {
+                    return false;
+                }
+                pairServer = Api.normalize(data.getQueryParameter("server"));
+                String code = data.getQueryParameter("code");
+                pairCode = code == null ? "" : code.replaceAll("[^0-9]", "");
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static List<Uri> sharedUris(Intent intent) {
+        List<Uri> uris = new ArrayList<>();
+        if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
+            ArrayList<Uri> list = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (list != null) {
+                uris.addAll(list);
+            }
+        } else {
+            Uri one = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (one != null) {
+                uris.add(one);
+            }
+        }
+        ClipData clip = intent.getClipData();
+        if (uris.isEmpty() && clip != null) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                if (clip.getItemAt(i).getUri() != null) {
+                    uris.add(clip.getItemAt(i).getUri());
+                }
+            }
+        }
+        return uris.size() > MAX_SHARED ? new ArrayList<>(uris.subList(0, MAX_SHARED)) : uris;
+    }
+
+    /** Egy megosztott fotó a gép felületének: /__jarvis_shared/<köteg>/<sorszám> (a work.js kéri le). */
+    private WebResourceResponse sharedPhoto(String rest) {
+        List<Uri> photos = sharedPhotos;
+        int batch;
+        int index;
+        try {
+            String[] parts = rest.split("/");
+            batch = Integer.parseInt(parts[0]);
+            index = Integer.parseInt(parts[1]);
+        } catch (RuntimeException e) {
+            return missing();
+        }
+        if (batch != sharedBatch || index < 0 || index >= photos.size()) {
+            return missing();
+        }
+        Uri uri = photos.get(index);
+        try {
+            String mime = getContentResolver().getType(uri);
+            String name = displayName(uri, index);
+            InputStream data;
+            if (("image/heic".equals(mime) || "image/heif".equals(mime)) && Build.VERSION.SDK_INT >= 28) {
+                data = new ByteArrayInputStream(jpeg(uri));    // a gép a HEIC-et külön csomag nélkül nem ismeri
+                mime = "image/jpeg";
+                name = name.replaceFirst("(?i)\\.hei[cf]$", "") + ".jpg";
+            } else {
+                data = getContentResolver().openInputStream(uri);
+            }
+            Map<String, String> headers = new HashMap<>();
+            headers.put("X-Jarvis-Name", Uri.encode(name));
+            headers.put("Cache-Control", "no-store");
+            return new WebResourceResponse(mime == null ? "image/jpeg" : mime, null, 200, "OK", headers, data);
+        } catch (Exception e) {                                 // pl. közben lejárt az olvasási engedély
+            return missing();
+        }
+    }
+
+    private static WebResourceResponse missing() {
+        return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found", new HashMap<>(),
+                new ByteArrayInputStream(new byte[0]));
+    }
+
+    private String displayName(Uri uri, int index) {
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null,
+                null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                String name = cursor.getString(0);
+                if (name != null && !name.isEmpty()) {
+                    return name;
+                }
+            }
+        } catch (RuntimeException e) {
+            // nem minden megosztó adja meg a nevet
+        }
+        return "foto-" + (index + 1) + ".jpg";
+    }
+
+    /** HEIC/HEIF kép JPEG-ben (legfeljebb kb. 3000 pixel; az elforgatást az ImageDecoder kezeli). */
+    @TargetApi(28)
+    private byte[] jpeg(Uri uri) throws IOException {
+        Bitmap bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(getContentResolver(), uri),
+                (decoder, info, source) -> {
+                    int side = Math.max(info.getSize().getWidth(), info.getSize().getHeight());
+                    int sample = 1;
+                    while (side / sample > 3000) {
+                        sample *= 2;
+                    }
+                    decoder.setTargetSampleSize(sample);
+                });
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out);
+        bitmap.recycle();
+        return out.toByteArray();
     }
 
     /** A gép felülete, ha párosítva van; különben a beállító oldal. */
@@ -217,6 +413,17 @@ public class MainActivity extends Activity {
             currentUrl = url == null ? "" : url;
         }
 
+        /** A megosztott fotók a gép felületének (a WebView szálán fut; a kép a telefonról jön). */
+        @Override
+        public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+            Uri url = request.getUrl();
+            String path = url.getPath();
+            if (path == null || !path.startsWith(SHARED_PATH) || "file".equals(url.getScheme()) || !ours(url)) {
+                return null;
+            }
+            return sharedPhoto(path.substring(SHARED_PATH.length()));
+        }
+
         @Override
         public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
             if (request.isForMainFrame() && !"file".equals(request.getUrl().getScheme())) {
@@ -279,8 +486,28 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String state() {
             try {
-                return new JSONObject().put("server", prefs.server()).put("device", Build.MODEL)
-                        .put("background", prefs.background()).toString();
+                String server = pairServer.isEmpty() ? prefs.server() : pairServer;
+                return new JSONObject().put("server", server).put("device", Build.MODEL)
+                        .put("background", prefs.background()).put("code", pairCode).toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
+        /** Amit egy parancsikon, a csempe, az értesítés vagy egy megosztás kért (egyszer adjuk oda). */
+        @JavascriptInterface
+        public String pending() {
+            try {
+                JSONObject result = new JSONObject().put("voice", wantVoice).put("listing", wantListing)
+                        .put("text", sharedText);
+                if (photosNew) {
+                    result.put("photos", sharedPhotos.size()).put("batch", sharedBatch);
+                }
+                wantVoice = false;
+                wantListing = false;
+                sharedText = "";
+                photosNew = false;
+                return result.toString();
             } catch (Exception e) {
                 return "{}";
             }
@@ -297,6 +524,8 @@ public class MainActivity extends Activity {
                 try {
                     JSONObject result = Api.pair(address, code.trim(), device.trim());
                     prefs.save(address, result.getString("token"), background);
+                    pairServer = "";
+                    pairCode = "";
                 } catch (Exception e) {
                     error = explain(e);
                 }

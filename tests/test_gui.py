@@ -350,6 +350,16 @@ class GuiBrowserTests(unittest.TestCase):
             self.page.wait_for_selector(".address code:has-text('https://gep.tail1234.ts.net')")
             self.assertNotIn("tailscale serve --bg", self.page.inner_text("#phone-body"))
             tailscale.assert_called_with(api.port)
+            # A kód mellé QR-kód: a telefon kamerája beolvassa (a gép címe, a # után a kód).
+            self.page.click("#phone-pair")
+            self.page.wait_for_selector(".pair-qr svg")
+            code = self.page.inner_text(".pair-code")
+            status, result = call(self.h.server.port, "POST", "/api/phone/code", body={},
+                                  headers={"X-Jarvis-Token": self.h.server.token, "Content-Type": "application/json"})
+            self.assertEqual(status, 200)
+            self.assertEqual(result["link"], f"https://gep.tail1234.ts.net/#pair={result['code']}")
+            self.assertIn("<svg", result["qr"])
+            self.assertNotEqual(result["code"], code, "minden kéréssel új kód")
         finally:
             api.stop()
 

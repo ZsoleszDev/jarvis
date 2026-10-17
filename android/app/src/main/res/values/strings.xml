@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Jarvis</string>
+    <string name="shortcut_voice_short">Hang</string>
+    <string name="shortcut_voice_long">Hangutasítás</string>
+    <string name="shortcut_listing_short">Új hirdetés</string>
+    <string name="shortcut_listing_long">Új hirdetés fotókkal</string>
+    <string name="tile_voice">Jarvis: hang</string>
 </resources>

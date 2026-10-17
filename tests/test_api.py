@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -449,7 +450,18 @@ class RemoteWindowBrowserTests(unittest.TestCase):
                 page.goto(f"http://127.0.0.1:{h.api.port}/")
                 self.assertTrue(page.locator("#android a").is_visible(), "a telefon böngészőjében: letöltés")
                 self.assertEqual(page.locator("#android a").get_attribute("href"), remote.APK_URL)
-                page.fill("#code", h.api.auth.new_code()["code"])
+                # A gép QR-kódja: a cím a kóddal (#pair=…); a kód beíródik, és az alkalmazásba is átvihető.
+                code = h.api.auth.new_code()["code"]
+                page.goto("about:blank")          # ugyanarra a címre csak a # változna: az oldal nem töltődne újra
+                page.goto(remote.pair_link(f"http://127.0.0.1:{h.api.port}", code))
+                page.wait_for_selector("#in-app:not([hidden])")
+                self.assertEqual(page.input_value("#code"), code)
+                self.assertEqual(page.evaluate("location.hash"), "", "a kód ne maradjon a címben")
+                self.assertTrue(page.locator("#android").is_hidden())
+                link = page.locator("#open-app").get_attribute("href")
+                self.assertTrue(link.startswith(f"intent://pair?server=http%3A%2F%2F127.0.0.1%3A{h.api.port}"
+                                                f"&code={code}#Intent;scheme=jarvis;package=hu.jarvis.app;"), link)
+                self.assertIn("S.browser_fallback_url=" + quote(remote.APK_URL, safe=""), link)
                 page.fill("#device", "Pixel")
                 self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 390)
                 page.click("#go")
@@ -467,6 +479,153 @@ class RemoteWindowBrowserTests(unittest.TestCase):
                 page.goto(f"http://127.0.0.1:{h.api.port}/")   # a megjegyzett kulccsal egyből belép
                 page.wait_for_selector("#text", timeout=15000)
                 self.assertEqual(errors, [])
+                browser.close()
+        finally:
+            h.close()
+
+
+
+class FakeStt:
+    def describe(self) -> str:
+        return "teszt"
+
+
+@unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
+class AndroidAppRequestsBrowserTests(unittest.TestCase):
+    """A távoli ablak az Android-alkalmazásban (Chromium, az alkalmazás hídja helyett egy hamis JarvisApp): a
+    galériából megosztott fotók az új hirdetéshez kerülnek, a megosztott link a beszélgetésbe, a hangutasítás
+    (parancsikon, csempe, értesítés) azonnal felvesz."""
+
+    UA = ANDROID_CHROME + " JarvisAndroid/1"
+
+    def open(self, pw, h, pending: dict, fake_mic: bool = False):
+        browser = pw.chromium.launch(headless=True, args=["--use-fake-ui-for-media-stream",
+                                                          "--use-fake-device-for-media-stream"] if fake_mic else [])
+        context = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True,
+                                      user_agent=self.UA)
+        context.add_init_script("""(() => {
+            let wanted = %s;
+            window.__asked = 0;
+            window.JarvisApp = { pending() { window.__asked += 1; const out = JSON.stringify(wanted); wanted = {};
+                                             return out; } };
+          })();""" % json.dumps(pending))
+        page = context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        return browser, page, errors
+
+    def test_shared_photos_go_to_a_new_listing(self):
+        from playwright.sync_api import sync_playwright
+
+        h = Harness()
+        try:
+            self.assertTrue(h.app.describe()["work"])
+            with sync_playwright() as pw:
+                browser, page, errors = self.open(pw, h, {"photos": 2, "batch": 3, "voice": False, "text": ""})
+                served = []
+
+                def shared(route):
+                    served.append(route.request.url.split("/__jarvis_shared/")[1])
+                    route.fulfill(status=200, body=jpeg(), content_type="image/jpeg",
+                                  headers={"X-Jarvis-Name": "farmer%20el%C5%91l.jpg"})
+
+                page.route("**/__jarvis_shared/**", shared)
+                page.goto(f"http://127.0.0.1:{h.api.port}/?t={h.token}")
+                page.wait_for_selector("#w-new-photos img >> nth=1", timeout=15000)
+                self.assertEqual(sorted(served), ["3/0", "3/1"])
+                self.assertEqual(page.get_attribute("body", "data-mode"), "work")
+                self.assertEqual(page.evaluate("document.activeElement.id"), "w-prompt")
+                self.assertEqual(page.locator("#w-new-photos img").count(), 2)
+                self.assertIn("2 fotó a megosztásból", page.inner_text(".toast"))
+                # A megosztott fotókkal ugyanúgy megy a feltöltés, mint a kézzel választottakkal.
+                page.fill("#w-prompt", "Hosszú farmer, 40-es")
+                page.check('#w-sites input[value="vinted"]')
+                h.app.submit_work = lambda *args, **kwargs: None
+                page.click("#w-go")
+                page.wait_for_selector("#ask-dialog[open]")
+                page.click("#ask-yes")
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and not any(len(i.photos) == 2 for i in h.app.work.store.all()):
+                    time.sleep(0.1)
+                self.assertTrue(any(len(i.photos) == 2 for i in h.app.work.store.all()), "a fotók a gépre kerültek")
+                self.assertEqual(errors, [])
+                browser.close()
+        finally:
+            h.close()
+
+    def test_shared_link_and_voice_request(self):
+        from playwright.sync_api import sync_playwright
+
+        h = Harness()
+        try:
+            h.app.stt = FakeStt()
+            h.bus.set_hello(h.app.describe())
+            calls = []
+            h.app.submit_audio = lambda data, mode="chat", request_id=None, silent=True: calls.append((len(data), mode))
+            with sync_playwright() as pw:
+                browser, page, errors = self.open(pw, h, {"text": "https://www.vinted.hu/items/123", "voice": True},
+                                                  fake_mic=True)
+                page.goto(f"http://127.0.0.1:{h.api.port}/?t={h.token}")
+                page.wait_for_selector("#listen.recording", timeout=15000)
+                self.assertEqual(page.input_value("#text"), "https://www.vinted.hu/items/123")
+                self.assertEqual(page.get_attribute("body", "data-mode"), "chat")
+                page.wait_for_timeout(900)
+                page.click("#listen")                     # kész: a felvétel a gépre megy
+                deadline = time.monotonic() + 10
+                while not calls and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                self.assertEqual([mode for _, mode in calls], ["chat"])
+                self.assertGreater(calls[0][0], 1000)
+                # Az alkalmazás szól, hogy új kérés jött (pl. a csempéről), és a felület lekérdezi.
+                page.evaluate("window.JarvisPending()")
+                self.assertGreaterEqual(page.evaluate("window.__asked"), 2)
+                self.assertEqual(errors, [])
+                browser.close()
+        finally:
+            h.close()
+
+
+    def test_recording_stops_after_silence(self):
+        """A felvétel magától leáll a beszéd utáni csendnél: a mikrofon helyett egy hangfájl (csend, 1 mp hang,
+        csend), és senki sem nyomja meg a gombot."""
+        import math
+        import struct
+        import wave
+        from playwright.sync_api import sync_playwright
+
+        h = Harness()
+        try:
+            rate = 48000
+            frames = [0] * int(0.6 * rate) + [int(16000 * math.sin(2 * math.pi * 440 * i / rate))
+                                              for i in range(rate)] + [0] * int(10 * rate)
+            wav = Path(h.tmp.name) / "beszed.wav"
+            with wave.open(str(wav), "wb") as out:
+                out.setnchannels(1)
+                out.setsampwidth(2)
+                out.setframerate(rate)
+                out.writeframes(struct.pack(f"<{len(frames)}h", *frames))
+            h.app.stt = FakeStt()
+            h.bus.set_hello(h.app.describe())
+            calls = []
+            h.app.submit_audio = lambda data, mode="chat", request_id=None, silent=True: calls.append(len(data))
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True, args=[
+                    "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+                    f"--use-file-for-fake-audio-capture={wav}%noloop"])
+                page = browser.new_page()
+                page.goto(f"http://127.0.0.1:{h.api.port}/?t={h.token}")
+                page.wait_for_selector("#listen:not([disabled])", timeout=15000)
+                started = time.monotonic()
+                page.click("#listen")
+                page.wait_for_selector("#listen.recording")
+                page.wait_for_selector("#listen:not(.recording)", timeout=12000)
+                took = time.monotonic() - started
+                deadline = time.monotonic() + 10
+                while not calls and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                self.assertEqual(len(calls), 1, "magától elküldte")
+                self.assertGreater(took, 2.0, "a hang alatt nem állt le")
+                self.assertLess(took, 6.5, "a csend után leállt (nem a fájl végén, és nem a 45 másodperces határnál)")
                 browser.close()
         finally:
             h.close()

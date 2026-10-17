@@ -57,7 +57,8 @@
   <section id="setup">
     <p id="intro">A Jarvis a gépeden fut; ez az alkalmazás annak az ablakát mutatja, és onnan ad feladatot
       (a feltöltés, a böngészés, a modellek mind a gépen dolgoznak). A gépen, a Jarvis ablakában nyomd meg a
-      <b>Telefon</b>, majd az <b>Új párosító kód</b> gombot.</p>
+      <b>Telefon</b>, majd az <b>Új párosító kód</b> gombot. A megjelenő QR-kódot a telefon kamerájával is
+      beolvashatod: akkor a címet és a kódot nem kell begépelni.</p>
     <form id="pair" autocomplete="off">
       <label>A gép címe (Tailscale)
         <input id="server" type="text" inputmode="url" autocapitalize="off" spellcheck="false" placeholder="gep-neve.tailnet.ts.net" required></label>
@@ -83,6 +84,7 @@ try { state = JSON.parse(app ? app.state() : "{}"); } catch { state = {}; }
 $("server").value = (state.server || "").replace(/^https:\/\//, "");
 $("device").value = state.device || "Telefon";
 $("background").checked = state.background !== false;
+if (state.code) $("code").value = state.code;
 
 function show(view, message) {
   $("offline").hidden = view !== "offline";
@@ -91,6 +93,7 @@ function show(view, message) {
 }
 
 if (location.hash === "#offline") show("offline");
+else if (location.hash === "#pair") show("setup", "A QR-kódból: nézd meg, jó-e a gép címe, és nyomd meg a Párosítás gombot.");
 else if (location.hash === "#revoked") show("setup", "A párosítás megszűnt (talán a gépen visszavontad). Párosítsd újra.");
 else show("setup");
 

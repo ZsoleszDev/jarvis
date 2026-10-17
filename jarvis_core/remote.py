@@ -44,10 +44,46 @@ self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET" || url.pathname === "/events") return;
   event.respondWith(fetch(event.request));
 });
+
+// Értesítés a gépről (Web Push, webpush.py), akkor is, ha az ablak be van zárva. Ha az ablak látszik, ott úgyis
+// megjelenik (a jóváhagyás kérdése is), ezért akkor nem szólunk.
+self.addEventListener("push", (event) => {
+  let message = {};
+  try { message = event.data ? event.data.json() : {}; } catch { message = {}; }
+  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
+    if (windows.some((w) => w.visibilityState === "visible")) return undefined;
+    const options = { body: message.text || "", tag: message.tag || "jarvis", icon: "/icon-192.png",
+                      badge: "/icon-192.png", data: message };
+    if (message.kind === "confirm" && message.answer) {
+      options.actions = [{ action: "approve", title: "Engedélyezem" }, { action: "deny", title: "Mégse" }];
+      options.requireInteraction = true;
+    }
+    return self.registration.showNotification(message.title || "Jarvis", options);
+  }));
+});
+
+function openWindow() {
+  return self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) =>
+    windows.length ? windows[0].focus() : self.clients.openWindow("/"));
+}
+
 self.addEventListener("notificationclick", (event) => {
+  const message = event.notification.data || {};
   event.notification.close();
-  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) =>
-    windows.length ? windows[0].focus() : self.clients.openWindow("/")));
+  if ((event.action === "approve" || event.action === "deny") && message.answer) {
+    const approved = event.action === "approve";
+    event.waitUntil(fetch("/api/v1/push/answer", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: message.answer, approved }),
+    }).then((response) => {
+      if (response.ok) return undefined;
+      return self.registration.showNotification("Jarvis", { body: "Ez a kérdés már nem vár válaszra.",
+                                                            tag: message.tag, icon: "/icon-192.png" });
+    }).catch(() => self.registration.showNotification("Jarvis", {
+      body: "Nem érem el a gépet; nyisd meg a Jarvist, és ott válaszolj.", tag: message.tag, icon: "/icon-192.png" })));
+    return;
+  }
+  event.waitUntil(openWindow());
 });
 """
 
@@ -85,6 +121,10 @@ LOGIN_PAGE = """<!doctype html>
   button:disabled { opacity: 0.5; }
   #message { min-height: 1.4em; color: var(--white); }
   a { color: var(--white); }
+  a.button { display: block; padding: 11px 15px; border-radius: 6px; background: var(--white); color: var(--black);
+             font: 600 15px var(--ui); text-align: center; text-decoration: none; }
+  #in-app { display: grid; gap: 12px; }
+  #in-app[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -108,15 +148,34 @@ LOGIN_PAGE = """<!doctype html>
   </form>
   <p id="android" hidden>Androidon kényelmesebb az alkalmazás: akkor is értesít, ha be van zárva.
     <a href="__APK__">Letöltés (jarvis.apk)</a></p>
+  <div id="in-app" hidden>
+    <a id="open-app" class="button" href="#">Párosítás az alkalmazásban</a>
+    <p>Ha még nincs meg az alkalmazás, ez a gomb letölti; telepítés után olvasd be újra a QR-kódot. Vagy
+      párosíts itt, a böngészőben (fent).</p>
+  </div>
 </main>
 <script>
 "use strict";
 const KEY = "jarvis-token";
 const say = (text) => { document.getElementById("message").textContent = text; };
 const params = new URLSearchParams(location.search);
+const android = /Android/i.test(navigator.userAgent) && !window.JarvisApp;   // a telefon böngészője
+// A gép Telefon ablakának QR-kódja: a gép címe, a # után a párosító kód (a gépnek nem megy el).
+const scanned = /^#pair=(\\d{6})$/.exec(location.hash);
 let saved = null;
 try { saved = localStorage.getItem(KEY); } catch { saved = null; }
-if (params.get("t")) {
+if (scanned) {
+  history.replaceState(null, "", "/");
+  document.getElementById("code").value = scanned[1];
+  if (android) {
+    // Az Android-alkalmazás (ha telepítve van) átveszi a címet és a kódot; ha nincs, a letöltés jön.
+    document.getElementById("open-app").href = "intent://pair?server=" + encodeURIComponent(location.origin) +
+      "&code=" + scanned[1] + "#Intent;scheme=jarvis;package=hu.jarvis.app;S.browser_fallback_url=" +
+      encodeURIComponent("__APK__") + ";end";
+    document.getElementById("in-app").hidden = false;
+  }
+  say("A kódot beírtam a QR-kódból.");
+} else if (params.get("t")) {
   // A gép nem fogadta el a kulcsot: lejárt, vagy a gépen visszavontad.
   try { localStorage.removeItem(KEY); } catch { /* nem baj */ }
   if (window.JarvisApp && window.JarvisApp.revoked) window.JarvisApp.revoked();   // az Android-alkalmazás maga párosít
@@ -128,7 +187,7 @@ if (params.get("t")) {
 const guess = /Android/i.test(navigator.userAgent) ? "Telefon" : /Windows/i.test(navigator.userAgent) ? "Laptop" : "Eszköz";
 document.getElementById("device").value = guess;
 // A telefon böngészőjében: innen töltheted le az alkalmazást (az alkalmazásban ez nem kell).
-document.getElementById("android").hidden = !/Android/i.test(navigator.userAgent) || !!window.JarvisApp;
+document.getElementById("android").hidden = !android || !!scanned;
 document.getElementById("pair").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = document.getElementById("go");
@@ -210,6 +269,11 @@ def static_file(path: str) -> tuple[bytes, str] | None:
         size = 192 if path in ("/icon-192.png", "/favicon.ico") else 512
         return icon_png(size, maskable="maskable" in path), "image/png"
     return None
+
+
+def pair_link(address: str, code: str) -> str:
+    """A párosító QR-kód tartalma: a gép címe, a kód a # után (a gépnek nem megy el, a belépő oldal olvassa ki)."""
+    return f"{address.rstrip('/')}/#pair={code}"
 
 
 def serve_address(status: str, port: int) -> str:

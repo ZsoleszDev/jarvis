@@ -22,6 +22,9 @@ import org.json.JSONObject;
  * lekérdezéssel, a Tailscale-en át), és értesít, ha a Jarvis jóváhagyást kér (a gombokkal az értesítésből is
  * megadhatod), ha kész vagy elakadt egy feladat, vagy ha kérdez valamit. A Firebase nem kell hozzá: minden a te
  * gépedről jön.
+ *
+ * Az állandó értesítés mutatja, hogy éri-e el a gépet, és szünetel-e a Jarvis; a gombjaival hangutasítást adhatsz,
+ * vagy szüneteltetheted (a gépen minden modell leáll, pl. játékhoz), és folytathatod.
  */
 public class NotifyService extends Service {
     static final String CHANNEL_LINK = "kapcsolat";
@@ -33,6 +36,9 @@ public class NotifyService extends Service {
     static final int NOTICE_BASE = 100000;
 
     private volatile boolean running;
+    private volatile boolean connected = true;
+    private volatile boolean paused;
+    private String shown = "";
     private Thread worker;
 
     /** Elindítja (ha párosítva van, és kérted a háttérértesítéseket), különben leállítja. */
@@ -88,15 +94,48 @@ public class NotifyService extends Service {
         channels(this);
     }
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification ongoing = new Notification.Builder(this, CHANNEL_LINK)
+    /** Hangutasítás: megnyitja az ablakot, és a gép felülete azonnal felvesz (MainActivity.ACTION_VOICE). */
+    static PendingIntent voice(Context context) {
+        Intent intent = new Intent(context, MainActivity.class).setAction(MainActivity.ACTION_VOICE)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        return PendingIntent.getActivity(context, 1, intent,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    private Notification ongoing() {
+        String text = !connected ? "Nem érem el a gépet (újrapróbálom)"
+                : paused ? "Szünetel: a modellek nem futnak" : "Kapcsolatban a géppel";
+        return new Notification.Builder(this, CHANNEL_LINK)
                 .setSmallIcon(R.drawable.ic_notify)
                 .setContentTitle("Jarvis")
-                .setContentText("Kapcsolatban a géppel")
+                .setContentText(text)
                 .setContentIntent(openApp(this))
                 .setOngoing(true)
+                .addAction(new Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_mic), "Hang",
+                        voice(this)).build())
+                .addAction(new Notification.Action.Builder(
+                        Icon.createWithResource(this, paused ? R.drawable.ic_play : R.drawable.ic_pause),
+                        paused ? "Folytatás" : "Szünet",
+                        ActionReceiver.command(this, paused ? ActionReceiver.RESUME : ActionReceiver.PAUSE)).build())
                 .build();
+    }
+
+    /** Az állandó értesítés frissítése, ha változott, amit mutat (a kapcsolat vagy a szünet). */
+    private synchronized void refresh() {
+        String now = connected + "/" + paused;
+        if (now.equals(shown)) {
+            return;
+        }
+        shown = now;
+        getSystemService(NotificationManager.class).notify(ONGOING_ID, ongoing());
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        Notification ongoing = ongoing();
+        synchronized (this) {
+            shown = connected + "/" + paused;
+        }
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(ONGOING_ID, ongoing, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         } else {
@@ -127,6 +166,7 @@ public class NotifyService extends Service {
     private void loop() {
         Prefs prefs = new Prefs(this);
         long backoff = 2000;
+        boolean synced = false;
         while (running) {
             String server = prefs.server();
             String token = prefs.token();
@@ -134,11 +174,17 @@ public class NotifyService extends Service {
                 break;
             }
             try {
-                long after = prefs.lastEvent();
-                if (after < 0) {          // az első kapcsolódáskor a régi eseményekről nem szólunk
-                    after = Api.call(server, token, "GET", "/api/v1/status", null, 20000).optLong("last_event", 0);
-                    prefs.lastEvent(after);
+                if (!synced) {            // (újra)kapcsolódáskor: szünetel-e, és honnan folytatjuk
+                    JSONObject status = Api.call(server, token, "GET", "/api/v1/status", null, 20000);
+                    paused = status.optBoolean("paused");
+                    if (prefs.lastEvent() < 0) {          // az első kapcsolódáskor a régi eseményekről nem szólunk
+                        prefs.lastEvent(status.optLong("last_event", 0));
+                    }
+                    synced = true;
+                    connected = true;
+                    refresh();
                 }
+                long after = prefs.lastEvent();
                 JSONObject result = Api.call(server, token, "GET", "/api/v1/events?after=" + after + "&wait=50",
                         null, 75000);
                 JSONArray events = result.optJSONArray("events");
@@ -154,6 +200,9 @@ public class NotifyService extends Service {
                 break;
             } catch (Exception e) {
                 // nincs kapcsolat (a gép ki van kapcsolva, vagy a Tailscale nem fut): később újra
+                synced = false;
+                connected = false;
+                refresh();
                 try {
                     Thread.sleep(backoff);
                 } catch (InterruptedException stop) {
@@ -170,7 +219,11 @@ public class NotifyService extends Service {
     private void handle(JSONObject event) {
         String type = event.optString("type");
         NotificationManager manager = getSystemService(NotificationManager.class);
-        if ("confirm".equals(type)) {
+        if ("state".equals(type)) {
+            String state = event.optString("state");
+            paused = "paused".equals(state) || "standby".equals(state);
+            refresh();
+        } else if ("confirm".equals(type)) {
             if (MainActivity.visible) {
                 return;                                   // a felületen úgyis feljön a kérdés
             }
@@ -184,9 +237,9 @@ public class NotifyService extends Service {
                     .setContentIntent(openApp(this))
                     .setAutoCancel(true)
                     .addAction(new Notification.Action.Builder((Icon) null, "Engedélyezem",
-                            ActionReceiver.intent(this, id, true)).build())
+                            ActionReceiver.confirm(this, id, true)).build())
                     .addAction(new Notification.Action.Builder((Icon) null, "Mégse",
-                            ActionReceiver.intent(this, id, false)).build())
+                            ActionReceiver.confirm(this, id, false)).build())
                     .build();
             manager.notify(CONFIRM_BASE + id, notification);
         } else if ("confirm_done".equals(type)) {

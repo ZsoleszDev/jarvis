@@ -59,7 +59,8 @@ PACKAGES = [
     ("mss", "mss"),
     ("PIL", "pillow"),
 ]
-OPTIONAL_PACKAGES = [("openwakeword", "openwakeword", "pip install -r requirements-wakeword.txt")]
+OPTIONAL_PACKAGES = [("openwakeword", "openwakeword", "pip install -r requirements-wakeword.txt"),
+                     ("cryptography", "cryptography", "a laptopos értesítésekhez bezárt ablaknál: pip install cryptography")]
 
 
 def check_packages() -> None:

@@ -416,6 +416,8 @@ body[data-state="paused"] #eye { filter: brightness(0.55); }
 body[data-state="paused"] #state { color: var(--ash); }
 body[data-state="standby"] #eye { filter: brightness(0.72); }
 body[data-state="standby"] #state { color: var(--ash); }
+.pair-qr { width: 196px; margin: 4px 0 12px; }
+.pair-qr svg { display: block; width: 100%; height: auto; border-radius: 4px; }
 .pair-code {
   margin: 10px 0;
   font: 600 34px/1 var(--ui);

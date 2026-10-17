@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from . import console, creative_templates, instance, remote
+from . import console, creative_templates, instance, qr, remote
 from .app import STATE_TEXT, JarvisApp, tool_label
 from .config import GuiCfg, app_data
 from .creative import MAX_TEXT, StoryError
@@ -569,7 +569,12 @@ class _Handler(BaseHTTPRequestHandler):
         if phone is None:
             return self._json(503, {"ok": False, "error": "A telefonos kapcsolat ki van kapcsolva ([api] enabled)."})
         if path == "/api/phone/code":
-            return self._json(200, {"ok": True, **phone.auth.new_code()})
+            result = phone.auth.new_code()
+            address = remote.tailscale_address(phone.port)
+            if address:     # QR-kód: a telefon kamerája beolvassa, és a kóddal együtt nyitja meg a gép címét
+                link = remote.pair_link(address, result["code"])
+                result.update(link=link, qr=qr.svg(link))
+            return self._json(200, {"ok": True, **result})
         if path == "/api/phone/revoke":
             ok = phone.auth.revoke(str(body.get("id") or ""))
             return self._json(200 if ok else 404, {"ok": ok, "devices": phone.auth.devices()})

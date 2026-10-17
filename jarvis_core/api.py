@@ -31,6 +31,7 @@ from . import remote
 from .config import ApiCfg
 from .selling import FAILED, MAX_PHOTO_BYTES, NOT_POSTED, POSTED, ItemError
 from .watches import WatchError
+from .webpush import INSTALL_HINT, PushError, WebPush, available as push_available
 
 API_VERSION = 1
 MAX_JSON = 256 * 1024
@@ -195,6 +196,7 @@ class ApiServer:
         self.auth = auth
         self.log = log
         self.gui: Any = None      # a gép felülete (gui.GuiServer): a távoli ablak ennek adja tovább a kéréseket
+        self.push: WebPush | None = None    # értesítés a laptopra, ha az ablak be van zárva (webpush.py)
         handler = type("JarvisApiHandler", (_ApiHandler,), {"api": self})
         self.httpd = ThreadingHTTPServer((cfg.host, int(cfg.port)), handler)
         self.httpd.daemon_threads = True
@@ -302,6 +304,8 @@ class _ApiHandler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "name": "Jarvis", "api": API_VERSION})
             if method == "POST" and sub == "/pair":
                 return self._pair()
+            if method == "POST" and sub == "/push/answer":
+                return self._push_answer()      # az értesítés gombja: egyszer használható válaszkulccsal
             token = self._bearer(query)
             # Képet és hangot az <img>/<audio> nem tud fejléccel kérni: ezeknél a kulcs a címben is lehet.
             if not token and method == "GET" and (sub.endswith(".jpg") or sub == "/tts"):
@@ -321,6 +325,8 @@ class _ApiHandler(BaseHTTPRequestHandler):
         except ItemError as exc:
             self._error(400, "bad_request", str(exc))
         except WatchError as exc:
+            self._error(400, "bad_request", str(exc))
+        except PushError as exc:
             self._error(400, "bad_request", str(exc))
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -485,6 +491,37 @@ class _ApiHandler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 - a felület hibája ne rontsa el a párosítást
             pass
         self._json(200, {"ok": True, **result})
+
+    # --- értesítés a laptopra (Web Push) -------------------------------------------------------------
+
+    def _push(self) -> WebPush:
+        if self.api.push is None:
+            raise ApiError(503, "no_push", "A laptopos értesítés nincs bekapcsolva.")
+        return self.api.push
+
+    def r_push_info(self, query: dict[str, list[str]]) -> None:
+        push = self._push()
+        key = push.public_key()
+        self._json(200, {"ok": True, "available": bool(key), "key": key, "reason": "" if key else INSTALL_HINT,
+                         "subscriptions": len(push.subscriptions(self.device))})
+
+    def r_push_subscribe(self, query: dict[str, list[str]]) -> None:
+        push = self._push()
+        if not push_available():
+            raise ApiError(503, "no_push", INSTALL_HINT)
+        count = push.subscribe(self.device, self._body().get("subscription"))
+        self._json(200, {"ok": True, "subscriptions": count})
+
+    def r_push_unsubscribe(self, query: dict[str, list[str]]) -> None:
+        removed = self._push().unsubscribe(self.device, str(self._body().get("endpoint") or ""))
+        self._json(200, {"ok": True, "removed": removed})
+
+    def _push_answer(self) -> None:
+        body = self._body()
+        confirm_id = self._push().answer(str(body.get("key") or ""))
+        if confirm_id is None or not self.api.ui.resolve_confirm(confirm_id, bool(body.get("approved"))):
+            raise ApiError(404, "not_found", "Ez a jóváhagyás már nem vár válaszra.")
+        self._json(200, {"ok": True, "approved": bool(body.get("approved"))})
 
     # --- állapot, beszélgetés, események ---------------------------------------------------------
 
@@ -799,6 +836,9 @@ ROUTES: list[tuple[str, re.Pattern[str], str]] = [(m, re.compile(p), n) for m, p
     ("DELETE", r"/watches/([0-9a-f]{6})", "r_watch_delete"),
     ("GET", r"/notifications", "r_notifications"),
     ("POST", r"/notifications/read", "r_notifications_read"),
+    ("GET", r"/push", "r_push_info"),
+    ("POST", r"/push/subscribe", "r_push_subscribe"),
+    ("POST", r"/push/unsubscribe", "r_push_unsubscribe"),
     ("GET", r"/devices", "r_devices"),
     ("DELETE", r"/devices/([0-9a-f]{8})", "r_device_delete"),
 )]
@@ -808,6 +848,9 @@ def start_api(app: Any, ui: Any, bus: Any, data_root: Path) -> ApiServer:
     """Elindítja a telefonos kapcsolatot (a run_gui hívja, ha az [api] be van kapcsolva)."""
     log = EventLog()
     bus.add_listener(log.add)
-    server = ApiServer(app, ui, bus, app.cfg.api, PhoneAuth(Path(data_root) / "telefon.json"), log)
+    auth = PhoneAuth(Path(data_root) / "telefon.json")
+    server = ApiServer(app, ui, bus, app.cfg.api, auth, log)
+    server.push = WebPush(Path(data_root) / "push.json", devices=lambda: {d["id"] for d in auth.devices()})
+    bus.add_listener(server.push.on_event)
     server.start()
     return server
