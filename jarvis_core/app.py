@@ -23,13 +23,13 @@ import urllib.parse
 from pathlib import PurePath
 from typing import Any, Callable, Protocol
 
-from . import gpu, web
+from . import gpu, memory, web
 from .assistant import Assistant
 from .config import Config, adopt_legacy_data, app_data, resolve_path
 from .creative import CreativeDesk, StoryError
 from .llm import FULL_GPU, Cancelled, OllamaClient, OllamaError, gpu_share, is_runner_crash
 from .notices import NoticeBoard
-from .ollama_log import CACHE_SETTING, ServerLog, advice, find_cause, short_advice, user_setting
+from .ollama_log import CACHE_SETTING, CHECKPOINT_SETTING, ServerLog, explain, find_cause, pagefile_tip, user_setting
 from .recorder import Recorder
 from .browser import BrowserError
 from .scheduler import Hooks, Job, Scheduler
@@ -344,7 +344,21 @@ class JarvisApp:
             self._set_phase("error")
             return False
         self._report_model_placement(status)
+        self._check_pagefile()
         return True
+
+    def _check_pagefile(self) -> None:
+        """Windows: ha nincs lapozófájl, vagy kicsi, a nagy modell, a böngésző és a többi program mellett könnyen
+        elfogy a memória (a modell és a böngésző leáll). Ezt előre megmondjuk, egyszer."""
+        if getattr(self, "_pagefile_checked", False):
+            return
+        self._pagefile_checked = True
+        try:
+            tip = pagefile_tip(memory.MemoryReport(pagefile=memory.pagefile_setting()))
+        except Exception:  # noqa: BLE001 - csak tanács
+            return
+        if tip:
+            self.ui.warn(tip)
 
     def start(self, standby: bool = False) -> bool:
         """Betölt mindent. Hamissal tér vissza, ha a nyelvi modell nem indítható.
@@ -610,18 +624,23 @@ class JarvisApp:
         try:
             cause = find_cause(self.server_log.read_new())
             self.server_log.mark()
+            kind = cause.kind if cause else "unknown"
+            # Ha a gép memóriája fogyott el (vagy nem tudjuk, mi): mennyi a határ, ki foglalja, és tényleg él-e
+            # a futó Ollamában a beállítás.
+            report = memory.report() if kind in ("ram", "unknown") else None
+            ollama = memory.ollama_process() if kind == "ram" else None
             self.model_restarts.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "error": detail[:300],
-                                        "cause": cause.kind if cause else "", "log": cause.line if cause else ""})
+                                        "cause": cause.kind if cause else "", "log": cause.line if cause else "",
+                                        "memory": report.public() if report is not None else None})
             del self.model_restarts[:-10]
-            key = cause.kind if cause else "unknown"
-            cache_off = user_setting(CACHE_SETTING) == "0"
-            if key in self._restart_advice:
-                if cause is not None:
-                    self.ui.warn(short_advice(cause, cache_off))
+            repeated = kind in self._restart_advice
+            self._restart_advice.add(kind)
+            if repeated and cause is None:
                 return
-            self._restart_advice.add(key)
-            self.ui.warn(advice(cause, self.server_log.path, cache_off))
-            if cause is not None and cause.kind == "vram":
+            user = {CACHE_SETTING: user_setting(CACHE_SETTING), CHECKPOINT_SETTING: user_setting(CHECKPOINT_SETTING)}
+            for level, text in explain(cause, self.server_log.path, user, report, ollama, repeated):
+                (self.ui.info if level == "info" else self.ui.warn)(text)
+            if kind == "vram" and not repeated:
                 for line in gpu.memory_lines():
                     self.ui.warn("  " + line)
         except Exception:  # noqa: BLE001 - csak magyarázat: ha nem sikerül, a munka attól még megy tovább

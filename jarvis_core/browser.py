@@ -12,6 +12,7 @@ Biztonság:
 from __future__ import annotations
 
 import base64
+import functools
 import re
 import time
 import urllib.parse
@@ -33,6 +34,8 @@ _CHALLENGE_RE = re.compile(
     r"are you a robot|captcha|cf-chl|egy pillanat|ellenőrizzük, hogy|nem vagy robot|access denied",
     re.IGNORECASE)
 CHALLENGE_WAIT = 12.0      # ennyit vár, hogy a köztes oldal magától továbbengedjen
+RESTARTED_NOTE = ("A böngésző közben bezárult vagy összeomlott (pl. elfogyott a gép memóriája); újraindítottam, "
+                  "az előző oldal már nincs nyitva.")
 # Ennél régebben indult, be nem fejezett adatkérésre nem várunk (pl. egy hosszan nyitva tartott kapcsolat,
 # vagy egy kérés, aminek a vége elveszett, mert közben átnavigált az oldal).
 STUCK_REQUEST_SECONDS = 15.0
@@ -40,11 +43,34 @@ STUCK_REQUEST_SECONDS = 15.0
 _TRACKED_TYPES = {"XHR", "Fetch", "Document", "Script"}
 _CLOSED_RE = re.compile(r"has been closed|target closed|browser closed|browser has disconnected|"
                         r"connection closed", re.IGNORECASE)
+# A Playwright-meghajtó (node) elhalt, pl. mert elfogyott a gép memóriája: ilyenkor a context.close() örökre
+# várna a válaszára, ezért csak a Playwrightot állítjuk le.
+_DRIVER_GONE_RE = re.compile(r"connection closed|reading from the driver", re.IGNORECASE)
+_PROFILE_BUSY_RE = re.compile(r"ProcessSingleton|user data directory is already in use")
 
 
 def is_closed_error(exc: BaseException) -> bool:
-    """A böngészőt (vagy az ablakát) közben bezárták: újra kell indítani."""
-    return type(exc).__name__ == "TargetClosedError" or bool(_CLOSED_RE.search(str(exc)))
+    """A böngészőt (vagy az ablakát) közben bezárták, vagy összeomlott (pl. elfogyott a gép memóriája, és a
+    böngésző vagy a Playwright-meghajtó leállt): újra kell indítani. Csak az üzenet első sorát nézzük: a
+    hibaüzenetünk után az oldalnézet jöhet, és abban az oldal szövege is (pl. „This item has been closed”)."""
+    first = (str(exc).strip().splitlines() or [""])[0]
+    return type(exc).__name__ == "TargetClosedError" or bool(_CLOSED_RE.search(first))
+
+
+def _restarts_after_crash(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Ha a művelet közben a böngésző (vagy a Playwright-meghajtó) bezárult vagy összeomlott, elengedjük, és a
+    következő lépés újraindítja (_ensure). Különben a halott lap minden további lépésnél ugyanazt a hibát adná.
+    Ha a műveleten belül már újraindult (pl. az oldalnézet), azt nem zárjuk be újra."""
+    @functools.wraps(method)
+    def wrapper(self: "BrowserController", *args: Any, **kwargs: Any) -> Any:
+        starts = self._starts
+        try:
+            return method(self, *args, **kwargs)
+        except Exception as exc:
+            if self._starts == starts and self.running and is_closed_error(exc):
+                self._release(exc)
+            raise
+    return wrapper
 
 # Ezekre a szavakra (ékezet nélkül, szó elején) kattintás előtt jóváhagyás kell.
 _RISKY_RE = re.compile(
@@ -627,6 +653,7 @@ class BrowserController:
         self.pace.sleep = self._sleep
         self.auto = False
         self._mouse: tuple[float, float] | None = None
+        self._starts = 0          # hányszor indult el a böngésző (lásd _restarts_after_crash)
 
     # --- indítás és leállítás ------------------------------------------------------
 
@@ -656,23 +683,29 @@ class BrowserController:
         elif self.cfg.channel:
             attempts.append({"channel": self.cfg.channel})
         attempts.append({})  # tartalék: a Playwright saját Chromiuma
+        self._starts += 1
         self._pw = sync_playwright().start()
         last_error: Exception | None = None
-        for extra in attempts:
-            try:
-                self._context = self._pw.chromium.launch_persistent_context(
-                    str(profile), **options, **extra)
-                self.engine = extra.get("channel") or ("saját" if extra else "chromium")
+        for round_no in range(3):
+            for extra in attempts:
+                try:
+                    self._context = self._pw.chromium.launch_persistent_context(
+                        str(profile), **options, **extra)
+                    self.engine = extra.get("channel") or ("saját" if extra else "chromium")
+                    break
+                except Exception as exc:  # noqa: BLE001 - pl. nincs Edge, próbáljuk a következőt
+                    last_error = exc
+            # Egy összeomlás után a régi böngésző még pár pillanatig fogja a profilt: kicsit várunk rá.
+            if self._context is not None or not _PROFILE_BUSY_RE.search(str(last_error)) or round_no == 2:
                 break
-            except Exception as exc:  # noqa: BLE001 - pl. nincs Edge, próbáljuk a következőt
-                last_error = exc
+            time.sleep(1.5)
         if self._context is None:
             self._pw.stop()
             self._pw = None
             message = str(last_error)
             if "playwright install" in message or "Executable doesn't exist" in message:
                 raise BrowserError("Hiányzik a böngésző. Futtasd: playwright install chromium") from last_error
-            if "ProcessSingleton" in message or "user data directory is already in use" in message:
+            if _PROFILE_BUSY_RE.search(message):
                 raise BrowserError("A böngészőprofil már használatban van (fut egy másik Jarvis?).") from last_error
             raise BrowserError(f"A böngésző nem indult: {_short(last_error)}") from last_error
         pages = self._context.pages
@@ -687,14 +720,17 @@ class BrowserController:
                     self.page = pages[-1] if pages else self._context.new_page()
                 self._watch_network(self.page)
                 return self.page
-            except Exception:  # noqa: BLE001 - bezárt böngésző
-                self.close()
+            except Exception as exc:  # noqa: BLE001 - bezárt böngésző
+                self._release(exc)
         self._start()
         self._watch_network(self.page)
         return self.page
 
-    def close(self) -> None:
-        for obj, method in ((self._context, "close"), (self._pw, "stop")):
+    def close(self, driver_gone: bool = False) -> None:
+        """Bezárja a böngészőt. `driver_gone`: a Playwright-meghajtó már elhalt; ilyenkor a böngészőhöz nem
+        szólunk (a válaszát örökre várnánk), csak a Playwrightot állítjuk le."""
+        context = None if driver_gone else self._context
+        for obj, method in ((context, "close"), (self._pw, "stop")):
             if obj is not None:
                 try:
                     getattr(obj, method)()
@@ -702,6 +738,11 @@ class BrowserController:
                     pass
         self._context = self._pw = self.page = None
         self.elements = {}
+
+    def _release(self, exc: BaseException) -> None:
+        """Elengedi a bezárult vagy összeomlott böngészőt: a következő lépés újraindítja (_ensure)."""
+        first = (str(exc).strip().splitlines() or [""])[0]
+        self.close(driver_gone=bool(_DRIVER_GONE_RE.search(first)))
 
     # --- segédek ------------------------------------------------------------------
 
@@ -765,15 +806,18 @@ class BrowserController:
         for state, timeout in (("domcontentloaded", 10000), ("load", 4000)):
             try:
                 page.wait_for_load_state(state, timeout=timeout)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                if is_closed_error(exc):
+                    return            # bezárult vagy összeomlott: nincs mire várni
         previous, stable = -1, 0
         deadline = time.monotonic() + max_wait
         while time.monotonic() < deadline:
             try:
                 page.wait_for_timeout(250)
                 size, loading = page.evaluate(_SETTLE_JS)
-            except Exception:  # noqa: BLE001 - épp navigál
+            except Exception as exc:  # noqa: BLE001 - épp navigál
+                if is_closed_error(exc):
+                    return
                 stable = 0
                 continue
             busy = self._network_busy(page) or loading
@@ -842,6 +886,7 @@ class BrowserController:
             desc["editable"] = True
         return desc
 
+    @_restarts_after_crash
     def locate(self, want: dict[str, Any], timeout: float = 6.0) -> dict[str, Any] | None:
         """Megkeres egy korábban rögzített elemet (lásd describe), és használhatóvá teszi a
         click/type_text/upload_files számára. Ha `timeout` alatt sem jelenik meg, None."""
@@ -865,27 +910,28 @@ class BrowserController:
             except Exception:  # noqa: BLE001
                 time.sleep(0.3)
 
+    @_restarts_after_crash
     def scan(self) -> list[dict[str, Any]]:
         """Az oldal összes látható, kezelhető eleme (a látható részen kívüliek is), megszámozva: a modell nélküli
         kitöltés (vinted.py) ebből keresi meg a mezőket és egy lenyitott lista lehetőségeit, és a számukkal
         kattint vagy gépel (click, type_text). Egy kattintás vagy gépelés után a számok már nem érvényesek
         (az oldalnézet újraszámoz), ezért utána újra le kell tapogatni."""
         page = self._ensure()
-        last_error: Exception | None = None
-        for _ in range(3):
+        found = None
+        for attempt in range(3):
             try:
                 found = page.evaluate(SCAN_JS, {"base": SCAN_BASE, "span": SCAN_SPAN, "max": SCAN_MAX})
                 break
             except Exception as exc:  # noqa: BLE001 - pl. épp navigál az oldal
-                last_error = exc
+                if attempt == 2 or is_closed_error(exc):
+                    raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(exc)}).") from None
                 self._settle(page)
-        else:
-            raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(last_error)}).")
         elements = [e for e in found or [] if isinstance(e, dict)]
         self.elements = {n: e for n, e in self.elements.items() if not SCAN_BASE <= n < SCAN_BASE + SCAN_SPAN}
         self.elements.update({int(e["id"]): e for e in elements})
         return elements
 
+    @_restarts_after_crash
     def press(self, key: str = "Escape") -> None:
         """Egy billentyű (pl. Esc: bezárja a nyitva maradt listát), ahogy az ember is megnyomná."""
         page = self._ensure()
@@ -955,21 +1001,30 @@ class BrowserController:
 
     # --- műveletek --------------------------------------------------------------------
 
+    @_restarts_after_crash
     def snapshot(self, note: str = "") -> str:
-        page = self._ensure()
-        last_error: Exception | None = None
-        for _ in range(3):
-            try:
-                data = page.evaluate(SNAPSHOT_JS, {"max": int(self.cfg.max_elements),
-                                                   "textChars": VISIBLE_TEXT_CHARS})
-                break
-            except Exception as exc:  # noqa: BLE001 - pl. épp navigál az oldal
-                last_error = exc
-                self._settle(page)
-        else:
-            raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(last_error)}).")
+        try:
+            data = self._snapshot_data(self._ensure())
+        except BrowserError as exc:
+            if not is_closed_error(exc):
+                raise
+            # A böngésző közben bezárult vagy összeomlott: újraindítjuk, hogy a következő lépés már működjön.
+            self._release(exc)
+            data = self._snapshot_data(self._ensure())
+            note = " ".join(part for part in (note, RESTARTED_NOTE) if part)
         self.elements = {int(e["id"]): e for e in data.get("elements", [])}
         return format_snapshot(data, note)
+
+    def _snapshot_data(self, page: Any) -> dict[str, Any]:
+        for attempt in range(3):
+            try:
+                return page.evaluate(SNAPSHOT_JS, {"max": int(self.cfg.max_elements),
+                                                   "textChars": VISIBLE_TEXT_CHARS})
+            except Exception as exc:  # noqa: BLE001 - pl. épp navigál az oldal
+                if attempt == 2 or is_closed_error(exc):
+                    raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(exc)}).") from None
+                self._settle(page)
+        raise BrowserError("Nem tudom beolvasni az oldalt.")
 
     def _goto(self, url: str, timeout: int = 30000) -> Any:
         """Az aktív lapon megnyitja a címet. Ha közben bezárták a böngészőt (vagy az ablakát), újraindítja,
@@ -981,7 +1036,7 @@ class BrowserController:
         except Exception as exc:  # noqa: BLE001
             if not is_closed_error(exc):
                 raise BrowserError(f"Nem sikerült megnyitni: {url} ({_short(exc)})") from None
-        self.close()
+            self._release(exc)
         page = self._ensure()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout)
@@ -989,6 +1044,7 @@ class BrowserController:
             raise BrowserError(f"Nem sikerült megnyitni: {url} ({_short(exc)})") from None
         return page
 
+    @_restarts_after_crash
     def open(self, url: str) -> str:
         try:
             url = web.normalize_url(url, allow_local=self.allow_local)
@@ -1001,6 +1057,7 @@ class BrowserController:
         self._emit({"do": "goto", "url": url, "final": page.url})
         return self.snapshot()
 
+    @_restarts_after_crash
     def click(self, element: Any) -> str:
         page = self._ensure()
         el = self._element(element)
@@ -1052,6 +1109,7 @@ class BrowserController:
                     "risky": risky, "chooser": bool(choosers)})
         return self.snapshot(note)
 
+    @_restarts_after_crash
     def type_text(self, element: Any, text: str, submit: bool = False) -> str:
         page = self._ensure()
         el = self._element(element)
@@ -1081,6 +1139,7 @@ class BrowserController:
         note = f'Beírtam: "{text}"' + (", és elküldtem (Enter)." if submit else ".")
         return self.snapshot(note)
 
+    @_restarts_after_crash
     def fill_fields(self, fields: list[dict[str, Any]]) -> str:
         """Több mezőt tölt ki egy lépésben (a legutóbbi oldalnézet számai szerint), Enter nélkül.
 
@@ -1309,6 +1368,7 @@ class BrowserController:
         locator.click(timeout=timeout, position={"x": x - box["x"], "y": y - box["y"]}, delay=self.pace.press_ms())
         self._mouse = (x, y)
 
+    @_restarts_after_crash
     def scroll(self, direction: str = "down") -> str:
         page = self._ensure()
         up = fold(direction).strip() in ("up", "fel", "felfele", "felfelé")
@@ -1323,6 +1383,7 @@ class BrowserController:
         self._settle(page, max_wait=2.5)  # végtelen görgetésű oldalak ilyenkor töltenek újabb elemeket
         return self.snapshot("Felfelé görgettem." if up else "Lefelé görgettem.")
 
+    @_restarts_after_crash
     def back(self) -> str:
         page = self._ensure()
         before = page.url
@@ -1335,6 +1396,7 @@ class BrowserController:
         note = "Visszaléptem az előző oldalra." if page.url != before else "Nincs hova visszalépni."
         return self.snapshot(note)
 
+    @_restarts_after_crash
     def read(self) -> str:
         """Az aktuális oldal teljes (fő)szövege, pl. egy cikk elolvasásához."""
         page = self._ensure()
@@ -1365,6 +1427,7 @@ class BrowserController:
             return unsure
         return bool(_CHALLENGE_RE.search(title)) or (len(head) < 600 and bool(_CHALLENGE_RE.search(head)))
 
+    @_restarts_after_crash
     def fetch_text(self, url: str) -> tuple[str, str, str]:
         """Elolvas egy oldalt egy KÜLÖN lapon, és bezárja (az aktív lap, amin a modell épp dolgozik,
         nem változik): (végső cím, oldalcím, szöveg). Azokhoz az oldalakhoz, amelyek a sima
@@ -1380,7 +1443,7 @@ class BrowserController:
         except Exception as exc:  # noqa: BLE001
             if not is_closed_error(exc):
                 raise BrowserError(f"Nem sikerült új lapot nyitni ({_short(exc)}).") from None
-            self.close()
+            self._release(exc)
             self._ensure()
             page = self._context.new_page()
         try:
@@ -1412,6 +1475,7 @@ class BrowserController:
         final_url, title, text = self.fetch_text(url)
         return web.format_page(title, final_url, text, self.read_max_chars, js_hint=False)
 
+    @_restarts_after_crash
     def screenshot_b64(self) -> str:
         page = self._ensure()
         try:
@@ -1429,6 +1493,7 @@ class BrowserController:
         except Exception:  # noqa: BLE001 - bezárt lap
             return ""
 
+    @_restarts_after_crash
     def upload_files(self, files: list[str], element: Any = None) -> str:
         """Fájlokat (fotókat) tölt fel az oldal fájlfeltöltő mezőjébe.
 
@@ -1496,6 +1561,7 @@ class BrowserController:
             locator.set_input_files([file], timeout=15000)
             page.wait_for_timeout(600)
 
+    @_restarts_after_crash
     def extract_listings(self, url: str) -> list[dict[str, Any]]:
         """Egy keresési találati oldal hirdetései árral (az árkutatáshoz)."""
         try:

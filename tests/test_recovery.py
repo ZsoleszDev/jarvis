@@ -20,6 +20,8 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
+import psutil
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -31,11 +33,13 @@ from test_work import SHIRT, jpeg  # noqa: E402
 from jarvis_core import app as app_module  # noqa: E402
 from jarvis_core import llm  # noqa: E402
 from jarvis_core.app import JarvisApp, model_problem  # noqa: E402
-from jarvis_core.browser import BrowserController, BrowserError, blocker_of  # noqa: E402
+from jarvis_core.browser import RESTARTED_NOTE, BrowserController, BrowserError, blocker_of  # noqa: E402
 from jarvis_core.config import load_config  # noqa: E402
 from jarvis_core.gui import EventBus, GuiUI  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, is_runner_crash  # noqa: E402
-from jarvis_core.ollama_log import ServerLog, advice, find_cause  # noqa: E402
+from jarvis_core import memory  # noqa: E402
+from jarvis_core.memory import GB, MemoryReport, OllamaProcess  # noqa: E402
+from jarvis_core.ollama_log import ServerLog, explain, find_cause  # noqa: E402
 from jarvis_core.selling import FAILED  # noqa: E402
 
 # Az Ollama 0.40 pontos hibaüzenetei, amikor a modellfolyamat leáll (a felhasználó naplójából)
@@ -103,14 +107,159 @@ class ServerLogTests(unittest.TestCase):
         nowhere.path = None                                      # Linuxon a rendszernaplóban van
         self.assertEqual(nowhere.read_new(), "")
 
-    def test_advice_names_the_fix(self):
-        ram = find_cause(BAD_ALLOC_LOG)
-        text = advice(ram, Path("server.log"), cache_off=False)
-        self.assertIn("elfogyott a gép memóriája", text)
-        self.assertIn("setx LLAMA_ARG_CACHE_RAM 0", text)
-        self.assertIn("lépj ki az Ollamából", text)
-        self.assertIn("már 0", advice(ram, None, cache_off=True))
-        self.assertIn("server.log", advice(None, Path("C:/Users/x/AppData/Local/Ollama/server.log"), cache_off=False))
+
+
+# A felhasználó gépéhez hasonló állapot: a véglegesített memória (RAM + lapozófájl) majdnem betelt.
+FULL = MemoryReport(ram_used=int(29.6 * GB), ram_total=int(31.9 * GB), commit_used=int(35.2 * GB),
+                    commit_limit=int(35.9 * GB), pagefile="fixed:4096",
+                    top=[("ollama.exe", int(14.1 * GB), 2), ("msedge.exe", int(6.2 * GB), 23),
+                         ("python.exe", int(2.1 * GB), 1), ("node.exe", int(0.4 * GB), 1)])
+NO_SETTING = {"LLAMA_ARG_CACHE_RAM": None, "LLAMA_ARG_CTX_CHECKPOINTS": None}
+CACHE_OFF = {"LLAMA_ARG_CACHE_RAM": "0", "LLAMA_ARG_CTX_CHECKPOINTS": None}
+
+
+def texts(lines: list[tuple[str, str]]) -> str:
+    return "\n".join(text for _, text in lines)
+
+
+class CrashAdviceTests(unittest.TestCase):
+    """Mit mondjon a Jarvis a leállás után: az okot, a gép memóriáját, és a javítást a tényleges állapot szerint."""
+
+    def setUp(self):
+        self.ram = find_cause(BAD_ALLOC_LOG)
+
+    def test_without_the_setting(self):
+        lines = explain(self.ram, Path("server.log"), NO_SETTING, FULL, OllamaProcess())
+        self.assertEqual(lines[0][0], "warn")
+        self.assertIn("elfogyott a gép memóriája (", lines[0][1])
+        text = texts(lines)
+        self.assertIn("RAM 29,6 / 31,9 GB foglalt; véglegesítve (RAM + lapozófájl) 35,2 / 35,9 GB", text)
+        self.assertIn("A legtöbbet foglalja: ollama.exe (2 folyamat) 14,1 GB, msedge.exe (23 folyamat) 6,2 GB", text)
+        self.assertIn("„setx LLAMA_ARG_CACHE_RAM 0” és „setx LLAMA_ARG_CTX_CHECKPOINTS 4”", text)
+        self.assertIn("a lapozófájl legfeljebb 4 GB", text)
+        self.assertIn("SystemPropertiesPerformance", text)
+        self.assertIn("A böngésző (msedge.exe) 6,2 GB-ot foglal", text)
+        self.assertEqual({level for level, line in lines if line.startswith("  A gép memóriája")}, {"info"})
+
+    def test_ollama_was_not_restarted_after_the_setting(self):
+        stale = OllamaProcess(found=True, readable=True, env={})
+        text = texts(explain(self.ram, None, CACHE_OFF, None, stale))
+        self.assertIn("A futó Ollama még a beállítás előtt indult (a környezetében nincs LLAMA_ARG_CACHE_RAM)", text)
+        self.assertIn("lépj ki az Ollamából a tálcán", text)
+        self.assertIn("„setx LLAMA_ARG_CTX_CHECKPOINTS 4”", text, "az ellenőrzőpontok még nincsenek beállítva")
+        self.assertNotIn("setx LLAMA_ARG_CACHE_RAM", text, "az már megvan")
+
+    def test_ollama_runs_with_the_settings(self):
+        settings = {"LLAMA_ARG_CACHE_RAM": "0", "LLAMA_ARG_CTX_CHECKPOINTS": "4"}
+        running = OllamaProcess(found=True, readable=True, env=dict(settings))
+        roomy = MemoryReport(ram_used=20 * GB, ram_total=32 * GB, commit_used=30 * GB, commit_limit=64 * GB,
+                             pagefile="auto", top=[("ollama.exe", 9 * GB, 1)])
+        text = texts(explain(self.ram, None, settings, roomy, running))
+        self.assertNotIn("még a beállítás előtt", text)
+        self.assertNotIn("setx", text)
+        self.assertNotIn("lapozófájl legfeljebb", text)
+        self.assertIn("Zárj be más, sok memóriát foglaló programokat", text)
+
+    def test_ollama_forces_its_own_cache_size(self):
+        forced = OllamaProcess(found=True, readable=True, env={"LLAMA_ARG_CACHE_RAM": "0"},
+                               flags={"LLAMA_ARG_CACHE_RAM": "8192"})
+        self.assertIn("maga adja meg: --cache-ram 8192", texts(explain(self.ram, None, CACHE_OFF, None, forced)))
+
+    def test_repeated_crash_is_shorter_but_complete(self):
+        first = texts(explain(self.ram, None, NO_SETTING, FULL, OllamaProcess()))
+        again = texts(explain(self.ram, None, NO_SETTING, FULL, OllamaProcess(), repeated=True))
+        self.assertIn("A leállás oka megint: elfogyott a gép memóriája.", again)
+        self.assertIn("setx LLAMA_ARG_CACHE_RAM 0", again)
+        self.assertIn("35,2 / 35,9 GB", again, "a friss számokkal")
+        self.assertLess(len(again), len(first))
+
+    def test_unknown_cause(self):
+        log = Path("C:/Users/x/AppData/Local/Ollama/server.log")
+        self.assertIn("server.log", texts(explain(None, log, NO_SETTING)))
+        self.assertIn("lapozófájl", texts(explain(None, log, NO_SETTING, FULL)), "ha betelt a memória, az a gyanús")
+
+
+class FakeProc:
+    def __init__(self, name, mb=0, cmdline=(), environ=None):
+        self.info = {"name": name, "cmdline": list(cmdline),
+                     "memory_info": mock.Mock(rss=mb * 2**20, vms=mb * 2**20, private=mb * 2**20)}
+        self._environ = environ
+
+    def environ(self):
+        if isinstance(self._environ, Exception):
+            raise self._environ
+        return self._environ or {}
+
+
+class FakePsutil:
+    def __init__(self, procs):
+        self.procs = procs
+
+    def process_iter(self, attrs=None):
+        return iter(self.procs)
+
+    def virtual_memory(self):
+        return mock.Mock(total=32 * GB, available=4 * GB)
+
+
+class FakeRegistry:
+    HKEY_LOCAL_MACHINE = "HKLM"
+
+    def __init__(self, values):
+        self.values = values
+
+    def OpenKey(self, root, path):
+        if self.values is None:
+            raise OSError("nincs ilyen kulcs")
+        return mock.MagicMock()
+
+    def QueryValueEx(self, key, name):
+        if name not in self.values:
+            raise OSError(name)
+        return self.values[name], 7
+
+
+class MemoryTests(unittest.TestCase):
+    def test_heavy_programs_are_grouped_by_name(self):
+        fake = FakePsutil([FakeProc("msedge.exe", 900), FakeProc("msedge.exe", 1200), FakeProc("ollama.exe", 9000),
+                           FakeProc("python.exe", 1500), FakeProc("", 5000), FakeProc("Idle", 0)])
+        self.assertEqual(memory.heavy_programs(3, fake), [("ollama.exe", 9000 * 2**20, 1),
+                                                          ("msedge.exe", 2100 * 2**20, 2),
+                                                          ("python.exe", 1500 * 2**20, 1)])
+        report = memory.report(2, fake)
+        self.assertEqual((report.ram_used, report.ram_total), (28 * GB, 32 * GB))
+        self.assertEqual(len(report.top), 2)
+
+    def test_pagefile_setting(self):
+        cases = [({"AutomaticManagedPagefile": 1, "PagingFiles": ["?:\\pagefile.sys"]}, "auto"),
+                 ({"AutomaticManagedPagefile": 0, "PagingFiles": ["?:\\pagefile.sys"]}, "auto"),
+                 ({"PagingFiles": ["C:\\pagefile.sys 0 0"]}, "auto"),
+                 ({"PagingFiles": ["C:\\pagefile.sys 2048 4096", "D:\\pagefile.sys 1024 1024"]}, "fixed:5120"),
+                 ({"PagingFiles": [""]}, "none"),
+                 ({"PagingFiles": []}, "none"),
+                 (None, "")]
+        for values, expected in cases:
+            self.assertEqual(memory.pagefile_setting(FakeRegistry(values)), expected, values)
+        self.assertEqual(MemoryReport(pagefile="fixed:5120").pagefile_max_gb, 5.0)
+        self.assertEqual(MemoryReport(pagefile="none").pagefile_max_gb, 0.0)
+        self.assertIsNone(MemoryReport(pagefile="auto").pagefile_max_gb)
+
+    def test_the_running_ollama_and_its_settings(self):
+        fake = FakePsutil([
+            FakeProc("ollama app.exe", 50, ["C:\\Ollama\\ollama app.exe"]),
+            FakeProc("ollama.exe", 80, ["C:\\Ollama\\ollama.exe", "serve"],
+                     {"LLAMA_ARG_CACHE_RAM": "0", "PATH": "x"}),
+            FakeProc("llama-server.exe", 9000, ["llama-server.exe", "--model", "m.gguf", "--ctx-checkpoints", "8"]),
+        ])
+        found = memory.ollama_process(fake)
+        self.assertTrue(found.found and found.readable)
+        self.assertEqual(found.env, {"LLAMA_ARG_CACHE_RAM": "0"})
+        self.assertEqual(found.flags, {"LLAMA_ARG_CTX_CHECKPOINTS": "8"})
+        hidden = memory.ollama_process(FakePsutil([FakeProc("ollama.exe", 80, ["ollama", "serve"],
+                                                            PermissionError("másik felhasználó"))]))
+        self.assertTrue(hidden.found)
+        self.assertFalse(hidden.readable)
+        self.assertFalse(memory.ollama_process(FakePsutil([FakeProc("python.exe")])).found)
 
 
 class ClientRetryTests(unittest.TestCase):
@@ -241,21 +390,38 @@ class AppRecoveryTests(unittest.TestCase):
         self.app.server_log = ServerLog(log_file)
         self.app.server_log.mark()
         with mock.patch.object(app_module, "RESTART_LOG_DELAY", 0.01), \
-                mock.patch.object(app_module, "user_setting", return_value=None):
+                mock.patch.object(app_module, "user_setting", return_value=None), \
+                mock.patch.object(memory, "report", return_value=FULL), \
+                mock.patch.object(memory, "ollama_process", return_value=OllamaProcess()):
             with log_file.open("a", encoding="utf-8") as handle:
                 handle.write(BAD_ALLOC_LOG)              # ezt írja az Ollama a naplójába, amikor a modell leáll
             self.fake.chat_script = [crash(CRASH_DURING), reply("Itt vagyok.")]
             self.app.answer("Szia")
-            note = self.wait_for_warn("elfogyott a gép memóriája")
-            self.assertIn("setx LLAMA_ARG_CACHE_RAM 0", note)
+            self.wait_for_warn("elfogyott a gép memóriája (")
+            first = self.notes_after("elfogyott a gép memóriája (")
+            self.assertIn("setx LLAMA_ARG_CACHE_RAM 0", first)
+            self.assertIn("véglegesítve (RAM + lapozófájl) 35,2 / 35,9 GB", first, "a gép memóriája is látszik")
             with log_file.open("a", encoding="utf-8") as handle:
                 handle.write(BAD_ALLOC_LOG)
             self.fake.chat_script = [crash(CRASH_DURING), reply("Megint itt.")]
             self.app.answer("Szia újra")
-            again = self.wait_for_warn("A leállás oka megint")
+            self.wait_for_warn("A leállás oka megint")
+            again = self.notes_after("A leállás oka megint")
         self.assertIn("setx LLAMA_ARG_CACHE_RAM 0", again, "röviden, de a javítással együtt")
-        self.assertLess(len(again), len(note), "a részletes magyarázat csak egyszer")
+        self.assertLess(len(again), len(first), "a részletes magyarázat csak egyszer")
         self.assertEqual([r["cause"] for r in self.app.model_restarts], ["ram", "ram"])
+        self.assertEqual(self.app.model_restarts[0]["memory"]["commit"], [35.2, 35.9], "a hibacsomagba is bekerül")
+
+    def notes_after(self, head: str) -> str:
+        """A figyelmeztetés és az utána jövő magyarázó sorok (amíg a következő leállás nem jön)."""
+        events = [e for e in self.events() if e["type"] in ("warn", "info")]
+        start = max(i for i, e in enumerate(events) if head in e["text"])
+        lines = []
+        for event in events[start:]:
+            if lines and "futás közben leállt" in event["text"]:
+                break
+            lines.append(event["text"])
+        return "\n".join(lines)
 
     def test_a_failed_post_reports_in_the_work_log_and_on_the_card(self):
         store = self.app.work.store
@@ -353,6 +519,82 @@ class CoveredClickTests(unittest.TestCase):
         self.assertEqual(blocker_of(nested),
                          "egy <span> elem („ok”)")
         self.assertEqual(blocker_of("Locator.click: Timeout 8000ms exceeded."), "")
+
+
+@unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
+class BrowserCrashTests(unittest.TestCase):
+    """Ha a böngésző vagy a Playwright-meghajtó (node) elhal (pl. mert elfogyott a gép memóriája), a következő
+    lépés újraindítja, és nem akad el. A felhasználónál így jött: „Target page, context or browser has been
+    closed”, utána „Playwright connection closed”, és minden további böngészős lépés ugyanígy elbukott."""
+
+    PAGES = {"a.html": "<!doctype html><title>A</title><button>Gomb</button>",
+             "b.html": "<!doctype html><title>B</title><a href='a.html'>Vissza</a>"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        for name, html in cls.PAGES.items():
+            (Path(cls.dir.name) / name).write_text(html, encoding="utf-8")
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_QuietHandler, directory=cls.dir.name))
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.dir.cleanup()
+
+    def setUp(self):
+        self.profile = tempfile.TemporaryDirectory()
+        cfg = load_config(ROOT / "config.toml").browser
+        cfg.headless = True
+        cfg.channel = ""
+        cfg.profile_dir = self.profile.name
+        cfg.pace = 0.0
+        before = {p.pid for p in psutil.Process().children(recursive=True)}
+        self.browser = BrowserController(cfg, allow_local=True, confirm=lambda prompt: True)
+        self.assertIn("Gomb", self.browser.open(self.url("a.html")))
+        self.spawned = [p for p in psutil.Process().children(recursive=True) if p.pid not in before]
+
+    def tearDown(self):
+        self.browser.close()
+        self.profile.cleanup()
+
+    def url(self, name: str) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}/{name}"
+
+    def kill(self, driver: bool) -> None:
+        drivers = [p for p in self.spawned if "node" in p.name().lower()]
+        self.assertTrue(drivers, "a Playwright-meghajtó megvan")
+        targets = drivers if driver else [p for p in self.spawned
+                                          if p not in drivers and p.ppid() in {d.pid for d in drivers}]
+        self.assertTrue(targets)
+        for proc in targets:
+            proc.kill()
+        psutil.wait_procs(targets, timeout=5)
+        time.sleep(0.5)
+
+    def check_recovers(self) -> None:
+        started = time.monotonic()
+        view = self.browser.snapshot()
+        self.assertIn(RESTARTED_NOTE, view, "megmondja a modellnek, hogy az oldal elveszett")
+        self.assertLess(time.monotonic() - started, 30, "nem akad el")
+        self.assertIn("Vissza", self.browser.open(self.url("b.html")), "utána minden megy tovább")
+
+    def test_the_browser_crashed(self):
+        self.kill(driver=False)
+        self.check_recovers()
+
+    def test_the_playwright_driver_died(self):
+        self.kill(driver=True)
+        self.check_recovers()
+
+    def test_a_failed_step_lets_the_next_one_restart(self):
+        self.kill(driver=True)
+        with self.assertRaises(BrowserError):
+            self.browser.press("Escape")
+        self.assertFalse(self.browser.running, "elengedte a halott böngészőt")
+        self.assertIn("Vissza", self.browser.open(self.url("b.html")))
 
 
 if __name__ == "__main__":
