@@ -1478,44 +1478,113 @@ class JarvisApp:
         return ok
 
     def _post_one(self, item_id: str, key: str) -> bool:
-        """Egy oldalra tölti fel: ha már begyakorolta, modell nélkül; különben a Munka menü
-        beszélgetésével (a böngészőben, a végén jóváhagyással), és közben megtanulja."""
+        """Egy oldalra tölti fel: a Vintedre a Jarvis maga tölti ki (vinted.py); ha már begyakorolta, modell
+        nélkül; különben a Munka menü beszélgetésével (a böngészőben, a végén jóváhagyással), és közben
+        megtanulja."""
         assert self.work is not None and self.work_assistant is not None
         if key not in self.work.platforms:
             raise ItemError(f"Ismeretlen hirdetési oldal: {key}")
         self._respect_gap(item_id, key)
         self.work.begin_trail()
+        if self.work.can_autofill(item_id, key):
+            result = self._autofill(item_id, key)
+            if result is not None:
+                return result
         if self.work.can_replay(item_id, key, "post"):
             result = self._replay(item_id, key, "post")
             if result is not None:
                 return result
         item = self.work.store.get(item_id)
+        return self._model_post(item_id, key, self.work.post_request(item, key),
+                                shown=f"Feltöltés: {item.name} → {self.work.platforms[key].name}")
+
+    def _model_post(self, item_id: str, key: str, request: str, shown: str, guard: bool = False) -> bool:
+        """A feltöltést (vagy a félig kitöltött űrlap befejezését) a modell csinálja a Munka menü beszélgetésében.
+        `guard`: a közzététel már megtörtént (jóváhagytad), ezért újra feltölteni (item_post) nem szabad."""
+        assert self.work is not None and self.work_assistant is not None
         self.work.store.set_busy(item_id, f"Feltöltés: {self.work.platforms[key].name}…")
         # Minden feltöltés tiszta lappal indul: rövidebb kérés, gyorsabb válasz.
         self.work_assistant.reset()
         last = ""
-        site = self.work.platforms[key].name
         cancelled = False
         failure: OllamaError | None = None
+        if guard:
+            self.work.checking = (item_id, key)
         try:
             try:
-                self.answer(self.work.post_request(item, key), via="auto", mode="work",
-                            shown=f"Feltöltés: {item.name} → {site}")
+                self.answer(request, via="auto", mode="work", shown=shown)
                 last = self._last_work_reply()
             except OllamaError as exc:
                 last, failure = model_problem(exc, short=True), exc
-            if self.work.unmarked_publish(item_id, key):
+            if self.work.unmarked_publish(item_id, key) and not guard:   # (a guard-os kérés maga is ellenőrzés)
                 last = self._check_publish(item_id, key) or last
         except Cancelled:
             last = "Megszakítottad. Az Újra gombbal folytatom."
             cancelled = True
             raise
         finally:
+            self.work.checking = None
             ok = self.work.finish_post(item_id, key, last)
             if not ok and not cancelled:
                 self._dossier(item_id, key, "post", last or "nem sikerült végigcsinálni", "modell")
         if failure is not None and not ok:
             raise failure
+        return ok
+
+    def _autofill(self, item_id: str, key: str) -> bool | None:
+        """A Vinted űrlapjának kitöltése modell nélkül (a modell csak a kategóriát választja ki, lásd vinted.py).
+
+        Visszaad: True (fent van), False (nem sikerült, nem engedélyezted, vagy be kell jelentkezni), vagy None,
+        ha az űrlapot fel sem ismerte (akkor a begyakorolt lépések vagy a modell csinálja elölről). Ha közben
+        elakad, vagy a közzététel után nem egyértelmű az eredmény, a modell a nyitott űrlapon folytatja."""
+        assert self.work is not None and self.work_assistant is not None
+        work = self.work
+        item = work.store.get(item_id)
+        site = work.platforms[key]
+        self.ui.info(f"Feltöltés modell nélkül: {item.name} → {site.name}")
+        work.store.set_busy(item_id, f"Feltöltés (modell nélkül): {site.name}…")
+        work.current = (item_id, key)
+        work.approved = False
+        started = time.perf_counter()
+        try:
+            outcome = work.autofill(item_id, key, progress=self._progress(item_id))
+        except Cancelled:
+            work.current = None
+            raise
+        mode = "Vinted-kitöltő"
+        if outcome.status == "miss":
+            work.current = None
+            self._dossier(item_id, key, "post", outcome.reason, mode, url=outcome.url, kitoltes=outcome.log)
+            self.ui.info(f"A modell nélküli kitöltés most nem megy ({outcome.reason}), végiggondolom.")
+            return None
+        if outcome.status == "declined":
+            return work.finish_post(item_id, key, "Nem engedélyezted a közzétételt.")
+        if outcome.status == "blocked":
+            self.ui.notice(outcome.reason)
+            return work.finish_post(item_id, key, outcome.reason)
+        if outcome.status == "done":
+            work.store.mark(item_id, key, POSTED, url=outcome.url if outcome.url.startswith("http") else "")
+            ok = work.finish_post(item_id, key)
+            if ok:
+                work.remember_choices(outcome)
+            if self.cfg.assistant.show_timings:
+                self.ui.timing(f"feltöltés modell nélkül: {secs(time.perf_counter() - started)}")
+            return ok
+        # Elakadt (partial), vagy a közzététel után nem egyértelmű (uncertain): a modell a nyitott űrlapon folytatja.
+        self._dossier(item_id, key, "post", outcome.reason, mode, url=outcome.url, kitoltes=outcome.log)
+        if outcome.published:
+            self.ui.info(f"A közzététel után nem egyértelmű, sikerült-e ({outcome.reason}); megnézem.")
+        else:
+            self.ui.info(f"A kitöltés nem ment végig ({outcome.reason}); a hiányzót a modell pótolja.")
+        try:
+            page = self.toolbox.browser.snapshot()
+        except BrowserError as exc:
+            page = f"(Az oldalnézet nem készült el: {exc})"
+        verb = "Ellenőrzés" if outcome.published else "Folytatás"
+        ok = self._model_post(item_id, key, work.continue_request(item, key, outcome, page),
+                              shown=f"{verb}: {item.name} → {site.name}", guard=outcome.published)
+        if ok:
+            work.remember_choices(outcome)
         return ok
 
     def _last_work_reply(self) -> str:

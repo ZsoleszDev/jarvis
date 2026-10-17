@@ -31,6 +31,7 @@ from .selling import (CONDITIONS, NEEDS, NOT_POSTED, PARCEL_SIZES, PLATFORMS, PO
                       missing_needs, parse_price, price_verdict, question_for)
 from .textutil import fold
 from .tools import Toolbox, ToolError, params
+from .vinted import ChoiceMemory, FillOutcome, VintedFiller
 
 # A Munka menü beszélgetése ezeket az eszközöket látja; a böngésző ugyanaz, mint a Beszélgetésé.
 SHARED_TOOLS = {"get_datetime", "web_search", "read_webpage", "browser_open", "browser_click",
@@ -131,6 +132,7 @@ class WorkDesk:
                  platforms: dict[str, Platform] | None = None,
                  check_stop: Callable[[], None] | None = None):
         self.cfg = cfg
+        self.llm = llm
         self.toolbox = toolbox
         self.confirm = confirm or (lambda _prompt: False)
         self.check_stop = check_stop or (lambda: None)   # Állj gomb: Cancelled kivételt dob
@@ -152,12 +154,16 @@ class WorkDesk:
         self.settings = self._load_settings()
         # Begyakorolt lépések: a modell sikeres feltöltéseiből és levételeiből tanul (replay.py).
         self.flows = FlowStore(self.root / "folyamatok")
+        # A Vinted-kitöltő (vinted.py) választásai, pl. egy tárgyfajta kategóriaútja: legközelebb modell nélkül.
+        self.choices = ChoiceMemory(self.root / "valasztasok" / "vinted.json")
         # Hibacsomagok (dossier.py): ha egy feltöltés vagy levétel elakad, minden a javításhoz.
         self.dossiers = Dossiers(self.root / "hibak")
         self.trail: list[dict[str, Any]] = []      # a mostani feltöltés/levétel böngészős lépései
         # Emberi tempó: oldal → mikortól jöhet a következő közzététel vagy levétel.
         self._next_allowed: dict[str, float] = {}
         self.recorder: FlowRecorder | None = None
+        # A jóváhagyó ablakba: mivel töltötte ki (begyakorolt lépések vagy a Vinted-kitöltő), és mit választott.
+        self.preview_title = ""
         self.replay_preview: list[str] = []
         # Jóváhagyott levétel: (tárgy, oldal, meddig); addig a törlés gombjaira nem kérdez újra.
         self.delisting: tuple[str, str, float] | None = None
@@ -338,7 +344,7 @@ class WorkDesk:
         site = self.platforms.get(self.current[1])
         text = f"{site.name if site else self.current[1]}: {item.name} – {format_price(item.price)}"
         if self.replay_preview:
-            text += "\nBegyakorolt lépésekkel töltöttem ki. " + "; ".join(self.replay_preview)
+            text += f"\n{self.preview_title or 'Begyakorolt lépésekkel töltöttem ki.'} " + "; ".join(self.replay_preview)
         return text
 
     # --- felvétel és visszajátszás (lásd replay.py) ---------------------------------------------------
@@ -350,6 +356,7 @@ class WorkDesk:
         self.recorder = None
         self.delisting = None
         self.replay_preview = []
+        self.preview_title = ""
         self.checking = None
 
     def _on_browser_action(self, event: dict[str, Any]) -> None:
@@ -499,6 +506,63 @@ class WorkDesk:
                 "hirdetés már nem él (törölve, inaktív vagy eladottként jelölve), jelöld meg az item_mark eszközzel "
                 f"(status: nincs fent, platform: {key}). Ha még fent van, fejezd be a levételt. Röviden mondd el "
                 "az eredményt.")
+
+    # --- a Vinted-kitöltő (lásd vinted.py) -------------------------------------------------------------
+
+    def can_autofill(self, item_id: str, key: str) -> bool:
+        """A Vinted űrlapját a Jarvis maga tölti ki ([work] autofill); a modell csak a kategóriát választja ki."""
+        if not (self.cfg.work.autofill and self.browser_ready) or key != "vinted" or key not in self.platforms:
+            return False
+        try:
+            item = self.store.get(item_id)
+        except ItemError:
+            return False
+        return bool(item.title and item.description and item.price and item.photos)
+
+    def autofill(self, item_id: str, key: str, progress: Callable[[str], None] | None = None) -> FillOutcome:
+        """Kitölti (és jóváhagyással közzéteszi) a hirdetést a Vinted-kitöltővel."""
+        item = self.store.get(item_id)
+        filler = VintedFiller(self.toolbox.browser, self.llm, item_values(item, self.settings),
+                              [str(p) for p in self.store.photo_paths(item.id)], memory=self.choices,
+                              check=self.check_stop, progress=progress)
+        self.recorder = None
+        self.begin_trail()
+        self.preview_title = "Modell nélkül töltöttem ki."
+        self.replay_preview = filler.summary      # a közzététel kérdésében látod, mit választott
+        try:
+            return filler.run(self.platforms[key].new_url)
+        finally:
+            self.replay_preview = []
+            self.preview_title = ""
+
+    def remember_choices(self, outcome: FillOutcome) -> None:
+        """Sikeres feltöltés után: amit a modell kiválasztott (pl. a kategóriautat), legközelebb modell nélkül."""
+        try:
+            self.choices.update(outcome.learned)
+        except OSError:
+            pass
+
+    def continue_request(self, item: Item, key: str, outcome: FillOutcome, page: str) -> str:
+        """A Vinted-kitöltő után a modell a nyitott űrlapon folytatja (nem kezdi elölről)."""
+        site = self.platforms[key]
+        mark = (f"jelöld meg az item_mark eszközzel (status: feltöltve, platform: {key}, és ha látod, a hirdetés "
+                "webcíme)")
+        if outcome.published:
+            task = (f"Kitöltöttem a(z) {site.name} hirdetési űrlapját, és a felhasználó jóváhagyta a közzétételt, de nem "
+                    f"biztos, hogy sikerült ({outcome.reason}). Nézd meg az oldalt. Ha a hirdetés fent van, rögtön {mark}. "
+                    "Ha az oldal azt írja, hogy valami hiányzik, pótold a hirdetés adataival, és tedd közzé újra (a rendszer "
+                    "megint jóváhagyást kér). Ha nem tudod eldönteni, fent van-e, ne jelöld meg.")
+        else:
+            task = (f"Elkezdtem kitölteni a(z) {site.name} hirdetési űrlapját, ami nyitva van a böngésződben. Kész: "
+                    f"{', '.join(outcome.filled) or 'még semmi'}. Nem sikerült: {outcome.reason}. Ezeket pótold a hirdetés "
+                    "adataival, a kész mezőkhöz ne nyúlj. Utána kattints a közzététel gombjára (a rendszer jóváhagyást "
+                    f"kér), és ha fent van, rögtön {mark}.")
+        return (f"A(z) „{item.name}” hirdetés (azonosító: {item.id}). {task} Az item_post eszközt ne használd, mert "
+                "elölről kezdené. Márkát, méretet, színt vagy állapotot ne találj ki: ha valami nincs meg a hirdetés "
+                "adatai között, állj meg, és mondd meg, mi kell. Ha bejelentkezés vagy robot-ellenőrzés kell, állj meg, és "
+                "kérd meg a felhasználót. A végén röviden mondd el az eredményt.\n\n"
+                f"A hirdetés adatai ({item.id}):\n{self.listing_block(item, key)}\n\nTippek ({site.name}): {site.hints}"
+                + KEEP_ABOVE + page)
 
     # --- levétel (eladás után) ----------------------------------------------------------------------
 

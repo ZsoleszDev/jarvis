@@ -79,9 +79,14 @@ PLATFORMS: dict[str, Platform] = {
         "vinted", "Vinted", "https://www.vinted.hu/", "https://www.vinted.hu/items/new",
         "https://www.vinted.hu/catalog?search_text={q}", ("vinted.hu",),
         "1. Fotók: browser_upload_photos (elem nélkül, vagy a fotófeltöltő gomb számával). "
-        "2. Cím és leírás. 3. Kategória: kattints a mezőre, és lépkedj a szinteken (pl. Nők, Ruhák, "
-        "Pólók). 4. Márka: kezdd el begépelni, és válaszd ki a listából. 5. Méret, állapot, szín (és ha "
-        "van, anyag) a listákból. 6. Ár forintban. 7. Csomagméret a megadott. 8. Végül a „Feltöltés” gomb."),
+        "2. Cím (Title), leírás (Description) és ár (Price) egy browser_fill lépésben. 3. Kategória (Category): "
+        "a mezőre kattintva lista nyílik; szintenként válassz (pl. Women, Clothing, Jeans), az utolsó szint "
+        "egy választógomb. 4. A kategória után jelenik meg a márka, a méret, az állapot és a szín. Márka: a "
+        "„Search brands” mezőbe írd be, és válaszd ki a listából. 5. Méret a listából (ha előbb a méretrendszert "
+        "kéri, pl. EU, azt is). 6. Állapot: New with tags = Új, címkével; New without tags = Új; Very good = "
+        "Nagyon jó; Good = Jó; Satisfactory = Elfogadható vagy Hibás. 7. Szín (Colours, legfeljebb kettő), utána "
+        "zárd be a listát. 8. Csomagméret: Small = kicsi, Medium = közepes, Large = nagy. 9. Végül a „Feltöltés” "
+        "(Upload) gomb; ha utána azt írja, hogy valamit ki kell tölteni (Fill in …), pótold, és kattints újra."),
     "jofogas": Platform(
         "jofogas", "Jófogás", "https://www.jofogas.hu/", "https://www.jofogas.hu/",
         "https://www.jofogas.hu/magyarorszag?q={q}", ("jofogas.hu",),

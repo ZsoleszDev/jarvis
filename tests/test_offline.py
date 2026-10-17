@@ -189,6 +189,9 @@ def make_cfg(tmp: Path, host: str | None = None) -> Config:
     # nélkül, és két közzététel között sem kell várni.
     cfg.browser.pace = 0.0
     cfg.work.publish_gap_minutes = 0.0
+    # A helyi „hirdetési oldalak” a modell és a begyakorolt lépések útját tesztelik; a Vinted-kitöltőt
+    # (vinted.py) a saját tesztjei (test_vinted.py) kapcsolják be, a Vinted űrlapját utánzó oldallal.
+    cfg.work.autofill = False
     return cfg
 
 

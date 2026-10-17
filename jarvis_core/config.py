@@ -150,6 +150,8 @@ class WorkCfg:
     max_tool_rounds: int = 40
     max_photos: int = 20
     replay: bool = True        # a begyakorolt feltöltés/levétel visszajátszása modell nélkül
+    # A Vinted űrlapját a Jarvis maga tölti ki (vinted.py); a modell csak a kategóriát választja ki.
+    autofill: bool = True
     # Két közzététel (vagy levétel) között ugyanazon az oldalon legalább ennyi perc teljen el
     # (véletlenszerűen ±30%), ahogy egy embernél. 0 = nincs várakozás.
     publish_gap_minutes: float = 2.0

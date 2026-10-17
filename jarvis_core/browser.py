@@ -23,6 +23,9 @@ from .humanize import LONG_TEXT, Pace
 from .textutil import fold
 
 VISIBLE_TEXT_CHARS = 1500
+# A modell nélküli kitöltés letapogatásának számai (az oldalnézeté 1-től, a visszajátszásé 9000-től megy).
+# Bőven kell: a lenyíló listák gyakran a lap legvégére kerülnek, a fejléc és a lábléc linkjei után.
+SCAN_BASE, SCAN_SPAN, SCAN_MAX = 5000, 3000, 1500
 # Robotvédelmi köztes oldal (pl. Cloudflare "Just a moment..."): egy valódi böngészőben ez
 # többnyire magától továbbenged pár másodperc alatt. Ha captchát kér, azt nem kerüljük meg.
 _CHALLENGE_RE = re.compile(
@@ -358,6 +361,82 @@ LOCATE_JS = r"""
   if (sensitive(el)) item.sensitive = true;
   if (pick.field) item.field = pick.field;
   return {count: top.length, score: best, item};
+}
+"""
+
+# Modell nélküli kitöltés (vinted.py): az oldal ÖSSZES látható, kezelhető eleme (nem csak a képernyőn
+# lévők, és nincs 60-as korlát), megszámozva, hogy a click/type_text használhassa őket. A számok külön
+# tartományban vannak (SCAN_BASE-től), és minden letapogatás az előzőét törli.
+SCAN_JS = r"""
+(opts) => {
+""" + _JS_HELPERS + r"""
+  const BASE = opts.base, END = opts.base + opts.span;
+  document.querySelectorAll('[data-jarvis-scan]').forEach((el) => {
+    el.removeAttribute('data-jarvis-scan');
+    const id = parseInt(el.getAttribute('data-jarvis-id') || '0', 10);
+    if (id >= BASE && id < END) el.removeAttribute('data-jarvis-id');
+  });
+  const CHROME = 'header, nav, footer, [role=banner], [role=navigation], [role=contentinfo]';
+  const vh = window.innerHeight;
+  const noValue = ['password', 'checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file'];
+  const out = [];
+  for (const el of document.querySelectorAll(SELECTOR)) {
+    if (out.length >= opts.max) break;
+    if (el.disabled) continue;
+    const kind = kindOf(el);
+    if (kind !== 'input:file' && !visible(el)) continue;
+    const name = nameOf(el);
+    const isField = /^(input|textbox|searchbox|combobox|textarea|select)/.test(kind);
+    if (!name && !isField) continue;
+    const id = BASE + out.length;
+    el.setAttribute('data-jarvis-id', String(id));
+    el.setAttribute('data-jarvis-scan', '1');
+    const r = el.getBoundingClientRect();
+    const item = {id, kind, label: name.slice(0, 160), field: fieldOf(el), inView: r.bottom > 0 && r.top < vh};
+    if (el.closest(CHROME)) item.chrome = true;
+    if (el.getAttribute('aria-disabled') === 'true') item.disabled = true;
+    if (el.tagName === 'A') item.href = (el.getAttribute('href') || '').slice(0, 120);
+    if ((el.tagName === 'INPUT' && !noValue.includes(el.type)) || el.tagName === 'TEXTAREA') {
+      item.value = (el.value || '').slice(0, 100);
+      if (el.readOnly) item.readonly = true;
+    }
+    if (el.type === 'checkbox' || el.type === 'radio') item.checked = !!el.checked;
+    const state = el.getAttribute('aria-checked') || el.getAttribute('aria-selected') || el.getAttribute('aria-pressed');
+    if (state) item.checked = state === 'true';
+    if (el.getAttribute('aria-expanded')) item.expanded = el.getAttribute('aria-expanded') === 'true';
+    if (el.isContentEditable) item.editable = true;
+    if (el.tagName === 'SELECT') {
+      item.select = true;
+      const chosen = el.options[el.selectedIndex];
+      item.value = chosen ? clean(chosen.text).slice(0, 60) : '';
+      item.options = Array.from(el.options).slice(0, 60).map((o) => clean(o.text).slice(0, 60));
+    }
+    if (sensitive(el)) item.sensitive = true;
+    out.push(item);
+  }
+  return out;
+}
+"""
+
+# Hibaüzenetek az űrlapon (pl. a Vinted: „Fill in colour to continue”), a közzététel után.
+FORM_ERRORS_JS = r"""
+() => {
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const shown = (el) => {
+    if (typeof el.checkVisibility === 'function' && !el.checkVisibility({visibilityProperty: true})) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  };
+  const out = [];
+  const nodes = document.querySelectorAll('[role=alert], [aria-live=assertive], [class*=error i], [class*=invalid i], ' +
+                                          '[data-testid*=error i]');
+  for (const el of nodes) {
+    if (out.length >= 6) break;
+    if (!shown(el)) continue;
+    const text = clean(el.innerText);
+    if (text && text.length <= 200 && !out.some((t) => t.includes(text) || text.includes(t))) out.push(text);
+  }
+  return out;
 }
 """
 
@@ -785,6 +864,56 @@ class BrowserController:
                 page.wait_for_timeout(300)
             except Exception:  # noqa: BLE001
                 time.sleep(0.3)
+
+    def scan(self) -> list[dict[str, Any]]:
+        """Az oldal összes látható, kezelhető eleme (a látható részen kívüliek is), megszámozva: a modell nélküli
+        kitöltés (vinted.py) ebből keresi meg a mezőket és egy lenyitott lista lehetőségeit, és a számukkal
+        kattint vagy gépel (click, type_text). Egy kattintás vagy gépelés után a számok már nem érvényesek
+        (az oldalnézet újraszámoz), ezért utána újra le kell tapogatni."""
+        page = self._ensure()
+        last_error: Exception | None = None
+        for _ in range(3):
+            try:
+                found = page.evaluate(SCAN_JS, {"base": SCAN_BASE, "span": SCAN_SPAN, "max": SCAN_MAX})
+                break
+            except Exception as exc:  # noqa: BLE001 - pl. épp navigál az oldal
+                last_error = exc
+                self._settle(page)
+        else:
+            raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(last_error)}).")
+        elements = [e for e in found or [] if isinstance(e, dict)]
+        self.elements = {n: e for n, e in self.elements.items() if not SCAN_BASE <= n < SCAN_BASE + SCAN_SPAN}
+        self.elements.update({int(e["id"]): e for e in elements})
+        return elements
+
+    def press(self, key: str = "Escape") -> None:
+        """Egy billentyű (pl. Esc: bezárja a nyitva maradt listát), ahogy az ember is megnyomná."""
+        page = self._ensure()
+        self.pace.wait(0.15, 0.4)
+        try:
+            page.keyboard.press(key)
+            page.wait_for_timeout(250)
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(f"Nem sikerült megnyomni: {key} ({_short(exc)}).") from None
+
+    def form_errors(self) -> list[str]:
+        """Az űrlap látható hibaüzenetei (pl. egy kötelező, de üres mezőnél), legfeljebb hat."""
+        page = self._ensure()
+        try:
+            found = page.evaluate(FORM_ERRORS_JS)
+        except Exception:  # noqa: BLE001 - épp navigál az oldal
+            return []
+        return [str(text) for text in found or [] if text]
+
+    def challenged(self) -> bool:
+        """Robot-ellenőrzést (captcha) vagy robotvédelmi köztes oldalt mutat-e az aktív lap."""
+        page = self._ensure()
+        try:
+            if page.evaluate("() => !!document.querySelector('iframe[src*=\"captcha\" i]')"):
+                return True
+        except Exception:  # noqa: BLE001 - épp továbbirányít
+            return False
+        return self._challenge(page, unsure=False)
 
     def capture(self) -> tuple[bytes | None, str]:
         """A hibacsomaghoz: képernyőkép (JPEG, ha nem túl hosszú, az egész oldalról) és oldalnézet.
@@ -1228,12 +1357,12 @@ class BrowserController:
             text = web.tidy(visible_text)
         return title, text
 
-    def _challenge(self, page: Any) -> bool:
+    def _challenge(self, page: Any, unsure: bool = True) -> bool:
         try:
             title = page.title() or ""
             head = page.evaluate("() => (document.body ? document.body.innerText : '').slice(0, 1500)") or ""
         except Exception:  # noqa: BLE001 - épp továbbirányít
-            return True
+            return unsure
         return bool(_CHALLENGE_RE.search(title)) or (len(head) < 600 and bool(_CHALLENGE_RE.search(head)))
 
     def fetch_text(self, url: str) -> tuple[str, str, str]:

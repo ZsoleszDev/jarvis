@@ -180,6 +180,10 @@ max_photos = 20
 # Begyakorolt lépések: amit a modell egyszer sikeresen feltöltött vagy levett, azt legközelebb
 # modell nélkül, gyorsan visszajátssza (a közzététel előtt ugyanúgy kérdez)
 replay = true
+# A Vinted űrlapját a Jarvis maga tölti ki (fotók, cím, leírás, márka, méret, állapot, szín, ár,
+# csomagméret); a modell csak a kategóriát választja ki a Vinted saját listájából. Ha valamit nem
+# talál, a modell a félig kitöltött űrlapon folytatja. false = a modell tölti ki, mint eddig.
+autofill = true
 # Ugyanazon az oldalon két közzététel (vagy levétel) között legalább ennyi perc teljen el
 # (véletlenszerűen ±30%), ahogy egy embernél, aki egymás után tölt fel. 0 = nincs várakozás.
 publish_gap_minutes = 2.0
