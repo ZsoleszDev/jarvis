@@ -426,6 +426,8 @@ body[data-state="standby"] #state { color: var(--ash); }
 .devices li { display: flex; gap: 10px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--rule); }
 .devices li span { flex: 1; }
 #phone-dialog code { color: var(--silver); }
+#phone-dialog .address { margin-bottom: 10px; }
+#phone-dialog .address code { color: var(--white); font-size: 15px; user-select: all; }
 #jobs-dialog { width: min(520px, 92vw); }
 #jobs-body .section-title { margin: 16px 0 4px; }
 .jobs { display: grid; gap: 10px; margin: 8px 0 18px; }

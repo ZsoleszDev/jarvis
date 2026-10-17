@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from . import console, creative_templates, instance
+from . import console, creative_templates, instance, remote
 from .app import STATE_TEXT, JarvisApp, tool_label
 from .config import GuiCfg, app_data
 from .creative import MAX_TEXT, StoryError
@@ -428,7 +428,7 @@ class _Handler(BaseHTTPRequestHandler):
         if phone is None:
             return {"ok": True, "enabled": False}
         return {"ok": True, "enabled": True, "host": phone.host, "port": phone.port,
-                "devices": phone.auth.devices()}
+                "address": remote.tailscale_address(phone.port), "devices": phone.auth.devices()}
 
     def _jobs_info(self) -> dict[str, Any]:
         """Az Automatikus munkák ablaknak: a figyelők és a háttérmunkák (be- vagy kikapcsolva)."""

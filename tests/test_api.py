@@ -25,6 +25,7 @@ from test_work import SHIRT, extracted, jpeg  # noqa: E402
 
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
+from jarvis_core import remote  # noqa: E402
 from jarvis_core.api import start_api  # noqa: E402
 from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.gui import EventBus, GuiServer, GuiUI  # noqa: E402
@@ -313,6 +314,7 @@ class RemoteWindowTests(unittest.TestCase):
         self.assertIn("Párosító kód".encode(), page)
         self.assertIn("form-action 'none'", headers["Content-Security-Policy"])
         self.assertIn("Párosító kód".encode(), self.get("/?t=rossz-kulcs")[1], "rossz kulccsal is a belépés jön")
+        self.assertIn(f'href="{remote.APK_URL}"'.encode(), page, "a telefon böngészőjéből letölthető az alkalmazás")
         status, manifest, _ = self.get("/manifest.webmanifest")
         self.assertEqual((manifest["name"], manifest["start_url"], manifest["display"]), ("Jarvis", "/", "standalone"))
         self.assertIn(b"notificationclick", self.get("/sw.js")[1])
@@ -389,6 +391,46 @@ class RemoteWindowTests(unittest.TestCase):
         self.assertEqual(len(data["item"]["photos"]), 1, "a fotó a gépre került")
 
 
+ANDROID_CHROME = ("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/130.0.0.0 Mobile Safari/537.36")
+
+
+class TailscaleAddressTests(unittest.TestCase):
+    """A gép címe a Telefon ablakban: a `tailscale serve status` kiírásából, ha a mi portunkat adja tovább."""
+
+    STATUS = ("# Funnel off:\n\n"
+              "https://gep.tail1234.ts.net:8443 (tailnet only)\n|-- / proxy http://127.0.0.1:3000\n\n"
+              "https://gep.tail1234.ts.net (tailnet only)\n|-- / proxy http://127.0.0.1:8765\n")
+
+    def test_address_of_our_port(self):
+        self.assertEqual(remote.serve_address(self.STATUS, 8765), "https://gep.tail1234.ts.net")
+        self.assertEqual(remote.serve_address(self.STATUS, 3000), "https://gep.tail1234.ts.net:8443")
+        self.assertEqual(remote.serve_address(self.STATUS.replace("127.0.0.1", "localhost"), 8765),
+                         "https://gep.tail1234.ts.net")
+
+    def test_not_served(self):
+        self.assertEqual(remote.serve_address(self.STATUS, 876), "", "a 8765 nem a 876-os port")
+        self.assertEqual(remote.serve_address(self.STATUS.replace("8765", "87650"), 8765), "")
+        self.assertEqual(remote.serve_address("No serve config\n", 8765), "")
+        self.assertEqual(remote.serve_address("", 8765), "")
+
+    def test_runs_tailscale_when_installed(self):
+        from unittest import mock
+        import subprocess
+
+        done = subprocess.CompletedProcess(["tailscale"], 0, stdout=self.STATUS, stderr="")
+        with mock.patch.object(remote.shutil, "which", return_value="/usr/bin/tailscale"), \
+                mock.patch.object(remote.subprocess, "run", return_value=done) as run:
+            self.assertEqual(remote.tailscale_address(8765), "https://gep.tail1234.ts.net")
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/tailscale", "serve", "status"])
+        with mock.patch.object(remote.shutil, "which", return_value="/usr/bin/tailscale"), \
+                mock.patch.object(remote.subprocess, "run", side_effect=subprocess.TimeoutExpired("tailscale", 5)):
+            self.assertEqual(remote.tailscale_address(8765), "", "ha a Tailscale nem felel, nincs cím")
+        with mock.patch.object(remote.shutil, "which", return_value=None), \
+                mock.patch.object(remote.sys, "platform", "linux"):
+            self.assertEqual(remote.tailscale_address(8765), "", "Tailscale nélkül nincs cím")
+
+
 @unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
 class RemoteWindowBrowserTests(unittest.TestCase):
     """A távoli ablak egy valódi (láthatatlan) Chromiumban, telefonméretben: párosítás, beszélgetés."""
@@ -400,10 +442,13 @@ class RemoteWindowBrowserTests(unittest.TestCase):
         try:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=True)
-                page = browser.new_page(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+                page = browser.new_page(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True,
+                                        user_agent=ANDROID_CHROME)
                 errors: list[str] = []
                 page.on("pageerror", lambda exc: errors.append(str(exc)))
                 page.goto(f"http://127.0.0.1:{h.api.port}/")
+                self.assertTrue(page.locator("#android a").is_visible(), "a telefon böngészőjében: letöltés")
+                self.assertEqual(page.locator("#android a").get_attribute("href"), remote.APK_URL)
                 page.fill("#code", h.api.auth.new_code()["code"])
                 page.fill("#device", "Pixel")
                 self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 390)

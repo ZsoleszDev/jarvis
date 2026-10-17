@@ -337,11 +337,17 @@ async function renderPhone(code) {
   }
   const devices = info.devices || [];
   const date = (t) => (t ? new Date(t * 1000).toLocaleString("hu-HU") : "–");
+  const where = info.address
+    ? "<p>A gép címe, ezt add meg a telefonon és a laptopon:</p>" +
+      `<p class="address"><code>${escHtml(info.address)}</code></p>` +
+      '<p class="muted">Telefon: a Jarvis alkalmazásban (ha még nincs meg, nyisd meg ezt a címet a telefon ' +
+      "böngészőjében: ott a letöltés linkje). Laptop: nyisd meg az Edge-ben, és telepítsd alkalmazásként.</p>"
+    : '<p class="muted">A telefon és a laptop a Tailscale-en át éri el a Jarvist. A gépen egyszer futtasd: ' +
+      `<code>tailscale serve --bg ${escHtml(info.port)}</code>, és az alkalmazásban a gép Tailscale-címét add ` +
+      "meg (pl. <code>https://gep-neve.tailnet.ts.net</code>).</p>";
   body.innerHTML = `
-    <p class="muted">A telefon a Tailscale-en át éri el a Jarvist. A gépen egyszer futtasd:
-      <code>tailscale serve --bg ${escHtml(info.port)}</code>, és az appban a gép Tailscale-címét add meg
-      (pl. <code>https://gep-neve.tailnet.ts.net</code>).</p>
-    ${code ? `<p>Írd be ezt a kódot az appban (5 percig érvényes):</p><div class="pair-code" aria-live="polite">${escHtml(code)}</div>`
+    ${where}
+    ${code ? `<p>Írd be ezt a kódot a telefonon vagy a laptopon (5 percig érvényes):</p><div class="pair-code" aria-live="polite">${escHtml(code)}</div>`
            : '<div class="row"><button type="button" id="phone-pair" class="primary">Új párosító kód</button></div>'}
     <h3 class="section-title">Párosított eszközök</h3>
     ${devices.length ? `<ul class="devices">${devices.map((d) =>

@@ -318,11 +318,14 @@ class GuiBrowserTests(unittest.TestCase):
         self.assertFalse(self.h.app.paused)
 
     def test_phone_dialog_pairs_a_device(self):
+        from jarvis_core import remote
         from jarvis_core.api import start_api
 
         self.h.cfg.api.port = 0
         api = start_api(self.h.app, self.h.ui, self.h.bus, self.h.cfg.data_root)
         self.h.server.phone = api
+        tailscale = mock.patch.object(remote, "tailscale_address", return_value="").start()
+        self.addCleanup(mock.patch.stopall)
         try:
             self.page.click("#phone")
             self.page.wait_for_selector("#phone-dialog[open]")
@@ -340,6 +343,13 @@ class GuiBrowserTests(unittest.TestCase):
             self.page.click("#ask-yes")
             self.page.wait_for_selector("text=Még nincs párosított eszköz.")
             self.assertEqual(api.auth.devices(), [])
+            # Ha a tailscale serve már be van állítva, a gép pontos címe látszik (ezt kell megadni a telefonon).
+            tailscale.return_value = "https://gep.tail1234.ts.net"
+            self.page.click("#phone-close")
+            self.page.click("#phone")
+            self.page.wait_for_selector(".address code:has-text('https://gep.tail1234.ts.net')")
+            self.assertNotIn("tailscale serve --bg", self.page.inner_text("#phone-body"))
+            tailscale.assert_called_with(api.port)
         finally:
             api.stop()
 

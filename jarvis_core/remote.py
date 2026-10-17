@@ -14,10 +14,18 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
+import re
+import shutil
+import subprocess
+import sys
 from functools import lru_cache
 
 # Távolról nem engedjük (a gép előtt ülve, a Jarvis ablakában lehet).
 DENIED = ("/api/quit", "/api/listen", "/api/phone")
+
+# Az Android-alkalmazás: a GitHub Actions fordítja (.github/workflows/android.yml, android/).
+APK_URL = "https://github.com/ZsoleszDev/jarvis/releases/download/android-latest/jarvis.apk"
 
 MANIFEST = {
     "name": "Jarvis", "short_name": "Jarvis", "description": "A saját gépeden futó asszisztens",
@@ -76,6 +84,7 @@ LOGIN_PAGE = """<!doctype html>
            color: var(--black); font: 600 15px var(--ui); cursor: pointer; }
   button:disabled { opacity: 0.5; }
   #message { min-height: 1.4em; color: var(--white); }
+  a { color: var(--white); }
 </style>
 </head>
 <body>
@@ -97,6 +106,8 @@ LOGIN_PAGE = """<!doctype html>
     <button id="go" type="submit">Párosítás</button>
     <div id="message" role="status"></div>
   </form>
+  <p id="android" hidden>Androidon kényelmesebb az alkalmazás: akkor is értesít, ha be van zárva.
+    <a href="__APK__">Letöltés (jarvis.apk)</a></p>
 </main>
 <script>
 "use strict";
@@ -116,6 +127,8 @@ if (params.get("t")) {
 }
 const guess = /Android/i.test(navigator.userAgent) ? "Telefon" : /Windows/i.test(navigator.userAgent) ? "Laptop" : "Eszköz";
 document.getElementById("device").value = guess;
+// A telefon böngészőjében: innen töltheted le az alkalmazást (az alkalmazásban ez nem kell).
+document.getElementById("android").hidden = !/Android/i.test(navigator.userAgent) || !!window.JarvisApp;
 document.getElementById("pair").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = document.getElementById("go");
@@ -141,7 +154,7 @@ document.getElementById("pair").addEventListener("submit", async (event) => {
 </script>
 </body>
 </html>
-""".encode("utf-8")
+""".replace("__APK__", APK_URL).encode("utf-8")
 
 # A Jarvis ablakának fejlécébe (index.html): a telepíthető alkalmazáshoz kell, és ebből tudja a felület, hogy
 # távolról nézik (a mikrofon a telefoné vagy a laptopé, nem a gépé; értesítések).
@@ -197,3 +210,35 @@ def static_file(path: str) -> tuple[bytes, str] | None:
         size = 192 if path in ("/icon-192.png", "/favicon.ico") else 512
         return icon_png(size, maskable="maskable" in path), "image/png"
     return None
+
+
+def serve_address(status: str, port: int) -> str:
+    """A `tailscale serve status` kiírásából a gép címe, ha a Tailscale a mi portunkat adja tovább, pl.
+    „https://gep.tail1234.ts.net (tailnet only)”, alatta „|-- / proxy http://127.0.0.1:8765”. Különben ""."""
+    ours = re.compile(rf"(?:^|[\s/])(?:127\.0\.0\.1|localhost):{port}(?!\d)")
+    address = ""
+    for line in status.splitlines():
+        line = line.strip()
+        if line.startswith("https://"):
+            address = line.split()[0].rstrip("/")
+        elif address and ours.search(line):
+            return address
+    return ""
+
+
+def tailscale_address(port: int) -> str:
+    """A gép címe a telefonnak és a laptopnak (https://<gép>.<tailnet>.ts.net), ha a `tailscale serve` már
+    továbbadja a telefonos kapcsolat portját; "", ha nincs Tailscale, vagy még nincs beállítva."""
+    exe = shutil.which("tailscale")
+    if exe is None and sys.platform == "win32":
+        default = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Tailscale", "tailscale.exe")
+        exe = default if os.path.exists(default) else None
+    if exe is None:
+        return ""
+    flags = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+    try:
+        proc = subprocess.run([exe, "serve", "status"], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=5, **flags)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return serve_address(proc.stdout or "", port)
