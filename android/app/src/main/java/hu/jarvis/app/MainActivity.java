@@ -21,6 +21,7 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -219,6 +220,14 @@ public class MainActivity extends Activity {
         @Override
         public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
             if (request.isForMainFrame() && !"file".equals(request.getUrl().getScheme())) {
+                view.loadUrl(SETUP + "#offline");
+            }
+        }
+
+        /** A gép be van kapcsolva, de a Jarvis nem fut rajta: a Tailscale ilyenkor 502-vel felel. */
+        @Override
+        public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+            if (request.isForMainFrame() && response.getStatusCode() >= 500) {
                 view.loadUrl(SETUP + "#offline");
             }
         }

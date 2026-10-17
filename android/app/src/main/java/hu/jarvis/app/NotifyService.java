@@ -162,7 +162,9 @@ public class NotifyService extends Service {
                 backoff = Math.min(backoff * 2, 60000);
             }
         }
-        stopSelf();
+        if (running) {
+            stopSelf();                                   // nincs párosítás; ha leállítottak, már nem kell
+        }
     }
 
     private void handle(JSONObject event) {

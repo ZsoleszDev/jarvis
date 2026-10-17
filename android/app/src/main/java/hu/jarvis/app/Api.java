@@ -63,9 +63,19 @@ final class Api {
             if (status == 401) {
                 throw new Unauthorized();
             }
-            JSONObject result = text.isEmpty() ? new JSONObject() : new JSONObject(text);
+            JSONObject result;
+            try {
+                result = text.isEmpty() ? new JSONObject() : new JSONObject(text);
+            } catch (JSONException e) {
+                if (status < 400) {
+                    throw e;
+                }
+                result = new JSONObject();                // pl. a Tailscale hibaoldala
+            }
             if (status >= 400) {
-                throw new IOException(result.optString("error", "A gép hibát adott (" + status + ")."));
+                throw new IOException(result.optString("error", status >= 502 && status <= 504
+                        ? "A gépet elérem, de a Jarvis nem fut rajta (vagy még indul)."
+                        : "A gép hibát adott (" + status + ")."));
             }
             return result;
         } finally {
