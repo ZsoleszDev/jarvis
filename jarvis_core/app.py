@@ -29,6 +29,7 @@ from .config import Config, adopt_legacy_data, app_data, resolve_path
 from .creative import CreativeDesk, StoryError
 from .llm import FULL_GPU, Cancelled, OllamaClient, OllamaError, gpu_share, is_runner_crash
 from .notices import NoticeBoard
+from .ollama_log import CACHE_SETTING, ServerLog, advice, find_cause, short_advice, user_setting
 from .recorder import Recorder
 from .browser import BrowserError
 from .scheduler import Hooks, Job, Scheduler
@@ -53,6 +54,8 @@ VOICE_PAUSE_PHRASES = {"pihenj", "szunet", "tarts szunetet", "szunetelj", "enged
                        "szabaditsd fel a videokartyat", "allits le mindent"}
 PAUSED_REPLY = "Szünetelek, minden modell le van állítva. A Folytatás gombbal (vagy a telefonról) újraindulok."
 WAKE_FAILED = "Most nem tudtam felébredni, mert a nyelvi modell nem töltődött be. Próbáld újra kicsit később."
+# A modell leállása után ennyi másodperc múlva nézzük meg az Ollama naplójában, miért (addigra beleírta).
+RESTART_LOG_DELAY = 5.0
 
 # Ezeknél az eszközöknél pár másodperc is lehet a várakozás, ezért Jarvis rögtön szól valamit.
 SLOW_TOOLS = {"web_search", "read_webpage", "browser_open", "browser_click", "browser_type", "browser_fill",
@@ -226,6 +229,10 @@ class JarvisApp:
         self.llm.stop_event = self.stop_event
         self.llm.on_runner_restart = self._on_runner_restart
         self.llm.fit_memory = app_data(cfg) / "modell_illesztes.json"
+        # Az Ollama naplója: ha a modell leáll, ebből derül ki, miért (lásd _explain_restart).
+        self.server_log = ServerLog()
+        self.model_restarts: list[dict[str, str]] = []   # a leállások okai (a hibacsomagba is bekerülnek)
+        self._restart_advice: set[str] = set()           # amelyik okról már részletesen szóltunk
         self.exit_requested = threading.Event()
         self.speaker: Speaker | None = None
         self.speech: SpeechQueue | None = None
@@ -330,6 +337,7 @@ class JarvisApp:
             t0 = time.perf_counter()
             status = self.llm.load_fitted(log=self.ui.info)
             self.model_loaded = True
+            self.server_log.mark()    # egy leállás okát innentől keressük a naplóban
             self.ui.info(f"  kész ({secs(time.perf_counter() - t0)})")
         except OllamaError as exc:
             self.ui.error(str(exc))
@@ -585,10 +593,39 @@ class JarvisApp:
             self.creative = None
 
     def _on_runner_restart(self, detail: str) -> None:
-        """Az Ollama modellfolyamata leállt; a kliens egyszer újrapróbálja (közben az Ollama újraindítja)."""
+        """Az Ollama modellfolyamata leállt; a kliens egyszer újrapróbálja (közben az Ollama újraindítja).
+        Pár másodperc múlva az Ollama naplójából kiderül, miért (_explain_restart)."""
         self.ui.warn("A nyelvi modell (Ollama) futás közben leállt. Újraindítom, és folytatom ott, ahol "
                      "tartottam (20–40 másodperc)…")
         self._set_phase("working", "Újraindítom a nyelvi modellt")
+        timer = threading.Timer(RESTART_LOG_DELAY, self._explain_restart, args=(detail,))
+        timer.daemon = True
+        timer.start()
+
+    def _explain_restart(self, detail: str) -> None:
+        """Megnézi az Ollama naplójában, miért állt le a modell, és megmondja, mit lehet tenni ellene: okonként
+        egyszer részletesen (a javítással együtt), utána csak röviden."""
+        if self._closing.is_set():
+            return
+        try:
+            cause = find_cause(self.server_log.read_new())
+            self.server_log.mark()
+            self.model_restarts.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "error": detail[:300],
+                                        "cause": cause.kind if cause else "", "log": cause.line if cause else ""})
+            del self.model_restarts[:-10]
+            key = cause.kind if cause else "unknown"
+            cache_off = user_setting(CACHE_SETTING) == "0"
+            if key in self._restart_advice:
+                if cause is not None:
+                    self.ui.warn(short_advice(cause, cache_off))
+                return
+            self._restart_advice.add(key)
+            self.ui.warn(advice(cause, self.server_log.path, cache_off))
+            if cause is not None and cause.kind == "vram":
+                for line in gpu.memory_lines():
+                    self.ui.warn("  " + line)
+        except Exception:  # noqa: BLE001 - csak magyarázat: ha nem sikerül, a munka attól még megy tovább
+            pass
 
     def _report_model_placement(self, status: dict[str, Any] | None) -> None:
         """Szól, ha a modell egy része a processzorra került, és megjegyzi a valódi kontextusméretet."""
@@ -1636,6 +1673,8 @@ class JarvisApp:
             item = work.store.get(item_id)
             browser = self.toolbox.browser if self.toolbox is not None and work.browser_ready else None
             history = list(self.work_assistant.history) if mode.startswith("modell") and self.work_assistant else []
+            if self.model_restarts:
+                extra.setdefault("model_restarts", self.model_restarts[-5:])   # a nyelvi modell leállásai
             name = work.dossiers.create(task=task, platform=key, item=item, reason=reason, mode=mode,
                                         browser=browser, steps=list(work.trail), history=history, extra=extra)
             work.store.attach_dossier(item_id, key, name)

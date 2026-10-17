@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_offline import FakeOllama, make_cfg, reply, tool_reply  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
+from jarvis_core import gpu  # noqa: E402
 from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.assistant import Assistant  # noqa: E402
 from jarvis_core.gui import EventBus, GuiServer, GuiUI  # noqa: E402
@@ -68,6 +69,26 @@ def request(port: int, method: str, path: str, headers: dict | None = None, body
     return status
 
 
+def call(port: int, method: str, path: str, headers: dict | None = None, body: dict | None = None):
+    """Mint a request, de a választ is visszaadja: (állapotkód, JSON vagy None)."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    data = json.dumps(body).encode() if body is not None else None
+    conn.request(method, path, body=data, headers=headers or {})
+    response = conn.getresponse()
+    raw = response.read()
+    conn.close()
+    try:
+        return response.status, json.loads(raw)
+    except ValueError:
+        return response.status, None
+
+
+def two_cards(loads: dict[int, int]):
+    """Hamis olvasó a GPU-sávokhoz: a terhelést a teszt állítja (loads)."""
+    return lambda: [gpu.GpuInfo(0, "NVIDIA GeForce RTX 3060 Ti", loads[0], 6420, 8192, 52),
+                    gpu.GpuInfo(1, "NVIDIA GeForce RTX 5060 Ti", loads[1], 15565, 16311, 64)]
+
+
 class GuiSecurityTests(unittest.TestCase):
     """Más weboldalak ne tudjanak parancsot küldeni a Jarvisnak."""
 
@@ -98,6 +119,66 @@ class GuiSecurityTests(unittest.TestCase):
         self.assertEqual(request(self.port, "POST", "/api/send", headers=headers, body={"text": "szia"}), 403)
         headers["Origin"] = f"http://127.0.0.1:{self.port}"
         self.assertEqual(request(self.port, "POST", "/api/send", headers=headers, body={"text": "szia"}), 202)
+
+
+class GuiPanelApiTests(unittest.TestCase):
+    """A GPU-sávok és az Automatikus munkák ablak végpontjai."""
+
+    def setUp(self):
+        self.h = GuiHarness()
+        self.port, self.token = self.h.server.port, self.h.server.token
+
+    def tearDown(self):
+        self.h.close()
+
+    def get(self, path: str):
+        return call(self.port, "GET", f"{path}?t={self.token}")
+
+    def post(self, path: str, body: dict):
+        return call(self.port, "POST", path, body=body,
+                    headers={"X-Jarvis-Token": self.token, "Content-Type": "application/json"})
+
+    def test_gpu_history_needs_the_token_and_can_be_switched_off(self):
+        self.h.server.gpus = gpu.GpuMonitor(reader=two_cards({0: 7, 1: 87}))
+        self.assertEqual(call(self.port, "GET", "/api/gpus")[0], 403)
+        status, data = self.get("/api/gpus")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["available"])
+        self.assertEqual([g["name"] for g in data["gpus"]], ["RTX 3060 Ti", "RTX 5060 Ti"])
+        self.assertEqual(data["gpus"][1]["total_mb"], 16311)
+        self.assertEqual(data["gpus"][1]["samples"][-1][1:], [87, 15565, 64])
+        self.h.cfg.gui.gpu_bars = False
+        self.assertFalse(self.get("/api/gpus")[1]["available"], "[gui] gpu_bars = false")
+
+    def test_watches_are_listed_and_deleted_by_id(self):
+        self.assertEqual(call(self.port, "GET", "/api/jobs")[0], 403)
+        self.assertFalse(self.get("/api/jobs")[1]["ready"], "amíg a háttérmunka nem indult el")
+        self.h.app._start_background()
+        first = self.h.app.watches.add("python állás Debrecen", "profession.hu")
+        second = self.h.app.watches.add("RTX 3080")
+        data = self.get("/api/jobs")[1]
+        self.assertEqual([w["id"] for w in data["watches"]], [first.id, second.id])
+        self.assertEqual(data["watches"][0]["label"], first.describe())
+        self.assertEqual([j["key"] for j in data["jobs"]], ["watches"])
+        self.assertTrue(data["jobs"][0]["on"])
+        self.assertEqual(self.post("/api/jobs/watch-delete", {"id": "python"})[0], 404, "csak pontos azonosítóval")
+        status, data = self.post("/api/jobs/watch-delete", {"id": first.id})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["removed"][0]["query"], "python állás Debrecen")
+        self.assertEqual([w["id"] for w in data["watches"]], [second.id])
+        self.assertEqual(self.post("/api/jobs/watch-delete", {"ids": [second.id]})[1]["watches"], [])
+        saved = Path(self.h.cfg.data_root) / "figyelok.json"
+        self.assertEqual(json.loads(saved.read_text(encoding="utf-8")), [], "a fájlból is törlődött")
+
+    def test_background_jobs_can_be_switched_off(self):
+        self.h.app._start_background()
+        status, data = self.post("/api/jobs/toggle", {"key": "watches", "on": False})
+        self.assertEqual(status, 200)
+        self.assertFalse(data["jobs"][0]["on"])
+        self.assertFalse(self.h.app.scheduler.is_on("watches"))
+        self.assertEqual(self.post("/api/jobs/toggle", {"key": "nincs ilyen", "on": False})[0], 404)
+        self.post("/api/jobs/toggle", {"key": "watches", "on": True})
+        self.assertTrue(self.h.app.scheduler.is_on("watches"))
 
 
 class EventBusTests(unittest.TestCase):
@@ -261,6 +342,64 @@ class GuiBrowserTests(unittest.TestCase):
             self.assertEqual(api.auth.devices(), [])
         finally:
             api.stop()
+
+    def test_gpu_strips_show_the_load_and_details_on_hover(self):
+        loads = {0: 7, 1: 87}
+        self.h.server.gpus = gpu.GpuMonitor(reader=two_cards(loads))
+        self.page.reload()
+        self.page.wait_for_selector("#gpus:not([hidden]) .gpu >> nth=1")
+        self.assertEqual(self.page.locator("#gpus .gpu").count(), 2, "kártyánként egy sáv")
+        self.assertEqual(self.page.locator("#gpus .gpu >> nth=1").get_attribute("aria-label"),
+                         "RTX 5060 Ti terhelése az utolsó percben")
+        # a görbe kirajzolódik: a 87%-os kártya sávjának jobb szélén, a felső felében is van fény
+        self.page.wait_for_function("""() => {
+            const c = document.querySelectorAll('#gpus canvas')[1];
+            if (!c || !c.width) return false;
+            const d = c.getContext('2d').getImageData(Math.floor(c.width * 0.9), 0, Math.ceil(c.width * 0.1),
+                                                      Math.floor(c.height / 2)).data;
+            for (let i = 3; i < d.length; i += 4) if (d[i] > 0) return true;
+            return false; }""", timeout=8000)
+        self.page.hover("#gpus .gpu >> nth=1")
+        self.page.wait_for_selector("#gpu-tip:not([hidden])")
+        self.assertEqual(self.page.inner_text("#gpu-tip"), "RTX 5060 Ti · terhelés 87% · VRAM 15,2 / 16 GB · 64 °C")
+        loads[1] = 12
+        self.page.wait_for_selector("#gpu-tip:has-text('terhelés 12%')", timeout=5000)   # élőben frissül
+        self.page.mouse.move(5, 600)
+        self.page.wait_for_selector("#gpu-tip", state="hidden")
+
+    def test_gpu_strips_stay_hidden_without_an_nvidia_card(self):
+        with mock.patch.object(gpu, "make_reader", return_value=(None, 0.0)):
+            self.h.server.gpus = gpu.GpuMonitor()
+            self.page.reload()
+            self.page.wait_for_selector("#examples button")
+            self.page.wait_for_timeout(1500)
+        self.assertTrue(self.page.locator("#gpus").is_hidden())
+        self.assertEqual(self.page.locator("#gpus .gpu").count(), 0)
+
+    def test_jobs_dialog_deletes_watches_and_switches_jobs_off(self):
+        self.h.app._start_background()
+        watches = self.h.app.watches
+        keep = watches.add("RTX 3080 hirdetés", "hardverapro.hu")
+        gone = watches.add("python állás Debrecen")
+        self.page.click("#jobs")
+        self.page.wait_for_selector("#jobs-dialog[open] [data-watch]")
+        body = self.page.inner_text("#jobs-body")
+        self.assertIn("„RTX 3080 hirdetés” (hardverapro.hu", body)
+        self.assertIn("még nem néztem meg", body)
+        self.page.click(f"[data-watch='{gone.id}']")
+        self.page.wait_for_selector("#ask-dialog[open]")
+        self.assertIn("python állás Debrecen", self.page.inner_text("#ask-text"))
+        self.page.click("#ask-yes")
+        self.page.wait_for_function(f"() => !document.querySelector(\"[data-watch='{gone.id}']\")")
+        self.assertEqual([w.id for w in watches.all()], [keep.id])
+        self.assertTrue(self.page.locator("#jobs-dialog").evaluate("d => d.open"), "az ablak nyitva marad")
+        box = self.page.locator("[data-job='watches']")
+        self.assertTrue(box.is_checked())
+        box.uncheck()
+        self.page.wait_for_selector("text=kikapcsolva: magától nem nézi meg")
+        self.assertFalse(self.h.app.scheduler.is_on("watches"))
+        self.page.click("#jobs-close")
+        self.assertFalse(self.page.locator("#jobs-dialog").evaluate("d => d.open"))
 
     def test_reload_restores_conversation(self):
         self.h.fake.chat_script = [reply("Szia! Miben segíthetek?")]

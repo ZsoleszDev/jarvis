@@ -149,6 +149,9 @@ browser = "msedge"
 port = 0
 # Ha bezárod az ablakot, a Jarvis is leáll (és kiüríti a modellt a VRAM-ból)
 exit_on_close = true
+# Az ablak tetején kártyánként egy vékony sáv: a videókártyák terhelése az utolsó percben
+# (fölé víve az egeret: terhelés, VRAM, hőmérséklet)
+gpu_bars = true
 
 [wake_word]
 # "Hey Jarvis" ébresztőszó. Telepítés: pip install -r requirements-wakeword.txt

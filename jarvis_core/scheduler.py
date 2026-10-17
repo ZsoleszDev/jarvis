@@ -105,6 +105,7 @@ class Scheduler:
         self.submitted: str | None = None     # a sorba tett, még el nem indult munka
         self.submitted_at = 0.0
         self._lock = threading.Lock()
+        self._save_lock = threading.Lock()     # a felület, a telefon és az ágens-szál is menthet
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.state: dict[str, Any] = self._load()
@@ -123,19 +124,37 @@ class Scheduler:
         return data
 
     def _save(self) -> None:
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp, self.path)
-        except OSError:
-            pass
+        with self._save_lock:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=1), encoding="utf-8")
+                os.replace(tmp, self.path)
+            except OSError:
+                pass
 
     def register(self, job: Job) -> None:
         self.jobs[job.key] = job
 
     def _job_state(self, key: str) -> dict[str, Any]:
         return self.state["jobs"].setdefault(key, {})
+
+    def is_on(self, key: str) -> bool:
+        """Nincs-e kikapcsolva a felületen (Automatikus munkák)."""
+        return not self._job_state(key).get("off")
+
+    def set_enabled(self, key: str, on: bool) -> bool:
+        """Be- vagy kikapcsol egy háttérmunkát; a következő indításkor is így marad. Hamis, ha nincs ilyen."""
+        if key not in self.jobs:
+            return False
+        with self._lock:
+            state = self._job_state(key)
+            if on:
+                state.pop("off", None)
+            else:
+                state["off"] = True
+        self._save()
+        return True
 
     # --- mikor ér rá ----------------------------------------------------------------
 
@@ -169,7 +188,7 @@ class Scheduler:
 
     def due(self, job: Job, now: float) -> bool:
         every = float(job.every_minutes() or 0)
-        if every <= 0 or not job.available() or not self._allowed(job):
+        if every <= 0 or not self.is_on(job.key) or not job.available() or not self._allowed(job):
             return False
         last = float(self._job_state(job.key).get("last_run") or 0)
         return now - last >= every * 60
@@ -268,10 +287,12 @@ class Scheduler:
             state = self._job_state(job.key)
             every = float(job.every_minutes() or 0)
             last = float(state.get("last_run") or 0)
+            on = not state.get("off")
             jobs.append({
                 "key": job.key, "title": job.title, "every_minutes": every,
-                "enabled": every > 0 and job.available(),
-                "last_run": last or None, "next_run": (last + every * 60) if every > 0 and last else None,
+                "enabled": every > 0 and on and job.available(), "on": on, "available": bool(job.available()),
+                "last_run": last or None,
+                "next_run": (last + every * 60) if every > 0 and on and last else None,
                 "result": state.get("result", ""), "error": state.get("error", ""),
                 "running": self.running == job.key,
             })

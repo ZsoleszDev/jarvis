@@ -139,7 +139,7 @@ A feltöltés és a levétel menet közben jóváhagyást kérhet (közzététel
 
 | Módszer | Útvonal | Törzs | Megjegyzés |
 |---|---|---|---|
-| GET | `/jobs` | | `{free, blocked, snoozed_until, running, jobs: [{key, title, every_minutes, last_run, next_run, result, error}]}` |
+| GET | `/jobs` | | `{free, blocked, snoozed_until, running, jobs: [{key, title, every_minutes, on, last_run, next_run, result, error}]}` (`on`: hamis, ha a gépen, az Automatikus munkák ablakban kikapcsoltad) |
 | POST | `/jobs/{key}/run` | | most rögtön (`watches`, `stale`) |
 | POST | `/jobs/snooze` | `{minutes}` | ennyi ideig nincs háttérmunka (0: újra mehet) |
 | GET | `/watches` | | `{watches: [{id, query, site, recency, label, hits, last_check, error}]}` |

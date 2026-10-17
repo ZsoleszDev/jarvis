@@ -360,5 +360,158 @@ class GpuInfoTests(unittest.TestCase):
             self.assertEqual(gpu.query_gpus(), [])
 
 
+class FakeNvml:
+    """Az NVIDIA-driver könyvtára (nvml.dll) helyett: ugyanúgy a ctypes-mutatókon át ad vissza értékeket."""
+
+    def __init__(self, cards, memory_v2=True):
+        self.cards = cards        # (név, terhelés vagy None, foglalt MB, összes MB, hőmérséklet)
+        self.closed = False
+        if not memory_v2:
+            self.nvmlDeviceGetMemoryInfo_v2 = lambda handle, memory: 3   # NVML_ERROR_NOT_SUPPORTED
+
+    def card(self, handle):
+        return self.cards[handle.value - 1]
+
+    def nvmlInit_v2(self):
+        return 0
+
+    def nvmlShutdown(self):
+        self.closed = True
+        return 0
+
+    def nvmlDeviceGetCount_v2(self, count):
+        count._obj.value = len(self.cards)
+        return 0
+
+    def nvmlDeviceGetHandleByIndex_v2(self, index, handle):
+        handle._obj.value = index + 1
+        return 0
+
+    def nvmlDeviceGetName(self, handle, buffer, size):
+        buffer.value = self.card(handle)[0].encode()
+        return 0
+
+    def nvmlDeviceGetUtilizationRates(self, handle, rates):
+        load = self.card(handle)[1]
+        if load is None:
+            return 3
+        rates._obj.gpu = load
+        return 0
+
+    def nvmlDeviceGetMemoryInfo_v2(self, handle, memory):
+        assert memory._obj.version == gpu.MEMORY_V2, "a v2-es szerkezet verziószámmal megy"
+        _, _, used, total, _ = self.card(handle)
+        memory._obj.used, memory._obj.total = used * 2**20, total * 2**20
+        memory._obj.reserved, memory._obj.free = 300 * 2**20, (total - used - 300) * 2**20
+        return 0
+
+    def nvmlDeviceGetMemoryInfo(self, handle, memory):
+        _, _, used, total, _ = self.card(handle)
+        memory._obj.used, memory._obj.total = (used + 300) * 2**20, total * 2**20   # a régi a tartalékkal együtt
+        return 0
+
+    def nvmlDeviceGetTemperature(self, handle, sensor, temperature):
+        temperature._obj.value = self.card(handle)[4]
+        return 0
+
+
+CARDS = [("NVIDIA GeForce RTX 3060 Ti", 7, 6420, 8192, 52), ("NVIDIA GeForce RTX 5060 Ti", 87, 15565, 16311, 64)]
+
+
+class NvmlTests(unittest.TestCase):
+    def test_reads_every_card_from_the_driver(self):
+        lib = FakeNvml(CARDS)
+        nvml = gpu.Nvml(lib)
+        cards = nvml.read()
+        self.assertEqual([(c.index, c.name, c.utilization, c.used_mb, c.total_mb, c.temperature) for c in cards], [
+            (0, "NVIDIA GeForce RTX 3060 Ti", 7, 6420, 8192, 52),
+            (1, "NVIDIA GeForce RTX 5060 Ti", 87, 15565, 16311, 64)])
+        nvml.close()
+        self.assertTrue(lib.closed)
+
+    def test_older_driver_and_missing_load(self):
+        nvml = gpu.Nvml(FakeNvml([("NVIDIA GeForce RTX 3060 Ti", None, 6420, 8192, 52)], memory_v2=False))
+        card = nvml.read()[0]
+        self.assertIsNone(card.utilization)
+        self.assertEqual(card.used_mb, 6720, "a régi lekérdezés a driver tartalékát is beleszámolja")
+        self.assertEqual(nvml.read()[0].used_mb, 6720, "utána már egyből a régit kérdezi")
+
+    def test_no_card_or_no_driver(self):
+        with self.assertRaises(OSError):
+            gpu.Nvml(FakeNvml([]))
+        with mock.patch.object(gpu.Nvml, "_load", side_effect=OSError("nincs")):
+            with mock.patch("shutil.which", return_value=None):
+                self.assertEqual(gpu.make_reader(), (None, 0.0))
+            with mock.patch("shutil.which", return_value="nvidia-smi"):
+                reader, interval = gpu.make_reader()
+                self.assertIsNotNone(reader)
+                self.assertEqual(interval, 2.0, "az nvidia-smi új folyamat: ritkábban kérdezzük")
+
+    def test_short_names(self):
+        self.assertEqual(gpu.short_name("NVIDIA GeForce RTX 5060 Ti"), "RTX 5060 Ti")
+        self.assertEqual(gpu.short_name("NVIDIA RTX A2000"), "RTX A2000")
+
+
+class Clock:
+    def __init__(self, now: float = 1_800_000_000.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class GpuMonitorTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = Clock()
+        self.loads = iter(range(100))
+        self.monitor = gpu.GpuMonitor(reader=self.read, interval=60.0, keep_seconds=300.0, idle_seconds=15.0,
+                                      clock=self.clock)
+
+    def tearDown(self):
+        self.monitor.stop()
+
+    def read(self):
+        load = next(self.loads)
+        return [gpu.GpuInfo(0, "NVIDIA GeForce RTX 3060 Ti", load, 6420, 8192, 52),
+                gpu.GpuInfo(1, "NVIDIA GeForce RTX 5060 Ti", 100 - load, 15565, 16311, None)]
+
+    def test_snapshot_has_the_last_minute_per_card(self):
+        first = self.monitor.snapshot()
+        self.assertTrue(first["available"])
+        self.assertEqual([(g["index"], g["name"], g["total_mb"]) for g in first["gpus"]],
+                         [(0, "RTX 3060 Ti", 8192), (1, "RTX 5060 Ti", 16311)])
+        self.assertEqual(first["gpus"][1]["samples"], [[self.clock.now, 100, 15565, None]],
+                         "az első lekérdezés sem üres")
+        for _ in range(8):
+            self.clock.now += 60
+            self.monitor.sample()
+        samples = self.monitor.snapshot()["gpus"][0]["samples"]
+        self.assertEqual(len(samples), 7, "csak a megőrzött időszak (300 mp) mintái maradnak")
+        self.assertEqual(samples[-1], [self.clock.now, 8, 6420, 52])
+
+    def test_measures_only_while_someone_looks(self):
+        self.monitor.snapshot()
+        background = self.monitor._thread
+        self.monitor.stop()                       # a háttérszál helyett itt futtatjuk a ciklusát
+        background.join(5)
+        self.monitor._stop = threading.Event()
+        self.monitor.interval = 0.0
+        self.monitor._thread = threading.current_thread()
+        self.clock.now += 16                      # 16 mp-e senki sem kérdezte
+        self.monitor._run()
+        self.assertIsNone(self.monitor._thread, "leállt")
+        with mock.patch.object(threading.Thread, "start") as start:
+            self.monitor.snapshot()
+        start.assert_called_once()
+
+    def test_reader_errors_and_no_cards(self):
+        broken = gpu.GpuMonitor(reader=mock.Mock(side_effect=RuntimeError("driver")), clock=self.clock)
+        self.assertEqual(broken.snapshot()["gpus"], [])
+        broken.stop()
+        with mock.patch.object(gpu, "make_reader", return_value=(None, 0.0)):
+            nothing = gpu.GpuMonitor()
+            self.assertEqual(nothing.snapshot(), {"available": False, "gpus": []})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

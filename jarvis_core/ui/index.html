@@ -9,6 +9,8 @@
 </head>
 <body data-state="starting" data-mode="chat">
   <header class="top">
+    <!-- kártyánként egy vékony sáv: a terhelés az utolsó percben (app.js, GPU-sávok) -->
+    <div id="gpus" class="gpus" role="group" aria-label="Videókártyák" hidden></div>
     <div id="name">Jarvis</div>
     <nav class="tabs" role="tablist" aria-label="Menü">
       <button id="tab-chat" type="button" role="tab" aria-selected="true" aria-controls="log">Beszélgetés</button>
@@ -153,6 +155,8 @@
       <button id="stop" type="button" title="Esc">Állj</button>
       <button id="reset" type="button">Új beszélgetés</button>
       <span class="spacer"></span>
+      <button id="jobs" type="button" class="quiet"
+        title="Amit Jarvis magától, időnként megnéz (figyelők): itt törölheted vagy kikapcsolhatod">Automatikus munkák</button>
       <button id="phone" type="button" class="quiet" title="A telefonod párosítása (Tailscale-en át)">Telefon</button>
       <button id="pause" type="button"
         title="Minden modellt leállít, bezárja a böngészőt, és felszabadítja a videókártyát és a memóriát (pl. játékhoz)">Szünet</button>
@@ -176,6 +180,14 @@
     </div>
   </dialog>
 
+  <dialog id="jobs-dialog" aria-labelledby="jobs-title">
+    <h2 id="jobs-title">Automatikus munkák</h2>
+    <div id="jobs-body"></div>
+    <div class="row">
+      <button id="jobs-close" type="button">Bezárás</button>
+    </div>
+  </dialog>
+
   <dialog id="sold-dialog" aria-labelledby="sold-title">
     <h2 id="sold-title">Eladva</h2>
     <p id="sold-text"></p>
@@ -195,6 +207,8 @@
       <button id="ask-yes" type="button" class="primary">Rendben</button>
     </div>
   </dialog>
+
+  <div id="gpu-tip" class="gpu-tip" role="tooltip" hidden></div>
 
 <script src="/ui/app.js"></script>
 <script src="/ui/work.js"></script>

@@ -355,6 +355,104 @@ $("phone-body").addEventListener("click", async (event) => {
     $("phone-dialog").open || $("phone-dialog").showModal();
   }
 });
+
+// --- Automatikus munkák: a figyelők és a háttérmunka ---------------------------------------------
+// Itt látod, mit néz meg Jarvis magától, időnként; amire nincs szükséged, törölheted vagy kikapcsolhatod.
+
+let jobsInfo = null;
+
+function everyText(minutes) {
+  if (minutes % 1440 === 0) return minutes === 1440 ? "naponta" : `${minutes / 1440} naponta`;
+  if (minutes % 60 === 0) return minutes === 60 ? "óránként" : `${minutes / 60} óránként`;
+  return `${Math.round(minutes)} percenként`;
+}
+
+const shortDate = (t) => new Date(t * 1000).toLocaleString("hu-HU",
+  { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+function watchState(watch) {
+  if (watch.error) return "legutóbb nem sikerült: " + watch.error;
+  if (!watch.checks) return "még nem néztem meg";
+  const hits = (watch.hits || []).length;
+  return `utoljára ${shortDate(watch.last_check)} · ` + (hits ? `${hits} új találat eddig` : "még nem volt új találat");
+}
+
+function jobState(job) {
+  if (!job.every_minutes) return "a config.toml-ban ki van kapcsolva";
+  if (!job.on) return "kikapcsolva: magától nem nézi meg";
+  const parts = [everyText(job.every_minutes)];
+  if (job.last_run) parts.push("utoljára " + shortDate(job.last_run));
+  if (!job.available) parts.push("most nincs mit néznie");
+  return parts.join(" · ");
+}
+
+async function renderJobs(info) {
+  if (!info) {
+    try {
+      const response = await fetch("/api/jobs?t=" + encodeURIComponent(token));
+      info = await response.json();
+    } catch { info = {}; }
+  }
+  const body = $("jobs-body");
+  jobsInfo = info;
+  if (!info.ok || !info.ready) {
+    body.innerHTML = '<p class="muted">A háttérmunka még indul; nézz vissza pár másodperc múlva.</p>';
+    return;
+  }
+  const watches = info.watches || [];
+  const jobs = info.jobs || [];
+  const none = info.search ? "A beszélgetésben kérhetsz egyet, pl. „szólj, ha lesz új Python-állás Debrecenben”."
+    : "A figyelőkhöz webes keresés kell (pip install ddgs).";
+  // (a párbeszédablak bekezdései megtartják a sortörést, ezért egy sorban)
+  body.innerHTML = `
+    <p class="muted">Amit Jarvis magától, időnként megnéz, és szól, ha talál valamit. Amire nincs szükséged, töröld, vagy kapcsold ki.</p>
+    ${info.enabled ? "" : '<p class="muted">A háttérmunka most ki van kapcsolva a config.toml-ban ([scheduler] enabled).</p>'}
+    <h3 class="section-title">Figyelők</h3>
+    ${watches.length ? `<ul class="devices">${watches.map((w) => `
+      <li><span>${escHtml(w.label)}<br><small class="muted">${escHtml(watchState(w))}</small></span>
+        <button type="button" class="small" data-watch="${escHtml(w.id)}">Törlés</button></li>`).join("")}</ul>
+      ${watches.length > 1 ? '<div class="row"><button type="button" class="small quiet" id="watch-all">Mind törlése</button></div>' : ""}`
+      : `<p class="muted">Nincs figyelőd. ${none}</p>`}
+    <h3 class="section-title">Időnként magától</h3>
+    <div class="jobs">${jobs.map((j) => `
+      <label class="check"><input type="checkbox" data-job="${escHtml(j.key)}"${j.on ? " checked" : ""}${j.every_minutes ? "" : " disabled"}>
+        <span>${escHtml(j.title)}<br><small class="muted">${escHtml(jobState(j))}</small></span></label>`).join("")}</div>`;
+}
+
+$("jobs").addEventListener("click", () => {
+  renderJobs();
+  $("jobs-dialog").showModal();
+});
+$("jobs-close").addEventListener("click", () => $("jobs-dialog").close());
+$("jobs-body").addEventListener("click", async (event) => {
+  const one = event.target.closest("[data-watch]");
+  if (!one && !event.target.closest("#watch-all")) return;
+  const watches = (jobsInfo && jobsInfo.watches) || [];
+  const ids = one ? [one.dataset.watch] : watches.map((w) => w.id);
+  const watch = watches.find((w) => w.id === ids[0]);
+  const sure = one
+    ? await ask("Figyelő törlése", `${watch ? watch.label : "Ezt a figyelőt"} többé nem nézem meg.`, "Törlés")
+    : await ask("Minden figyelő törlése", `${ids.length} figyelőt törlök; ezeket többé nem nézem meg.`, "Mind törlése");
+  if (!sure) return;
+  const result = await postJson("/api/jobs/watch-delete", { ids });
+  if (!result.ok) { toast(result.error || "Nem sikerült."); renderJobs(); return; }
+  toast(ids.length > 1 ? "Figyelők törölve" : "Figyelő törölve");
+  renderJobs(result);
+  $("jobs-close").focus();
+});
+$("jobs-body").addEventListener("change", async (event) => {
+  const box = event.target.closest("[data-job]");
+  if (!box) return;
+  const result = await postJson("/api/jobs/toggle", { key: box.dataset.job, on: box.checked });
+  if (!result.ok) { toast(result.error || "Nem sikerült."); box.checked = !box.checked; return; }
+  jobsInfo = result;
+  const job = (result.jobs || []).find((j) => j.key === box.dataset.job);
+  if (job) {
+    box.checked = job.on;
+    box.closest("label").querySelector("small").textContent = jobState(job);
+  }
+});
+
 $("listen").addEventListener("click", () => post("/api/listen"));
 $("stop").addEventListener("click", () => post("/api/stop"));
 $("reset").addEventListener("click", () => { post("/api/reset", { mode }); clearLog(mode); });
@@ -449,8 +547,186 @@ function frame(t) {
   shadow.setAttribute("d", wedge(eye.angle));
   disk.style.opacity = (0.32 + eye.glow).toFixed(3);
   glass.style.filter = `drop-shadow(0 0 ${(5 + eye.glow * 22).toFixed(1)}px rgba(255, 255, 255, ${(eye.glow * 0.6).toFixed(3)}))`;
+  // A GPU-sávok gördülése: másodpercenként kb. 12 kép elég, hogy folyamatosnak lássék.
+  if (gpuStrips.size && !reduceMotion && t - gpuDrawn > 80) {
+    gpuDrawn = t;
+    drawGpus();
+  }
   requestAnimationFrame(frame);
 }
+
+// --- videókártyák: kártyánként egy vékony sáv a fejlécben ------------------------------------------
+// Az utolsó perc terhelése gördülő görbeként, mint a Windows Feladatkezelőjében. A terhelést a fényerő
+// mutatja, nem szín: minél jobban dolgozik a kártya, annál világosabb a vonal. Fölé víve az egeret (vagy
+// billentyűzettel ráállva) látszanak a pontos értékek: terhelés, VRAM, hőmérséklet.
+
+const GPU_SPAN = 60;                 // ennyi másodpercet mutat egy sáv
+const gpuStrips = new Map();         // a kártya sorszáma → {el, canvas, gpu}
+let gpuInterval = 1;                 // a mérés üteme másodpercben (a Jarvis mondja meg)
+let gpuClock = 0;                    // a Jarvis órája mínusz a böngészőé, másodpercben
+let gpuTipFor = null;                // a sáv, amelyiknek a részletei épp látszanak
+let gpuTimer = null;
+let gpuDrawn = 0;
+
+const decimal = (value) => value.toFixed(1).replace(".", ",");
+
+function vramText(usedMb, totalMb) {
+  // A kártya névleges mérete (16 GB), ha a driver szerinti csak kicsit kevesebb (15,9).
+  const total = totalMb / 1024;
+  const nominal = Math.round(total);
+  const shown = nominal && Math.abs(total - nominal) <= nominal * 0.03 ? String(nominal) : decimal(total);
+  return decimal(usedMb / 1024) + " / " + shown + " GB";
+}
+
+function gpuText(gpu) {
+  const last = gpu.samples[gpu.samples.length - 1];
+  const parts = [gpu.name];
+  if (last) {
+    const [, load, used, temp] = last;
+    parts.push(load === null ? "terhelés: nem mérhető" : "terhelés " + load + "%");
+    parts.push("VRAM " + vramText(used, gpu.total_mb));
+    if (temp !== null) parts.push(temp + " °C");
+  }
+  return parts.join(" · ");
+}
+
+function showGpuTip() {
+  const tip = $("gpu-tip");
+  if (!gpuTipFor) { tip.hidden = true; return; }
+  tip.textContent = gpuText(gpuTipFor.gpu);
+  tip.hidden = false;
+  const box = gpuTipFor.el.getBoundingClientRect();
+  const left = Math.min(Math.max(8, box.left + box.width / 2 - tip.offsetWidth / 2), innerWidth - tip.offsetWidth - 8);
+  tip.style.left = left + "px";
+  tip.style.top = box.bottom + 4 + "px";
+}
+
+function gpuStrip(gpu) {
+  let strip = gpuStrips.get(gpu.index);
+  if (!strip) {
+    const el = document.createElement("div");
+    el.className = "gpu";
+    el.tabIndex = 0;
+    el.setAttribute("role", "img");
+    el.setAttribute("aria-describedby", "gpu-tip");
+    const canvas = document.createElement("canvas");
+    el.appendChild(canvas);
+    $("gpus").appendChild(el);
+    strip = { el, canvas, gpu };
+    gpuStrips.set(gpu.index, strip);
+    const show = () => { gpuTipFor = strip; showGpuTip(); };
+    const hide = () => { if (gpuTipFor === strip) { gpuTipFor = null; showGpuTip(); } };
+    el.addEventListener("mouseenter", show);
+    el.addEventListener("focus", show);
+    el.addEventListener("mouseleave", hide);
+    el.addEventListener("blur", hide);
+  }
+  strip.gpu = gpu;
+  strip.el.setAttribute("aria-label", gpu.name + " terhelése az utolsó percben");
+  return strip;
+}
+
+function renderGpus(info) {
+  gpuInterval = info.interval || 1;
+  gpuClock = (info.now || Date.now() / 1000) - Date.now() / 1000;
+  const seen = new Set();
+  for (const gpu of info.gpus || []) {
+    gpuStrip(gpu);
+    seen.add(gpu.index);
+  }
+  for (const [index, strip] of gpuStrips) {
+    if (seen.has(index)) continue;
+    strip.el.remove();
+    gpuStrips.delete(index);
+    if (gpuTipFor === strip) gpuTipFor = null;
+  }
+  $("gpus").hidden = gpuStrips.size === 0;
+  showGpuTip();
+  if (reduceMotion) drawGpus();
+}
+
+async function pollGpus() {
+  if (document.hidden || gpuTimer === null) return;
+  let info = null;
+  try {
+    const response = await fetch("/api/gpus?t=" + encodeURIComponent(token));
+    if (response.ok) info = await response.json();
+  } catch { info = null; }
+  if (!info) return;                 // pl. épp újraindul a Jarvis: a következő körben újra
+  if (!info.available) {             // nincs NVIDIA-kártya, vagy ki van kapcsolva ([gui] gpu_bars)
+    clearInterval(gpuTimer);
+    gpuTimer = null;
+    $("gpus").hidden = true;
+    return;
+  }
+  renderGpus(info);
+}
+
+function drawGpus() {
+  // Egy ütemmel lemaradva rajzol, így a görbe vége nem ugrál, amikor megjön a következő mérés.
+  const now = Date.now() / 1000 + gpuClock - gpuInterval;
+  for (const strip of gpuStrips.values()) drawGpu(strip, now);
+}
+
+function drawGpu(strip, now) {
+  const canvas = strip.canvas;
+  const ratio = window.devicePixelRatio || 1;
+  const width = Math.round(canvas.clientWidth * ratio);
+  const height = Math.round(canvas.clientHeight * ratio);
+  if (!width || !height) return;
+  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, width, height);
+  // halvány alapvonal: üresjáratban is látszik, hogy ott a kártya
+  ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
+  ctx.fillRect(0, height - ratio, width, ratio);
+  const xOf = (t) => width - ((now - t) / GPU_SPAN) * width;
+  const yOf = (load) => height - ratio / 2 - load * (height - ratio);
+  const points = strip.gpu.samples.filter((s) => s[1] !== null).map((s) => [xOf(s[0]), s[1] / 100]);
+  if (!points.length) return;
+  const last = points[points.length - 1];
+  if (last && last[0] < width && last[0] > width - (3 * gpuInterval / GPU_SPAN) * width) {
+    points.push([width, last[1]]);   // az utolsó érték a sáv végéig
+  }
+  // A mérési hézagoknál (pl. amíg az ablak a háttérben volt) a görbe megszakad.
+  const gap = (4 * gpuInterval / GPU_SPAN) * width;
+  const runs = [];
+  let run = [];
+  for (const point of points) {
+    if (run.length && point[0] - run[run.length - 1][0] > gap) { runs.push(run); run = []; }
+    run.push(point);
+  }
+  runs.push(run);
+  // A fényerő egy vízszintes színátmenet: mintánként világosabb, ahol a kártya jobban dolgozott.
+  const fill = ctx.createLinearGradient(0, 0, width, 0);
+  const line = ctx.createLinearGradient(0, 0, width, 0);
+  for (const [x, load] of points) {
+    const at = Math.min(1, Math.max(0, x / width));
+    fill.addColorStop(at, `rgba(255, 255, 255, ${(0.05 + 0.25 * load).toFixed(3)})`);
+    line.addColorStop(at, `rgba(255, 255, 255, ${(0.3 + 0.7 * load).toFixed(3)})`);
+  }
+  ctx.beginPath();
+  for (const part of runs.filter((r) => r.length > 1)) {
+    ctx.moveTo(part[0][0], height);
+    for (const [x, load] of part) ctx.lineTo(x, yOf(load));
+    ctx.lineTo(part[part.length - 1][0], height);
+    ctx.closePath();
+  }
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.beginPath();
+  for (const part of runs.filter((r) => r.length > 1)) {
+    ctx.moveTo(part[0][0], yOf(part[0][1]));
+    for (const [x, load] of part.slice(1)) ctx.lineTo(x, yOf(load));
+  }
+  ctx.strokeStyle = line;
+  ctx.lineWidth = ratio;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+}
+
+gpuTimer = setInterval(pollGpus, 1000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pollGpus(); });
 
 // --- a Munka menünek (work.js) ----------------------------------------------------------
 
@@ -466,6 +742,7 @@ window.Jarvis = {
 
 requestAnimationFrame(frame);
 connect();
+pollGpus();
 // A legutóbb használt menü nyíljon meg (amint a Munka menü elérhető).
 let savedMode = null;
 try { savedMode = localStorage.getItem("jarvis-mode"); } catch { /* nem baj */ }

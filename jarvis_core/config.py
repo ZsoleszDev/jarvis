@@ -129,6 +129,7 @@ class GuiCfg:
     browser: str = "msedge"
     port: int = 0
     exit_on_close: bool = True
+    gpu_bars: bool = True          # a videókártyák terhelése az ablak tetején (kártyánként egy vékony sáv)
 
 
 @dataclass

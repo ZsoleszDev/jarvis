@@ -28,12 +28,14 @@ from test_offline import FakeOllama, make_cfg, reply, tool_reply  # noqa: E402
 from test_web_browser import HAS_CHROMIUM, _QuietHandler  # noqa: E402
 from test_work import SHIRT, jpeg  # noqa: E402
 
+from jarvis_core import app as app_module  # noqa: E402
 from jarvis_core import llm  # noqa: E402
 from jarvis_core.app import JarvisApp, model_problem  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError, blocker_of  # noqa: E402
 from jarvis_core.config import load_config  # noqa: E402
 from jarvis_core.gui import EventBus, GuiUI  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, is_runner_crash  # noqa: E402
+from jarvis_core.ollama_log import ServerLog, advice, find_cause  # noqa: E402
 from jarvis_core.selling import FAILED  # noqa: E402
 
 # Az Ollama 0.40 pontos hibaüzenetei, amikor a modellfolyamat leáll (a felhasználó naplójából)
@@ -41,6 +43,13 @@ CRASH_AFTER = ("model runner has unexpectedly stopped, this may be due to resour
                "error, check ollama server logs for details")
 CRASH_DURING = ("error reading llama-server response: read tcp 127.0.0.1:62287->127.0.0.1:57861: wsarecv: "
                 "A létező kapcsolatot a távoli állomás kényszerítetten bezárta.")
+
+
+# Ami ilyenkor az Ollama naplójába (server.log) kerül, ha a gép memóriája fogyott el
+BAD_ALLOC_LOG = ("terminate called after throwing an instance of 'std::bad_alloc'\n"
+                 "  what():  std::bad_alloc\n"
+                 'time=2026-10-17T10:15:09.004+02:00 level=ERROR source=server.go:764 msg="llama runner terminated" '
+                 'error="exit status 0xc0000409"\n')
 
 
 def crash(message: str = CRASH_AFTER):
@@ -62,6 +71,46 @@ class CrashDetectionTests(unittest.TestCase):
         self.assertIn("Az Újra gombbal", model_problem(OllamaError(CRASH_DURING), short=True))
         self.assertEqual(model_problem(OllamaError("Ollama-hiba (404): nincs ilyen modell")),
                          "Ollama-hiba (404): nincs ilyen modell")
+
+
+class ServerLogTests(unittest.TestCase):
+    """Miért állt le a modell: az Ollama naplójából."""
+
+    def test_finds_the_reason(self):
+        cause = find_cause('time=... level=INFO msg="llama runner started in 21.4 seconds"\n' + BAD_ALLOC_LOG)
+        self.assertEqual(cause.kind, "ram", "a memóriahiba számít, nem a kilépési kód")
+        self.assertIn("std::bad_alloc", cause.line)
+        vram = ("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1024.00 MiB on device 1: "
+                "cudaMalloc failed: out of memory\n")
+        self.assertEqual(find_cause(vram).kind, "vram")
+        self.assertEqual(find_cause("llama-context.cpp:123: GGML_ASSERT(obj_new) failed\n").kind, "crash")
+        self.assertIsNone(find_cause('time=... level=INFO msg="llama runner started"\n'))
+
+    def test_reads_only_what_was_written_since_the_mark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "server.log"
+            path.write_text("egy régi leállás: std::bad_alloc\n", encoding="utf-8")
+            log = ServerLog(path)
+            log.mark()
+            self.assertEqual(log.read_new(), "")
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("CUDA error: out of memory\n")
+            self.assertEqual(find_cause(log.read_new()).kind, "vram", "a régi sor nem számít")
+            path.write_text("új napló\n", encoding="utf-8")      # az Ollama újraindult: új, rövidebb napló
+            self.assertEqual(log.read_new(), "új napló\n")
+            self.assertEqual(ServerLog(Path(tmp) / "nincs.log").read_new(), "")
+        nowhere = ServerLog(Path("x"))
+        nowhere.path = None                                      # Linuxon a rendszernaplóban van
+        self.assertEqual(nowhere.read_new(), "")
+
+    def test_advice_names_the_fix(self):
+        ram = find_cause(BAD_ALLOC_LOG)
+        text = advice(ram, Path("server.log"), cache_off=False)
+        self.assertIn("elfogyott a gép memóriája", text)
+        self.assertIn("setx LLAMA_ARG_CACHE_RAM 0", text)
+        self.assertIn("lépj ki az Ollamából", text)
+        self.assertIn("már 0", advice(ram, None, cache_off=True))
+        self.assertIn("server.log", advice(None, Path("C:/Users/x/AppData/Local/Ollama/server.log"), cache_off=False))
 
 
 class ClientRetryTests(unittest.TestCase):
@@ -176,6 +225,37 @@ class AppRecoveryTests(unittest.TestCase):
         self.assertFalse([e for e in events if e["type"] == "error"])
         tools = [m for m in self.app.assistant.history if m.get("role") == "tool"]
         self.assertEqual(len(tools), 1, "az eszközt nem futtatta le újra")
+
+    def wait_for_warn(self, text: str) -> str:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for event in self.events():
+                if event["type"] == "warn" and text in event["text"]:
+                    return event["text"]
+            time.sleep(0.02)
+        self.fail(f"nem jött ilyen figyelmeztetés: {text}")
+
+    def test_the_reason_of_a_crash_is_explained_once(self):
+        log_file = Path(self.tmp.name) / "server.log"
+        log_file.write_text("a korábbi futás sorai\n", encoding="utf-8")
+        self.app.server_log = ServerLog(log_file)
+        self.app.server_log.mark()
+        with mock.patch.object(app_module, "RESTART_LOG_DELAY", 0.01), \
+                mock.patch.object(app_module, "user_setting", return_value=None):
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(BAD_ALLOC_LOG)              # ezt írja az Ollama a naplójába, amikor a modell leáll
+            self.fake.chat_script = [crash(CRASH_DURING), reply("Itt vagyok.")]
+            self.app.answer("Szia")
+            note = self.wait_for_warn("elfogyott a gép memóriája")
+            self.assertIn("setx LLAMA_ARG_CACHE_RAM 0", note)
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(BAD_ALLOC_LOG)
+            self.fake.chat_script = [crash(CRASH_DURING), reply("Megint itt.")]
+            self.app.answer("Szia újra")
+            again = self.wait_for_warn("A leállás oka megint")
+        self.assertIn("setx LLAMA_ARG_CACHE_RAM 0", again, "röviden, de a javítással együtt")
+        self.assertLess(len(again), len(note), "a részletes magyarázat csak egyszer")
+        self.assertEqual([r["cause"] for r in self.app.model_restarts], ["ram", "ram"])
 
     def test_a_failed_post_reports_in_the_work_log_and_on_the_card(self):
         store = self.app.work.store

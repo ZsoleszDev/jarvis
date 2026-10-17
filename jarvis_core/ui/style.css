@@ -33,8 +33,9 @@ body[data-mode="work"] { max-width: 1120px; }
 /* --- fejléc és menü ------------------------------------------------------------- */
 .top {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 18px;
+  gap: 6px 18px;
   padding: 12px 22px 0;
 }
 #name { font-size: 17px; font-weight: 600; font-stretch: 85%; }
@@ -50,6 +51,25 @@ body[data-mode="work"] { max-width: 1120px; }
 }
 .tabs button:hover { color: var(--paper); border-color: var(--steel); }
 .tabs button[aria-selected="true"] { color: var(--white); border-color: var(--white); }
+
+/* A videókártyák: kártyánként egy vékony sáv a fejléc tetején (a görbét az app.js rajzolja). A terhelést a
+   vonal fényereje mutatja; fölé víve az egeret jönnek a pontos értékek. */
+.gpus { order: -1; flex: 1 0 100%; display: flex; gap: 14px; margin-top: -9px; }
+.gpu { flex: 1 1 0; min-width: 0; padding: 4px 0; cursor: default; }
+.gpu canvas { display: block; width: 100%; height: 7px; }
+.gpu:focus-visible { outline: 1px solid var(--silver); outline-offset: 1px; }
+.gpu-tip {
+  position: fixed;
+  z-index: 20;
+  padding: 4px 10px;
+  border: 1px solid var(--steel);
+  border-radius: 6px;
+  background: var(--graphite-hi);
+  color: var(--paper);
+  font-size: 12.5px;
+  white-space: nowrap;
+  pointer-events: none;
+}
 
 /* --- varázsszem ------------------------------------------------------------------ */
 .dial {
@@ -405,6 +425,11 @@ body[data-state="standby"] #state { color: var(--ash); }
 .devices li { display: flex; gap: 10px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--rule); }
 .devices li span { flex: 1; }
 #phone-dialog code { color: var(--silver); }
+#jobs-dialog { width: min(520px, 92vw); }
+#jobs-body .section-title { margin: 16px 0 4px; }
+.jobs { display: grid; gap: 10px; margin: 8px 0 18px; }
+.jobs .check { align-items: flex-start; }
+.jobs .check input { margin-top: 2px; }
 #sold-where { border: 0; padding: 0; margin: 6px 0 10px; display: grid; gap: 6px; }
 #sold-dialog > .check { margin-bottom: 16px; }
 

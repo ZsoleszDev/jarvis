@@ -33,6 +33,8 @@ export interface ConfirmRequest { type?: 'confirm'; id: number; prompt: string; 
 
 export interface SchedulerJob {
   key: string; title: string; every_minutes: number; enabled: boolean;
+  on: boolean;          // hamis, ha a gépen (Automatikus munkák) kikapcsoltad
+  available: boolean;   // van-e mit néznie (pl. van-e figyelő)
   last_run: number | null; next_run: number | null; result: string; error: string; running: boolean;
 }
 

@@ -161,6 +161,26 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(status["free"])
         self.assertEqual(status["jobs"][0]["title"], "Figyelők")
 
+    def test_a_job_switched_off_stays_off(self):
+        scheduler = self.make()
+        self.assertFalse(scheduler.set_enabled("nincs ilyen", False))
+        self.assertTrue(scheduler.set_enabled("watches", False))      # az Automatikus munkák ablakból
+        self.clock.now += 3 * 3600
+        self.assertFalse(scheduler.due(scheduler.jobs["watches"], self.clock.now))
+        self.assertIsNone(scheduler.tick(), "kikapcsolva magától nem fut")
+        job = scheduler.status()["jobs"][0]
+        self.assertFalse(job["on"])
+        self.assertFalse(job["enabled"])
+        self.assertIsNone(job["next_run"])
+        again = self.make()                                            # újraindítás után is így marad
+        self.assertFalse(again.is_on("watches"))
+        self.assertIsNone(again.tick())
+        self.assertEqual(again.run("watches", forced=True), "kész", "kérésre azért lefut")
+        again.set_enabled("watches", True)
+        self.clock.now += 61 * 60
+        self.assertEqual(again.tick(), "watches")
+        self.assertTrue(self.make().status()["jobs"][0]["on"])
+
     def test_active_hours(self):
         def at(hour: int) -> float:
             return dt.datetime(2026, 10, 15, hour, 30).timestamp()

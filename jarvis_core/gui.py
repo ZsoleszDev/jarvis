@@ -31,8 +31,10 @@ from .app import STATE_TEXT, JarvisApp, tool_label
 from .config import GuiCfg, app_data
 from .creative import MAX_TEXT, StoryError
 from .dossier import open_folder
+from .gpu import GpuMonitor
 from .selling import MAX_PHOTO_BYTES, ItemError
 from .tools import summarize_result
+from .watches import WatchError
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 PAGE = UI_DIR / "index.html"
@@ -300,6 +302,8 @@ class GuiServer:
         self.ui = ui
         self.bus = bus
         self.phone: Any = None      # a telefonos kapcsolat (api.ApiServer), ha fut
+        self.gpus: GpuMonitor | None = None   # a GPU-sávok mérése (az első lekérdezéskor indul)
+        self._gpus_lock = threading.Lock()
         self.token = secrets.token_urlsafe(24)
         self.closing = threading.Event()
         handler = type("JarvisHandler", (_Handler,), {"gui": self})
@@ -312,8 +316,16 @@ class GuiServer:
     def start(self) -> None:
         self._thread.start()
 
+    def gpu_monitor(self) -> GpuMonitor:
+        with self._gpus_lock:
+            if self.gpus is None:
+                self.gpus = GpuMonitor()
+            return self.gpus
+
     def stop(self) -> None:
         self.closing.set()
+        if self.gpus is not None:
+            self.gpus.stop()
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -393,6 +405,17 @@ class _Handler(BaseHTTPRequestHandler):
             if not self._token_ok(token):
                 return self._forbidden()
             return self._json(200, self._phone_info())
+        if parsed.path == "/api/gpus":
+            if not self._token_ok(token):
+                return self._forbidden()
+            app = self.gui.app
+            if app is not None and not app.cfg.gui.gpu_bars:
+                return self._json(200, {"ok": True, "available": False, "gpus": []})
+            return self._json(200, {"ok": True, **self.gui.gpu_monitor().snapshot()})
+        if parsed.path == "/api/jobs":
+            if not self._token_ok(token):
+                return self._forbidden()
+            return self._json(200, self._jobs_info())
         if parsed.path == "/api/ping":
             if not self._token_ok(token):
                 return self._forbidden()
@@ -405,6 +428,17 @@ class _Handler(BaseHTTPRequestHandler):
             return {"ok": True, "enabled": False}
         return {"ok": True, "enabled": True, "host": phone.host, "port": phone.port,
                 "devices": phone.auth.devices()}
+
+    def _jobs_info(self) -> dict[str, Any]:
+        """Az Automatikus munkák ablaknak: a figyelők és a háttérmunkák (be- vagy kikapcsolva)."""
+        app = self.gui.app
+        scheduler = app.scheduler if app is not None else None
+        if scheduler is None or app.watches is None:
+            return {"ok": True, "ready": False}
+        status = scheduler.status()
+        return {"ok": True, "ready": True, "enabled": status["enabled"],
+                "search": app.toolbox is not None and app.toolbox.has("watch_add"),
+                "watches": [w.public() for w in app.watches.all()], "jobs": status["jobs"]}
 
     def _work(self) -> Any:
         app = self.gui.app
@@ -492,6 +526,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._work_post(path, body)
         if path.startswith("/api/creative/"):
             return self._creative_post(path, body)
+        if path.startswith("/api/jobs/"):
+            return self._jobs_post(path, body)
         mode = str(body.get("mode") or "chat")
         if path == "/api/send":
             app.submit_text(str(body.get("text", ""))[:4000], mode=mode)
@@ -517,6 +553,29 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/phone/revoke":
             ok = phone.auth.revoke(str(body.get("id") or ""))
             return self._json(200 if ok else 404, {"ok": ok, "devices": phone.auth.devices()})
+        return self._json(404, {"ok": False})
+
+    def _jobs_post(self, path: str, body: dict[str, Any]) -> None:
+        app = self.gui.app
+        if app.scheduler is None or app.watches is None:
+            return self._json(503, {"ok": False, "error": "A háttérmunka még indul."})
+        if path == "/api/jobs/watch-delete":
+            ids = body.get("ids") if isinstance(body.get("ids"), list) else [body.get("id")]
+            known = {w.id for w in app.watches.all()}
+            wanted = [str(i) for i in ids if str(i) in known]
+            if not wanted:
+                return self._json(404, {"ok": False, "error": "Nincs ilyen figyelő (talán már törölted)."})
+            removed = []
+            for watch_id in wanted:
+                try:
+                    removed.append(app.watches.remove(watch_id).public())
+                except WatchError:
+                    continue
+            return self._json(200, {**self._jobs_info(), "removed": removed})
+        if path == "/api/jobs/toggle":
+            if not app.scheduler.set_enabled(str(body.get("key") or ""), bool(body.get("on"))):
+                return self._json(404, {"ok": False, "error": "Nincs ilyen háttérmunka."})
+            return self._json(200, self._jobs_info())
         return self._json(404, {"ok": False})
 
     def _work_photo(self, item_id: str, length: int) -> None:
