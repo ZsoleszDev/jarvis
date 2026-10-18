@@ -31,7 +31,7 @@ from .selling import (CONDITIONS, NEEDS, NOT_POSTED, PARCEL_SIZES, PLATFORMS, PO
                       missing_needs, parse_price, price_verdict, question_for)
 from .textutil import fold
 from .tools import Toolbox, ToolError, params
-from .vinted import ChoiceMemory, FillOutcome, VintedFiller
+from .vinted import ChoiceMemory, FillOutcome, VintedDelister, VintedFiller
 
 # A Munka menü beszélgetése ezeket az eszközöket látja; a böngésző ugyanaz, mint a Beszélgetésé.
 SHARED_TOOLS = {"get_datetime", "web_search", "read_webpage", "browser_open", "browser_click",
@@ -150,6 +150,8 @@ class WorkDesk:
         self.approved = False    # feltöltés közben jóváhagytál-e egy kattintást (pl. a közzétételt)
         # (tárgy, oldal), amiről a modell épp megnézi, fent van-e: ilyenkor újra feltölteni nem szabad.
         self.checking: tuple[str, str] | None = None
+        # (tárgy, oldal), amit a Vinted-levevő ebben a kérésben már megpróbált: az item_delist nem kezdi újra.
+        self.autodelisted: tuple[str, str] | None = None
         self._settings_path = self.root / "beallitasok.json"
         self.settings = self._load_settings()
         # Begyakorolt lépések: a modell sikeres feltöltéseiből és levételeiből tanul (replay.py).
@@ -358,6 +360,7 @@ class WorkDesk:
         self.replay_preview = []
         self.preview_title = ""
         self.checking = None
+        self.autodelisted = None
 
     def _on_browser_action(self, event: dict[str, Any]) -> None:
         if self.recorder is not None:
@@ -491,8 +494,9 @@ class WorkDesk:
             self.flows.update_stats(flow, ok=False)
         return outcome
 
-    def verify_request(self, item: Item, key: str, task: str, outcome: ReplayOutcome) -> str:
-        """A modell nézze meg, sikerült-e (ha a visszajátszás után nem egyértelmű)."""
+    def verify_request(self, item: Item, key: str, task: str, outcome: ReplayOutcome | FillOutcome,
+                       how: str = "begyakorolt lépésekkel") -> str:
+        """A modell nézze meg, sikerült-e (ha a visszajátszás vagy a modell nélküli levétel után nem egyértelmű)."""
         site = self.platforms[key]
         if task == "post":
             return (f"A(z) „{item.name}” hirdetést (azonosító: {item.id}) begyakorolt lépésekkel kitöltöttem a(z) "
@@ -501,7 +505,7 @@ class WorkDesk:
                     f"az item_mark eszközzel (status: feltöltve, platform: {key}, és ha látod, a hirdetés webcíme). "
                     "Ha hibaüzenet van (pl. hiányzó kötelező mező), javítsd ki a hirdetés adataival (item_get), és "
                     "tedd közzé újra. Ha nem tudod eldönteni, ne jelöld meg. Röviden mondd el az eredményt.")
-        return (f"A(z) „{item.name}” hirdetést (azonosító: {item.id}) begyakorolt lépésekkel vettem le a(z) "
+        return (f"A(z) „{item.name}” hirdetést (azonosító: {item.id}) {how} vettem le a(z) "
                 f"{site.name} oldalról, de nem biztos, hogy sikerült ({outcome.reason}). Nézd meg az oldalt. Ha a "
                 "hirdetés már nem él (törölve, inaktív vagy eladottként jelölve), jelöld meg az item_mark eszközzel "
                 f"(status: nincs fent, platform: {key}). Ha még fent van, fejezd be a levételt. Röviden mondd el "
@@ -530,10 +534,71 @@ class WorkDesk:
         self.preview_title = "Modell nélkül töltöttem ki."
         self.replay_preview = filler.summary      # a közzététel kérdésében látod, mit választott
         try:
-            return filler.run(self.platforms[key].new_url)
+            outcome = filler.run(self.platforms[key].new_url)
         finally:
             self.replay_preview = []
             self.preview_title = ""
+        self.remember_profile(outcome.profile)
+        return outcome
+
+    def remember_profile(self, url: str) -> None:
+        """A Vinted-profilod címe (a feltöltés után a Vinted oda visz): ha egy hirdetés webcíme nincs meg, a
+        levételnél ott keresi."""
+        if url and self.settings.get("vinted_profile") != url:
+            self.settings["vinted_profile"] = url
+            try:
+                self._save_settings()
+            except OSError:
+                pass
+
+    # --- a Vinted-levétel (lásd vinted.py) ------------------------------------------------------------
+
+    def can_autodelist(self, item_id: str, key: str) -> bool:
+        """A Vintedről a Jarvis maga veszi le a hirdetést ([work] autofill): Törlés, megerősítés, modell nélkül."""
+        if not (self.cfg.work.autofill and self.browser_ready) or key != "vinted" or key not in self.platforms:
+            return False
+        try:
+            item = self.store.get(item_id)
+        except ItemError:
+            return False
+        return bool(item.title or item.platforms.get(key, {}).get("url"))
+
+    def autodelist(self, item_id: str, key: str, progress: Callable[[str], None] | None = None) -> FillOutcome:
+        """Leveszi a hirdetést a Vinted-levevővel (a levételt már jóváhagytad: begin_delist)."""
+        item = self.store.get(item_id)
+        site = self.platforms[key]
+        delister = VintedDelister(self.toolbox.browser, item.title or item.name,
+                                  url=item.platforms.get(key, {}).get("url", ""),
+                                  profile=str(self.settings.get("vinted_profile") or ""), search_url=site.search_url,
+                                  check=self.check_stop, progress=progress)
+        self.recorder = None
+        self.begin_trail()
+        self.autodelisted = (item_id, key)
+        outcome = delister.run()
+        self.remember_profile(outcome.profile)
+        return outcome
+
+    def _after_autodelist(self, found: Item, platform: str, outcome: FillOutcome) -> str | None:
+        """Az item_delist eszközben (a beszélgetésből kért levételnél) a Vinted-levevő eredménye: a kész válasz, ha
+        a modellnek nincs több dolga; None, ha folytatnia kell (a megtalált hirdetésnél)."""
+        site = self.platforms[platform]
+        if outcome.status in ("done", "gone"):
+            note = DELISTED_NOTE if outcome.status == "done" else f"{DELISTED_NOTE} (már nem volt fent)"
+            self.store.mark(found.id, platform, NOT_POSTED, note=note)
+            self.store.set_busy(found.id, "")
+            self.delisting = self.current = None
+            if outcome.status == "gone":
+                return f"A hirdetés már nem volt fent a(z) {site.name} oldalon. Megjelöltem: nincs fent."
+            return f"Levettem a(z) {site.name} oldalról (modell nélkül). Megjelöltem: nincs fent."
+        if outcome.url:          # megtalálta a hirdetést: onnan folytatódik
+            self.store.mark(found.id, platform, POSTED, url=outcome.url)
+        if outcome.status == "declined":
+            self.store.set_busy(found.id, "")
+            return "A felhasználó nem engedélyezte a levételt."
+        if outcome.status == "blocked":
+            self.store.set_busy(found.id, "")
+            return f"Nem tudom levenni: {outcome.reason} Állj meg, és mondd el ezt a felhasználónak."
+        return None
 
     def remember_choices(self, outcome: FillOutcome) -> None:
         """Sikeres feltöltés után: amit a modell kiválasztott (pl. a kategóriautat), legközelebb modell nélkül."""
@@ -604,6 +669,7 @@ class WorkDesk:
         """Egy oldalról levétel után: ha nem jelölte meg levettnek, a hirdetés fent marad, megjegyzéssel."""
         self.current = None
         self.delisting = None
+        self.autodelisted = None
         if self.recorder is not None and self.recorder.task == "delist":
             self.recorder = None
         try:
@@ -888,8 +954,19 @@ class WorkDesk:
         self.current = (found.id, platform)
         self.begin_trail()
         self.store.set_busy(found.id, f"Levétel: {site.name}…")
-        prefix = ""
-        if self.can_replay(found.id, platform, "delist"):
+        prefix, clicked = "", False
+        if self.can_autodelist(found.id, platform) and self.autodelisted != (found.id, platform):
+            auto = self.autodelist(found.id, platform)
+            answer = self._after_autodelist(found, platform, auto)
+            if answer is not None:
+                return answer
+            found = self.store.get(found.id)
+            entry = found.platforms.get(platform) or {}
+            clicked = auto.status == "uncertain"     # a Törlésre már rákattintott: csak meg kell nézni
+            prefix = (f"A Törlésre rákattintottam, de nem biztos, hogy sikerült ({auto.reason}). Nézd meg az "
+                      "oldalt: ha a hirdetés már nincs fent, csak jelöld meg; ha még fent van, fejezd be.\n" if clicked
+                      else f"A modell nélküli levétel nem ment végig ({auto.reason}); folytasd te.\n")
+        if not clicked and self.can_replay(found.id, platform, "delist"):
             outcome = self.replay(found.id, platform, "delist")
             if outcome.status == "done":
                 self.store.mark(found.id, platform, NOT_POSTED, note=DELISTED_NOTE)
@@ -899,7 +976,7 @@ class WorkDesk:
             if outcome.status == "declined":
                 self.store.set_busy(found.id, "")
                 return "A felhasználó nem engedélyezte a levételt."
-            prefix = f"A begyakorolt lépések nem vitték végig ({outcome.reason}); folytasd te.\n"
+            prefix += f"A begyakorolt lépések nem vitték végig ({outcome.reason}); folytasd te.\n"
         url = entry.get("url", "")
         if url:
             self.start_recording(found, platform, "delist", url)

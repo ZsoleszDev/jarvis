@@ -25,9 +25,11 @@ import json
 import os
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote_plus, urljoin, urlsplit
 
 from .browser import BrowserError, is_risky
 from .llm import OllamaError
@@ -133,6 +135,7 @@ class FillOutcome:
     filled: list[str] = field(default_factory=list)   # mi van már kitöltve (ha a modellnek kell folytatnia)
     learned: dict[str, dict[str, list[dict[str, str]]]] = field(default_factory=dict)
     log: list[str] = field(default_factory=list)      # a döntések (a hibacsomagba)
+    profile: str = ""             # a Vinted-profilod címe, ha útközben kiderült (a levételhez jól jön)
 
 
 # --- segédek (böngésző nélkül is tesztelhetők) --------------------------------------------------------
@@ -812,6 +815,22 @@ class VintedFiller:
         self.log.append(f"Közzététel: „{button.get('label', '')}”")
         return self._await_result(form_url, before_errors)
 
+    def _listing_url(self, landing: str) -> str:
+        """A közzététel után a Vinted a profilodra (vagy a hirdetésre) visz. A hirdetés saját címe kell (azzal
+        egyből le lehet venni): ha a profilon ott a linkje, azt adjuk vissza, különben a céloldalt."""
+        if ITEM_PATH_RE.search(urlsplit(landing).path):
+            return landing
+        for attempt in range(3):            # a profil hirdetései kicsit később töltődhetnek be
+            try:
+                link = listing_link(self.browser.scan(), self.values.get("title", ""))
+            except BrowserError:
+                break
+            if link is not None:
+                return urljoin(self.browser.url or landing, link["href"])
+            if attempt < 2:
+                time.sleep(0.7)
+        return landing
+
     def _await_result(self, form_url: str, before_errors: set[str]) -> FillOutcome:
         """A közzététel után: a Vinted továbbenged (a hirdetés vagy a profil oldalára), vagy hibát ír ki."""
         started = time.monotonic()
@@ -820,7 +839,9 @@ class VintedFiller:
         while True:
             url = self.browser.url
             if url and url_shape(url) != shape:
-                return self._outcome("done", published=True, url=url)
+                outcome = self._outcome("done", published=True, url=self._listing_url(url))
+                outcome.profile = profile_url(url)
+                return outcome
             if time.monotonic() - started >= 1.5:
                 errors = [e for e in self.browser.form_errors() if e not in before_errors]
                 if errors and errors == last:    # két egymás utáni nézésnél is ott van: nem csak egy villanás
@@ -830,3 +851,320 @@ class VintedFiller:
             if time.monotonic() - started >= self.publish_wait:
                 return self._outcome("uncertain", "nem látszik, hogy a Vinted elfogadta", published=True, url=url)
             time.sleep(0.5)
+
+
+# --- levétel (eladás után) --------------------------------------------------------------------------------
+# Eddig a modell vette le lépésenként: a hirdetés címe nélkül a főoldalról indult, a profilodon kereste, és a
+# jobb oldali gombokat képről próbálta megtalálni; percekig tartott, és nem mindig sikerült. Itt a kód tudja,
+# hol mi van: a hirdetés oldalán a Törlés (Delete) gomb, utána a megerősítés, végül megnézi, hogy eltűnt-e.
+
+DELETE_WAIT = 15.0          # a megerősítés után ennyi ideig várja, hogy a hirdetés eltűnjön
+MAX_CANDIDATES = 3          # a keresőben legfeljebb ennyi azonos című hirdetést nyit meg (melyik a tiéd)
+PROFILE_SCROLLS = 3         # a profilodon ennyit görget lefelé, ha a hirdetés nem látszik (a rács később tölt)
+ITEM_PATH_RE = re.compile(r"/items/(\d+)")
+MEMBER_PATH_RE = re.compile(r"/member/(\d+)")
+_DELETE_RE = re.compile(r"^(delete|delete item|delete listing|torles|torlom|hirdetes torlese|a hirdetes torlese|"
+                        r"termek torlese|tetel torlese)$")
+# A megerősítő ablak gombja (a „Mégse” nem): előbb a törlés szavával, aztán az általános megerősítés.
+_CONFIRM_DELETE_RE = re.compile(r"^(confirm and delete|yes delete|yes delete it|delete|delete item|torles|torlom|"
+                                r"igen torlom|igen torles|megerosites es torles|torles megerositese)$")
+_CONFIRM_RE = re.compile(r"^(confirm|megerosites|megerositem|igen|yes|ok|rendben)$")
+_GONE_RE = re.compile(r"(page not found|page doesn t exist|not found|nem talalhato|nem letezik|no longer available|"
+                      r"mar nem elerheto|has been deleted|was deleted|torolve|toroltek|toroltuk)")
+_LOGGED_OUT_RE = re.compile(r"^(log in|login|sign up|sign up log in|sign in|bejelentkezes|belepes|regisztracio|"
+                            r"regisztralj|csatlakozz)$")
+
+
+def item_slug(title: str) -> str:
+    """A hirdetés címe úgy, ahogy a Vinted a webcímbe teszi: „Hosszú farmer 40-es méret” → hosszu-farmer-40-es-meret."""
+    return re.sub(r"[^a-z0-9]+", "-", fold(title or "")).strip("-")
+
+
+def profile_url(url: str) -> str:
+    """A Vinted-profil címe (a /member/<szám> rész, a ?… nélkül), ha ez egy profiloldal; különben ""."""
+    parts = urlsplit(url or "")
+    found = MEMBER_PATH_RE.search(parts.path)
+    return f"{parts.scheme}://{parts.netloc}{parts.path}" if found and parts.scheme in ("http", "https") else ""
+
+
+def listing_link(elements: list[dict[str, Any]], title: str) -> dict[str, Any] | None:
+    """Egy hirdetéslista (a profilod vagy a keresés) eleme, ami erre a hirdetésre visz: /items/<szám>-… link, és a
+    felirata a hirdetés címével kezdődik („Hosszú farmer 40-es méret, brand: …”), vagy a webcímében ez a cím áll."""
+    return next(iter(listing_links(elements, title)), None)
+
+
+def listing_links(elements: list[dict[str, Any]], title: str) -> list[dict[str, Any]]:
+    slug = item_slug(title)
+    if not slug:
+        return []
+    found, seen = [], set()
+    for el in elements:
+        href = str(el.get("href") or "")
+        path = urlsplit(href).path
+        match = ITEM_PATH_RE.search(path)
+        if not match or match.group(1) in seen:
+            continue
+        tail = path[match.end():].strip("/-")
+        if starts(el.get("label", ""), title) or tail == slug or tail.startswith(slug + "-"):
+            seen.add(match.group(1))
+            found.append(el)
+    return found
+
+
+def delete_button(elements: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """A hirdetés oldalán a Törlés (Delete) gomb: csak a saját hirdetéseden van ilyen."""
+    for el in elements:
+        if el.get("chrome") or el.get("disabled") or el.get("kind", "") not in BUTTON_KINDS | {"link"}:
+            continue
+        if _DELETE_RE.match(norm_text(el.get("label", ""))):
+            return el
+    return None
+
+
+def seller_profile(elements: list[dict[str, Any]], base: str) -> str:
+    """A hirdetés oldalán az eladó profiljának címe (a fejlécen kívüli /member/<szám> link), ha egyértelmű. A saját
+    hirdetéseden ez a te profilod: legközelebb ott keresi a hirdetéseidet."""
+    members = {}
+    for el in elements:
+        href = str(el.get("href") or "")
+        found = MEMBER_PATH_RE.search(urlsplit(href).path)
+        if found and not el.get("chrome"):
+            members.setdefault(found.group(1), href)
+    return profile_url(urljoin(base, next(iter(members.values())))) if len(members) == 1 else ""
+
+
+def logged_out(elements: list[dict[str, Any]]) -> bool:
+    """Kijelentkezett oldal: a fejlécben „Log in” / „Bejelentkezés” gomb van."""
+    return any(_LOGGED_OUT_RE.match(norm_text(el.get("label", ""))) for el in elements)
+
+
+def new_elements(before: Counter, elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ami egy kattintás óta jelent meg (pl. a megerősítő ablak gombjai). Ha egy felirat már előtte is ott volt
+    (a „Delete” gomb az oldalon és az ablakban is), a későbbi előfordulás az új: az ablak a lap végére kerül."""
+    seen: Counter = Counter()
+    fresh = []
+    for el in elements:
+        key = elem_key(el)
+        seen[key] += 1
+        if seen[key] > before.get(key, 0):
+            fresh.append(el)
+    return fresh
+
+
+def confirm_button(fresh: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """A megerősítő ablak gombja a most megjelent elemek közül: a törlés szavával, vagy az általános igen."""
+    buttons = [e for e in fresh if e.get("kind", "") in BUTTON_KINDS and not e.get("disabled")]
+    for pattern in (_CONFIRM_DELETE_RE, _CONFIRM_RE):
+        for el in buttons:
+            if pattern.match(norm_text(el.get("label", ""))):
+                return el
+    return None
+
+
+class _Stop(Exception):
+    """A levétel itt megáll (pl. bejelentkezés vagy robot-ellenőrzés kell); a kimenetel benne van."""
+
+    def __init__(self, outcome: FillOutcome):
+        super().__init__(outcome.reason)
+        self.outcome = outcome
+
+
+class VintedDelister:
+    """Egy hirdetés levétele a Vintedről modell nélkül, emberi tempóban (a böngésző közben „auto” módban van).
+
+    A hirdetés oldala: a megjegyzett webcím; ha az a profilodé (a feltöltés után a Vinted oda visz), vagy nincs,
+    a profilodon, végül a Vinted keresőjében keresi meg (a keresőben a tiéd az, amelyiken ott a Törlés gomb).
+    Utána a Törlés, a megerősítés, és megnézi, hogy a hirdetés eltűnt-e. A törlés jóvá van hagyva, mert a
+    levételt már jóváhagytad (work.begin_delist); fizetős gombra soha nem kattint."""
+
+    def __init__(self, browser: Any, title: str, url: str = "", profile: str = "", search_url: str = "",
+                 check: Callable[[], None] | None = None, progress: Callable[[str], None] | None = None,
+                 wait: float | None = None):
+        self.browser = browser
+        self.title = title
+        self.url = url or ""
+        self.profile = profile_url(url) or profile or ""
+        self.search_url = search_url
+        self.check = check or (lambda: None)
+        self.progress = progress or (lambda _text: None)
+        self.wait = DELETE_WAIT if wait is None else wait
+        self.found = ""             # a hirdetés webcíme, ha megtalálta (legközelebb egyből oda megy)
+        self.log: list[str] = []
+
+    def run(self) -> FillOutcome:
+        previous = getattr(self.browser, "auto", False)
+        self.browser.auto = True
+        try:
+            return self._run()
+        except _Stop as stop:
+            return stop.outcome
+        finally:
+            self.browser.auto = previous
+
+    def _outcome(self, status: str, reason: str = "", published: bool = False) -> FillOutcome:
+        return FillOutcome(status, reason, url=self.found, published=published, log=list(self.log),
+                           profile=self.profile)
+
+    def _run(self) -> FillOutcome:
+        try:
+            self.progress("a hirdetés megkeresése")
+            button = self._find()
+            if button is None:
+                return self._outcome("miss", "nem találom a hirdetést (se a webcímén, se a profilodon, se a keresőben)")
+            return self._delete(button)
+        except BrowserError as exc:
+            return self._outcome("miss", f"a böngészőben hiba volt ({str(exc).splitlines()[0][:160]})")
+
+    # --- a hirdetés megkeresése ---
+
+    def _open(self, url: str) -> tuple[str, list[dict[str, Any]]]:
+        """Megnyit egy oldalt (a süti-ablakot elfogadja); az oldal szövege és a letapogatott elemek."""
+        self.check()
+        text = self.browser.open(url)
+        if self.browser.challenged():
+            raise _Stop(self._outcome("blocked", "A Vinted robot-ellenőrzést (captcha) kér. Oldd meg a "
+                                                 "böngészőablakomban, utána az Újra gombbal folytatom."))
+        elements = self.browser.scan()
+        consent = consent_button(elements)
+        if consent is not None:
+            self.browser.click(consent["id"])
+            elements = self.browser.scan()
+        return text, elements
+
+    def _item_page(self, url: str, known: bool = False) -> dict[str, Any] | None:
+        """Megnyitja a hirdetés oldalát; a Törlés gombja, ha ez a te hirdetésed. A megjegyzett webcímnél (known)
+        az is kiderül, ha már nincs fent, vagy ha be kell jelentkezni."""
+        text, elements = self._open(url)
+        for attempt in range(3):            # a gombok a lap betöltése után kicsit később jelenhetnek meg
+            button = delete_button(elements)
+            if button is not None:
+                self.found = self.browser.url.split("?")[0]
+                self.log.append(f"A hirdetés oldala: {self.found}")
+                self.profile = self.profile or seller_profile(elements, self.browser.url)
+                return button
+            if attempt < 2:
+                time.sleep(0.6)
+                elements = self.browser.scan()
+        if logged_out(elements):
+            raise _Stop(self._outcome("blocked", "Be kell jelentkezned a Vintedre a böngészőablakomban (Alapadatok és "
+                                                 "bejelentkezés › Vinted), utána az Újra gombbal folytatom."))
+        if known and self._gone(url, text):
+            self.log.append(f"A hirdetés már nincs fent: {url}")
+            raise _Stop(self._outcome("gone", "a hirdetés már nem volt fent a Vinteden"))
+        return None
+
+    def _gone(self, url: str, text: str) -> bool:
+        """A hirdetés oldala már nem létezik: a Vinted máshova irányított, vagy „nem található” oldalt mutat."""
+        wanted = ITEM_PATH_RE.search(urlsplit(url).path)
+        now = ITEM_PATH_RE.search(urlsplit(self.browser.url).path)
+        if wanted and (now is None or now.group(1) != wanted.group(1)):
+            return True
+        heading, visible = self._page_text(text)
+        return bool(_GONE_RE.search(norm_text(heading + " " + visible[:600]))) and not starts(heading, self.title)
+
+    @staticmethod
+    def _page_text(text: str) -> tuple[str, str]:
+        """Az oldalnézetből (browser.open) az oldal címe és a látható szöveg (a kezelhető elemek nélkül)."""
+        heading, visible, inside = "", [], False
+        for line in (text or "").splitlines():
+            if line.startswith("Oldal: ") and not heading:
+                heading = line[len("Oldal: "):].strip()
+            elif line.startswith("Látható szöveg:"):
+                inside = True
+            elif line.startswith("Kezelhető elemek") or line.startswith("Nincs kezelhető elem"):
+                break
+            elif inside:
+                visible.append(line)
+        return heading, " ".join(visible)
+
+    def _find(self) -> dict[str, Any] | None:
+        if self.url and ITEM_PATH_RE.search(urlsplit(self.url).path):
+            self.progress("a hirdetés megnyitása")
+            button = self._item_page(self.url, known=True)
+            if button is not None:
+                return button
+            # Fent van, és be vagy jelentkezve, csak a Törlés gombot nem ismerem fel (pl. új elrendezés): máshol
+            # nem keresem, mert egy azonos című másik hirdetésedet törölhetném; a lépéseket a modell végzi.
+            self.found = self.url.split("?")[0]
+            raise _Stop(self._outcome("miss", "a hirdetés oldalán nem találom a Törlés gombot"))
+        if self.profile:
+            self.progress("a hirdetés keresése a profilodon")
+            button = self._from_profile(self.profile)
+            if button is not None:
+                return button
+        if self.search_url and self.title:
+            self.progress("a hirdetés keresése a Vinteden")
+            return self._from_search()
+        return None
+
+    def _from_profile(self, url: str) -> dict[str, Any] | None:
+        _text, elements = self._open(url)
+        for scroll in range(PROFILE_SCROLLS + 1):
+            link = listing_link(elements, self.title)
+            if link is not None:
+                self.log.append(f"A profilodon: „{short(link.get('label', ''), 60)}”")
+                return self._item_page(urljoin(self.browser.url, link["href"]))
+            if scroll < PROFILE_SCROLLS:
+                self.browser.scroll("down")
+                elements = self.browser.scan()
+        self.log.append("A profilodon nem látszik a hirdetés.")
+        return None
+
+    def _from_search(self) -> dict[str, Any] | None:
+        query = self.search_url.replace("{q}", quote_plus(self.title))
+        _text, elements = self._open(query)
+        base = self.browser.url
+        links = [urljoin(base, el["href"]) for el in listing_links(elements, self.title)][:MAX_CANDIDATES]
+        self.log.append(f"A keresőben {len(links)} azonos című hirdetés.")
+        for link in links:
+            button = self._item_page(link)
+            if button is not None:          # a tiéd az, amelyiken ott a Törlés gomb
+                return button
+        return None
+
+    # --- a törlés ---
+
+    def _delete(self, button: dict[str, Any]) -> FillOutcome:
+        item_url = self.found or self.browser.url
+        before = Counter(elem_key(e) for e in self.browser.scan())
+        self.check()
+        self.progress("törlés")
+        result = self.browser.click(button["id"])
+        if result.startswith("A felhasználó nem engedélyezte"):
+            return self._outcome("declined", "nem engedélyezted a törlést")
+        self.log.append(f"Törlés: „{button.get('label', '')}”")
+        confirm = None
+        deadline = time.monotonic() + 4.0
+        while confirm is None and time.monotonic() < deadline:
+            if not ITEM_PATH_RE.search(urlsplit(self.browser.url).path):
+                break                       # megerősítés nélkül törölte, és továbbvitt
+            confirm = confirm_button(new_elements(before, self.browser.scan()))
+            if confirm is None:
+                time.sleep(0.4)
+        if confirm is not None:
+            self.progress("a törlés megerősítése")
+            result = self.browser.click(confirm["id"])
+            if result.startswith("A felhasználó nem engedélyezte"):
+                return self._outcome("declined", "nem engedélyezted a törlést")
+            self.log.append(f"Megerősítés: „{confirm.get('label', '')}”")
+        return self._await_gone(item_url)
+
+    def _await_gone(self, item_url: str) -> FillOutcome:
+        """A törlés után: a Vinted továbbvisz (pl. a profilodra), vagy eltűnik a hirdetés. Ha nem egyértelmű,
+        még egyszer megnyitja a hirdetést: ha már nincs ott, kész; ha még ott van a Törlés gomb, bizonytalan."""
+        wanted = ITEM_PATH_RE.search(urlsplit(item_url).path)
+        started = time.monotonic()
+        while time.monotonic() - started < self.wait:
+            now = ITEM_PATH_RE.search(urlsplit(self.browser.url).path)
+            if wanted and (now is None or now.group(1) != wanted.group(1)):
+                self.log.append(f"Törölve, továbbvitt: {self.browser.url}")
+                return self._outcome("done", published=True)
+            if delete_button(self.browser.scan()) is None and time.monotonic() - started >= 1.5:
+                break
+            time.sleep(0.5)
+        text = self.browser.open(item_url)
+        if self._gone(item_url, text) or (delete_button(self.browser.scan()) is None
+                                          and not starts(self._page_text(text)[0], self.title)):
+            self.log.append("Újra megnyitva: a hirdetés már nincs fent.")
+            return self._outcome("done", published=True)
+        return self._outcome("uncertain", "a törlés után is látszik a hirdetés", published=True)

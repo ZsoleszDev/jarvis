@@ -1532,12 +1532,21 @@ class JarvisApp:
         # Bizonytalan: a közzététel (törlés) megtörtént, de nem látszik egyértelműen az eredmény.
         # Újrakezdeni nem szabad (kétszer kerülne fel), ezért a modell megnézi az oldalt.
         self._dossier(item_id, key, task, outcome.reason, "begyakorolt lépések (bizonytalan)", url=outcome.url)
+        return self._check_after(item_id, key, task, outcome)
+
+    def _check_after(self, item_id: str, key: str, task: str, outcome: Any,
+                     how: str = "begyakorolt lépésekkel") -> bool:
+        """Ha a modell nélküli feltöltés vagy levétel után nem egyértelmű az eredmény, a modell megnézi az oldalt."""
+        assert self.work is not None and self.work_assistant is not None
+        work = self.work
+        item = work.store.get(item_id)
+        site = work.platforms[key]
         self.work_assistant.reset()
         last = ""
         cancelled = False
         work.checking = (item_id, key)   # közzététel után: újra feltölteni nem szabad (kétszer kerülne fel)
         try:
-            self.answer(work.verify_request(item, key, task, outcome), via="auto", mode="work",
+            self.answer(work.verify_request(item, key, task, outcome, how), via="auto", mode="work",
                         shown=f"Ellenőrzés: {item.name} → {site.name}")
             last = self._last_work_reply()
         except Cancelled:
@@ -1784,7 +1793,12 @@ class JarvisApp:
         work.begin_trail()
         work.begin_delist(item_id, key)   # a levételt már jóváhagytad: a törlés gombjaira nem kérdez újra
         site = work.platforms[key]
-        item = work.store.get(item_id)
+        if work.can_autodelist(item_id, key):
+            result = self._autodelist(item_id, key)
+            if result is not None:
+                return result
+            work.begin_delist(item_id, key)
+        item = work.store.get(item_id)        # a levevő közben megtalálhatta a hirdetés webcímét
         if work.can_replay(item_id, key, "delist"):
             result = self._replay(item_id, key, "delist")
             if result is not None:
@@ -1810,6 +1824,50 @@ class JarvisApp:
             if not ok and not cancelled:
                 self._dossier(item_id, key, "delist", last or "nem sikerült végigcsinálni", "modell")
         return ok
+
+    def _autodelist(self, item_id: str, key: str) -> bool | None:
+        """A Vinted-levétel modell nélkül (vinted.py): a hirdetés oldalán a Törlés és a megerősítés, emberi tempóban.
+
+        Visszaad: True (levéve, vagy már nem volt fent), False (nem sikerült, nem engedélyezted, vagy be kell
+        jelentkezni), vagy None, ha nem találta meg a hirdetést vagy a Törlés gombját: akkor a begyakorolt lépések
+        vagy a modell csinálja (a megtalált webcímmel). Ha a törlés után nem egyértelmű, a modell megnézi."""
+        assert self.work is not None and self.work_assistant is not None
+        work = self.work
+        item = work.store.get(item_id)
+        site = work.platforms[key]
+        self.ui.info(f"Levétel modell nélkül: {item.name} → {site.name}")
+        work.store.set_busy(item_id, f"Levétel (modell nélkül): {site.name}…")
+        work.current = (item_id, key)
+        started = time.perf_counter()
+        try:
+            outcome = work.autodelist(item_id, key, progress=self._progress(item_id))
+        except Cancelled:
+            work.current = None
+            work.delisting = None
+            raise
+        mode = "Vinted-levétel"
+        if outcome.status in ("done", "gone"):
+            note = DELISTED_NOTE if outcome.status == "done" else f"{DELISTED_NOTE} (már nem volt fent)"
+            work.store.mark(item_id, key, NOT_POSTED, note=note)
+            ok = work.finish_delist(item_id, key)
+            if self.cfg.assistant.show_timings:
+                self.ui.timing(f"levétel modell nélkül: {secs(time.perf_counter() - started)}")
+            return ok
+        if outcome.url:          # megtalálta a hirdetést: a következő lépés (vagy a modell) egyből oda megy
+            work.store.mark(item_id, key, POSTED, url=outcome.url)
+        if outcome.status == "declined":
+            return work.finish_delist(item_id, key, "nem engedélyezted.")
+        if outcome.status == "blocked":
+            self.ui.notice(outcome.reason)
+            return work.finish_delist(item_id, key, outcome.reason)
+        if outcome.status == "miss":
+            work.current = None
+            self._dossier(item_id, key, "delist", outcome.reason, mode, url=outcome.url, kitoltes=outcome.log)
+            self.ui.info(f"A modell nélküli levétel most nem megy ({outcome.reason}), végiggondolom.")
+            return None
+        self._dossier(item_id, key, "delist", outcome.reason, f"{mode} (bizonytalan)", url=outcome.url,
+                      kitoltes=outcome.log)
+        return self._check_after(item_id, key, "delist", outcome, how="modell nélkül")
 
     def _research(self, item_id: str) -> None:
         """Árkutatás külön kérésre (csak ajánlás, nem állítja meg az eladást)."""
