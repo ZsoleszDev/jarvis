@@ -150,7 +150,7 @@ Az ablak tetején három menü van. A **Beszélgetés** ugyanaz, mint eddig: bá
 2. **Fotók.** Kattints a **+ Fotók** gombra, vagy húzd az ablakra a képeket.
 3. **Egy mondat arról, mit adsz el**, pl. „Zara L-es fekete póló, egyszer hordott, 500 Ft”, majd **Mehet**.
 
-Jarvis egyetlen modellhívással kiolvassa a mondatodból a hirdetés adatait (cím, leírás, kategória, márka, méret, állapot, ár). A fotókat nem nézi, mert az sok idő lenne, ezért amit nem írtál, azt nem is találja ki. Ha a kiválasztott oldalakhoz valami hiányzik, a hirdetés kártyáján (és hangosan is) visszakérdez, pl. „még kell: állapot; átvétel helye (Jófogás)”. A kártyán válaszolsz, vagy egyszerűen beírod (bemondod) a Munka menüben. Ha minden megvan, sorban feltölti minden kiválasztott oldalra.
+Jarvis egyetlen modellhívással kiolvassa a mondatodból a hirdetés adatait (egy leírást csak egyszer; ha visszakérdezett, a válaszodból csak a kérdezett mezőket, és ha a tárgy már fent van valahol, a címét és a leírását magától nem írja át) (cím, leírás, kategória, márka, méret, állapot, ár). A fotókat nem nézi, mert az sok idő lenne, ezért amit nem írtál, azt nem is találja ki. Ha a kiválasztott oldalakhoz valami hiányzik, a hirdetés kártyáján (és hangosan is) visszakérdez, pl. „még kell: állapot; átvétel helye (Jófogás)”. A kártyán válaszolsz, vagy egyszerűen beírod (bemondod) a Munka menüben. Ha minden megvan, sorban feltölti minden kiválasztott oldalra.
 
 | Mit kér | Vinted | Jófogás | Vatera | Hardverapró |
 |---|---|---|---|---|
@@ -161,7 +161,7 @@ Jarvis egyetlen modellhívással kiolvassa a mondatodból a hirdetés adatait (c
 
 A várost, a szállítást és a Vinted csomagméretét elég egyszer megadni az **Alapadatok és bejelentkezés** résznél; utána Jarvis onnan veszi, és nem kérdez rá. Ha egy hirdetésnél mást írsz (pl. „csak személyes átvétel Debrecenben”), az az erősebb.
 
-**„Nézz utána, mennyiért adják máshol.”** Ha ezt is bepipálod, feltöltés előtt a kiválasztott oldalak keresőjében megnézi, mennyiért kínálnak hasonlót. Ha az árad jóval drágább (a hasonlók középértékénél 25%-kal többe kerül), megáll, és megkérdezi: „Maradjon a te árad, vagy legyen 4 500 Ft?”. Ez csak ajánlás: a **Marad** gombbal (vagy ha azt mondod, „maradjon”) a te áradon tölti fel; a **Legyen** gombbal, vagy ha egy összeget mondasz („legyen 4000”), azzal. Ha az árad rendben van, vagy olcsóbb, csak szól, és megy tovább.
+**„Nézz utána, mennyiért adják máshol.”** Ha ezt is bepipálod, feltöltés előtt a kiválasztott oldalak keresőjében megnézi, mennyiért kínálnak hasonlót. Ha az árad jóval drágább (a hasonlók középértékénél 25%-kal többe kerül), megáll, és megkérdezi: „Maradjon a te árad, vagy legyen 4 500 Ft?”. Ez csak ajánlás: a **Marad** gombbal (vagy ha azt mondod, „maradjon”) a te áradon tölti fel; a **Legyen** gombbal, vagy ha egy összeget mondasz („legyen 4000”), azzal. Ha az árad rendben van, vagy olcsóbb, csak szól, és megy tovább. A modell elé csak a hasonló hirdetések kerülnek: a keresett és a cserélendő holmi, a csomagban árult, az alkatrésznek vagy hibásan kínált, a saját és az ismétlődő hirdetés kimarad; a kilógó árakat levágja, és a középérték mellett a hasonlók középső felét (25–75%) és a bizonyosságot is megmondja. A licites árakat csak akkor számolja, ha nincs elég fix ár. Ha az árkutatás egy hétnél régebbi, feltöltés előtt megújítja.
 
 **A feltöltés.** Jarvis a saját böngészőablakában, a szemed előtt tölti ki a hirdetésfeladást: fotók, cím, leírás, kategória, márka, méret, állapot, ár, helyszín, szállítás (a Vinteden modell nélkül, lásd lent). A **közzététel** gomb előtt oldalanként egyszer rákérdez; a kérdés első sorában látod, melyik oldal, melyik tárgy és mennyiért. A végén szól, hol van fent, és hol nem sikerült. Ami nem sikerült (pl. be kellett volna jelentkezni), azt a kártyán ✕ jelzi; a hirdetés lapján olvasható, miért, és az **Újra** gombbal folytatja. Ha elakadt, az oldal sorában egy **Hibacsomag** gomb is van (lásd lent). Ha a közzétételt jóváhagytad, de a modell a végén nem jelölte meg a hirdetést (pl. félbemaradt a válasza), Jarvis még egyszer megnézeti vele az oldalt, és ha fent van, megjelöli; újra feltölteni ilyenkor nem kezdi, nehogy kétszer kerüljön fel.
 
@@ -179,7 +179,7 @@ A várost, a szállítást és a Vinted csomagméretét elég egyszer megadni az
 
 **Vinted: levétel modell nélkül.** A Vintedről a Jarvis maga veszi le a hirdetést, nem a modell keresgél az oldalakon (az lépésenként egy modellkör volt, és a hirdetés oldalsávjában lévő Törlés gombot a modell oldalnézete nem mindig mutatta, ezért görgetett és képernyőképeket nézegetett). Megnyitja a hirdetés oldalát (a feltöltéskor megjegyzett webcímen; ha az nincs meg, a profilodon keresi meg, végül a Vinted keresőjében, ahol a tiéd az, amelyiken ott a Törlés gomb; a hirdetésed oldaláról a profilod címét is megjegyzi), rákattint a **Delete** (Törlés) gombra, a megerősítő ablakban is, és megnézi, hogy a hirdetés tényleg eltűnt-e. Emberi tempóban dolgozik (körülnéz az oldalon, az egér odamegy a gombhoz, a megerősítés előtt gondolkodik egy kicsit): a helyi tesztoldalakon 11–19 másodperc, a valódi Vinteden az oldalak betöltése miatt valamivel több. Ha be kell jelentkezni, vagy robot-ellenőrzés jön, megáll, és szól; ha a hirdetés már nincs fent, „Levéve (már nem volt fent)”. Ha a hirdetés oldalán nem találja a Törlés gombot (pl. a Vinted átalakította az oldalt), máshol nem keresi (nehogy egy azonos című másik hirdetésedet törölje): a begyakorolt lépések vagy a modell folytatja, de már a hirdetés oldaláról, és hibacsomag készül arról, mit látott. Ha a törlés után nem egyértelmű, hogy eltűnt-e, a modell megnézi az oldalt. Akkor is így megy, ha a beszélgetésben kéred („a farmer elkelt, vedd le a Vintedről”). Kikapcsolás (a feltöltéssel együtt): `[work] autofill = false`.
 
-**Begyakorolt lépések.** (A Vinteden a feltöltést és a levételt is a Jarvis maga csinálja modell nélkül, lásd fent; ott ez csak akkor jön, ha azt kikapcsolod, vagy az oldalt nem ismeri fel.) Amikor a modell egy oldalon sikeresen feltölt (vagy levesz) egy hirdetést, Jarvis megjegyzi a lépéseit, és legközelebb modell nélkül, emberi tempóban játssza vissza (lásd lent): ugyanazokat a mezőket és gombokat keresi meg, és a mostani tárgy adataival tölti ki. A választásoknál (márka, méret, állapot, szín) megjegyzi, melyik értékhez mire kellett kattintani; ha a felirat maga az érték (pl. „L” a méretnél), bármelyik értékre működik. Feltöltésnél a recept tárgyfajtánként és kategóriánként külön van, mert a kategória kiválasztása és az űrlap is ettől függ: egy új kategóriát a modell tanul meg egyszer. A közzététel előtt ugyanúgy jóváhagyást kér, és a kérdésben azt is látod, mit választott ki („Kategória: …; Állapot: …”). Ha a közzététel elsőre nem ment át (pl. hiányzott egy kötelező mező, és utána pótolni kellett), azt a lépéssort nem jegyzi meg, mert a visszajátszás a félkész űrlapnál kérne jóváhagyást. Ha valami nem stimmel (az oldal megváltozott, vagy olyan érték jön, amit még nem tanult meg), a közzététel **előtt** megáll (és hibacsomagot készít arról, hol akadt el), majd a modell csinálja végig, közben újratanul; két egymás utáni kudarc után elfelejti a régi receptet. Közzététel után soha nem kezdi újra (nehogy kétszer kerüljön fel), legfeljebb megnézeti a modellel, sikerült-e. A receptek a `%LOCALAPPDATA%\Jarvis\munka\folyamatok` mappában vannak; ha egyet törölsz, a következő alkalommal újratanulja. Kikapcsolás: `[work] replay = false`.
+**Begyakorolt lépések.** (A Vinteden a feltöltést és a levételt is a Jarvis maga csinálja modell nélkül, lásd fent; ott ez csak akkor jön, ha azt kikapcsolod, vagy az oldalt nem ismeri fel.) Amikor a modell egy oldalon sikeresen feltölt (vagy levesz) egy hirdetést, Jarvis megjegyzi a lépéseit, és legközelebb modell nélkül, emberi tempóban játssza vissza (lásd lent): ugyanazokat a mezőket és gombokat keresi meg, és a mostani tárgy adataival tölti ki. A választásoknál (márka, méret, állapot, szín) megjegyzi, melyik értékhez mire kellett kattintani; ha a felirat maga az érték (pl. „L” a méretnél), bármelyik értékre működik. Feltöltésnél a recept tárgyfajtánként és kategóriánként külön van, mert a kategória kiválasztása és az űrlap is ettől függ: egy új kategóriát a modell tanul meg egyszer. A közzététel előtt ugyanúgy jóváhagyást kér, és a kérdésben azt is látod, mit választott ki („Kategória: …; Állapot: …”). Ha a közzététel elsőre nem ment át (pl. hiányzott egy kötelező mező, és utána pótolni kellett), azt a lépéssort nem jegyzi meg, mert a visszajátszás a félkész űrlapnál kérne jóváhagyást. Ha valami nem stimmel (az oldal megváltozott, vagy olyan érték jön, amit még nem tanult meg), a közzététel **előtt** megáll (és hibacsomagot készít arról, hol akadt el), majd a modell csinálja végig, közben újratanul; két egymás utáni kudarc után elfelejti a régi receptet. Közzététel után soha nem kezdi újra (nehogy kétszer kerüljön fel), legfeljebb megnézeti a modellel, sikerült-e. Közzététel után kivárja az eredményt (a sikeres oldal címe vagy fejléce, vagy egy hibaüzenet), nem rögtön dönt. A felvételt megtisztítja (görgetés, visszalépett ágak, újragépelt mezők, kinyitott és bezárt listák), így egy kis kerülővel végigvitt menetből is lesz recept. Ha egy elemet nem talál (pl. átírták a feliratát), a modell egy rövid, számozott kérdéssel kiválasztja a helyét (egy menetben legfeljebb kétszer; a közzététel gombját soha). Egy még nem látott értéket (pl. egy új állapotot) a lista feliratai alapján, ha kell, egy kérdéssel választ ki, és megjegyzi; ha így sem megy, a modell a félig kitöltött űrlapon folytatja. A hirdetésfeladás űrlapjának címét is megjegyzi (`munka\beallitasok.json`), és legközelebb közvetlenül azt nyitja meg. A receptek a `%LOCALAPPDATA%\Jarvis\munka\folyamatok` mappában vannak; ha egyet törölsz, a következő alkalommal újratanulja. Kikapcsolás: `[work] replay = false`.
 
 A Munka menüben szóban vagy írásban is kérhetsz: „A farmer legyen ötszáz forinttal olcsóbb”, „Melyik tárgy nincs még fent sehol?”, „Mennyit ér a blézer?”, „A pulóver elkelt”.
 
@@ -326,25 +326,33 @@ A „Hey Jarvis” felismerése helyben, a processzoron fut (openWakeWord), a ha
 
 ```
 Oldal: Hasznaltauto.hu – Keresés
-Látható szöveg: Skoda Octavia 1.6 CR TDI Style, 2018, 4 290 000 Ft …
+Cím: https://www.hasznaltauto.hu/…
+Hibaüzenetek: A keresőmező nem lehet üres.
+
+Látható szöveg:
+Keresés Üzemanyag Skoda Octavia 1.6 CR TDI Style 4 290 000 Ft …
+
 Kezelhető elemek (a számukkal hivatkozz rájuk):
-[1] gomb "Elfogadom"
-[2] keresőmező "Márka, modell"
-[3] lenyíló lista "Évjárat" (kiválasztva: "Mindegy"; lehetőségek: …)
-[4] link "Skoda Octavia 1.6 CR TDI Style" -> /szemelyauto/skoda/…
+[3] gomb "Elfogadom"
+[4] keresőmező "Márka, modell"
+[5] lenyíló lista "Évjárat" (kiválasztva: "Mindegy"; lehetőségek: Mindegy, 2018, 2019)
+Üzemanyag (választógombok): [6] Benzin ✓, [7] Dízel
+*[8] link "Skoda Octavia 1.6 CR TDI Style · 4 290 000 Ft" -> /szemelyauto/skoda/…
 ```
 
-A modell a számokra hivatkozva kattint (`browser_click`), gépel (`browser_type`), egy űrlap több mezőjét egy lépésben kitölti (`browser_fill`), görget, visszalép, és el is olvassa az oldalt (`browser_read`). Ez a szöveges nézet pontosabb és gyorsabb, mintha képről kellene kitalálnia, hová kattintson. A régebbi oldalnézeteket a Jarvis kitömöríti, hogy ne teljen be a kontextus.
+Az oldalnézet tömör (egy választógomb-csoport egy sor, a bejelöltet ✓ jelzi), egy oldalon belül az elemek száma nem változik a lépések között, a `*` az előző nézet óta megjelent elemet jelöli, a hibaüzenetek (pl. egy kötelező, de üres mező) külön sorban állnak, és egy hirdetéskártya linkje mellett ott az ára is.
+
+A modell a számokra hivatkozva kattint (`browser_click`), gépel (`browser_type`), egy űrlap több mezőjét egy lépésben kitölti (`browser_fill`), görget, visszalép, és el is olvassa az oldalt (`browser_read`). Egy saját (nem natív) lenyíló listából a `browser_choose` választ: kinyitja, kereshető listánál beírja, megkeresi és rákattint, fánál szintenként („Nők > Ruházat > Pólók”), és ha nyitva marad, bezárja; ez egy modellkör a négy-öt kattintás helyett. A `browser_do` legfeljebb öt lépést tesz meg egy körben ugyanazon az oldalon (kattintás, gépelés, választás, jelölés); ha közben új oldal vagy felugró ablak jön, megáll, és megmondja, mi maradt ki, kockázatos gomb (pl. közzététel) pedig csak az utolsó lehet. Ez a szöveges nézet pontosabb és gyorsabb, mintha képről kellene kitalálnia, hová kattintson. A régebbi oldalnézetek helyén egy rövid sor marad (mi történt, melyik oldalon), hogy ne teljen be a kontextus.
 
 Webshopokban (Vinted, Jófogás, eMAG) fontos részletek:
 - Az oldalnézetben a **fő tartalom** (termékek, szűrők, kereső) előrébb kerül, a fejléc és lábléc linkjei hátrébb, és legfeljebb a lista harmadát foglalhatják el.
-- A Jarvis **kivárja a betöltődést**: amíg az oldal adatot tölt, vagy „Betöltés…” felirat látszik rajta, nem készít oldalnézetet.
+- A Jarvis **kivárja a betöltődést**: amíg az oldal adatot tölt, változik, vagy „Betöltés…” felirat látszik rajta, nem készít oldalnézetet; ha megnyugodott, rögtön folytatja (a reklámok és a mérőkódok kérései nem tartják fel).
 - A rendszerprompt szerint a modell az oldal **saját keresőjét és szűrőit** használja, nem találgat webcímet. Ha három-négy próbálkozás után sem jut előre, megáll, és elmondja, meddig jutott.
 - Ha az oldal **robot-ellenőrzést** (captcha) kér, szól, hogy oldd meg a böngészőablakban. A valódi Edge-ben ez ritkábban fordul elő, mint a Playwright Chromiumában.
 
 A profil megőrzi a sütiket: ha egyszer belépsz valahova a Jarvis böngészőjében, legközelebb is bejelentkezve látja (lásd: Bejelentkezés).
 
-**Látás.** A Qwen3.8 képet is ért. A `browser_look` lefényképezi a böngésző oldalát (grafikonok, képek, elrendezés), a `look_at_screen` a monitorodat („mi ez a hibaüzenet?”). A képet egy külön, egyszeri kérdésben kapja meg a modell, így nem foglalja a beszélgetés kontextusát.
+**Látás.** A Qwen3.8 képet is ért. A `browser_look` lefényképezi a böngésző oldalát (grafikonok, képek, elrendezés), a `look_at_screen` a monitorodat („mi ez a hibaüzenet?”). A képet a futó beszélgetésben kapja meg a modell (látja, mit csinált eddig, és a gyorsítótár is megmarad); ha a kép már nem férne bele a kontextusba, egy külön, egyszeri kérdésben.
 
 ## Sebesség: hol megy el az idő
 
@@ -365,10 +373,14 @@ További gyorsítások, amik már be vannak építve:
 - **Előmelegítés.** Induláskor és Szünet után a Jarvis egy külön kéréssel előre feldolgoztatja a Beszélgetés elejét (rendszerprompt és eszközök), így az első kérdésnél már csak magát a kérdést kell. Kikapcsolás: `[llm] warm_up = false`.
 - **Vinted modell nélkül.** A Vinted űrlapját a Jarvis maga tölti ki; a modell csak a kategóriafában választ egy számot. A levételhez (Törlés, megerősítés) a modell nem is kell (lásd a Munka menünél).
 - **Begyakorolt lépések.** Egy már megtanult feltöltés vagy levétel modell nélkül fut (lásd a Munka menünél).
+- **Az első lépést a Jarvis teszi meg.** Egy feltöltésnél vagy levételnél a hirdetésfeladást (a hirdetést) a Jarvis maga nyitja meg, és a modell már az oldalnézettel kezd: egy modellkör megspórolva.
+- **A szünet a közzététel előtt.** A két közzététel közti pár perc szünet a közzététel gombja előtt jön, nem az űrlap megnyitása előtt: az űrlap kitöltése addig is halad.
 - **Több oldal egy lépésben** (`web_research`): oldalanként egy modellkör helyett egy.
 
 - **„Egy pillanat.”** Ha lassú lépés jön (keresés, böngészés, fájlkeresés), Jarvis azonnal mond valamit, így nem érzed, hogy lefagyott.
-- **Gyorsítótár-barát előzmények.** Az Ollama megjegyzi az előző kérés elejét, és csak az új részt számolja. A régi oldalnézeteket a Jarvis csak akkor tömöríti, ha a kontextus 60%-a betelt, és akkor is egyszerre mindet; az előzmények elejét pedig ritkán, egyszerre a felére vágja. Ha minden lépésnél módosítaná, az Ollamának minden alkalommal újra kellene számolnia a későbbi szöveget.
+- **Gyorsítótár-barát előzmények.** Az Ollama megjegyzi az előző kérés elejét, és csak az új részt számolja. Ezért egy kérésen belül végig ugyanaz az eszközlista (a feltöltésnél és a levételnél csak a böngésző és a tárgy eszközei), a régi oldalnézet helyére rögtön egy rövid sor kerül (`[assistant] keep_page_views`), az előzmények elejét pedig ritkán, egyszerre a felére vágja. Melegíteni is módonként melegít (a Munka menüre váltáskor, ébredéskor, Szünet után), az eddigi előzményekkel együtt.
+- **Rövid válaszok.** Egy modellkör legfeljebb 2048 (a Munka menüben 1024) tokent írhat, a JSON-kérdések még kevesebbet; ha egy eszközhívás félbemaradna, egyszer újrakéri.
+- **Elakadásfigyelés.** Ha a modell ugyanazt a lépést ismétli, és az oldal nem változik, szól neki, a negyedik után pedig abbahagyja, és elmondja, hol akadt el (nem égeti el a lépéskeretet).
 - **Folytatólagos beszélgetés.** Válasz után pár másodpercig Enter nélkül is figyel.
 
 Amit te tudsz még tenni:
