@@ -1,8 +1,8 @@
 """Háttérmunka: amit Jarvis magától, időnként elvégez (pl. a figyelők átnézése).
 
 Csak akkor dolgozik, amikor ráér:
-- nincs Szünet (a Szünet gomb mindent leállít, a háttérmunkát is); készenlétben csak a modell nélküli
-  munkák futnak (pl. a figyelők),
+- nincs Szünet (a Szünet gomb mindent leállít, a háttérmunkát is); készenlétben csak a modell és
+  böngésző nélküli munkák futnak (pl. a figyelők),
 - épp nem dolgozik másvalamin, és az utolsó beszélgetés óta eltelt pár perc (quiet_minutes),
 - az aktív órákon belül vagyunk (ha be van állítva), és nem függesztetted fel.
 
@@ -52,6 +52,7 @@ class Job:
     run: Callable[["JobContext"], str]
     available: Callable[[], bool] = lambda: True
     needs_models: bool = True                   # kell-e hozzá a nyelvi modell (készenlétben nem fut)
+    needs_browser: bool = False                 # kell-e hozzá a böngésző (készenlétben az sincs: nem fut)
 
 
 @dataclass
@@ -181,10 +182,10 @@ class Scheduler:
         return self.hooks.preempted() or (self.hooks.paused() and not self.hooks.standby())
 
     def _allowed(self, job: Job) -> bool:
-        """Futhat-e most ez a munka (készenlétben csak a modell nélküliek)."""
+        """Futhat-e most ez a munka (készenlétben csak a modell és böngésző nélküliek)."""
         if not self.hooks.paused():
             return True
-        return self.hooks.standby() and not job.needs_models
+        return self.hooks.standby() and not job.needs_models and not job.needs_browser
 
     def due(self, job: Job, now: float) -> bool:
         every = float(job.every_minutes() or 0)

@@ -27,6 +27,7 @@
   const STATUS_CLASS = { "vázlat": "vazlat", "kérdés": "kerdes", "árdöntés": "kerdes",
                          "részben fent": "kesz", "fent": "feltoltve", "eladva": "eladva" };
   const FILTERS = [["all", "Mind"], ["todo", "Teendő"], ["up", "Fent van"], ["sold", "Eladva"]];
+  const CHECKED = { sold: "Elkeltnek látszik", gone: "Már nincs fent?" };   // a háttérellenőrzés jelzései
 
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -355,9 +356,10 @@
   function siteChips(item) {
     return item.targets.map((key) => {
       const state = siteState(item, key);
-      const mark = state === POSTED ? "✓" : state === FAILED ? "✕" : "…";
-      const cls = state === POSTED ? "on" : state === FAILED ? "bad" : "";
-      return `<span class="site ${cls}" title="${esc((item.platforms[key] || {}).note || state || "még nincs fent")}">` +
+      const flagged = state === POSTED && !item.sold ? CHECKED[(item.platforms[key] || {}).check] : "";
+      const mark = flagged ? "?" : state === POSTED ? "✓" : state === FAILED ? "✕" : "…";
+      const cls = flagged || state === FAILED ? "bad" : state === POSTED ? "on" : "";
+      return `<span class="site ${cls}" title="${esc(flagged || (item.platforms[key] || {}).note || state || "még nincs fent")}">` +
              `${esc(siteName(key))} ${mark}</span>`;
     }).join("");
   }
@@ -426,8 +428,11 @@
     const similar = r.similar || [];
     let html = item.verdict ? `<p class="verdict">${esc(item.verdict)}</p>` : "";
     if (r.reason) html += `<p class="muted">${esc(r.reason)}</p>`;
+    const dropped = (r.count || 0) - (r.kept ?? (r.count || 0));
     html += `<p class="muted">Keresés: „${esc(r.query)}”, ${r.count || 0} találat` +
+            (dropped > 0 ? ` (${dropped} kiszűrve: kereső, csomag, alkatrész, a sajátod vagy más termék)` : "") +
             (similar.length ? `, ebből ${similar.length} hasonló:` : ".") + "</p>";
+    if (item.research_stale) html += '<p class="muted">Ez az árkutatás egy hétnél régebbi; árazás előtt frissítem.</p>';
     if (similar.length) {
       html += "<ul>" + similar.map((s) => {
         const text = `${esc(s.site)}: ${esc((s.text || "").slice(0, 90))}`;
@@ -444,19 +449,26 @@
     const state = item.platforms[p.key] || {};
     const chosen = item.targets.includes(p.key);
     const delisted = state.status === "nincs fent" && (state.note || "").startsWith("Levéve");
-    const label = state.status === POSTED ? "Fent van" : state.status === FAILED ? "Nem sikerült"
+    // a háttérellenőrzés szerint itt elkelt vagy eltűnt (csak jelzés: a döntés a tiéd)
+    const flagged = state.status === POSTED && !item.sold && CHECKED[state.check] ? CHECKED[state.check] : "";
+    const label = flagged ? flagged : state.status === POSTED ? "Fent van" : state.status === FAILED ? "Nem sikerült"
       : delisted ? "Levéve" : chosen ? "Még nincs fent" : "";
     const when = state.at && state.status ? " (" + new Date(state.at * 1000).toLocaleDateString("hu-HU") + ")" : "";
     const note = state.note && state.status !== "nincs fent" ? state.note : "";
+    const drift = (item.drift || []).find((d) => d.platform === p.key && d.price !== undefined);
+    const others = Object.keys(item.platforms).some((k) => k !== p.key && siteState(item, k) === POSTED);
     return `<div class="platform">
       <label class="check pname"><input type="checkbox" data-target="${esc(p.key)}"${chosen ? " checked" : ""}> ${esc(p.name)}</label>
-      <span class="pstatus${state.status === POSTED ? " on" : state.status === FAILED ? " bad" : ""}">${esc(label + (label ? when : ""))}</span>
+      <span class="pstatus${flagged ? " bad" : state.status === POSTED ? " on" : state.status === FAILED ? " bad" : ""}">${esc(label + (label ? when : ""))}</span>
+      ${flagged ? `<button type="button" class="small" data-action="soldhere" data-platform="${esc(p.key)}" title="Megjelöli eladottnak; a többi oldalról a jóváhagyásod után leveszi">${others ? "Eladva itt, vedd le a többiről" : "Eladva itt"}</button>` : ""}
       ${state.status === POSTED && safeUrl(state.url) ? `<a class="button small" href="${esc(state.url)}" target="_blank" rel="noopener noreferrer">Megnyitás</a>` : ""}
       ${chosen && !item.sold && state.status !== POSTED && browserOn ? `<button type="button" class="small" data-action="post" data-platform="${esc(p.key)}">${state.status === FAILED ? "Újra" : "Feltöltés"}</button>` : ""}
       ${state.status === POSTED && browserOn ? `<button type="button" class="small" data-action="delist" data-platform="${esc(p.key)}" title="Jarvis leveszi a hirdetést erről az oldalról">Levétel</button>` : ""}
       ${chosen ? `<button type="button" class="small quiet" data-action="toggle" data-platform="${esc(p.key)}" title="Csak a nyilvántartást írja át">${state.status === POSTED ? "Már levettem" : "Fent van"}</button>` : ""}
       ${state.dossier ? `<button type="button" class="small quiet" data-action="dossier" data-platform="${esc(p.key)}" title="Képernyőkép, oldalnézet és a lépések abból a pillanatból, amikor elakadt">Hibacsomag</button>` : ""}
       ${note ? `<span class="pnote">${esc(note)}</span>` : ""}
+      ${flagged && state.check_note ? `<span class="pnote">${esc(state.check_note)}</span>` : ""}
+      ${drift ? `<span class="pnote">Ár eltér: a hirdetésben még ${esc(price(drift.price))}, itt ${esc(price(item.price) || "nincs ár")}. Jarvis a fent lévő hirdetést nem írja át; ott kézzel módosítsd.</span>` : ""}
     </div>`;
   }
 
@@ -520,14 +532,16 @@
     remember(await J.postJson("/api/work/mark", { id: item.id, platform: key, status }), "Nem sikerült.");
   }
 
-  // Eladva: hol kelt el, és vegye-e le Jarvis a többi oldalról (ahol nem ott kelt el).
-  function askSold(item, posted) {
+  // Eladva: hol kelt el, és vegye-e le Jarvis a többi oldalról (ahol nem ott kelt el). `where`: előre
+  // kiválasztott oldal (pl. ahol a háttérellenőrzés szerint elkelt); a döntés itt is a tiéd.
+  function askSold(item, posted, where = "") {
     return new Promise((resolve) => {
       const dialog = $("sold-dialog");
+      const chosen = posted.includes(where) ? where : "";
       $("sold-text").textContent = `${item.name}: hol kelt el?`;
       $("sold-where").innerHTML = [...posted.map((k) => [k, siteName(k)]), ["", "Máshol vagy személyesen"]]
-        .map(([key, name], i) => `<label class="check"><input type="radio" name="sold-where" value="${esc(key)}"` +
-          `${i === posted.length ? " checked" : ""}> ${esc(name)}</label>`).join("");
+        .map(([key, name]) => `<label class="check"><input type="radio" name="sold-where" value="${esc(key)}"` +
+          `${key === chosen ? " checked" : ""}> ${esc(name)}</label>`).join("");
       $("sold-delist").checked = true;
       const finish = (value) => {
         $("sold-yes").removeEventListener("click", onYes);
@@ -550,7 +564,7 @@
     });
   }
 
-  async function sold(item) {
+  async function sold(item, where = "") {
     if (item.sold) {   // mégsem kelt el
       remember(await J.postJson("/api/work/mark", { id: item.id, sold: false }), "Nem sikerült.");
       return;
@@ -560,7 +574,7 @@
       remember(await J.postJson("/api/work/mark", { id: item.id, sold: true }), "Nem sikerült.");
       return;
     }
-    const answer = await askSold(item, posted);
+    const answer = await askSold(item, posted, where);
     if (!answer) return;
     const result = await J.postJson("/api/work/mark", { id: item.id, sold: true });
     if (!remember(result, "Nem sikerült.")) return;
@@ -727,6 +741,7 @@
       }
     }
     else if (name === "sold") sold(item);
+    else if (name === "soldhere") sold(item, button.dataset.platform);
     else if (name === "delete") remove(item);
   });
 

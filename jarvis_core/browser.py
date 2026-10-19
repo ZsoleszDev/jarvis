@@ -635,11 +635,25 @@ SNAPSHOT_JS = r"""
 
 # Keresési találati oldal (Vinted, Jófogás…) hirdetései: minden hirdetéskártya szövege, ára és
 # címe. Nem oldalspecifikus: a linkektől felfelé haladva megkeresi a legkisebb elemet, amelyben
-# ár is van (ez a kártya), és kártyánként egyszer veszi fel.
+# ár is van (ez a kártya), és kártyánként egyszer veszi fel. Az áthúzott (régi) ár nem számít; ha a
+# kártyán villámár vagy fix ár is van, az az ár; a licites kártya jelzést kap (auction), mert az ott
+# látható ár csak a mostani ajánlat.
 LISTINGS_JS = r"""
 () => {
   const PRICE = /(\d{1,3}(?:[   .]\d{3})+|\d{2,7})(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])/i;
+  const FIXED = new RegExp('(?:villámár|fix ?ár|azonnal megvehető|buy it now)\\D{0,4}' + PRICE.source, 'i');
+  const AUCTION = /(licit|aukció|árverés|jelenlegi ár|kikiáltási ár|\bbids?\b|auction)/i;
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const struck = (el) => el.matches('s, del, strike') ||
+                         (getComputedStyle(el).textDecorationLine || '').includes('line-through');
+  const priceText = (node) => {   // a kártya szövege az áthúzott árak nélkül
+    let text = clean(node.innerText);
+    for (const el of node.querySelectorAll('*')) {
+      const old = struck(el) ? clean(el.innerText) : '';
+      if (old) text = text.replace(old, ' ');
+    }
+    return clean(text);
+  };
   const SKIP = 'header, nav, footer, [role=banner], [role=navigation], [role=contentinfo]';
   const PROFILE = /\/(member|members|user|users|profil|profile|seller|felhasznalo)(\/|$|\?)/i;
   const cards = new Map();
@@ -668,17 +682,60 @@ LISTINGS_JS = r"""
   for (const card of cards.values()) {
     if (nodes.some(other => other !== card.node && card.node.contains(other))) continue;
     if (seen.has(card.href)) continue;
-    const text = clean(card.node.innerText);
-    const m = text.match(PRICE) || card.label.match(PRICE);
+    const text = priceText(card.node);
+    const fixed = text.match(FIXED);
+    const m = fixed || text.match(PRICE) || card.label.match(PRICE);
     if (!m) continue;
     const price = parseInt(m[1].replace(/[^\d]/g, ''), 10);
     if (!(price > 0 && price < 10000000)) continue;
     seen.add(card.href);
     const summary = (card.label.length > 15 && !text.includes(card.label)) ? card.label + ' | ' + text : text;
-    out.push({text: summary.slice(0, 240), price, url: card.href});
+    const entry = {text: summary.slice(0, 240), price, url: card.href};
+    if (!fixed && AUCTION.test(text)) entry.auction = true;
+    out.push(entry);
     if (out.length >= 40) break;
   }
   return out;
+}
+"""
+
+# Egy hirdetés saját oldala a háttérellenőrzéshez (listings.py): a fő tartalom látható szövege a gombok,
+# linkek, mezők és menük nélkül (így a saját hirdetéseden lévő „Megjelölés eladottként” gomb nem számít
+# „Eladva” jelzésnek), a rövid szövegdarabok külön (egy „Eladva” címke ilyen), és a gombok, linkek
+# feliratai (ebből látszik, ha ki vagy jelentkezve).
+LISTING_PAGE_JS = r"""
+() => {
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const SKIP = 'header, nav, footer, aside, [role=banner], [role=navigation], [role=contentinfo], script, style, ' +
+               'noscript, template, a, button, [role=button], [role=link], [role=menuitem], input, select, ' +
+               'textarea, option, label';
+  const root = document.querySelector('main, [role=main]') || document.body || document.documentElement;
+  const shown = new Map();
+  const parts = [], short = [];
+  let total = 0;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (total < 4000 && walker.nextNode()) {
+    const p = walker.currentNode.parentElement;
+    const t = clean(walker.currentNode.textContent);
+    if (!p || !t || p.closest(SKIP)) continue;
+    let ok = shown.get(p);
+    if (ok === undefined) {
+      ok = typeof p.checkVisibility !== 'function' || p.checkVisibility({visibilityProperty: true});
+      shown.set(p, ok);
+    }
+    if (!ok) continue;
+    parts.push(t);
+    total += t.length + 1;
+    if (t.length <= 40 && short.length < 200) short.push(t);
+  }
+  const labels = [];
+  for (const el of document.querySelectorAll('a, button, [role=button]')) {
+    const t = clean(el.innerText || el.getAttribute('aria-label'));
+    if (t && t.length <= 40) labels.push(t);
+    if (labels.length >= 150) break;
+  }
+  return {title: document.title, url: location.href, text: parts.join(' ').slice(0, 4000), short, labels,
+          captcha: !!document.querySelector('iframe[src*="captcha" i]')};
 }
 """
 
@@ -2904,3 +2961,30 @@ class BrowserController:
         except Exception as exc:  # noqa: BLE001
             raise BrowserError(f"Nem tudom beolvasni a találatokat ({_short(exc)}).") from None
         return [entry for entry in found or [] if isinstance(entry, dict) and entry.get("price")]
+
+    @_restarts_after_crash
+    def look_listing(self, url: str) -> dict[str, Any]:
+        """Egy hirdetés oldala a háttérellenőrzéshez (listings.py), csak olvasva: megnyitja az aktív lapon,
+        emberi tempóban átfutja (egy pillantás, egy kis görgetés, olvasás), és visszaadja a lap adatait
+        (LISTING_PAGE_JS) a captcha jelzéssel. Egy magától átengedő robotvédelmi köztes oldalt kivár
+        (CHALLENGE_WAIT), de a captchát nem próbálja megoldani. Semmire nem kattint."""
+        try:
+            url = web.normalize_url(url, allow_local=self.allow_local)
+        except web.WebError as exc:
+            raise BrowserError(str(exc)) from None
+        page = self._goto(url)
+        self._settle(page, max_wait=8.0)
+        deadline = time.monotonic() + CHALLENGE_WAIT
+        while self._challenge(page, unsure=False) and time.monotonic() < deadline:
+            page.wait_for_timeout(1000)
+            self._settle(page, max_wait=3.0)
+        self._glance(page)   # modell nélküli olvasás: egy ember is átfutja az oldalt
+        self.pace.read()
+        self.elements = {}   # a korábbi oldalnézet számai itt már nem érvényesek
+        try:
+            data = page.evaluate(LISTING_PAGE_JS)
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(exc)}).") from None
+        data = data if isinstance(data, dict) else {}
+        data["captcha"] = bool(data.get("captcha")) or self._challenge(page, unsure=False)
+        return data

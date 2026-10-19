@@ -199,13 +199,18 @@ class SchedulerStandbyTests(unittest.TestCase):
             scheduler = Scheduler(SchedulerCfg(quiet_minutes=0), Path(tmp) / "hatter.json", hooks)
             light = Job("watches", "Figyelők", lambda: 60.0, lambda ctx: "ok", needs_models=False)
             heavy = Job("digest", "Összefoglaló", lambda: 60.0, lambda ctx: "ok")
+            browsing = Job("listings", "Hirdetések", lambda: 60.0, lambda ctx: "ok", needs_models=False,
+                           needs_browser=True)
             scheduler.register(light)
             scheduler.register(heavy)
+            scheduler.register(browsing)
             now = time.time()
             self.assertEqual(scheduler.blocked_reason(), "")
             self.assertFalse(scheduler.should_yield())
             self.assertTrue(scheduler.due(light, now))
             self.assertFalse(scheduler.due(heavy, now), "ehhez kellene a nyelvi modell")
+            self.assertFalse(scheduler.due(browsing, now), "készenlétben a böngésző sem fut")
+            self.assertEqual(scheduler.run("listings"), "Szünetelek, ezért most nem dolgozom.")
             self.assertEqual(scheduler.run("digest", forced=True), "Szünetelek, ezért most nem dolgozom.")
             self.assertEqual(scheduler.run("watches"), "ok")
             flags["standby"] = False         # a Szünet gombbal

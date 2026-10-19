@@ -221,6 +221,9 @@ active_hours = ""
 watch_minutes = 60
 # Ennyi nap után szól, ha egy hirdetés még nem kelt el (0 = soha)
 stale_days = 14
+# Naponta ennyi fent lévő hirdetésed oldalát nézi meg (csak olvasva, emberi tempóban): elkelt-e vagy
+# eltűnt-e valahol; ha igen, szól, és felajánlja a levételt a többi oldalról (0 = soha)
+listing_checks = 5
 # A háttérmunka eredményét fel is olvassa
 speak = true
 

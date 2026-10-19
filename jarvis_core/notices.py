@@ -1,7 +1,12 @@
 """Értesítések: amit Jarvis a háttérben talált (új találat egy figyelőben, régóta fent lévő
-hirdetés), és amiről a telefonon is tudnod kell (kész vagy elakadt feltöltés és levétel, egy kérdés a
-tárgyról). Megmaradnak újraindítás után is, és a telefonos felület innen kérdezi le őket, olvasottnak
-is innen jelöli.
+hirdetés, egy elkeltnek vagy eltűntnek látszó hirdetés), és amiről a telefonon is tudnod kell (kész
+vagy elakadt feltöltés és levétel, egy kérdés a tárgyról). Megmaradnak újraindítás után is, és a
+telefonos felület innen kérdezi le őket, olvasottnak is innen jelöli.
+
+Egy értesítés a szövegén túl hivatkozhat egy tárgyra (item), egy oldalra (platform), és felajánlhat
+műveleteket (actions): pl. az elkeltnek látszó hirdetésnél [{"action": "sold", "where": "vinted",
+"delist": true, "label": "Eladva itt, vedd le a többiről"}]. A művelet a felületen a meglévő Eladva-út
+(/work/items/{id}/sold), a levétel ott is a te kattintásodra indul.
 """
 from __future__ import annotations
 
@@ -13,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-KINDS = ("watch", "stale", "delist", "post", "question", "error", "work", "info")
+KINDS = ("watch", "stale", "sold", "delist", "post", "question", "error", "work", "info")
 
 
 class NoticeBoard:

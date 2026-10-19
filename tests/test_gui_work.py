@@ -331,6 +331,31 @@ class WorkBrowserTests(unittest.TestCase):
         self.wait_for(lambda: not self.h.store.all())
         page.wait_for_selector("#w-compose", state="visible")
 
+    def test_sold_elsewhere_and_price_drift_on_the_listing_page(self):
+        item = self.h.ready_item(("vinted", "hardverapro"), price=5000)
+        store = self.h.store
+        store.mark(item.id, "vinted", "feltöltve", url="https://www.vinted.hu/items/1234567-zara")
+        store.mark(item.id, "hardverapro", "feltöltve", url="https://hardverapro.hu/apro/zara/friss.html")
+        store.update(item.id, user=True, price=4500)
+        store.set_check(item.id, "vinted", "sold", detail="„Eladva” jelzés az oldalán")
+        page = self.page
+        page.wait_for_selector(f'.card[data-id="{item.id}"] .site.bad:has-text("Vinted ?")')
+        self.open_item(item.id)
+        row = '.platform:has-text("Vinted")'
+        self.assertEqual(page.inner_text(f"{row} .pstatus").split(" (")[0], "Elkeltnek látszik")
+        self.assertIn("Ár eltér: a hirdetésben még 5 000 Ft, itt 4 500 Ft.", page.inner_text(row))
+        self.assertIn("„Eladva” jelzés az oldalán", page.inner_text(row))
+        self.assertEqual(page.locator('[data-action="soldhere"]').count(), 1, "csak ott, ahol elkeltnek látszik")
+        page.click(f'{row} [data-action="soldhere"]')
+        page.wait_for_selector("#sold-dialog[open]")
+        self.assertTrue(page.is_checked('#sold-where input[value="vinted"]'), "ahol a jelzés volt, az van kiválasztva")
+        page.uncheck("#sold-delist")
+        page.click("#sold-yes")
+        page.wait_for_selector('.toast:has-text("Ne felejtsd el levenni innen: Hardverapró")')
+        found = store.get(item.id)
+        self.assertTrue(found.sold)
+        self.assertEqual(found.platforms["vinted"]["note"], "Itt kelt el.")
+
     def test_dossier_button_on_the_listing_page(self):
         item = self.h.ready_item()
         work = self.h.app.work

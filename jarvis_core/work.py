@@ -28,11 +28,12 @@ from .assistant import KEEP_ABOVE
 from .browser import BrowserError
 from .config import Config, data_path, resolve_path
 from .dossier import Dossiers
+from .listings import CHECK_WORDS, GONE, SOLD, ListingChecker
 from .replay import (FlowRecorder, FlowStore, Replayer, ReplayOutcome, entry_for, entry_problem, flow_key, item_values,
                      url_shape)
-from .selling import (CONDITIONS, MAX_PRICE, NEEDS, NOT_POSTED, PARCEL_SIZES, PLATFORMS, POSTED, FAILED, Item,
-                      ItemError, ItemStore, ListingExtractor, Platform, PriceResearcher, format_price,
-                      missing_needs, price_verdict, question_for)
+from .selling import (CONDITIONS, MAX_PRICE, NEEDS, NOT_POSTED, ON_SITE, PARCEL_SIZES, PLATFORMS, POSTED, FAILED,
+                      RESEARCH_MAX_AGE, Item, ItemError, ItemStore, ListingExtractor, Platform, PriceResearcher,
+                      format_price, missing_needs, price_verdict, question_for, research_fresh)
 from .textutil import fold, hu_amounts
 from .tools import Toolbox, ToolError, params
 from .vinted import ChoiceMemory, FillOutcome, VintedDelister, VintedFiller
@@ -79,19 +80,29 @@ def load_work_prompt(cfg: Config) -> str:
     return template.replace("{name}", cfg.assistant.name).strip()
 
 
-def research_summary(research: dict[str, Any]) -> str:
+def research_summary(research: dict[str, Any], now: float | None = None) -> str:
     if not research:
         return "Árkutatás: még nem volt."
+    now = time.time() if now is None else now
+    age = now - float(research.get("at") or now)
+    head = f"Árkutatás („{research.get('query', '')}”)"
+    if age >= RESEARCH_MAX_AGE:
+        head += f", {int(age // 86400)} napos, elavult (árazás előtt újra megnézem)"
     similar = research.get("similar") or []
     if not similar:
         errors = "; ".join(research.get("errors") or [])
-        text = f"Árkutatás („{research.get('query', '')}”): nem találtam elég hasonló hirdetést."
+        text = f"{head}: nem találtam elég hasonló hirdetést."
         return text + (f" ({errors})" if errors else "")
     sites = sorted({entry["site"] for entry in similar})
-    text = (f"Árkutatás („{research.get('query', '')}”): {len(similar)} hasonló hirdetés "
-            f"({', '.join(sites)}), {format_price(research.get('min'))} és {format_price(research.get('max'))} "
-            f"között, középérték {format_price(research.get('median'))}. "
+    if research.get("p25") is not None and research.get("p75") is not None:
+        band = f"többnyire {format_price(research['p25'])} és {format_price(research['p75'])} között"
+    else:
+        band = f"{format_price(research.get('min'))} és {format_price(research.get('max'))} között"
+    text = (f"{head}: {len(similar)} hasonló hirdetés ({', '.join(sites)}), {band}, "
+            f"középérték {format_price(research.get('median'))}. "
             f"Javasolt ár: {format_price(research.get('suggested'))}.")
+    if research.get("confidence") == "bizonytalan":
+        text += " Kevés vagy nagyon eltérő ár alapján, ezért csak tájékoztató."
     if research.get("reason"):
         text += " " + str(research["reason"])
     return text
@@ -185,6 +196,9 @@ class WorkDesk:
         sites = [catalog[key] for key in cfg.work.research_sites if key in catalog]
         self.researcher = (PriceResearcher(llm, self.store, lambda: toolbox.browser, sites)
                            if self.browser_ready and sites else None)
+        # A fent lévő hirdetések háttérellenőrzése (elkelt-e, eltűnt-e): modell nélkül, csak olvasva.
+        self.checker = (ListingChecker(self.store, self.platforms, lambda: toolbox.browser)
+                        if self.browser_ready else None)
         self.current: tuple[str, str] | None = None   # (tárgy, oldal), amit épp feltölt
         self._answered: dict[str, list[str]] = {}     # tárgy → amire a legutóbb visszakérdezett és válaszoltál
         self.approved = False    # feltöltés közben jóváhagytál-e egy kattintást (pl. a közzétételt)
@@ -297,7 +311,8 @@ class WorkDesk:
             question = question_for(item, missing)
             self.store.set_pending(item_id, {"kind": "info", "question": question})
             return Step("ask", question)
-        if item.research_wanted and not item.research.get("at") and self.researcher is not None:
+        # Az egy hétnél régebbi árkutatást az árazás előtt frissíti (azóta változhattak az árak).
+        if item.research_wanted and not research_fresh(item) and self.researcher is not None:
             try:
                 item = self.researcher.research(item_id, lambda detail: progress("árkutatás – " + detail),
                                                 only=item.targets)
@@ -851,11 +866,13 @@ class WorkDesk:
     # --- régóta fent lévő hirdetések (háttérmunka) ----------------------------------------------------------
 
     def stale_items(self, days: int, now: float | None = None) -> list[Item]:
-        """Ami legalább `days` napja fent van, nem kelt el, és egy hete nem szóltunk róla."""
+        """Ami legalább `days` napja fent van, nem kelt el, és egy hete nem szóltunk róla. Amiről a
+        háttérellenőrzés már szólt, hogy valahol elkeltnek vagy eltűntnek látszik, arról itt nem szól újra."""
         now = time.time() if now is None else now
         out = []
         for item in self.store.all():
-            if item.sold:
+            if item.sold or any(e.get("status") == POSTED and e.get("check") in (SOLD, GONE)
+                                for e in item.platforms.values()):
                 continue
             since = item.online_since()      # a felkerülés ideje (egy újbóli jelölés nem nullázza)
             if since is None or now - since < days * 86400:
@@ -987,9 +1004,15 @@ class WorkDesk:
     def _line(self, item: Item) -> str:
         parts = [item.id, item.name, format_price(item.price), item.status]
         states = []
+        drift = {d["platform"]: d for d in item.drift()}
         for key in item.targets:
             entry = item.platforms.get(key, {})
-            states.append(f"{self._site_name(key)}: {entry.get('status') or 'még nincs fent'}")
+            state = f"{self._site_name(key)}: {entry.get('status') or 'még nincs fent'}"
+            if "price" in drift.get(key, {}):
+                state += f" (ott még {format_price(drift[key]['price'])})"
+            if entry.get("status") == POSTED and entry.get("check") in CHECK_WORDS:
+                state += f" ({CHECK_WORDS[entry['check']]})"
+            states.append(state)
         if states:
             parts.append(", ".join(states))
         if item.busy:
@@ -1018,10 +1041,29 @@ class WorkDesk:
         if not values:
             raise ToolError("Nem adtál meg módosítandó adatot.")
         try:
-            self.store.update(found.id, user=True, **values)
+            updated = self.store.update(found.id, user=True, **values)
         except ItemError as exc:
             raise ToolError(str(exc)) from None
-        return f"Módosítva ({found.name}): " + ", ".join(FIELD_NAMES.get(k, k) for k in values)
+        return (f"Módosítva ({found.name}): " + ", ".join(FIELD_NAMES.get(k, k) for k in values)
+                + self.drift_note(updated, set(values)))
+
+    def drift_note(self, item: Item, changed: set[str]) -> str:
+        """Ha a fent lévő hirdetésekben még a régi ár vagy cím van, őszintén megmondja, hogy csak itt írta át:
+        a hirdetéseket magától nem szerkeszti."""
+        parts = []
+        for entry in item.drift():
+            old = []
+            if "price" in changed and "price" in entry:
+                old.append(format_price(entry["price"]))
+            if "title" in changed and "title" in entry:
+                old.append(f"a régi cím („{entry['title']}”)")
+            if old:
+                where = ON_SITE.get(entry["platform"]) or f"a(z) {self._site_name(entry['platform'])} oldalon"
+                parts.append(f"{where} még " + " és ".join(old))
+        if not parts:
+            return ""
+        return (". Csak itt írtam át; " + ", ".join(parts) + ". A fent lévő hirdetést magamtól nem szerkesztem: "
+                "ott kézzel kell átírni (vagy levenni, és újra feltölteni).")
 
     def tool_research(self, item: str) -> str:
         found = self._item(item)
