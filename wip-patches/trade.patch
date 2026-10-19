@@ -1,0 +1,1605 @@
+diff --git a/config.toml b/config.toml
+index 08e97d1..3797883 100644
+--- a/config.toml
++++ b/config.toml
+@@ -216,6 +216,9 @@ active_hours = ""
+ watch_minutes = 60
+ # Ennyi nap után szól, ha egy hirdetés még nem kelt el (0 = soha)
+ stale_days = 14
++# Naponta ennyi fent lévő hirdetésed oldalát nézi meg (csak olvasva, emberi tempóban): elkelt-e vagy
++# eltűnt-e valahol; ha igen, szól, és felajánlja a levételt a többi oldalról (0 = soha)
++listing_checks = 5
+ # A háttérmunka eredményét fel is olvassa
+ speak = true
+ 
+diff --git a/jarvis_core/app.py b/jarvis_core/app.py
+index 8507550..bfedf26 100644
+--- a/jarvis_core/app.py
++++ b/jarvis_core/app.py
+@@ -485,6 +485,13 @@ class JarvisApp:
+             self.scheduler.register(Job("stale", "Régóta fent lévő hirdetések",
+                                         lambda: 24 * 60.0 if int(self.cfg.scheduler.stale_days) > 0 else 0,
+                                         self._stale_job, needs_models=False))
++        checker = self.work.checker if self.work is not None else None
++        if checker is not None:
++            # Modell nélkül, de a böngésző kell hozzá: készenlétben (bezárt böngészővel) nem fut.
++            self.scheduler.register(Job("listings", "Fent lévő hirdetések ellenőrzése",
++                                        lambda: 24 * 60.0 if int(self.cfg.scheduler.listing_checks) > 0 else 0,
++                                        self._listings_job, available=lambda: bool(checker.due()),
++                                        needs_models=False, needs_browser=True))
+ 
+     def _register_watch_tools(self) -> None:
+         box, watches = self.toolbox, self.watches
+@@ -561,6 +568,11 @@ class JarvisApp:
+         self.work.mark_reminded([i.id for i in stale])
+         return f"{len(stale)} régóta fent lévő hirdetés."
+ 
++    def _listings_job(self, ctx: Any) -> str:
++        """Naponta: néhány fent lévő hirdetés oldala (csak olvasva): elkelt-e vagy eltűnt-e valahol."""
++        assert self.work is not None and self.work.checker is not None
++        return self.work.checker.run(int(self.cfg.scheduler.listing_checks), check=ctx.check, notify=ctx.notify)
++
+     def _tell(self, kind: str, title: str, text: str, **extra: Any) -> None:
+         """Értesítés a telefonra is (a naplóba nem kerül újra): pl. hogy egy feltöltés kész, vagy hogy Jarvis
+         kérdez valamit egy tárgyról. Ha a feladatot a telefonról adtad, így ott is megtudod."""
+@@ -1040,11 +1052,11 @@ class JarvisApp:
+         return kind == "text" and isinstance(payload, dict) and is_pause_request(str(payload.get("text") or ""))
+ 
+     def _light_job(self, payload: Any) -> bool:
+-        """Készenlétben is lefuthat-e (a modell nélküli háttérmunkák: figyelők, régi hirdetések)."""
++        """Készenlétben is lefuthat-e (a modell és böngésző nélküli háttérmunkák: figyelők, régi hirdetések)."""
+         if not self.standby or self.scheduler is None or not isinstance(payload, dict):
+             return False
+         job = self.scheduler.jobs.get(str(payload.get("key") or ""))
+-        return job is not None and not job.needs_models
++        return job is not None and not job.needs_models and not job.needs_browser
+ 
+     def _wake_up(self) -> None:
+         """Készenlétből: betölti a modelleket, és utána jöhet a kérés."""
+diff --git a/jarvis_core/browser.py b/jarvis_core/browser.py
+index 6e5b486..544a60b 100644
+--- a/jarvis_core/browser.py
++++ b/jarvis_core/browser.py
+@@ -280,11 +280,25 @@ SNAPSHOT_JS = r"""
+ 
+ # Keresési találati oldal (Vinted, Jófogás…) hirdetései: minden hirdetéskártya szövege, ára és
+ # címe. Nem oldalspecifikus: a linkektől felfelé haladva megkeresi a legkisebb elemet, amelyben
+-# ár is van (ez a kártya), és kártyánként egyszer veszi fel.
++# ár is van (ez a kártya), és kártyánként egyszer veszi fel. Az áthúzott (régi) ár nem számít; ha a
++# kártyán villámár vagy fix ár is van, az az ár; a licites kártya jelzést kap (auction), mert az ott
++# látható ár csak a mostani ajánlat.
+ LISTINGS_JS = r"""
+ () => {
+   const PRICE = /(\d{1,3}(?:[   .]\d{3})+|\d{2,7})(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])/i;
++  const FIXED = new RegExp('(?:villámár|fix ?ár|azonnal megvehető|buy it now)\\D{0,4}' + PRICE.source, 'i');
++  const AUCTION = /(licit|aukció|árverés|jelenlegi ár|kikiáltási ár|\bbids?\b|auction)/i;
+   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
++  const struck = (el) => el.matches('s, del, strike') ||
++                         (getComputedStyle(el).textDecorationLine || '').includes('line-through');
++  const priceText = (node) => {   // a kártya szövege az áthúzott árak nélkül
++    let text = clean(node.innerText);
++    for (const el of node.querySelectorAll('*')) {
++      const old = struck(el) ? clean(el.innerText) : '';
++      if (old) text = text.replace(old, ' ');
++    }
++    return clean(text);
++  };
+   const SKIP = 'header, nav, footer, [role=banner], [role=navigation], [role=contentinfo]';
+   const PROFILE = /\/(member|members|user|users|profil|profile|seller|felhasznalo)(\/|$|\?)/i;
+   const cards = new Map();
+@@ -313,20 +327,63 @@ LISTINGS_JS = r"""
+   for (const card of cards.values()) {
+     if (nodes.some(other => other !== card.node && card.node.contains(other))) continue;
+     if (seen.has(card.href)) continue;
+-    const text = clean(card.node.innerText);
+-    const m = text.match(PRICE) || card.label.match(PRICE);
++    const text = priceText(card.node);
++    const fixed = text.match(FIXED);
++    const m = fixed || text.match(PRICE) || card.label.match(PRICE);
+     if (!m) continue;
+     const price = parseInt(m[1].replace(/[^\d]/g, ''), 10);
+     if (!(price > 0 && price < 10000000)) continue;
+     seen.add(card.href);
+     const summary = (card.label.length > 15 && !text.includes(card.label)) ? card.label + ' | ' + text : text;
+-    out.push({text: summary.slice(0, 240), price, url: card.href});
++    const entry = {text: summary.slice(0, 240), price, url: card.href};
++    if (!fixed && AUCTION.test(text)) entry.auction = true;
++    out.push(entry);
+     if (out.length >= 40) break;
+   }
+   return out;
+ }
+ """
+ 
++# Egy hirdetés saját oldala a háttérellenőrzéshez (listings.py): a fő tartalom látható szövege a gombok,
++# linkek, mezők és menük nélkül (így a saját hirdetéseden lévő „Megjelölés eladottként” gomb nem számít
++# „Eladva” jelzésnek), a rövid szövegdarabok külön (egy „Eladva” címke ilyen), és a gombok, linkek
++# feliratai (ebből látszik, ha ki vagy jelentkezve).
++LISTING_PAGE_JS = r"""
++() => {
++  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
++  const SKIP = 'header, nav, footer, aside, [role=banner], [role=navigation], [role=contentinfo], script, style, ' +
++               'noscript, template, a, button, [role=button], [role=link], [role=menuitem], input, select, ' +
++               'textarea, option, label';
++  const root = document.querySelector('main, [role=main]') || document.body || document.documentElement;
++  const shown = new Map();
++  const parts = [], short = [];
++  let total = 0;
++  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
++  while (total < 4000 && walker.nextNode()) {
++    const p = walker.currentNode.parentElement;
++    const t = clean(walker.currentNode.textContent);
++    if (!p || !t || p.closest(SKIP)) continue;
++    let ok = shown.get(p);
++    if (ok === undefined) {
++      ok = typeof p.checkVisibility !== 'function' || p.checkVisibility({visibilityProperty: true});
++      shown.set(p, ok);
++    }
++    if (!ok) continue;
++    parts.push(t);
++    total += t.length + 1;
++    if (t.length <= 40 && short.length < 200) short.push(t);
++  }
++  const labels = [];
++  for (const el of document.querySelectorAll('a, button, [role=button]')) {
++    const t = clean(el.innerText || el.getAttribute('aria-label'));
++    if (t && t.length <= 40) labels.push(t);
++    if (labels.length >= 150) break;
++  }
++  return {title: document.title, url: location.href, text: parts.join(' ').slice(0, 4000), short, labels,
++          captcha: !!document.querySelector('iframe[src*="captcha" i]')};
++}
++"""
++
+ 
+ # Visszajátszás: egy korábban rögzített elem megkeresése az egész oldalon (nem csak a látható
+ # részen), ugyanazzal az elemfelismeréssel, amit a modell is lát. A legjobb egyezést megjelöli.
+@@ -1578,3 +1635,30 @@ class BrowserController:
+         except Exception as exc:  # noqa: BLE001
+             raise BrowserError(f"Nem tudom beolvasni a találatokat ({_short(exc)}).") from None
+         return [entry for entry in found or [] if isinstance(entry, dict) and entry.get("price")]
++
++    @_restarts_after_crash
++    def look_listing(self, url: str) -> dict[str, Any]:
++        """Egy hirdetés oldala a háttérellenőrzéshez (listings.py), csak olvasva: megnyitja az aktív lapon,
++        emberi tempóban átfutja (egy pillantás, egy kis görgetés, olvasás), és visszaadja a lap adatait
++        (LISTING_PAGE_JS) a captcha jelzéssel. Egy magától átengedő robotvédelmi köztes oldalt kivár
++        (CHALLENGE_WAIT), de a captchát nem próbálja megoldani. Semmire nem kattint."""
++        try:
++            url = web.normalize_url(url, allow_local=self.allow_local)
++        except web.WebError as exc:
++            raise BrowserError(str(exc)) from None
++        page = self._goto(url)
++        self._settle(page, max_wait=8.0)
++        deadline = time.monotonic() + CHALLENGE_WAIT
++        while self._challenge(page, unsure=False) and time.monotonic() < deadline:
++            page.wait_for_timeout(1000)
++            self._settle(page, max_wait=3.0)
++        self._glance(page)   # modell nélküli olvasás: egy ember is átfutja az oldalt
++        self.pace.read()
++        self.elements = {}   # a korábbi oldalnézet számai itt már nem érvényesek
++        try:
++            data = page.evaluate(LISTING_PAGE_JS)
++        except Exception as exc:  # noqa: BLE001
++            raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(exc)}).") from None
++        data = data if isinstance(data, dict) else {}
++        data["captcha"] = bool(data.get("captcha")) or self._challenge(page, unsure=False)
++        return data
+diff --git a/jarvis_core/config.py b/jarvis_core/config.py
+index 672cd5a..00dfde2 100644
+--- a/jarvis_core/config.py
++++ b/jarvis_core/config.py
+@@ -178,6 +178,7 @@ class SchedulerCfg:
+     active_hours: str = ""         # pl. "08:00-20:00"; üres = bármikor, amíg a Jarvis fut
+     watch_minutes: float = 60.0    # a figyelők (mentett keresések) ellenőrzése
+     stale_days: int = 14           # ennyi nap után szól, ha egy hirdetés nem kelt el (0 = soha)
++    listing_checks: int = 5        # naponta ennyi fent lévő hirdetést néz meg: elkelt-e, eltűnt-e (0 = soha)
+     speak: bool = True             # a háttérmunka eredményét fel is olvassa
+ 
+ 
+diff --git a/jarvis_core/listings.py b/jarvis_core/listings.py
+new file mode 100644
+index 0000000..b36fb39
+--- /dev/null
++++ b/jarvis_core/listings.py
+@@ -0,0 +1,152 @@
++"""A fent lévő hirdetések háttérellenőrzése: elkelt-e vagy eltűnt-e (lejárt, törölték) valamelyik.
++
++Modell nélkül, és csak olvas: naponta egyszer néhány hirdetést nyit meg véletlen sorrendben, emberi
++tempóban (betöltés, egy pillantás és egy kis görgetés, olvasás), és a lap szövegéből dönt. Semmire nem
++kattint. Egy hirdetést naponta legfeljebb egyszer néz meg. Ha egy oldal robot-ellenőrzést (captchát) kér,
++vagy be kell jelentkezni, az egész kört abbahagyja, és egyszer szól. Ha valahol elkeltnek vagy eltűntnek
++látszik egy hirdetés, értesítést küld (kind: sold): a kártyán az „Eladva itt, vedd le a többiről” gombbal,
++jóváhagyás után, a többi oldalról is leveszi. Magától nem jelöl meg és nem vesz le semmit.
++"""
++from __future__ import annotations
++
++import random
++import re
++import time
++import urllib.parse
++from typing import Any, Callable
++
++from .browser import BrowserError
++from .replay import norm_text
++from .selling import ON_SITE, POSTED, Item, ItemStore, Platform, listing_key
++from .vinted import _GONE_RE, logged_out
++
++LIVE, SOLD, GONE, BLOCKED, UNKNOWN = "live", "sold", "gone", "blocked", "unknown"
++CHECK_SECONDS = 24 * 3600    # egy hirdetést naponta legfeljebb egyszer néz meg
++# A modellnek és a felületnek: mit látott a háttérellenőrzés.
++CHECK_WORDS = {SOLD: "a háttérellenőrzés szerint elkelt", GONE: "a háttérellenőrzés szerint már nincs fent"}
++
++# „Eladva” címke a hirdetés oldalán (rövid, önálló szövegdarab, nem gomb): a Vinteden „Sold” / „Reserved”.
++_SOLD_RE = re.compile(r"\b(sold(?! by)|eladva|elkelt|reserved|foglalt|lefoglalva)\b")
++# Lejárt vagy lezárt hirdetés (a Vinted „nem található” szavai mellé).
++_ENDED_RE = re.compile(r"(hirdetes lejart|lejart a hirdetes|lejart hirdetes|mar nem aktiv|hirdetes inaktiv|"
++                       r"inaktiv hirdetes|hirdetes lezarult|mar nem vasarolhato)")
++_LOGIN_RE = re.compile(r"/(login|signin|sign_in|sign-in|bejelentkez\w*|belepes)(/|$)")
++
++
++def classify(page: dict[str, Any], url: str, title: str = "", platform: str = "") -> tuple[str, str]:
++    """Egy megnyitott hirdetés állapota a lap adataiból (browser.look_listing): (állapot, miből látszik).
++    LIVE: fent van; SOLD: „Eladva” / „Foglalt” címke; GONE: máshova irányít, vagy „nem található” oldal;
++    BLOCKED: captcha, vagy be kell jelentkezni (ilyenkor a kör abbamarad)."""
++    final = str(page.get("url") or "")
++    if page.get("captcha"):
++        return BLOCKED, "robot-ellenőrzést (captchát) kér"
++    if _LOGIN_RE.search(urllib.parse.urlsplit(final).path.lower()):
++        return BLOCKED, "be kell jelentkezni"
++    if platform == "vinted" and logged_out([{"label": label} for label in page.get("labels") or []]):
++        return BLOCKED, "ki vagy jelentkezve"
++    if final and listing_key(final) != listing_key(url):
++        return GONE, "a hirdetés címe máshova irányít"
++    for text in page.get("short") or []:
++        if _SOLD_RE.search(norm_text(str(text))):
++            return SOLD, f"„{str(text)[:40]}” jelzés az oldalán"
++    heading = norm_text(str(page.get("title") or ""))
++    head = heading + " " + norm_text(str(page.get("text") or "")[:600])
++    own = norm_text(title)[:30]
++    if (_GONE_RE.search(head) or _ENDED_RE.search(head)) and not (own and own in heading):
++        return GONE, "az oldala szerint már nem található"
++    return LIVE, ""
++
++
++class ListingChecker:
++    """Naponta néhány fent lévő hirdetés oldala, csak olvasva (lásd a modul leírását)."""
++
++    def __init__(self, store: ItemStore, platforms: dict[str, Platform], browser: Callable[[], Any],
++                 clock: Callable[[], float] = time.time, rng: random.Random | None = None):
++        self.store = store
++        self.platforms = platforms
++        self.browser = browser
++        self.clock = clock
++        self.rng = rng or random.Random()
++
++    def due(self, now: float | None = None) -> list[tuple[Item, str]]:
++        """(tárgy, oldal) párok, amelyeket egy napja nem néztünk meg: fent vannak, ismerjük a webcímüket, és a
++        tárgy nincs eladottnak jelölve. A frissen feltöltöttet is csak egy nap múlva nézi meg."""
++        now = self.clock() if now is None else now
++        out = []
++        for item in self.store.all():
++            if item.sold:
++                continue
++            for key, entry in item.platforms.items():
++                if key not in self.platforms or entry.get("status") != POSTED or not entry.get("url"):
++                    continue
++                last = max(float(entry.get("at") or 0), float(entry.get("checked_at") or 0))
++                if now - last >= CHECK_SECONDS:
++                    out.append((item, key))
++        return out
++
++    def run(self, limit: int, check: Callable[[], None] = lambda: None,
++            notify: Callable[..., None] = lambda *a, **k: None) -> str:
++        """Egy kör: legfeljebb `limit` esedékes hirdetés, véletlen sorrendben. `check` a lépések között
++        megszakíthatja (a felhasználó közbeszólt), `notify` az értesítés. Visszaadja a rövid eredményt."""
++        picks = self.due()
++        self.rng.shuffle(picks)
++        picks = picks[:max(0, int(limit))]
++        if not picks:
++            return "Nincs ma megnézendő hirdetés."
++        browser = self.browser()
++        counts = {LIVE: 0, SOLD: 0, GONE: 0, UNKNOWN: 0}
++        for n, (item, key) in enumerate(picks):
++            check()
++            if n:
++                browser.pace.think()     # a következő hirdetés előtt, ahogy az ember is
++            try:
++                item = self.store.get(item.id)      # közben változhatott (pl. eladottnak jelölted)
++            except Exception:  # noqa: BLE001 - közben törölted
++                continue
++            entry = item.platforms.get(key) or {}
++            if item.sold or entry.get("status") != POSTED or not entry.get("url"):
++                continue
++            site = self.platforms[key]
++            try:
++                page = browser.look_listing(entry["url"])
++            except BrowserError as exc:
++                counts[UNKNOWN] += 1      # ma már nem próbálja újra (naponta egy látogatás)
++                self.store.set_check(item.id, key, str(entry.get("check") or UNKNOWN), self.clock(),
++                                     str(exc).splitlines()[0][:160])
++                continue
++            state, detail = classify(page, entry["url"], str(entry.get("posted_title") or item.title), key)
++            if state == BLOCKED:
++                notify("error", f"Hirdetések ellenőrzése: {site.name}",
++                       f"A hirdetéseid ellenőrzését abbahagytam: a(z) {site.name} {detail}. Nézd meg a "
++                       "böngészőablakomban; holnap újra megpróbálom.", platform=key)
++                return f"Abbahagytam: {site.name} – {detail}."
++            before = entry.get("check")
++            self.store.set_check(item.id, key, state, self.clock(), detail)
++            counts[state] += 1
++            if state in (SOLD, GONE) and before != state:
++                self._notify(notify, self.store.get(item.id), key, state, detail)
++        parts = [f"{counts[LIVE]} fent van"]
++        for state, word in ((SOLD, "elkeltnek látszik"), (GONE, "már nincs fent"), (UNKNOWN, "nem nyílt meg")):
++            if counts[state]:
++                parts.append(f"{counts[state]} {word}")
++        return f"{len(picks)} hirdetést néztem meg: " + ", ".join(parts) + "."
++
++    def _notify(self, notify: Callable[..., None], item: Item, key: str, state: str, detail: str) -> None:
++        site = self.platforms[key]
++        where = ON_SITE.get(key) or f"a(z) {site.name} oldalon"
++        others = [self.platforms[k].name for k, e in item.platforms.items()
++                  if k != key and k in self.platforms and e.get("status") == POSTED]
++        if state == SOLD:
++            title, text = f"Elkelt? {item.name}", f"{item.name}: {where} eladottnak látszik ({detail})."
++        else:
++            title, text = (f"Már nincs fent? {item.name}",
++                           f"{item.name}: {where} már nincs fent a hirdetés ({detail}). Ha csak lejárt vagy "
++                           "törölték, a kártyán a „Már levettem” gombbal jelöld meg.")
++        if others:
++            text += (f" Ha ott kelt el, a kártyán az „Eladva itt, vedd le a többiről” gombbal (jóváhagyás után) "
++                     f"innen is leveszem: {', '.join(others)}.")
++        else:
++            text += " Ha tényleg elkelt, a kártyán az „Eladva itt” gombbal jelöld meg."
++        label = "Eladva itt, vedd le a többiről" if others else "Eladva itt"
++        notify("sold", title, text, item=item.id, platform=key, state=state,
++               actions=[{"action": "sold", "where": key, "delist": bool(others), "label": label}])
+diff --git a/jarvis_core/notices.py b/jarvis_core/notices.py
+index 6bca806..16571b0 100644
+--- a/jarvis_core/notices.py
++++ b/jarvis_core/notices.py
+@@ -1,7 +1,12 @@
+ """Értesítések: amit Jarvis a háttérben talált (új találat egy figyelőben, régóta fent lévő
+-hirdetés), és amiről a telefonon is tudnod kell (kész vagy elakadt feltöltés és levétel, egy kérdés a
+-tárgyról). Megmaradnak újraindítás után is, és a telefonos felület innen kérdezi le őket, olvasottnak
+-is innen jelöli.
++hirdetés, egy elkeltnek vagy eltűntnek látszó hirdetés), és amiről a telefonon is tudnod kell (kész
++vagy elakadt feltöltés és levétel, egy kérdés a tárgyról). Megmaradnak újraindítás után is, és a
++telefonos felület innen kérdezi le őket, olvasottnak is innen jelöli.
++
++Egy értesítés a szövegén túl hivatkozhat egy tárgyra (item), egy oldalra (platform), és felajánlhat
++műveleteket (actions): pl. az elkeltnek látszó hirdetésnél [{"action": "sold", "where": "vinted",
++"delist": true, "label": "Eladva itt, vedd le a többiről"}]. A művelet a felületen a meglévő Eladva-út
++(/work/items/{id}/sold), a levétel ott is a te kattintásodra indul.
+ """
+ from __future__ import annotations
+ 
+@@ -13,7 +18,7 @@ import time
+ from pathlib import Path
+ from typing import Any, Callable
+ 
+-KINDS = ("watch", "stale", "delist", "post", "question", "error", "work", "info")
++KINDS = ("watch", "stale", "sold", "delist", "post", "question", "error", "work", "info")
+ 
+ 
+ class NoticeBoard:
+diff --git a/jarvis_core/scheduler.py b/jarvis_core/scheduler.py
+index b7371ec..8859c14 100644
+--- a/jarvis_core/scheduler.py
++++ b/jarvis_core/scheduler.py
+@@ -1,8 +1,8 @@
+ """Háttérmunka: amit Jarvis magától, időnként elvégez (pl. a figyelők átnézése).
+ 
+ Csak akkor dolgozik, amikor ráér:
+-- nincs Szünet (a Szünet gomb mindent leállít, a háttérmunkát is); készenlétben csak a modell nélküli
+-  munkák futnak (pl. a figyelők),
++- nincs Szünet (a Szünet gomb mindent leállít, a háttérmunkát is); készenlétben csak a modell és
++  böngésző nélküli munkák futnak (pl. a figyelők),
+ - épp nem dolgozik másvalamin, és az utolsó beszélgetés óta eltelt pár perc (quiet_minutes),
+ - az aktív órákon belül vagyunk (ha be van állítva), és nem függesztetted fel.
+ 
+@@ -52,6 +52,7 @@ class Job:
+     run: Callable[["JobContext"], str]
+     available: Callable[[], bool] = lambda: True
+     needs_models: bool = True                   # kell-e hozzá a nyelvi modell (készenlétben nem fut)
++    needs_browser: bool = False                 # kell-e hozzá a böngésző (készenlétben az sincs: nem fut)
+ 
+ 
+ @dataclass
+@@ -181,10 +182,10 @@ class Scheduler:
+         return self.hooks.preempted() or (self.hooks.paused() and not self.hooks.standby())
+ 
+     def _allowed(self, job: Job) -> bool:
+-        """Futhat-e most ez a munka (készenlétben csak a modell nélküliek)."""
++        """Futhat-e most ez a munka (készenlétben csak a modell és böngésző nélküliek)."""
+         if not self.hooks.paused():
+             return True
+-        return self.hooks.standby() and not job.needs_models
++        return self.hooks.standby() and not job.needs_models and not job.needs_browser
+ 
+     def due(self, job: Job, now: float) -> bool:
+         every = float(job.every_minutes() or 0)
+diff --git a/jarvis_core/selling.py b/jarvis_core/selling.py
+index c6ef3ca..f96cccb 100644
+--- a/jarvis_core/selling.py
++++ b/jarvis_core/selling.py
+@@ -45,6 +45,9 @@ TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200
+                "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20}
+ MULTILINE = {"description", "prompt"}
+ POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
++# Egy fent lévő hirdetés újbóli megjelölésekor (ugyanaz a hirdetés) ezek maradnak: a feltöltéskori ár és cím,
++# és a háttérellenőrzés eredménye (lásd listings.py).
++REMARK_KEEPS = ("posted_price", "posted_title", "checked_at", "check", "check_note")
+ 
+ 
+ class ItemError(Exception):
+@@ -112,6 +115,10 @@ PLATFORMS: dict[str, Platform] = {
+ }
+ 
+ 
++# Hol van fent, mondatba illesztve („a Vinteden még 9 000 Ft”).
++ON_SITE = {"vinted": "a Vinteden", "jofogas": "a Jófogáson", "vatera": "a Vaterán", "hardverapro": "a Hardveraprón"}
++
++
+ # --- mit kér az egyes oldal ---------------------------------------------------------
+ 
+ @dataclass(frozen=True)
+@@ -197,11 +204,29 @@ class Item:
+             return "részben fent"
+         return "vázlat"
+ 
++    def drift(self) -> list[dict[str, Any]]:
++        """Ahol a fent lévő hirdetés ára vagy címe már nem az, ami itt van (itt átírtuk, ott nem):
++        [{"platform": "vinted", "price": 9000, "title": "…"}], csak az eltérő mezőkkel."""
++        out = []
++        for key, entry in self.platforms.items():
++            if entry.get("status") != POSTED:
++                continue
++            differs: dict[str, Any] = {}
++            if entry.get("posted_price") is not None and entry["posted_price"] != self.price:
++                differs["price"] = entry["posted_price"]
++            if entry.get("posted_title") and self.title and entry["posted_title"] != self.title:
++                differs["title"] = entry["posted_title"]
++            if differs:
++                out.append({"platform": key, **differs})
++        return out
++
+     def public(self) -> dict[str, Any]:
+         data = asdict(self)
+         data["name"] = self.name
+         data["status"] = self.status
+         data["verdict"] = price_verdict(self).text if self.research.get("at") else ""
++        data["research_stale"] = bool(self.research.get("at")) and not research_fresh(self)
++        data["drift"] = self.drift()
+         return data
+ 
+     def stored(self) -> dict[str, Any]:
+@@ -482,12 +507,22 @@ class ItemStore:
+                 if status not in (POSTED, NOT_POSTED, FAILED):
+                     raise ItemError(f"Az állapot „{POSTED}”, „{NOT_POSTED}” vagy „{FAILED}” lehet.")
+                 entry: dict[str, Any] = {"status": status, "at": time.time()}
++                previous = item.platforms.get(platform, {})
+                 if url.startswith(("http://", "https://")):
+                     entry["url"] = url[:300]
+-                elif status == POSTED and item.platforms.get(platform, {}).get("url"):
+-                    entry["url"] = item.platforms[platform]["url"]
++                elif status == POSTED and previous.get("url"):
++                    entry["url"] = previous["url"]
+                 if note:
+                     entry["note"] = note[:300]
++                if status == POSTED:
++                    # Ugyanaz a hirdetés (pl. „Itt kelt el.” megjegyzéssel): a feltöltéskori ár és cím, és
++                    # amit a háttérben láttunk róla, marad. Új hirdetésnél a mostani ár és cím ment fel.
++                    if previous.get("status") == POSTED and previous.get("url", entry.get("url")) == entry.get("url"):
++                        entry.update({k: previous[k] for k in REMARK_KEEPS if k in previous})
++                    if item.price is not None:
++                        entry.setdefault("posted_price", item.price)
++                    if item.title:
++                        entry.setdefault("posted_title", item.title)
+                 item.platforms[platform] = entry
+             if sold is not None:
+                 item.sold = bool(sold)
+@@ -514,6 +549,22 @@ class ItemStore:
+             entry["dossier"] = str(name)[:120]
+             return self._changed(item)
+ 
++    def set_check(self, item_id: str, platform: str, state: str, when: float | None = None,
++                  detail: str = "") -> Item:
++        """A háttérben megnézett hirdetés állapota (fent van, elkelt, eltűnt): mikor, mit láttunk és miből."""
++        with self._lock:
++            item = self.get(item_id)
++            entry = item.platforms.get(platform)
++            if entry is None:
++                return item
++            entry["checked_at"] = time.time() if when is None else float(when)
++            entry["check"] = state
++            if detail:
++                entry["check_note"] = detail[:200]
++            else:
++                entry.pop("check_note", None)
++            return self._changed(item)
++
+     def set_reminded(self, item_id: str, when: float | None = None) -> Item:
+         """Feljegyzi, hogy szóltunk: régóta fent van, de még nem kelt el (hét napig nem szól újra)."""
+         with self._lock:
+@@ -714,6 +765,136 @@ def describe_item(item: Item) -> str:
+     return "; ".join(parts)
+ 
+ 
++# --- előszűrés és robusztus statisztika (modell nélkül) ---------------------------------------
++
++RESEARCH_MAX_AGE = 7 * 86400   # egy hét után az árkutatás elavult: a következő árazás előtt újra megnézi
++JUDGE_ROWS = 25                # a modell legfeljebb ennyi találatot kap: a tárgyhoz leginkább illőket
++NEW_CONDITIONS = {"Új, címkével", "Új"}
++WORN_CONDITIONS = {"Elfogadható", "Hibás"}
++
++_TOKEN_RE = re.compile(r"[a-z0-9]+")
++# Ezek szinte minden hirdetésben ott vannak, ezért arról, hogy ugyanaz-e a termék, nem mondanak semmit.
++_STOPWORDS = {
++    "az", "egy", "es", "is", "de", "vagy", "nem", "meg", "mar", "csak", "mint", "the", "and", "for", "with",
++    "uj", "ujszeru", "hasznalt", "elado", "eladom", "jo", "nagyon", "szep", "allapot", "allapotu", "allapotban",
++    "meret", "meretu", "szinu", "ft", "huf", "forint", "db", "darab", "szemelyes", "atvetel", "postazas",
++    "szallitas", "foxpost", "new", "used", "size", "noi", "ferfi", "unisex",
++}
++# Kereső- és cserehirdetés: valaki venni vagy cserélni akar, az ára nem eladási ár. A „csere” csak akkor
++# számít, ha az eladás szava nincs mellette („Eladó vagy csere” még eladás).
++_WANTED_RE = re.compile(r"\b(keresek|keresem|keresunk|veszek|vennek|vennem|megvennem|felvasar\w*|beszamit\w*)\b")
++_SWAP_RE = re.compile(r"\b(csere|cseret|csereben|cserere|cserelnem|cserelnek|cserelek|elcserelnem|cserebere)\b")
++_SALE_RE = re.compile(r"\belad")
++# Csomag vagy több darab egyben: az ár nem egy darabé. A darabszám („3 db”, „x2”) csak elektronikán kívül
++# számít: ott a „2 db ventilátorral” vagy a „PCIe x4” a tárgy leírása, nem csomag.
++_LOT_RE = re.compile(r"\b(csomag|csomagban|csomagot|csomagkent|szett|szettben|lot|kotegben|tetelben)\b|"
++                     r"\btobb (db|darab)\b")
++_COUNT_RE = re.compile(r"\b([2-9]|[1-9]\d) ?(db|darab|par)\b|\bx[2-9]\b")
++# Alkatrész, hibás, vagy csak a doboza: nem a működő tárgy ára („nem hibás”, „nem törött” nem számít).
++_PARTS_RE = re.compile(r"(?<!nem )\b(alkatresz\w*|hibas|hibasan|hibasak|javitasra|torott|for parts|"
++                       r"csak (a )?doboz\w*|ures doboz\w*)\b|\b(nem mukodik|nem mukodo|mukodeskeptelen)\b")
++
++
++def research_fresh(item: Item, now: float | None = None) -> bool:
++    """Van-e egy hétnél frissebb árkutatás (a régebbit a következő árazás előtt újra megnézi)."""
++    at = float((item.research or {}).get("at") or 0)
++    now = time.time() if now is None else now
++    return bool(at) and now - at < RESEARCH_MAX_AGE
++
++
++def _tokens(text: str) -> set[str]:
++    return {t for t in _TOKEN_RE.findall(fold(text or "")) if len(t) > 1 and t not in _STOPWORDS}
++
++
++def _shared(wanted: set[str], have: set[str]) -> set[str]:
++    """A közös szavak; a toldalékos és az összetett alak is számít (blézer ~ blézert, farmer ~ farmernadrág)."""
++    return {w for w in wanted if w in have or any((len(w) >= 4 and h.startswith(w)) or
++                                                  (len(h) >= 4 and w.startswith(h)) for h in have)}
++
++
++def listing_key(url: str) -> str:
++    """Egy hirdetés azonosítója a webcíméből: a gép és a hirdetés száma (ha van), különben az útvonal. Így a
++    saját hirdetésed más paraméterekkel vagy más címmel (slug) is felismerhető."""
++    parts = urllib.parse.urlsplit(url or "")
++    host = (parts.hostname or "").removeprefix("www.")
++    number = re.search(r"\d{5,}", parts.path)
++    return f"{host}#{number.group(0)}" if number else host + parts.path.rstrip("/").lower()
++
++
++def _same_listing(words: set[str], price: int, other: set[str], other_price: int) -> bool:
++    """Ugyanaz a hirdetés még egyszer (pl. az eladó több oldalra is feltette): szinte ugyanaz a cím és az ár."""
++    if not words or not other or abs(price - other_price) > 0.05 * max(price, other_price, 1):
++        return False
++    return len(words & other) / len(words | other) >= 0.8
++
++
++def prefilter(item: Item, rows: list[dict[str, Any]], limit: int = JUDGE_ROWS
++              ) -> tuple[list[dict[str, Any]], dict[str, int]]:
++    """Modell nélküli előszűrés a bíráló modellhívás előtt. Kimarad: a kereső- és a cserehirdetés, a csomag,
++    az alkatrész és a hibás (hacsak a te tárgyad nem ilyen), ami egy szóban sem egyezik a tárgyad címével,
++    márkájával, nevével vagy keresőszavával, a saját hirdetésed, és ugyanannak a hirdetésnek az ismétlése.
++    A maradékból a legjobban egyező `limit` darab marad, az eredeti sorrendben (a végső szót a modell
++    mondja ki). Visszaadja a megmaradtakat, és hogy miért mennyi esett ki."""
++    own = fold(" ".join((item.title, item.product, item.description, item.brand)))
++    lot_ok = bool(_LOT_RE.search(own) or _COUNT_RE.search(own))
++    parts_ok = item.condition == "Hibás" or bool(_PARTS_RE.search(own))
++    counts = item.kind != "elektronika"
++    wanted = _tokens(" ".join((item.title, item.brand, item.product, item.search_query)))
++    brand = _tokens(item.brand)
++    size = set(_TOKEN_RE.findall(fold(item.size)))
++    mine = {listing_key(e["url"]) for e in item.platforms.values() if isinstance(e, dict) and e.get("url")}
++    dropped: dict[str, int] = {}
++    scored: list[tuple[float, int, dict[str, Any]]] = []
++    seen: list[tuple[set[str], int]] = []
++    for index, row in enumerate(rows):
++        text = fold(str(row.get("text") or ""))
++        words, price = _tokens(text), int(row.get("price") or 0)
++        reason = ""
++        if row.get("url") and listing_key(str(row["url"])) in mine:
++            reason = "saját"
++        elif _WANTED_RE.search(text) or (_SWAP_RE.search(text) and not _SALE_RE.search(text)):
++            reason = "kereső"
++        elif not lot_ok and (_LOT_RE.search(text) or (counts and _COUNT_RE.search(text))):
++            reason = "csomag"
++        elif not parts_ok and _PARTS_RE.search(text):
++            reason = "alkatrész"
++        elif wanted and not _shared(wanted, words):
++            reason = "más termék"
++        elif any(_same_listing(words, price, other, other_price) for other, other_price in seen):
++            reason = "ismétlődő"
++        if reason:
++            dropped[reason] = dropped.get(reason, 0) + 1
++            continue
++        seen.append((words, price))
++        score = (len(_shared(wanted, words)) + (1.0 if brand and _shared(brand, words) else 0.0)
++                 + (0.5 if size and size & set(_TOKEN_RE.findall(text)) else 0.0))
++        scored.append((score, index, row))
++    best = sorted(scored, key=lambda s: (-s[0], s[1]))[:max(1, limit)]
++    if len(scored) > len(best):
++        dropped["kevésbé illő"] = len(scored) - len(best)
++    return [row for _, _, row in sorted(best, key=lambda s: s[1])], dropped
++
++
++def price_stats(prices: list[int] | list[float]) -> dict[str, Any]:
++    """Robusztus árstatisztika: a kilógó árakat (pl. egy tízszeres vagy egy 1 forintos hirdetés) a
++    negyedek közti terjedelemmel kidobja, a maradékból alsó negyed (p25), medián és felső negyed (p75).
++    „bizonytalan”, ha ötnél kevesebb ár maradt, vagy nagyon szórnak (a sáv a medián 60%-ánál szélesebb)."""
++    values = sorted(int(p) for p in prices)
++    if not values:
++        return {}
++    if len(values) >= 4:
++        q1, middle, q3 = statistics.quantiles(values, n=4, method="inclusive")
++        spread = max(q3 - q1, 0.2 * middle)   # sok egyforma árnál se essen ki minden kicsit eltérő
++        values = [v for v in values if q1 - 1.5 * spread <= v <= q3 + 1.5 * spread]
++    if len(values) >= 2:
++        p25, median, p75 = statistics.quantiles(values, n=4, method="inclusive")
++    else:
++        p25 = median = p75 = values[0]
++    confidence = "bizonytalan" if len(values) < 5 or p75 - p25 > 0.6 * median else "megbízható"
++    return {"min": values[0], "max": values[-1], "p25": int(round(p25)), "median": int(round(median)),
++            "p75": int(round(p75)), "n": len(values), "confidence": confidence}
++
++
+ class PriceResearcher:
+     """Megnézi a hirdetési oldalakon, mennyiért kínálnak hasonlót."""
+ 
+@@ -752,18 +933,26 @@ class PriceResearcher:
+             if not found:
+                 errors.append(f"{site.name}: nem találtam árakat (lehet, hogy ellenőrzést kér az oldal)")
+             for entry in found[:20]:
+-                results.append({"site": site.name, "text": entry["text"][:180],
+-                                "price": int(entry["price"]), "url": entry["url"]})
+-        research: dict[str, Any] = {"query": query, "at": time.time(), "count": len(results),
+-                                    "similar": [], "errors": errors}
+-        if results:
++                row = {"site": site.name, "text": entry["text"][:180], "price": int(entry["price"]),
++                       "url": entry["url"]}
++                if entry.get("auction"):
++                    row["auction"] = True
++                results.append(row)
++        rows, dropped = prefilter(item, results)
++        research: dict[str, Any] = {"query": query, "at": time.time(), "count": len(results), "kept": len(rows),
++                                    "dropped": dropped, "similar": [], "errors": errors}
++        if rows:
+             if progress:
+                 progress("a hasonlók kiválasztása")
+-            research.update(self._judge(item, results))
++            research.update(self._judge(item, rows))
++        elif results:
++            research["reason"] = ("A találatok között nem volt a tárgyadhoz hasonló (kereső- vagy csomaghirdetés, "
++                                  "alkatrész vagy más termék).")
+         return self.store.set_research(item_id, research)
+ 
+     def _judge(self, item: Item, results: list[dict[str, Any]]) -> dict[str, Any]:
+         listing = "\n".join(f"{n}. [{r['site']}] {r['text']} – {format_price(r['price'])}"
++                            + (" (licit: a mostani ajánlat, nem végleges ár)" if r.get("auction") else "")
+                             for n, r in enumerate(results, 1))
+         messages = [
+             {"role": "system", "content": SELECT_SYSTEM},
+@@ -782,16 +971,21 @@ class PriceResearcher:
+         if not picked:
+             out["reason"] = out["reason"] or "Nem találtam elég hasonló hirdetést."
+             return out
+-        prices = sorted(r["price"] for r in picked)
+-        median = statistics.median(prices)
+-        out.update({"min": prices[0], "max": prices[-1], "median": int(median)})
++        fixed = [r for r in picked if not r.get("auction")]
++        basis = fixed if len(fixed) >= 3 else picked    # a licit csak a mostani ajánlat: ha lehet, kimarad
++        stats = price_stats([r["price"] for r in basis])
++        kept = [r for r in basis if stats["min"] <= r["price"] <= stats["max"]]
++        out["similar"] = kept[:12]
++        out.update(stats)
++        if len(kept) < len(basis):
++            out["outliers"] = len(basis) - len(kept)
+         try:
+             suggested = int(data.get("suggested_price") or 0)
+         except (TypeError, ValueError):
+             suggested = 0
+-        if not prices[0] * 0.5 <= suggested <= prices[-1] * 1.2:
+-            suggested = median   # irreális javaslat helyett a középérték
+-        out["suggested"] = round_price(suggested)
++        if not stats["min"] * 0.5 <= suggested <= stats["max"] * 1.2:
++            suggested = stats["median"]   # irreális javaslat helyett a középérték
++        out["suggested"] = round_price(min(max(suggested, stats["p25"]), stats["p75"]))
+         return out
+ 
+ 
+@@ -802,8 +996,21 @@ class Verdict:
+     suggested: int | None = None
+ 
+ 
++def _condition_note(item: Item, p25: int, p75: int) -> str:
++    """Az állapot szerint a sáv melyik része reális (csak tájékoztatás, a javasolt árat nem írja át)."""
++    if p25 >= p75:
++        return ""
++    if item.condition in NEW_CONDITIONS:
++        return f" Mivel új, a sáv felső része (kb. {format_price(p75)}) is reális."
++    if item.condition in WORN_CONDITIONS:
++        return f" Az állapota miatt inkább a sáv alsó része (kb. {format_price(p25)}) a reális."
++    return ""
++
++
+ def price_verdict(item: Item) -> Verdict:
+-    """Az árkutatás alapján: rendben van-e az ár. Csak ajánlás; a döntés az eladóé."""
++    """Az árkutatás alapján: rendben van-e az ár. Csak ajánlás; a döntés az eladóé. A szokásos sáv a hasonlók
++    alsó és felső negyede közt van: ha az árad e fölött, és a középérték 1,25-szörösénél is feljebb van,
++    megáll és megkérdezi."""
+     r = item.research or {}
+     similar = r.get("similar") or []
+     prices = sorted(int(s["price"]) for s in similar if isinstance(s, dict) and isinstance(s.get("price"), (int, float)))
+@@ -814,15 +1021,20 @@ def price_verdict(item: Item) -> Verdict:
+         found = (f"Csak {len(prices)} hasonló hirdetést találtam, ez kevés az összevetéshez"
+                  if prices else "Nem találtam hasonló hirdetést az összevetéshez")
+         return Verdict(False, f"{found}; marad az árad ({format_price(price)}).")
+-    low, high = r.get("min") or prices[0], r.get("max") or prices[-1]
+-    median = r.get("median") or int(statistics.median(prices))
+-    span = f"{format_price(low)} és {format_price(high)} között (középérték {format_price(median)})"
+-    if price > median * 1.25:
++    stats = price_stats(prices)       # a régi (negyedek nélküli) kutatásnál ebből
++    median = int(r.get("median") or stats["median"])
++    p25, p75 = int(r.get("p25") or stats["p25"]), int(r.get("p75") or stats["p75"])
++    span = (f"többnyire {format_price(p25)} és {format_price(p75)} között (középérték {format_price(median)})"
++            if p25 < p75 else f"{format_price(median)} körül")
++    unsure = (" Kevés vagy nagyon eltérő ár alapján mondom, ezért csak tájékoztató."
++              if (r.get("confidence") or stats["confidence"]) == "bizonytalan" else "")
++    note = _condition_note(item, p25, p75)
++    if price > max(median * 1.25, p75):
+         suggested = r.get("suggested") or round_price(median)
+-        return Verdict(True, f"Hasonlót {span} kínálnak. {format_price(price)}-ért valószínűleg nehezen kel el, "
+-                             f"én {format_price(suggested)}-ot kérnék. Maradjon a te árad, vagy legyen "
+-                             f"{format_price(suggested)}?", suggested)
+-    if price < median * 0.6:
+-        return Verdict(False, f"Ennél többet is kérhetnél: hasonlót {span} kínálnak. Marad a te árad "
++        return Verdict(True, f"Hasonlót {span} kínálnak.{unsure}{note} {format_price(price)}-ért valószínűleg "
++                             f"nehezen kel el, én {format_price(suggested)}-ot kérnék. Maradjon a te árad, vagy "
++                             f"legyen {format_price(suggested)}?", suggested)
++    if price < min(median * 0.6, p25):
++        return Verdict(False, f"Ennél többet is kérhetnél: hasonlót {span} kínálnak.{note} Marad a te árad "
+                               f"({format_price(price)}).")
+-    return Verdict(False, f"Az árad rendben van: hasonlót {span} kínálnak.")
++    return Verdict(False, f"Az árad rendben van: hasonlót {span} kínálnak.{unsure}{note}")
+diff --git a/jarvis_core/ui/work.js b/jarvis_core/ui/work.js
+index 190f38d..d83a685 100644
+--- a/jarvis_core/ui/work.js
++++ b/jarvis_core/ui/work.js
+@@ -27,6 +27,7 @@
+   const STATUS_CLASS = { "vázlat": "vazlat", "kérdés": "kerdes", "árdöntés": "kerdes",
+                          "részben fent": "kesz", "fent": "feltoltve", "eladva": "eladva" };
+   const FILTERS = [["all", "Mind"], ["todo", "Teendő"], ["up", "Fent van"], ["sold", "Eladva"]];
++  const CHECKED = { sold: "Elkeltnek látszik", gone: "Már nincs fent?" };   // a háttérellenőrzés jelzései
+ 
+   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
+     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+@@ -355,9 +356,10 @@
+   function siteChips(item) {
+     return item.targets.map((key) => {
+       const state = siteState(item, key);
+-      const mark = state === POSTED ? "✓" : state === FAILED ? "✕" : "…";
+-      const cls = state === POSTED ? "on" : state === FAILED ? "bad" : "";
+-      return `<span class="site ${cls}" title="${esc((item.platforms[key] || {}).note || state || "még nincs fent")}">` +
++      const flagged = state === POSTED && !item.sold ? CHECKED[(item.platforms[key] || {}).check] : "";
++      const mark = flagged ? "?" : state === POSTED ? "✓" : state === FAILED ? "✕" : "…";
++      const cls = flagged || state === FAILED ? "bad" : state === POSTED ? "on" : "";
++      return `<span class="site ${cls}" title="${esc(flagged || (item.platforms[key] || {}).note || state || "még nincs fent")}">` +
+              `${esc(siteName(key))} ${mark}</span>`;
+     }).join("");
+   }
+@@ -426,8 +428,11 @@
+     const similar = r.similar || [];
+     let html = item.verdict ? `<p class="verdict">${esc(item.verdict)}</p>` : "";
+     if (r.reason) html += `<p class="muted">${esc(r.reason)}</p>`;
++    const dropped = (r.count || 0) - (r.kept ?? (r.count || 0));
+     html += `<p class="muted">Keresés: „${esc(r.query)}”, ${r.count || 0} találat` +
++            (dropped > 0 ? ` (${dropped} kiszűrve: kereső, csomag, alkatrész, a sajátod vagy más termék)` : "") +
+             (similar.length ? `, ebből ${similar.length} hasonló:` : ".") + "</p>";
++    if (item.research_stale) html += '<p class="muted">Ez az árkutatás egy hétnél régebbi; árazás előtt frissítem.</p>';
+     if (similar.length) {
+       html += "<ul>" + similar.map((s) => {
+         const text = `${esc(s.site)}: ${esc((s.text || "").slice(0, 90))}`;
+@@ -444,19 +449,26 @@
+     const state = item.platforms[p.key] || {};
+     const chosen = item.targets.includes(p.key);
+     const delisted = state.status === "nincs fent" && (state.note || "").startsWith("Levéve");
+-    const label = state.status === POSTED ? "Fent van" : state.status === FAILED ? "Nem sikerült"
++    // a háttérellenőrzés szerint itt elkelt vagy eltűnt (csak jelzés: a döntés a tiéd)
++    const flagged = state.status === POSTED && !item.sold && CHECKED[state.check] ? CHECKED[state.check] : "";
++    const label = flagged ? flagged : state.status === POSTED ? "Fent van" : state.status === FAILED ? "Nem sikerült"
+       : delisted ? "Levéve" : chosen ? "Még nincs fent" : "";
+     const when = state.at && state.status ? " (" + new Date(state.at * 1000).toLocaleDateString("hu-HU") + ")" : "";
+     const note = state.note && state.status !== "nincs fent" ? state.note : "";
++    const drift = (item.drift || []).find((d) => d.platform === p.key && d.price !== undefined);
++    const others = Object.keys(item.platforms).some((k) => k !== p.key && siteState(item, k) === POSTED);
+     return `<div class="platform">
+       <label class="check pname"><input type="checkbox" data-target="${esc(p.key)}"${chosen ? " checked" : ""}> ${esc(p.name)}</label>
+-      <span class="pstatus${state.status === POSTED ? " on" : state.status === FAILED ? " bad" : ""}">${esc(label + (label ? when : ""))}</span>
++      <span class="pstatus${flagged ? " bad" : state.status === POSTED ? " on" : state.status === FAILED ? " bad" : ""}">${esc(label + (label ? when : ""))}</span>
++      ${flagged ? `<button type="button" class="small" data-action="soldhere" data-platform="${esc(p.key)}" title="Megjelöli eladottnak; a többi oldalról a jóváhagyásod után leveszi">${others ? "Eladva itt, vedd le a többiről" : "Eladva itt"}</button>` : ""}
+       ${state.status === POSTED && safeUrl(state.url) ? `<a class="button small" href="${esc(state.url)}" target="_blank" rel="noopener noreferrer">Megnyitás</a>` : ""}
+       ${chosen && !item.sold && state.status !== POSTED && browserOn ? `<button type="button" class="small" data-action="post" data-platform="${esc(p.key)}">${state.status === FAILED ? "Újra" : "Feltöltés"}</button>` : ""}
+       ${state.status === POSTED && browserOn ? `<button type="button" class="small" data-action="delist" data-platform="${esc(p.key)}" title="Jarvis leveszi a hirdetést erről az oldalról">Levétel</button>` : ""}
+       ${chosen ? `<button type="button" class="small quiet" data-action="toggle" data-platform="${esc(p.key)}" title="Csak a nyilvántartást írja át">${state.status === POSTED ? "Már levettem" : "Fent van"}</button>` : ""}
+       ${state.dossier ? `<button type="button" class="small quiet" data-action="dossier" data-platform="${esc(p.key)}" title="Képernyőkép, oldalnézet és a lépések abból a pillanatból, amikor elakadt">Hibacsomag</button>` : ""}
+       ${note ? `<span class="pnote">${esc(note)}</span>` : ""}
++      ${flagged && state.check_note ? `<span class="pnote">${esc(state.check_note)}</span>` : ""}
++      ${drift ? `<span class="pnote">Ár eltér: a hirdetésben még ${esc(price(drift.price))}, itt ${esc(price(item.price) || "nincs ár")}. Jarvis a fent lévő hirdetést nem írja át; ott kézzel módosítsd.</span>` : ""}
+     </div>`;
+   }
+ 
+@@ -520,14 +532,16 @@
+     remember(await J.postJson("/api/work/mark", { id: item.id, platform: key, status }), "Nem sikerült.");
+   }
+ 
+-  // Eladva: hol kelt el, és vegye-e le Jarvis a többi oldalról (ahol nem ott kelt el).
+-  function askSold(item, posted) {
++  // Eladva: hol kelt el, és vegye-e le Jarvis a többi oldalról (ahol nem ott kelt el). `where`: előre
++  // kiválasztott oldal (pl. ahol a háttérellenőrzés szerint elkelt); a döntés itt is a tiéd.
++  function askSold(item, posted, where = "") {
+     return new Promise((resolve) => {
+       const dialog = $("sold-dialog");
++      const chosen = posted.includes(where) ? where : "";
+       $("sold-text").textContent = `${item.name}: hol kelt el?`;
+       $("sold-where").innerHTML = [...posted.map((k) => [k, siteName(k)]), ["", "Máshol vagy személyesen"]]
+-        .map(([key, name], i) => `<label class="check"><input type="radio" name="sold-where" value="${esc(key)}"` +
+-          `${i === posted.length ? " checked" : ""}> ${esc(name)}</label>`).join("");
++        .map(([key, name]) => `<label class="check"><input type="radio" name="sold-where" value="${esc(key)}"` +
++          `${key === chosen ? " checked" : ""}> ${esc(name)}</label>`).join("");
+       $("sold-delist").checked = true;
+       const finish = (value) => {
+         $("sold-yes").removeEventListener("click", onYes);
+@@ -550,7 +564,7 @@
+     });
+   }
+ 
+-  async function sold(item) {
++  async function sold(item, where = "") {
+     if (item.sold) {   // mégsem kelt el
+       remember(await J.postJson("/api/work/mark", { id: item.id, sold: false }), "Nem sikerült.");
+       return;
+@@ -560,7 +574,7 @@
+       remember(await J.postJson("/api/work/mark", { id: item.id, sold: true }), "Nem sikerült.");
+       return;
+     }
+-    const answer = await askSold(item, posted);
++    const answer = await askSold(item, posted, where);
+     if (!answer) return;
+     const result = await J.postJson("/api/work/mark", { id: item.id, sold: true });
+     if (!remember(result, "Nem sikerült.")) return;
+@@ -727,6 +741,7 @@
+       }
+     }
+     else if (name === "sold") sold(item);
++    else if (name === "soldhere") sold(item, button.dataset.platform);
+     else if (name === "delete") remove(item);
+   });
+ 
+diff --git a/jarvis_core/work.py b/jarvis_core/work.py
+index 7df2528..43f0de7 100644
+--- a/jarvis_core/work.py
++++ b/jarvis_core/work.py
+@@ -26,9 +26,10 @@ from .config import Config, data_path, resolve_path
+ from .dossier import Dossiers
+ from .llm import Cancelled
+ from .replay import FlowRecorder, FlowStore, Replayer, ReplayOutcome, flow_key, item_values
+-from .selling import (CONDITIONS, NEEDS, NOT_POSTED, PARCEL_SIZES, PLATFORMS, POSTED, FAILED, Item,
+-                      ItemError, ItemStore, ListingExtractor, Platform, PriceResearcher, format_price,
+-                      missing_needs, parse_price, price_verdict, question_for)
++from .listings import CHECK_WORDS, GONE, SOLD, ListingChecker
++from .selling import (CONDITIONS, NEEDS, NOT_POSTED, ON_SITE, PARCEL_SIZES, PLATFORMS, POSTED, FAILED,
++                      RESEARCH_MAX_AGE, Item, ItemError, ItemStore, ListingExtractor, Platform, PriceResearcher,
++                      format_price, missing_needs, parse_price, price_verdict, question_for, research_fresh)
+ from .textutil import fold
+ from .tools import Toolbox, ToolError, params
+ from .vinted import ChoiceMemory, FillOutcome, VintedDelister, VintedFiller
+@@ -71,19 +72,29 @@ def load_work_prompt(cfg: Config) -> str:
+     return template.replace("{name}", cfg.assistant.name).strip()
+ 
+ 
+-def research_summary(research: dict[str, Any]) -> str:
++def research_summary(research: dict[str, Any], now: float | None = None) -> str:
+     if not research:
+         return "Árkutatás: még nem volt."
++    now = time.time() if now is None else now
++    age = now - float(research.get("at") or now)
++    head = f"Árkutatás („{research.get('query', '')}”)"
++    if age >= RESEARCH_MAX_AGE:
++        head += f", {int(age // 86400)} napos, elavult (árazás előtt újra megnézem)"
+     similar = research.get("similar") or []
+     if not similar:
+         errors = "; ".join(research.get("errors") or [])
+-        text = f"Árkutatás („{research.get('query', '')}”): nem találtam elég hasonló hirdetést."
++        text = f"{head}: nem találtam elég hasonló hirdetést."
+         return text + (f" ({errors})" if errors else "")
+     sites = sorted({entry["site"] for entry in similar})
+-    text = (f"Árkutatás („{research.get('query', '')}”): {len(similar)} hasonló hirdetés "
+-            f"({', '.join(sites)}), {format_price(research.get('min'))} és {format_price(research.get('max'))} "
+-            f"között, középérték {format_price(research.get('median'))}. "
++    if research.get("p25") is not None and research.get("p75") is not None:
++        band = f"többnyire {format_price(research['p25'])} és {format_price(research['p75'])} között"
++    else:
++        band = f"{format_price(research.get('min'))} és {format_price(research.get('max'))} között"
++    text = (f"{head}: {len(similar)} hasonló hirdetés ({', '.join(sites)}), {band}, "
++            f"középérték {format_price(research.get('median'))}. "
+             f"Javasolt ár: {format_price(research.get('suggested'))}.")
++    if research.get("confidence") == "bizonytalan":
++        text += " Kevés vagy nagyon eltérő ár alapján, ezért csak tájékoztató."
+     if research.get("reason"):
+         text += " " + str(research["reason"])
+     return text
+@@ -146,6 +157,9 @@ class WorkDesk:
+         sites = [catalog[key] for key in cfg.work.research_sites if key in catalog]
+         self.researcher = (PriceResearcher(llm, self.store, lambda: toolbox.browser, sites)
+                            if self.browser_ready and sites else None)
++        # A fent lévő hirdetések háttérellenőrzése (elkelt-e, eltűnt-e): modell nélkül, csak olvasva.
++        self.checker = (ListingChecker(self.store, self.platforms, lambda: toolbox.browser)
++                        if self.browser_ready else None)
+         self.current: tuple[str, str] | None = None   # (tárgy, oldal), amit épp feltölt
+         self.approved = False    # feltöltés közben jóváhagytál-e egy kattintást (pl. a közzétételt)
+         # (tárgy, oldal), amiről a modell épp megnézi, fent van-e: ilyenkor újra feltölteni nem szabad.
+@@ -243,7 +257,8 @@ class WorkDesk:
+             question = question_for(item, missing)
+             self.store.set_pending(item_id, {"kind": "info", "question": question})
+             return Step("ask", question)
+-        if item.research_wanted and not item.research.get("at") and self.researcher is not None:
++        # Az egy hétnél régebbi árkutatást az árazás előtt frissíti (azóta változhattak az árak).
++        if item.research_wanted and not research_fresh(item) and self.researcher is not None:
+             try:
+                 item = self.researcher.research(item_id, lambda detail: progress("árkutatás – " + detail),
+                                                 only=item.targets)
+@@ -687,11 +702,13 @@ class WorkDesk:
+     # --- régóta fent lévő hirdetések (háttérmunka) ----------------------------------------------------------
+ 
+     def stale_items(self, days: int, now: float | None = None) -> list[Item]:
+-        """Ami legalább `days` napja fent van, nem kelt el, és egy hete nem szóltunk róla."""
++        """Ami legalább `days` napja fent van, nem kelt el, és egy hete nem szóltunk róla. Amiről a
++        háttérellenőrzés már szólt, hogy valahol elkeltnek vagy eltűntnek látszik, arról itt nem szól újra."""
+         now = time.time() if now is None else now
+         out = []
+         for item in self.store.all():
+-            if item.sold:
++            if item.sold or any(e.get("status") == POSTED and e.get("check") in (SOLD, GONE)
++                                for e in item.platforms.values()):
+                 continue
+             posted = [float(e.get("at") or now) for e in item.platforms.values() if e.get("status") == POSTED]
+             if not posted or now - min(posted) < days * 86400:
+@@ -811,9 +828,15 @@ class WorkDesk:
+     def _line(self, item: Item) -> str:
+         parts = [item.id, item.name, format_price(item.price), item.status]
+         states = []
++        drift = {d["platform"]: d for d in item.drift()}
+         for key in item.targets:
+             entry = item.platforms.get(key, {})
+-            states.append(f"{self._site_name(key)}: {entry.get('status') or 'még nincs fent'}")
++            state = f"{self._site_name(key)}: {entry.get('status') or 'még nincs fent'}"
++            if "price" in drift.get(key, {}):
++                state += f" (ott még {format_price(drift[key]['price'])})"
++            if entry.get("status") == POSTED and entry.get("check") in CHECK_WORDS:
++                state += f" ({CHECK_WORDS[entry['check']]})"
++            states.append(state)
+         if states:
+             parts.append(", ".join(states))
+         if item.busy:
+@@ -842,10 +865,29 @@ class WorkDesk:
+         if not values:
+             raise ToolError("Nem adtál meg módosítandó adatot.")
+         try:
+-            self.store.update(found.id, user=True, **values)
++            updated = self.store.update(found.id, user=True, **values)
+         except ItemError as exc:
+             raise ToolError(str(exc)) from None
+-        return f"Módosítva ({found.name}): " + ", ".join(FIELD_NAMES.get(k, k) for k in values)
++        return (f"Módosítva ({found.name}): " + ", ".join(FIELD_NAMES.get(k, k) for k in values)
++                + self.drift_note(updated, set(values)))
++
++    def drift_note(self, item: Item, changed: set[str]) -> str:
++        """Ha a fent lévő hirdetésekben még a régi ár vagy cím van, őszintén megmondja, hogy csak itt írta át:
++        a hirdetéseket magától nem szerkeszti."""
++        parts = []
++        for entry in item.drift():
++            old = []
++            if "price" in changed and "price" in entry:
++                old.append(format_price(entry["price"]))
++            if "title" in changed and "title" in entry:
++                old.append(f"a régi cím („{entry['title']}”)")
++            if old:
++                where = ON_SITE.get(entry["platform"]) or f"a(z) {self._site_name(entry['platform'])} oldalon"
++                parts.append(f"{where} még " + " és ".join(old))
++        if not parts:
++            return ""
++        return (". Csak itt írtam át; " + ", ".join(parts) + ". A fent lévő hirdetést magamtól nem szerkesztem: "
++                "ott kézzel kell átírni (vagy levenni, és újra feltölteni).")
+ 
+     def tool_research(self, item: str) -> str:
+         found = self._item(item)
+diff --git a/tests/test_background.py b/tests/test_background.py
+index d45599b..8eac9f3 100644
+--- a/tests/test_background.py
++++ b/tests/test_background.py
+@@ -8,13 +8,14 @@ from __future__ import annotations
+ import datetime as dt
+ import functools
+ import importlib.machinery
++import random
+ import sys
+ import tempfile
+ import threading
+ import time
+ import types
+ import unittest
+-from http.server import ThreadingHTTPServer
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from pathlib import Path
+ from unittest import mock
+ 
+@@ -24,14 +25,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
+ 
+ from test_offline import FakeOllama, make_cfg, reply  # noqa: E402
+ from test_streaming import RecordingUI  # noqa: E402
++from test_web_browser import HAS_CHROMIUM  # noqa: E402
+ from test_work import _QuietHandler  # noqa: E402
+ 
+ from jarvis_core import web  # noqa: E402
+ from jarvis_core.app import PAUSED_REPLY, JarvisApp, is_pause_request  # noqa: E402
++from jarvis_core.browser import BrowserController  # noqa: E402
+ from jarvis_core.config import SchedulerCfg, WebCfg  # noqa: E402
++from jarvis_core.listings import BLOCKED, GONE, LIVE, SOLD, ListingChecker, classify  # noqa: E402
+ from jarvis_core.notices import NoticeBoard  # noqa: E402
+ from jarvis_core.scheduler import Hooks, Job, Preempted, Scheduler, within_hours  # noqa: E402
+-from jarvis_core.selling import POSTED  # noqa: E402
++from jarvis_core.selling import POSTED, ItemStore, Platform  # noqa: E402
+ from jarvis_core.watches import WatchError, WatchList, normalize_url  # noqa: E402
+ 
+ 
+@@ -279,6 +283,216 @@ class NoticeTests(unittest.TestCase):
+             self.assertEqual([n["title"] for n in NoticeBoard(Path(tmp) / "e.json").list(unread_only=True)],
+                              ["Régi"])
+ 
++    def test_sold_notice_keeps_its_item_and_actions(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            board = NoticeBoard(Path(tmp) / "e.json")
++            actions = [{"action": "sold", "where": "vinted", "delist": True, "label": "Eladva itt, vedd le a többiről"}]
++            board.add("sold", "Elkelt? Farmer", "A Vinteden eladottnak látszik.", item="a1b2c3d4", platform="vinted",
++                      actions=actions)
++            notice = NoticeBoard(Path(tmp) / "e.json").list()[0]
++            self.assertEqual((notice["kind"], notice["item"], notice["platform"]), ("sold", "a1b2c3d4", "vinted"))
++            self.assertEqual(notice["actions"], actions)
++
++
++# --- fent lévő hirdetések háttérellenőrzése (elkelt-e, eltűnt-e) ---------------------------------------------
++
++def listing_page(title: str, body: str) -> str:
++    return (f"<!doctype html><html lang='hu'><head><meta charset='utf-8'><title>{title}</title></head>"
++            f"<body><header><a href='/'>Főoldal</a></header><main>{body}</main></body></html>")
++
++
++LISTINGS = {
++    "/items/1001-zara-blezer": (200, listing_page(
++        "Zara blézer | Vinted",
++        "<h1>Zara blézer</h1><p>4 500 Ft</p><button>Megjelölés eladottként</button><button>Mark as sold</button>"
++        "<a href='/items/7-masik'><span>Eladva</span></a>"
++        "<p>Leírás: a párja már eladva, ez az utolsó darab, egyszer hordott.</p>")),
++    "/items/2001-zara-blezer": (200, listing_page("Zara blézer - Jófogás", "<h1>Zara blézer</h1><p>4 500 Ft</p>")),
++    "/items/1002-mango-kabat": (200, listing_page(
++        "Mango kabát | Vinted", "<h1>Mango kabát</h1><div class='badge'>Eladva</div><p>9 000 Ft</p>")),
++    "/items/2002-mango-kabat": (200, listing_page("Mango kabát - Jófogás", "<h1>Mango kabát</h1><p>9 000 Ft</p>")),
++    "/items/1003-hm-polo": (404, listing_page("Az oldal nem található", "<h1>Hoppá! Ez az oldal nem létezik.</h1>")),
++    "/items/1004-levis-farmer": (302, "/catalog"),
++    "/catalog": (200, listing_page("Katalógus", "<h1>Katalógus</h1><p>Sok minden.</p>")),
++    "/items/1005-nike-cipo": (200, listing_page("Nike cipő", "<iframe src='/captcha/frame'></iframe>")),
++    "/items/1006-adidas-polo": (302, "/member/login?next=/items/1006"),
++    "/member/login": (200, listing_page("Belépés", "<h1>Lépj be</h1>")),
++}
++
++
++class ListingSite:
++    """Helyi „hirdetési oldal”: fent lévő, eladott, törölt (404), máshova irányító és captchás hirdetés."""
++
++    def __init__(self):
++        self.hits: list[str] = []
++        site = self
++
++        class Handler(BaseHTTPRequestHandler):
++            def log_message(self, *args):
++                pass
++
++            def do_GET(self):
++                path = self.path.split("?")[0]
++                site.hits.append(path)
++                status, body = LISTINGS.get(path, (404, listing_page("Nincs", "<h1>Nem található</h1>")))
++                if status == 302:
++                    self.send_response(302)
++                    self.send_header("Location", body)
++                    self.end_headers()
++                    return
++                data = body.encode("utf-8")
++                self.send_response(status)
++                self.send_header("Content-Type", "text/html; charset=utf-8")
++                self.send_header("Content-Length", str(len(data)))
++                self.end_headers()
++                self.wfile.write(data)
++
++        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
++        threading.Thread(target=self.server.serve_forever, daemon=True).start()
++
++    def url(self, path: str) -> str:
++        return f"http://127.0.0.1:{self.server.server_address[1]}{path}"
++
++    def visits(self) -> list[str]:
++        return [h for h in self.hits if h.startswith("/items/")]
++
++    def close(self) -> None:
++        self.server.shutdown()
++        self.server.server_close()
++
++
++class ListingClassifyTests(unittest.TestCase):
++    URL = "https://www.vinted.hu/items/4455667-zara-blezer"
++
++    def test_states_from_the_page(self):
++        live = {"url": self.URL + "?referrer=catalog", "title": "Zara blézer", "text": "Zara blézer 4 500 Ft",
++                "short": ["Zara blézer", "4 500 Ft"], "labels": ["Megjelölés eladottként", "Profilom"]}
++        self.assertEqual(classify(live, self.URL, "Zara blézer", "vinted"), (LIVE, ""))
++        self.assertEqual(classify({**live, "short": ["Sold"]}, self.URL, "Zara blézer", "vinted")[0], SOLD)
++        self.assertEqual(classify({**live, "short": ["Foglalt"]}, self.URL)[0], SOLD)
++        self.assertEqual(classify({**live, "short": ["Sold by Kata"]}, self.URL)[0], LIVE)
++        moved = {**live, "url": "https://www.vinted.hu/catalog?search_text=zara"}
++        self.assertEqual(classify(moved, self.URL), (GONE, "a hirdetés címe máshova irányít"))
++        missing = {**live, "title": "Az oldal nem található", "text": "Hoppá"}
++        self.assertEqual(classify(missing, self.URL, "Zara blézer")[0], GONE)
++        own = {**live, "title": "Zara blézer, nem található hiba", "text": ""}
++        self.assertEqual(classify(own, self.URL, "Zara blézer")[0], LIVE, "a saját címe van az oldalon: fent van")
++        self.assertEqual(classify({**live, "captcha": True}, self.URL)[0], BLOCKED)
++        self.assertEqual(classify({**live, "labels": ["Sign up | Log in", "Log in"]}, self.URL, "", "vinted"),
++                         (BLOCKED, "ki vagy jelentkezve"))
++        self.assertEqual(classify({**live, "url": "https://www.jofogas.hu/belepes?next=x"},
++                                  "https://www.jofogas.hu/zara_123456.htm")[0], BLOCKED)
++
++
++@unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
++class ListingCheckTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.site = ListingSite()
++        cls.tmp = tempfile.TemporaryDirectory()
++        cfg = make_cfg(Path(cls.tmp.name))
++        cfg.browser.headless = True
++        cls.browser = BrowserController(cfg.browser, allow_local=True)
++        cls.actions: list[dict] = []
++        cls.browser.on_action = cls.actions.append
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.browser.close()
++        cls.site.close()
++        cls.tmp.cleanup()
++
++    def setUp(self):
++        self.dir = tempfile.TemporaryDirectory()
++        self.clock = Clock()
++        names = {"vinted": "Vinted", "jofogas": "Jófogás", "vatera": "Vatera", "hardverapro": "Hardverapró"}
++        self.platforms = {key: Platform(key, name, "", "", "", ("127.0.0.1",), "") for key, name in names.items()}
++        self.store = ItemStore(Path(self.dir.name), platform_keys=list(self.platforms))
++        self.checker = ListingChecker(self.store, self.platforms, lambda: self.browser, clock=self.clock,
++                                      rng=random.Random(7))
++        self.notices: list[tuple] = []
++        self.site.hits.clear()
++        self.actions.clear()
++
++    def tearDown(self):
++        self.dir.cleanup()
++
++    def notify(self, kind, title, text, **extra):
++        self.notices.append((kind, title, text, extra))
++
++    def posted(self, title: str, where: dict[str, str]) -> str:
++        item = self.store.create(targets=list(where), title=title, price=4500)
++        for key, path in where.items():
++            self.store.mark(item.id, key, POSTED, url=self.site.url(path))
++            self.store.get(item.id).platforms[key]["at"] = self.clock.now - 2 * 86400
++        return item.id
++
++    def test_live_sold_and_gone_once_a_day_without_clicking(self):
++        live = self.posted("Zara blézer", {"vinted": "/items/1001-zara-blezer", "jofogas": "/items/2001-zara-blezer"})
++        sold = self.posted("Mango kabát", {"vinted": "/items/1002-mango-kabat", "jofogas": "/items/2002-mango-kabat"})
++        gone = self.posted("H&M póló", {"jofogas": "/items/1003-hm-polo"})
++        moved = self.posted("Levi's farmer", {"hardverapro": "/items/1004-levis-farmer"})
++        fresh = self.store.create(targets=["vatera"], title="Friss")
++        self.store.mark(fresh.id, "vatera", POSTED, url=self.site.url("/items/1001-zara-blezer"))
++        self.store.get(fresh.id).platforms["vatera"]["at"] = self.clock.now - 3600
++        self.assertEqual(len(self.checker.due()), 6, "a ma feltöltöttet még nem nézi meg")
++        result = self.checker.run(10, notify=self.notify)
++        self.assertEqual(result, "6 hirdetést néztem meg: 3 fent van, 1 elkeltnek látszik, 2 már nincs fent.")
++        states = {(i.id, k): e.get("check") for i in self.store.all() for k, e in i.platforms.items()}
++        self.assertEqual(states[(live, "vinted")], LIVE, "a gomb és a hosszú leírás „eladva” szava nem számít")
++        self.assertEqual((states[(sold, "vinted")], states[(sold, "jofogas")]), (SOLD, LIVE))
++        self.assertEqual((states[(gone, "jofogas")], states[(moved, "hardverapro")]), (GONE, GONE))
++        self.assertIsNone(states[(fresh.id, "vatera")])
++        kinds = sorted((n[3]["item"], n[3]["platform"], n[3]["state"]) for n in self.notices)
++        self.assertEqual(kinds, sorted([(sold, "vinted", SOLD), (gone, "jofogas", GONE), (moved, "hardverapro", GONE)]))
++        self.assertTrue(all(n[0] == "sold" for n in self.notices))
++        sold_notice = next(n for n in self.notices if n[3]["item"] == sold)
++        self.assertIn("a Vinteden eladottnak látszik", sold_notice[2])
++        self.assertIn("innen is leveszem: Jófogás", sold_notice[2])
++        self.assertEqual(sold_notice[3]["actions"], [{"action": "sold", "where": "vinted", "delist": True,
++                                                      "label": "Eladva itt, vedd le a többiről"}])
++        gone_notice = next(n for n in self.notices if n[3]["item"] == gone)
++        self.assertEqual(gone_notice[3]["actions"][0]["label"], "Eladva itt")
++        self.assertEqual([a for a in self.actions if a.get("do") != "goto"], [], "semmire nem kattintott")
++        self.assertEqual(len(self.site.visits()), 6)
++
++        self.assertEqual(self.checker.run(10, notify=self.notify), "Nincs ma megnézendő hirdetés.")
++        self.assertEqual(len(self.site.visits()), 6, "naponta legfeljebb egyszer")
++        self.clock.now += 86400 + 1
++        self.checker.run(10, notify=self.notify)
++        self.assertEqual(len(self.notices), 3, "ugyanarról nem szól újra")
++        self.assertEqual(len(self.site.visits()), 13, "egy nap múlva újra (a friss is)")
++
++    def test_a_captcha_or_a_login_stops_the_whole_run(self):
++        for path in ("/items/1005-nike-cipo", "/items/1006-adidas-polo"):
++            self.notices.clear()
++            self.site.hits.clear()
++            first = self.posted("Nike cipő", {"vinted": path})
++            second = self.posted("Puma cipő", {"jofogas": path})
++            result = self.checker.run(5, notify=self.notify)
++            self.assertTrue(result.startswith("Abbahagytam"), result)
++            self.assertEqual(len(self.site.visits()), 1, "az első akadálynál abbahagyja")
++            self.assertEqual([n[0] for n in self.notices], ["error"])
++            self.assertIn("holnap újra megpróbálom", self.notices[0][2])
++            for item_id in (first, second):
++                self.assertNotIn("checked_at", next(iter(self.store.get(item_id).platforms.values())))
++            for item_id in (first, second):
++                self.store.mark(item_id, sold=True)
++
++    def test_interrupt_between_listings(self):
++        self.posted("Zara blézer", {"vinted": "/items/1001-zara-blezer", "jofogas": "/items/2001-zara-blezer"})
++        calls = []
++
++        def check():
++            calls.append(1)
++            if len(calls) == 2:
++                raise Preempted()
++
++        with self.assertRaises(Preempted):
++            self.checker.run(5, check=check, notify=self.notify)
++        self.assertEqual(len(self.site.visits()), 1)
++        self.assertEqual(len(self.checker.due()), 1, "a megnézett kimarad, a másik esedékes marad")
++
+ 
+ # --- Szünet és Folytatás ----------------------------------------------------------------------------
+ 
+@@ -385,6 +599,22 @@ class PauseTests(unittest.TestCase):
+         self.assertIn("Farmer (5 000 Ft)", notice["text"])
+         self.assertEqual(work.stale_items(14), [], "egy hétig nem szól újra")
+ 
++    def test_listing_check_job_needs_the_browser_and_a_posted_listing(self):
++        job = self.app.scheduler.jobs["listings"]
++        self.assertTrue(job.needs_browser and not job.needs_models)
++        self.assertFalse(job.available(), "nincs fent lévő hirdetés")
++        store = self.app.work.store
++        item = store.create(targets=["vinted"], title="Farmer", price=5000)
++        store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/1234567-farmer")
++        store.get(item.id).platforms["vinted"]["at"] = time.time() - 20 * 86400
++        self.assertTrue(job.available())
++        self.assertEqual(job.every_minutes(), 24 * 60.0)
++        self.assertEqual([i.id for i in self.app.work.stale_items(14)], [item.id])
++        store.set_check(item.id, "vinted", SOLD)
++        self.assertEqual(self.app.work.stale_items(14), [], "erről már szólt a háttérellenőrzés")
++        self.cfg.scheduler.listing_checks = 0
++        self.assertEqual(job.every_minutes(), 0, "kikapcsolható")
++
+ 
+ # --- okosabb keresés: oldalra és frissességre szűrve, több oldal egy lépésben ------------------------------
+ 
+diff --git a/tests/test_gui_work.py b/tests/test_gui_work.py
+index a2e5054..3696c47 100644
+--- a/tests/test_gui_work.py
++++ b/tests/test_gui_work.py
+@@ -331,6 +331,31 @@ class WorkBrowserTests(unittest.TestCase):
+         self.wait_for(lambda: not self.h.store.all())
+         page.wait_for_selector("#w-compose", state="visible")
+ 
++    def test_sold_elsewhere_and_price_drift_on_the_listing_page(self):
++        item = self.h.ready_item(("vinted", "hardverapro"), price=5000)
++        store = self.h.store
++        store.mark(item.id, "vinted", "feltöltve", url="https://www.vinted.hu/items/1234567-zara")
++        store.mark(item.id, "hardverapro", "feltöltve", url="https://hardverapro.hu/apro/zara/friss.html")
++        store.update(item.id, user=True, price=4500)
++        store.set_check(item.id, "vinted", "sold", detail="„Eladva” jelzés az oldalán")
++        page = self.page
++        page.wait_for_selector(f'.card[data-id="{item.id}"] .site.bad:has-text("Vinted ?")')
++        self.open_item(item.id)
++        row = '.platform:has-text("Vinted")'
++        self.assertEqual(page.inner_text(f"{row} .pstatus").split(" (")[0], "Elkeltnek látszik")
++        self.assertIn("Ár eltér: a hirdetésben még 5 000 Ft, itt 4 500 Ft.", page.inner_text(row))
++        self.assertIn("„Eladva” jelzés az oldalán", page.inner_text(row))
++        self.assertEqual(page.locator('[data-action="soldhere"]').count(), 1, "csak ott, ahol elkeltnek látszik")
++        page.click(f'{row} [data-action="soldhere"]')
++        page.wait_for_selector("#sold-dialog[open]")
++        self.assertTrue(page.is_checked('#sold-where input[value="vinted"]'), "ahol a jelzés volt, az van kiválasztva")
++        page.uncheck("#sold-delist")
++        page.click("#sold-yes")
++        page.wait_for_selector('.toast:has-text("Ne felejtsd el levenni innen: Hardverapró")')
++        found = store.get(item.id)
++        self.assertTrue(found.sold)
++        self.assertEqual(found.platforms["vinted"]["note"], "Itt kelt el.")
++
+     def test_dossier_button_on_the_listing_page(self):
+         item = self.h.ready_item()
+         work = self.h.app.work
+diff --git a/tests/test_standby.py b/tests/test_standby.py
+index 63108e2..5cd05d0 100644
+--- a/tests/test_standby.py
++++ b/tests/test_standby.py
+@@ -199,13 +199,18 @@ class SchedulerStandbyTests(unittest.TestCase):
+             scheduler = Scheduler(SchedulerCfg(quiet_minutes=0), Path(tmp) / "hatter.json", hooks)
+             light = Job("watches", "Figyelők", lambda: 60.0, lambda ctx: "ok", needs_models=False)
+             heavy = Job("digest", "Összefoglaló", lambda: 60.0, lambda ctx: "ok")
++            browsing = Job("listings", "Hirdetések", lambda: 60.0, lambda ctx: "ok", needs_models=False,
++                           needs_browser=True)
+             scheduler.register(light)
+             scheduler.register(heavy)
++            scheduler.register(browsing)
+             now = time.time()
+             self.assertEqual(scheduler.blocked_reason(), "")
+             self.assertFalse(scheduler.should_yield())
+             self.assertTrue(scheduler.due(light, now))
+             self.assertFalse(scheduler.due(heavy, now), "ehhez kellene a nyelvi modell")
++            self.assertFalse(scheduler.due(browsing, now), "készenlétben a böngésző sem fut")
++            self.assertEqual(scheduler.run("listings"), "Szünetelek, ezért most nem dolgozom.")
+             self.assertEqual(scheduler.run("digest", forced=True), "Szünetelek, ezért most nem dolgozom.")
+             self.assertEqual(scheduler.run("watches"), "ok")
+             flags["standby"] = False         # a Szünet gombbal
+diff --git a/tests/test_work.py b/tests/test_work.py
+index c99db59..0300355 100644
+--- a/tests/test_work.py
++++ b/tests/test_work.py
+@@ -18,6 +18,7 @@ import statistics
+ import sys
+ import tempfile
+ import threading
++import time
+ import unittest
+ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+ from pathlib import Path
+@@ -164,6 +165,26 @@ class ItemStoreTests(unittest.TestCase):
+         self.assertEqual(selling.format_price(12990), "12 990 Ft")
+         self.assertEqual(clean_for_speech("Javasolt ár: 4 500 Ft."), "Javasolt ár: 4500 forint.")
+ 
++    def test_posted_price_and_drift(self):
++        item = self.store.create(targets=["vinted", "jofogas"], title="Levi's farmer", price=9000)
++        url = "https://www.vinted.hu/items/1234567-levis-farmer"
++        item = self.store.mark(item.id, "vinted", POSTED, url=url)
++        self.assertEqual((item.platforms["vinted"]["posted_price"], item.platforms["vinted"]["posted_title"]),
++                         (9000, "Levi's farmer"))
++        self.assertEqual(item.public()["drift"], [])
++        item = self.store.update(item.id, user=True, price=8500, title="Levi's 501 farmer")
++        self.assertEqual(item.public()["drift"], [{"platform": "vinted", "price": 9000, "title": "Levi's farmer"}])
++        self.store.set_check(item.id, "vinted", "live")
++        item = self.store.mark(item.id, "vinted", POSTED, note="Itt kelt el.")
++        entry = item.platforms["vinted"]
++        self.assertEqual((entry["posted_price"], entry["url"], entry["check"]), (9000, url, "live"),
++                         "ugyanaz a hirdetés: a feltöltéskori ár és az ellenőrzés marad")
++        item = self.store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/7654321-uj")
++        self.assertEqual(item.platforms["vinted"]["posted_price"], 8500, "új hirdetés: a mostani ár")
++        self.assertNotIn("check", item.platforms["vinted"])
++        item = self.store.mark(item.id, "vinted", "nincs fent")
++        self.assertEqual(item.drift(), [], "ami nincs fent, ott nincs mit átírni")
++
+     def test_photos(self):
+         item = self.store.create()
+         self.store.add_photo(item.id, jpeg(300, 200, orientation=6))     # a telefon elforgatva menti
+@@ -398,6 +419,100 @@ class PriceResearchTests(unittest.TestCase):
+         self.assertEqual(len(item.research["errors"]), 2)
+         self.assertIn("nem találtam", research_summary(item.research))
+ 
++    def blazer(self, **values) -> Item:
++        item = self.store.create(price=5000)
++        values = {"title": "Zara fekete blézer, M", "product": "blézer", "brand": "Zara", "size": "M",
++                  "search_query": "Zara blézer", **values}
++        return self.store.update(item.id, **values)
++
++    def test_prefilter_drops_noise_before_the_model(self):
++        item = self.blazer()
++        self.store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/4455667-zara-blezer?ref=x")
++        item = self.store.get(item.id)
++        rows = [{"text": "Zara blézer M, fekete", "price": 4000, "url": "https://www.vinted.hu/items/1"},
++                {"text": "Keresek Zara blézert M-es méretben", "price": 3000, "url": "https://jofogas.hu/k_1.htm"},
++                {"text": "Zara blézer csere is érdekel", "price": 4200, "url": "https://jofogas.hu/k_2.htm"},
++                {"text": "Eladó vagy csere: Zara blézer S", "price": 4100, "url": "https://jofogas.hu/k_3.htm"},
++                {"text": "Zara blézer csomag (3 db)", "price": 9000, "url": "https://www.vinted.hu/items/2"},
++                {"text": "Zara blézer x2", "price": 7000, "url": "https://www.vinted.hu/items/3"},
++                {"text": "Zara blézer, hibás, alkatrésznek", "price": 800, "url": "https://www.vinted.hu/items/4"},
++                {"text": "Zara blézer, nem hibás, nem törött", "price": 4300, "url": "https://www.vinted.hu/items/5"},
++                {"text": "Mango kabát", "price": 6000, "url": "https://www.vinted.hu/items/6"},
++                {"text": "A saját hirdetésem: Zara blézer", "price": 5000,
++                 "url": "https://vinted.hu/items/4455667-zara-fekete-blezer"},
++                {"text": "Zara blézer M, fekete", "price": 4050, "url": "https://jofogas.hu/ugyanaz_7.htm"},
++                {"text": "Zara blézert adok, M", "price": 4600, "url": "https://www.vinted.hu/items/8"}]
++        kept, dropped = selling.prefilter(item, rows)
++        self.assertEqual([r["price"] for r in kept], [4000, 4100, 4300, 4600])
++        self.assertEqual(dropped, {"kereső": 2, "csomag": 2, "alkatrész": 1, "más termék": 1, "saját": 1,
++                                   "ismétlődő": 1})
++        broken = self.blazer(condition="Hibás")
++        kept, _ = selling.prefilter(broken, rows)
++        self.assertIn(800, [r["price"] for r in kept], "ha a te tárgyad is hibás, a hibás a hasonló")
++        gpu = self.store.update(self.blazer().id, kind="elektronika", title="RTX 3080 videókártya", product="RTX 3080",
++                                brand="", size="", search_query="rtx 3080")
++        kept, _ = selling.prefilter(gpu, [{"text": "RTX 3080, 2 db ventilátor, PCIe x4", "price": 1, "url": ""}])
++        self.assertEqual(len(kept), 1, "elektronikánál a darabszám a leírás része, nem csomag")
++
++    def test_the_judge_gets_at_most_25_best_rows(self):
++        rows = [{"text": f"Zara blézer {'M fekete' if n % 2 else 'kék'} modell{n}", "price": 4000 + n,
++                 "url": f"https://www.vinted.hu/items/{n}"} for n in range(40)]
++        item, _ = self.research({"vinted": rows[:20], "jofogas": rows[20:]},
++                                {"similar": [1, 2, 3], "suggested_price": 4000, "reason": ""})
++        prompt = self.fake.chat_bodies()[-1]["messages"][-1]["content"]
++        lines = [line for line in prompt.splitlines() if re.match(r"\d+\. \[", line)]
++        self.assertEqual(len(lines), 25)
++        self.assertEqual(sum("M fekete" in line for line in lines), 20, "a legjobban egyezők maradnak")
++        self.assertEqual((item.research["count"], item.research["kept"]), (40, 25))
++        self.assertEqual(item.research["dropped"], {"kevésbé illő": 15})
++
++    def test_nothing_similar_means_no_model_call(self):
++        rows = [{"text": "Mango kabát", "price": 6000, "url": "https://www.vinted.hu/items/6"}]
++        item, _ = self.research({"vinted": rows}, None)
++        self.assertEqual(self.fake.chat_bodies(), [])
++        self.assertEqual((item.research["count"], item.research["kept"], item.research["similar"]), (1, 0, []))
++        self.assertIn("nem volt a tárgyadhoz hasonló", item.research["reason"])
++
++    def test_outliers_are_trimmed_and_the_suggestion_stays_in_the_band(self):
++        prices = [4000, 4200, 4500, 4800, 5000, 50000, 100]
++        rows = [{"text": f"Zara blézer modell{n}", "price": p, "url": f"https://www.vinted.hu/items/{n}"}
++                for n, p in enumerate(prices)]
++        item, _ = self.research({"vinted": rows}, {"similar": list(range(1, 8)), "suggested_price": 5500,
++                                                   "reason": "Ennyiért mennek."})
++        r = item.research
++        self.assertEqual([s["price"] for s in r["similar"]], [4000, 4200, 4500, 4800, 5000], "a tízszeres kiesik")
++        self.assertEqual((r["min"], r["p25"], r["median"], r["p75"], r["max"]), (4000, 4200, 4500, 4800, 5000))
++        self.assertEqual((r["n"], r["outliers"], r["confidence"]), (5, 2, "megbízható"))
++        self.assertEqual(r["suggested"], 4800, "a javaslat a szokásos sávban marad")
++        self.assertIn("többnyire 4 200 Ft és 4 800 Ft között", research_summary(r))
++
++    def test_auctions_are_tagged_and_left_out_when_there_are_enough_fixed_prices(self):
++        rows = [{"text": f"Zara blézer modell{n}", "price": 4000 + 100 * n, "url": f"https://www.vatera.hu/{n}"}
++                for n in range(3)]
++        rows.append({"text": "Zara blézer, licit", "price": 500, "url": "https://www.vatera.hu/9", "auction": True})
++        item, _ = self.research({"vinted": rows}, {"similar": [1, 2, 3, 4], "suggested_price": 4100, "reason": ""})
++        prompt = self.fake.chat_bodies()[-1]["messages"][-1]["content"]
++        self.assertIn("500 Ft (licit: a mostani ajánlat, nem végleges ár)", prompt)
++        self.assertEqual([s["price"] for s in item.research["similar"]], [4000, 4100, 4200])
++
++    def test_stats_are_robust(self):
++        stats = selling.price_stats([5000, 5000, 5000, 5000, 5500])
++        self.assertEqual((stats["n"], stats["max"]), (5, 5500), "sok egyforma árnál a kicsit eltérő is marad")
++        wide = selling.price_stats([1000, 3000, 6000, 9000, 12000])
++        self.assertEqual(wide["confidence"], "bizonytalan", "nagyon szóró árak")
++        self.assertEqual(selling.price_stats([4000])["p25"], 4000)
++        self.assertEqual(selling.price_stats([]), {})
++
++    def test_research_gets_old_after_a_week(self):
++        item = self.store.set_research(self.blazer().id, {"at": time.time() - 8 * 86400, "query": "Zara blézer",
++                                                          "similar": []})
++        self.assertFalse(selling.research_fresh(item))
++        self.assertTrue(item.public()["research_stale"])
++        self.assertIn("8 napos, elavult", research_summary(item.research))
++        item = self.store.set_research(item.id, {"at": time.time(), "query": "Zara blézer", "similar": []})
++        self.assertTrue(selling.research_fresh(item))
++        self.assertFalse(item.public()["research_stale"])
++
+ 
+ class PriceVerdictTests(unittest.TestCase):
+     def item(self, price, prices) -> Item:
+@@ -428,6 +543,22 @@ class PriceVerdictTests(unittest.TestCase):
+         self.assertEqual(Item(id="a1b2c3d4", created=0, updated=0).public()["verdict"], "", "kutatás nélkül nincs")
+         self.assertIn("rendben", self.item(5000, [4000, 4500, 5000]).public()["verdict"])
+ 
++    def test_typical_band_condition_and_uncertainty(self):
++        wide = self.item(6500, [2000, 3000, 5000, 7000, 9000, 10000])
++        verdict = price_verdict(wide)
++        self.assertFalse(verdict.pause, "a szokásos sávon (p25–p75) belül nem állít meg")
++        self.assertIn("többnyire", verdict.text)
++        self.assertIn("csak tájékoztató", verdict.text, "nagyon szórnak az árak")
++        new = self.item(5000, [4000, 4500, 5000, 5500, 6000])
++        new.condition = "Új, címkével"
++        self.assertIn("Mivel új, a sáv felső része (kb. 5 500 Ft) is reális.", price_verdict(new).text)
++        worn = self.item(9000, [4000, 4500, 5000, 5500, 6000])
++        worn.condition = "Elfogadható"
++        verdict = price_verdict(worn)
++        self.assertTrue(verdict.pause)
++        self.assertIn("inkább a sáv alsó része (kb. 4 500 Ft)", verdict.text)
++        self.assertTrue(verdict.text.endswith("Maradjon a te árad, vagy legyen 5 000 Ft?"), verdict.text)
++
+     def test_spoken_or_typed_price_answers(self):
+         cases = {"Maradjon": "keep", "maradjon az enyém": "keep", "nem, jó így": "keep", "nem kell": "keep",
+                  "Legyen a javasolt": "suggested", "oké, mehet": "suggested", "vidd lejjebb": "suggested",
+@@ -521,7 +652,8 @@ class WorkDeskTests(unittest.TestCase):
+                 self.calls += 1
+                 self.only = only
+                 similar = [{"site": "Vinted", "text": "Zara blézer", "price": p, "url": ""} for p in (4000, 4500, 5000)]
+-                return self.store.set_research(item_id, {"at": 1, "query": "Zara blézer", "count": 3, "errors": [],
++                return self.store.set_research(item_id, {"at": time.time(), "query": "Zara blézer", "count": 3,
++                                                         "errors": [],
+                                                          "similar": similar, "min": 4000, "max": 5000,
+                                                          "median": 4500, "suggested": 4500})
+ 
+@@ -543,6 +675,12 @@ class WorkDeskTests(unittest.TestCase):
+         self.assertEqual(self.desk.decide_price(item.id, "suggested").price, 4500)
+         self.assertEqual(self.desk.decide_price(item.id, 6000).price, 6000)
+         self.assertIn("price", self.store.get(item.id).edited, "Jarvis később nem írja vissza")
++        old = dict(self.store.get(item.id).research, at=time.time() - 8 * 86400)
++        self.store.set_research(item.id, old)
++        self.fake.chat_script = [extracted(**blazer)]
++        step = self.desk.prepare(item.id, self.steps.append)
++        self.assertEqual(researcher.calls, 2, "a hétnél régebbi árkutatást az árazás előtt frissíti")
++        self.assertEqual(step.kind, "price", "a friss kutatás szerint a 6000 Ft is sok: újra megkérdezi")
+ 
+     def test_failed_price_check_does_not_block_posting(self):
+         class Broken:
+@@ -592,6 +730,22 @@ class WorkDeskTests(unittest.TestCase):
+         self.assertFalse(self.box.has("item_research"))
+         self.assertFalse(self.box.has("item_write"), "a hirdetést már nem a fotókból írja")
+ 
++    def test_price_change_after_posting_is_answered_honestly(self):
++        item = self.item(["vinted", "hardverapro"])
++        self.store.update(item.id, title="Levi's farmer", price=9000)
++        self.store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/1234567-levis")
++        self.store.mark(item.id, "hardverapro", POSTED, url="https://hardverapro.hu/apro/levis/friss.html")
++        answer = self.box.call("item_update", {"item": item.id, "price": 8500})
++        self.assertIn("Módosítva (Levi's farmer): ár. Csak itt írtam át; a Vinteden még 9 000 Ft, "
++                      "a Hardveraprón még 9 000 Ft.", answer)
++        self.assertIn("magamtól nem szerkesztem", answer)
++        self.assertIn("Vinted: feltöltve (ott még 9 000 Ft)", self.box.call("item_list", {}))
++        self.assertEqual(self.box.call("item_update", {"item": item.id, "description": "Alig hordott."}),
++                         "Módosítva (Levi's farmer): leírás", "ha az ár nem változott, nincs mit mondani róla")
++        self.store.set_check(item.id, "vinted", "sold")
++        self.assertIn("Vinted: feltöltve (ott még 9 000 Ft) (a háttérellenőrzés szerint elkelt)",
++                      self.box.call("item_get", {"item": item.id}))
++
+     def test_acknowledgement_is_remembered(self):
+         with self.assertRaises(ItemError):
+             self.desk.acknowledge("ebay")
+@@ -651,6 +805,12 @@ PAGES = {
+ <div class="item"><a href="/items/2-hm-blezer"><span>H&amp;M blézer</span></a><p>S</p><p>2&nbsp;000 Ft</p></div>
+ <div class="item"><a href="/items/3-zara-kabat">Zara kabát</a><span>12 990 Ft</span></div>
+ <div class="item"><a href="/items/4-nincs-ar">Ár nélküli</a></div>
++<div class="item"><a href="/items/5-levis-farmer">Levi's farmer</a><s>9 000 Ft</s> <b>6 500 Ft</b></div>
++<div class="item"><a href="/items/6-mango-szoknya">Mango szoknya</a>
++  <span style="text-decoration: line-through">3 000 Ft</span><span>1 800 Ft</span></div>
++<div class="item"><a href="/items/7-regi-erme">Régi érme</a><span>Licit: 1 200 Ft</span>
++  <span>Villámár: 5 000 Ft</span></div>
++<div class="item"><a href="/items/8-regi-belyeg">Régi bélyeg</a><span>Jelenlegi ár: 300 Ft, 4 licit</span></div>
+ </div></main><footer><a href="/kapcsolat">Szállítás 0 Ft</a></footer></body></html>""",
+     "feladas.html": """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Hirdetésfeladás</title></head>
+ <body><h1>Új hirdetés</h1>
+@@ -768,10 +928,14 @@ class BrowserWorkTests(unittest.TestCase):
+ 
+     def test_extract_listings(self):
+         found = self.browser.extract_listings(self.pages.url("katalogus.html"))
+-        self.assertEqual([r["price"] for r in found], [4500, 2000, 12990])
++        self.assertEqual([r["price"] for r in found], [4500, 2000, 12990, 6500, 1800, 5000, 300],
++                         "az áthúzott régi ár nem számít; a villámár az ár")
+         self.assertTrue(found[0]["url"].endswith("/items/1-zara-blezer"), "a hirdetés linkje, nem az eladóé")
+         self.assertIn("Zara blézer", found[0]["text"])
+         self.assertIn("H&M blézer", found[1]["text"])
++        self.assertNotIn("9 000", found[3]["text"], "a modell sem látja a régi árat")
++        self.assertEqual([bool(r.get("auction")) for r in found], [False] * 6 + [True],
++                         "csak a villámár nélküli licites kártya jelzett")
+ 
+     def test_upload_with_the_photo_button(self):
+         view = self.browser.open(self.pages.url("feladas.html"))
