@@ -56,6 +56,12 @@ PAUSED_REPLY = "Szünetelek, minden modell le van állítva. A Folytatás gombba
 WAKE_FAILED = "Most nem tudtam felébredni, mert a nyelvi modell nem töltődött be. Próbáld újra kicsit később."
 # A modell leállása után ennyi másodperc múlva nézzük meg az Ollama naplójában, miért (addigra beleírta).
 RESTART_LOG_DELAY = 5.0
+# A Munka menü egy körének felső határa (token): ott a válasz egy-két mondat vagy egy eszközhívás (a hosszú
+# hirdetésszöveg is belefér); egy beragadt válasz így sem foglalja percekig a modellt és a nyitott űrlapot.
+WORK_MAX_TOKENS = 1024
+# Ha a modell egy része a processzorra került: ezekkel a KV-gyorsítótár-típusokkal a kontextus már kicsi.
+SMALL_KV_TYPES = {"q8_0", "q4_0"}
+KV_SETTING = "OLLAMA_KV_CACHE_TYPE"
 
 # Ezeknél az eszközöknél pár másodperc is lehet a várakozás, ezért Jarvis rögtön szól valamit.
 SLOW_TOOLS = {"web_search", "read_webpage", "browser_open", "browser_click", "browser_type", "browser_fill",
@@ -393,8 +399,9 @@ class JarvisApp:
         self.ui.info("Eszközök: " + ", ".join(name for name in self.toolbox.names() if name in chat_tools))
         self.assistant = self._make_assistant(load_system_prompt(self.cfg, self.ui), chat_tools)
         if self.work is not None:
-            self.work_assistant = self._make_assistant(load_work_prompt(self.cfg), self.work.agent_tools,
-                                                       max_rounds=int(self.cfg.work.max_tool_rounds))
+            self.work_assistant = self._make_assistant(
+                load_work_prompt(self.cfg), self.work.agent_tools, max_rounds=int(self.cfg.work.max_tool_rounds),
+                options={"temperature": float(self.cfg.work.temperature), "num_predict": WORK_MAX_TOKENS})
         if standby:
             self.paused = self.standby = True
             for warning in self.cfg.warnings:
@@ -581,9 +588,11 @@ class JarvisApp:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _make_assistant(self, prompt: str, tools: set[str], max_rounds: int | None = None) -> Assistant:
+    def _make_assistant(self, prompt: str, tools: set[str], max_rounds: int | None = None,
+                        options: dict[str, Any] | None = None) -> Assistant:
         assistant = Assistant(self.cfg, self.llm, self.toolbox, prompt, on_tool_call=self._on_tool_done,
-                              on_tool_start=self._on_tool_start, tool_names=tools, max_rounds=max_rounds)
+                              on_tool_start=self._on_tool_start, tool_names=tools, max_rounds=max_rounds,
+                              options=options)
         assistant.stop_event = self.stop_event
         if self.context_length:
             assistant.context_tokens = self.context_length
@@ -671,16 +680,21 @@ class JarvisApp:
             free_mb = sum(g.free_mb for g in gpus)
             placed = status or {}
             cpu_mb = max(0, int(placed.get("size") or 0) - int(placed.get("size_vram") or 0)) // 2**20
+            # A legolcsóbb javítás: a kisebb KV-gyorsítótár kb. a felére veszi a kontextus memóriáját.
+            kv_tip = "" if (user_setting(KV_SETTING) or "").strip().lower() in SMALL_KV_TYPES else (
+                f"Először ezt próbáld: „setx {KV_SETTING} q8_0” PowerShellben (a kontextus memóriája kb. a "
+                "felére csökken, alig érezhető minőségvesztéssel), majd lépj ki az Ollamából a tálcán, és indítsd "
+                "újra, utána a Jarvist is. ")
             if gpus and cpu_mb and free_mb >= cpu_mb + 512:
                 # Elférne, de az Ollama (llama-server) tartalékot hagy a kártyákon: nem más programok miatt van.
                 self.ui.warn(f"A modell kb. {cpu}%-a a processzoron fut{shrunk}, ezért lassabban válaszolok, "
                              f"pedig a videókártyákon van még kb. {gpu.gb(free_mb)} GB szabad hely: az Ollama "
-                             "tartalékot hagy rajtuk. Így is működik; ha gyorsítanál rajta, lásd a README "
+                             f"tartalékot hagy rajtuk. {kv_tip}Így is működik; ha gyorsítanál rajta, lásd a README "
                              "Hibaelhárítás részét (LLAMA_ARG_FIT_TARGET).")
             else:
                 self.ui.warn(f"A modell kb. {cpu}%-a a processzoron fut{shrunk}, ezért lassabban válaszolok. "
-                             "Valószínűleg más programok is foglalják a videókártyák memóriáját (böngésző, "
-                             "játék, videó). Zárd be őket, és indítsd újra a Jarvist. Ellenőrzés: ollama ps")
+                             f"{kv_tip}Valószínűleg más programok is foglalják a videókártyák memóriáját "
+                             "(böngésző, játék, videó). Zárd be őket, és indítsd újra a Jarvist. Ellenőrzés: ollama ps")
             for line in gpu.memory_lines(gpus):
                 self.ui.warn("  " + line)
         elif fitted and fitted < configured:
@@ -716,25 +730,35 @@ class JarvisApp:
                     and time.time() - self.last_activity >= idle):
                 self._submit(("standby", None))
 
-    def _warm_up(self) -> None:
-        """Előre feldolgoztatja a Beszélgetés elejét (rendszerprompt + eszközök), egy külön szálon,
-        így az első kérdésnél már csak magát a kérdést kell. Ha közben kérdezel, az Ollama sorba veszi."""
-        if not self.cfg.llm.warm_up or self.assistant is None or not self.model_loaded:
+    def _warm_up(self, mode: str | None = None) -> None:
+        """Előre feldolgoztatja egy menü beszélgetésének elejét (rendszerprompt, eszközök, előzmények), egy külön
+        szálon, így az első kérdésnél már csak magát a kérdést kell. Ha közben kérdezel, az Ollama sorba veszi.
+
+        `mode`: a most kezelt kérés menüje (alapból az elöl lévő menü). A kérés eleje szó szerint ugyanaz, mint
+        az igazié (Assistant.warm_request). Ha már vár a sorban egy kérésed, nem melegít: az úgyis feldolgozza a
+        saját elejét, a melegítés csak feltartaná."""
+        if not self.cfg.llm.warm_up or not self.model_loaded or self._interactive_queued():
             return
+        mode = self._mode(mode or self.mode)
+        if mode == "chat" and self.assistant is None:
+            return
+        messages, schemas, options = self._assistant_for(mode).warm_request()
         client = OllamaClient(self.cfg.llm)       # saját kapcsolat, hogy ne akadjon össze a többivel
         client.num_ctx = self.llm.num_ctx
         client._think_supported = self.llm._think_supported
-        messages = [{"role": "system", "content": self.assistant.system_message()},
-                    {"role": "user", "content": "."}]
-        tools = self.toolbox.schemas(self.assistant.tool_names) if self.toolbox else None
 
         def run() -> None:
             try:
-                client.warm(messages, tools)
+                client.warm(messages, schemas or None, options)
             except Exception:  # noqa: BLE001 - csak gyorsítás; ha nem megy, nem baj
                 pass
 
         threading.Thread(target=run, name="jarvis-warmup", daemon=True).start()
+
+    def _interactive_queued(self) -> bool:
+        """Vár-e a sorban a felhasználó egy kérése."""
+        with self.requests.mutex:
+            return any(item[0] in INTERACTIVE for item in self.requests.queue)
 
     def greet(self) -> None:
         self.ui.notice(self.cfg.assistant.greeting)
@@ -897,8 +921,12 @@ class JarvisApp:
                 self._finish_request(payload.get("request_id"))
 
     def set_mode(self, mode: str) -> None:
-        """Melyik menü van elöl: a hangos kérések (Hey Jarvis) oda mennek."""
-        self.mode = self._mode(mode)
+        """Melyik menü van elöl: a hangos kérések (Hey Jarvis) oda mennek. Ha a Munka menüre váltasz, és Jarvis
+        épp nem dolgozik, előre feldolgoztatja a Munka menü elejét (a menük eleje más, az Ollama egyet tart meg)."""
+        mode = self._mode(mode)
+        changed, self.mode = mode != self.mode, mode
+        if changed and mode == "work" and not self.busy and not self.paused:
+            self._warm_up("work")
 
     def _mode(self, mode: str) -> str:
         return mode if mode == "work" and self.work_assistant is not None else "chat"
@@ -964,7 +992,7 @@ class JarvisApp:
                     channel.enter_context(self._channel("creative"))
                 try:
                     if self.paused and self.standby and kind in INTERACTIVE and not self._asks_pause(kind, payload):
-                        self._wake_up()            # készenlétből egy kérés felébreszti (10–20 mp)
+                        self._wake_up(self._request_mode(kind, payload))   # készenlétből felébreszti (10–20 mp)
                     if self.paused and kind in INTERACTIVE and self._asks_pause(kind, payload):
                         self.ui.user(payload["text"], payload.get("via", "text"))
                         self._do_pause()           # készenlétből Szünet: felébredés nélkül
@@ -1046,10 +1074,19 @@ class JarvisApp:
         job = self.scheduler.jobs.get(str(payload.get("key") or ""))
         return job is not None and not job.needs_models
 
-    def _wake_up(self) -> None:
-        """Készenlétből: betölti a modelleket, és utána jöhet a kérés."""
+    def _wake_up(self, mode: str | None = None) -> None:
+        """Készenlétből: betölti a modelleket, és utána jöhet a kérés (`mode`: a kérés menüje, annak az elejét
+        melegíti elő)."""
         self.ui.info("Felébredek: betöltöm a modelleket (10–20 másodperc)...")
-        self._do_resume(announce=False)
+        self._do_resume(announce=False, mode=mode)
+
+    def _request_mode(self, kind: str, payload: Any) -> str:
+        """Melyik menü beszélgetése válaszol a kérésre (a Kreatív menünek nincs ilyen)."""
+        if kind in ("work", "creative"):
+            return kind
+        if kind in ("text", "audio") and isinstance(payload, dict):
+            return self._mode(str(payload.get("mode") or "chat"))
+        return self.mode
 
     def _run_job(self, payload: dict[str, Any]) -> None:
         if self.scheduler is None:
@@ -1144,7 +1181,7 @@ class JarvisApp:
             self.ui.info(f"Felszabadult kb. {gpu.gb(gained)} GB videómemória. " + " | ".join(lines))
         self._hello()
 
-    def _do_resume(self, announce: bool = True) -> None:
+    def _do_resume(self, announce: bool = True, mode: str | None = None) -> None:
         if not self.paused:
             self.ui.info("Nem szünetelek, minden fut.")
             return
@@ -1165,7 +1202,8 @@ class JarvisApp:
         self.standby = False
         self.last_activity = time.time()
         self._set_phase("idle")
-        self._warm_up()
+        if mode != "creative":      # a Kreatív menü saját, eszköz nélküli kéréseket küld: ott nincs mit előre
+            self._warm_up(mode)
         self._hello()
         if announce:
             self.ui.notice("Újra itt vagyok.")
@@ -1257,15 +1295,18 @@ class JarvisApp:
             self.ui.info("Nem értettem, próbáld újra.")
         return text
 
-    def answer(self, text: str, via: str = "text", mode: str = "chat", shown: str | None = None) -> None:
+    def answer(self, text: str, via: str = "text", mode: str = "chat", shown: str | None = None,
+               tools: set[str] | None = None) -> None:
         """Megválaszolja a kérést a megfelelő menü beszélgetésében (Beszélgetés vagy Munka).
 
         `shown`: a naplóban ez jelenjen meg a kérés helyett (a Jarvis saját, belső kéréseinél).
+        `tools`: ebben a kérésben csak ezek az eszközök (pl. egy feltöltésnél); alapból a menü összes eszköze.
         """
         with self._channel(mode):
-            self._answer(self._assistant_for(mode), text, via, shown)
+            self._answer(self._assistant_for(mode), text, via, shown, tools)
 
-    def _answer(self, assistant: Assistant, text: str, via: str, shown: str | None = None) -> None:
+    def _answer(self, assistant: Assistant, text: str, via: str, shown: str | None = None,
+                tools: set[str] | None = None) -> None:
         """A válasz kiírása és felolvasása már menet közben indul."""
         if shown is None:
             self.ui.user(text, via)
@@ -1284,7 +1325,7 @@ class JarvisApp:
                 self.say(sentence)
 
         try:
-            reply = assistant.ask(text, on_text=on_text if self.cfg.assistant.stream else None)
+            reply = assistant.ask(text, on_text=on_text if self.cfg.assistant.stream else None, tool_names=tools)
             self._flush_sentences()
         except BaseException:
             self.ui.assistant_abort()
@@ -1547,7 +1588,7 @@ class JarvisApp:
         work.checking = (item_id, key)   # közzététel után: újra feltölteni nem szabad (kétszer kerülne fel)
         try:
             self.answer(work.verify_request(item, key, task, outcome, how), via="auto", mode="work",
-                        shown=f"Ellenőrzés: {item.name} → {site.name}")
+                        shown=f"Ellenőrzés: {item.name} → {site.name}", tools=work.task_tools)
             last = self._last_work_reply()
         except Cancelled:
             cancelled = True
@@ -1597,7 +1638,7 @@ class JarvisApp:
             self.work.checking = (item_id, key)
         try:
             try:
-                self.answer(request, via="auto", mode="work", shown=shown)
+                self.answer(request, via="auto", mode="work", shown=shown, tools=self.work.task_tools)
                 last = self._last_work_reply()
             except OllamaError as exc:
                 last, failure = model_problem(exc, short=True), exc
@@ -1689,7 +1730,7 @@ class JarvisApp:
         try:
             # Ugyanabban a beszélgetésben: a modell tudja, mit csinált, és a hibacsomagba is minden belekerül.
             self.answer(work.check_request(item, key), via="auto", mode="work",
-                        shown=f"Ellenőrzés: {item.name} → {site}")
+                        shown=f"Ellenőrzés: {item.name} → {site}", tools=work.task_tools)
         except OllamaError as exc:
             self.ui.warn(f"Az ellenőrzés nem sikerült: {model_problem(exc, short=True)}")
             return ""
@@ -1810,7 +1851,7 @@ class JarvisApp:
             work.store.set_busy(item_id, f"Levétel: {site.name}…")
             self.work_assistant.reset()
             self.answer(work.delist_request(item, key), via="auto", mode="work",
-                        shown=f"Levétel: {item.name} → {site.name}")
+                        shown=f"Levétel: {item.name} → {site.name}", tools=work.task_tools)
             last = self._last_work_reply()
         except Cancelled:
             last = "Megszakítottad."

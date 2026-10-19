@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_offline import FakeOllama, free_port, make_cfg, reply  # noqa: E402
 from test_streaming import RecordingUI  # noqa: E402
 
+from jarvis_core import app as app_module  # noqa: E402
 from jarvis_core import gpu, gui, tools  # noqa: E402
+from jarvis_core import llm as llm_module  # noqa: E402
 from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.gui import EventBus, GuiUI  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, gpu_share  # noqa: E402
@@ -141,6 +143,34 @@ class ContextFitTests(FitTestCase):
         crowded.load_fitted(self.log.append)
         self.assertIn("kevesebb a hely, mint legutóbb", " ".join(self.log))
 
+    def test_memory_is_ignored_after_an_ollama_setting_changes(self):
+        # A KV-gyorsítótár típusa (vagy a flash attention, a tartalék a kártyákon) mást enged elférni: ha
+        # megváltozik, újra kipróbálja a méreteket, nem a régi döntést tölti be egy hétig.
+        memory = Path(self.tmp.name) / "illesztes.json"
+        self.fake.vram_fit = {16384: 0.90, 12288: 0.90, 8192: 0.93}.get
+        settings: dict[str, str] = {}
+
+        def fitted() -> OllamaClient:
+            client = self.client()
+            client.fit_memory, client.server_version = memory, "0.40.4"
+            with mock.patch.object(llm_module, "user_setting", side_effect=settings.get):
+                client.load_fitted(self.log.append)
+            return client
+
+        fitted()
+        loads_before = len(self.loads())
+        fitted()
+        self.assertEqual(self.loads()[loads_before:], [16384], "ugyanazokkal a beállításokkal: egy betöltés")
+        settings["OLLAMA_KV_CACHE_TYPE"] = "q8_0"
+        self.fake.vram_fit = lambda ctx: 1.0
+        fitted()
+        self.assertEqual(self.loads()[loads_before + 1:], [16384], "új kulcs: újra megnézi (és most elfér)")
+        with mock.patch.object(llm_module, "user_setting", side_effect=settings.get):
+            key = self.client()._fit_key([16384, 12288, 8192])
+        self.assertTrue(key.endswith("|OLLAMA_KV_CACHE_TYPE=q8_0"), key)
+        with mock.patch.object(llm_module, "user_setting", return_value=None):
+            self.assertNotIn("OLLAMA", self.client()._fit_key([16384, 12288, 8192]), "a régi kulcs marad")
+
     def test_old_memory_is_ignored(self):
         import json
         import time
@@ -228,6 +258,24 @@ class AppPlacementTests(FitTestCase):
         self.assertIn("pedig a videókártyákon van még kb. 6,2 GB szabad hely", warns[0])
         self.assertIn("LLAMA_ARG_FIT_TARGET", warns[0])
         self.assertNotIn("Zárd be", warns[0])
+
+    def test_kv_cache_tip_comes_first(self):
+        # A legolcsóbb javítás a kisebb KV-gyorsítótár (a kontextus memóriája kb. a felére csökken): ha még nem
+        # q8_0/q4_0, ezt javasolja először.
+        self.fake.vram_fit = lambda ctx: 0.85
+        app = self.make_app()
+        with mock.patch.object(gpu, "query_gpus", return_value=gpu.parse(NVIDIA_SMI)), \
+                mock.patch.object(app_module, "user_setting", return_value=None):
+            self.assertTrue(app.load_model())
+        warning = self.texts(app, "warn")[0]
+        self.assertIn("setx OLLAMA_KV_CACHE_TYPE q8_0", warning)
+        self.assertLess(warning.index("OLLAMA_KV_CACHE_TYPE"), warning.index("LLAMA_ARG_FIT_TARGET"))
+
+        app = self.make_app()
+        with mock.patch.object(gpu, "query_gpus", return_value=gpu.parse(NVIDIA_SMI)), \
+                mock.patch.object(app_module, "user_setting", return_value="q8_0"):
+            self.assertTrue(app.load_model())
+        self.assertNotIn("OLLAMA_KV_CACHE_TYPE", self.texts(app, "warn")[0], "már be van állítva")
 
     def test_warning_mentions_the_reduced_context(self):
         self.fake.vram_fit = {16384: 0.80, 12288: 0.85, 8192: 0.90}.get

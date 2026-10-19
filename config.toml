@@ -9,8 +9,9 @@ system_prompt_file = "system_prompt.txt"
 max_history_turns = 12
 # Egy kérésen belül legfeljebb ennyi eszközhívási kör (böngészős feladatnál sok lépés kellhet)
 max_tool_rounds = 20
-# Hány legutóbbi oldalnézetet/találati listát tartson meg teljes egészében (a régebbiek kitömörítve)
-keep_page_views = 2
+# Hány legutóbbi oldalnézetet tartson meg teljes egészében. A régebbiek helyén egy rövid sor marad (mi
+# történt, melyik oldalon), rögtön, ahogy új jön: így az Ollama gyorsítótára megmarad, és gyorsabb a válasz
+keep_page_views = 1
 # Kiírja, mennyi ideig tartott a felismerés és a válasz
 show_timings = true
 # Folyamatos válasz: már az első mondatnál megszólal, nem várja meg a teljes választ
@@ -35,7 +36,8 @@ num_ctx = 16384
 # kontextussal tölti be újra (12288, majd 8192), de ennél kisebbel nem. 0 = ne próbálkozzon.
 min_ctx = 8192
 request_timeout = 180
-# Induláskor (és Szünet után) előre feldolgozza a rendszerpromptot: gyorsabb az első válasz
+# Induláskor, Szünet után és a Munka menüre váltáskor előre feldolgozza a menü rendszerpromptját és
+# eszközeit: gyorsabb az első válasz
 warm_up = true
 
 [stt]
@@ -190,6 +192,9 @@ autofill = true
 # Ugyanazon az oldalon két közzététel (vagy levétel) között legalább ennyi perc teljen el
 # (véletlenszerűen ±30%), ahogy egy embernél, aki egymás után tölt fel. 0 = nincs várakozás.
 publish_gap_minutes = 2.0
+# A Munka menü beszélgetésének mintavétele (a Beszélgetésé az [llm] temperature): kisebb érték = kevesebb
+# véletlen az űrlapkitöltésnél (melyik mezőbe, mit). A modellt nem tölti újra.
+temperature = 0.3
 
 [creative]
 # A Kreatív menü: közös történetmesélés (kaland, mint az AI Dungeon) és beszélgetés egy karakterrel
