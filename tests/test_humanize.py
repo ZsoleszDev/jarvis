@@ -30,7 +30,7 @@ from test_offline import FakeOllama, make_cfg  # noqa: E402
 from test_replay import ReplayHarness  # noqa: E402
 from test_streaming import RecordingUI  # noqa: E402
 from test_web_browser import HAS_CHROMIUM, _QuietHandler  # noqa: E402
-from test_work import jpeg  # noqa: E402
+from test_work import FakeClock, jpeg  # noqa: E402
 
 from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.browser import BrowserController, same_value  # noqa: E402
@@ -384,24 +384,40 @@ class PublishGapTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2.0, "az Állj gomb rögtön megállítja")
 
 
-    def test_a_post_started_from_the_chat_waits_too(self):
+    def test_a_post_started_from_the_chat_waits_before_publishing(self):
         store = self.work.store
         store.add_photo(self.item.id, jpeg())
         store.update(self.item.id, title="Zara póló", description="Egyszer hordtam.", price=500)
+        browser = self.app.toolbox.browser
+        self.assertEqual(browser.before_publish, self.work._before_publish, "a böngésző a közzététel előtt szól")
         self.work._next_allowed["vinted"] = time.time() + 0.5
         args = {"item": self.item.id, "platform": "vinted"}
-        with mock.patch.object(self.app.toolbox.browser, "open", return_value="Oldal: Új hirdetés") as opened:
+        with mock.patch.object(browser, "open", return_value="Oldal: Új hirdetés") as opened:
             started = time.monotonic()
             result = self.app.toolbox.call("item_post", args)
-            self.assertGreaterEqual(time.monotonic() - started, 0.4, "a modell eszköze is kivárja")
+            self.assertLess(time.monotonic() - started, 0.4, "az űrlapot rögtön megnyitja: a szünetben kitölthető")
             self.assertIn("Oldal: Új hirdetés", result)
             opened.assert_called_once()
-            self.work._next_allowed["vinted"] = time.time() + 60
-            self.app.stop_event.set()
-            started = time.monotonic()
-            self.assertEqual(self.app.toolbox.call("item_post", args), "HIBA: Megszakítottad.")
-            self.assertLess(time.monotonic() - started, 2.0)
-            self.assertEqual(opened.call_count, 1, "megszakítva meg sem nyitja az oldalt")
+        started = time.monotonic()
+        self.work._before_publish("Feltöltés", "https://www.vinted.hu/items/new")    # a közzététel gombja előtt
+        self.assertGreaterEqual(time.monotonic() - started, 0.3, "a közzététel előtt kivárja a szünetet")
+        self.assertTrue(any("nemrég tettem közzé" in e[1] for e in self.ui.of("info")))
+        self.assertEqual(store.get(self.item.id).busy, "Feltöltés: Vinted…", "utána újra azt mutatja, amin dolgozik")
+
+        self.work._next_allowed["vinted"] = time.time() + 60
+        self.work.published_in = self.work.current           # a megerősítő gomb: ebben a menetben már nem vár
+        started = time.monotonic()
+        self.work._before_publish("Igen, közzéteszem", "https://www.vinted.hu/items/new")
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.work.begin_trail()                               # új menet: vár, de az Állj gomb megállítja
+        self.app.stop_event.set()
+        started = time.monotonic()
+        with self.assertRaises(Cancelled):
+            self.work._before_publish("Feltöltés", "https://www.vinted.hu/items/new")
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.work.current = None                              # feltöltésen kívül (pl. a Beszélgetésben) nem vár
+        self.app.stop_event.clear()
+        self.work._before_publish("Feltöltés", "https://www.vinted.hu/items/new")
 
 
 @unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
@@ -412,10 +428,11 @@ class HumanReplayFlowTests(ReplayHarness, unittest.TestCase):
         self.assertEqual(self.store.get(first.id).platforms["vinted"]["status"], POSTED)
         self.assertEqual(self.work.gap_remaining("vinted"), 0.0)
 
-        # A második tárgy előtt: a közzététel után 0,6 perc (±30%) szünet, és a begyakorolt lépések
-        # emberi szünetekkel (a várakozást itt csak feljegyezzük).
-        self.app.cfg.work.publish_gap_minutes = 0.01
-        self.work.note_publish("vinted")
+        # A második tárgy előtt: a közzététel után 2 perc (±30%) szünet, és a begyakorolt lépések emberi
+        # szünetekkel. Az űrlapot a szünet alatt tölti ki, a maradékot a közzététel gombja előtt várja ki
+        # (a várakozásokat itt csak feljegyezzük: hamis óra, és a böngésző szünetei sem telnek le).
+        self.app.cfg.work.publish_gap_minutes = 2.0
+        clock = FakeClock(time.time())
         browser = self.app.toolbox.browser
         browser.pace.factor = 1.0
         slept: list[float] = []
@@ -425,21 +442,25 @@ class HumanReplayFlowTests(ReplayHarness, unittest.TestCase):
         for name in ("think", "read", "review", "pick_files"):
             original = getattr(browser.pace, name)
             setattr(browser.pace, name, lambda n=name, o=original: named.append(n) or o())
+        waiter = self.work.gap_waiter
+        self.work.gap_waiter = lambda item_id, key: named.append("gap") or waiter(item_id, key)
         second = self.item(title="H&M fehér póló, M", price=700, brand="H&M", condition="Jó", size="M")
         calls_before = len(self.fake.chat_bodies())
-        started = time.monotonic()
-        self.app.run_work({"action": "post", "ids": [second.id], "platform": "vinted"})
-        self.assertGreaterEqual(time.monotonic() - started, 0.35, "megvárta a szünetet")
+        with mock.patch("jarvis_core.work.time", clock):
+            self.work.note_publish("vinted")
+            due = self.work._next_allowed["vinted"]
+            self.app.run_work({"action": "post", "ids": [second.id], "platform": "vinted"})
+            self.assertGreaterEqual(clock.now, due, "a közzététel előtt megvárta a szünetet")
+            self.assertGreater(self.work.gap_remaining("vinted"), 0.0, "a következő is vár majd")
         self.assertTrue(any("nemrég tettem közzé" in e[1] for e in self.ui.of("info")))
         self.assertEqual(len(self.fake.chat_bodies()), calls_before, "modell nélkül ment")
         self.assertEqual(self.store.get(second.id).platforms["vinted"]["status"], POSTED)
         self.assertEqual(named[0], "read", "az űrlap megnyitása után körülnéz")
-        self.assertIn("pick_files", named)
-        self.assertGreaterEqual(named.count("think"), 5)
-        self.assertEqual(named[-1], "review", "a közzététel előtt átnézi")
+        self.assertIn("pick_files", named[:named.index("gap")], "a fotókat a szünet alatt tölti fel")
+        self.assertGreaterEqual(named[:named.index("gap")].count("think"), 5, "a mezőket is")
+        self.assertEqual(named[-2:], ["gap", "review"], "a szünet után, a közzététel előtt átnézi")
         self.assertGreater(sum(slept), 5.0, "egy ember sem tölt ki egy hirdetést pár másodperc alatt")
         self.assertFalse(browser.auto, "utána a modell lépései már nem kapnak külön szünetet")
-        self.assertGreater(self.work.gap_remaining("vinted"), 0.0, "a következő is vár majd")
 
 
 if __name__ == "__main__":

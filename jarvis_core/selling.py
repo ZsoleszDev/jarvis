@@ -11,6 +11,7 @@ kis előnézetek (thumbs/). A törölt tárgy a _torolt mappába kerül, így vi
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -72,6 +73,7 @@ class Platform:
     domains: tuple[str, ...]
     hints: str             # tippek a Jarvisnak a kitöltéshez
     delist_hints: str = DEFAULT_DELIST_HINTS  # tippek a levételhez (eladás után)
+    max_photos: int = 10   # ennyi fotót vesz fel egy hirdetéshez (a borítókép az első); a többit nem töltjük fel
 
 
 PLATFORMS: dict[str, Platform] = {
@@ -86,7 +88,8 @@ PLATFORMS: dict[str, Platform] = {
         "kéri, pl. EU, azt is). 6. Állapot: New with tags = Új, címkével; New without tags = Új; Very good = "
         "Nagyon jó; Good = Jó; Satisfactory = Elfogadható vagy Hibás. 7. Szín (Colours, legfeljebb kettő), utána "
         "zárd be a listát. 8. Csomagméret: Small = kicsi, Medium = közepes, Large = nagy. 9. Végül a „Feltöltés” "
-        "(Upload) gomb; ha utána azt írja, hogy valamit ki kell tölteni (Fill in …), pótold, és kattints újra."),
+        "(Upload) gomb; ha utána azt írja, hogy valamit ki kell tölteni (Fill in …), pótold, és kattints újra.",
+        max_photos=20),
     "jofogas": Platform(
         "jofogas", "Jófogás", "https://www.jofogas.hu/", "https://www.jofogas.hu/",
         "https://www.jofogas.hu/magyarorszag?q={q}", ("jofogas.hu",),
@@ -101,7 +104,8 @@ PLATFORMS: dict[str, Platform] = {
         "legközelebbi. 3. Cím (ha hosszabbat kér, egészítsd ki a márkával és az állapottal) és leírás. "
         "4. Állapot: Új, Felújított, Használt – kiváló / jó / sérült közül a legközelebbi. 5. Eladás "
         "módja: fix áras (azonnal megvehető), az ár, darabszám 1. 6. Fotók (legfeljebb 8). 7. Szállítás: "
-        "a megadott módok és díjak; fizetésnél amit az oldal alapból ajánl. 8. Végül a feltöltés gomb."),
+        "a megadott módok és díjak; fizetésnél amit az oldal alapból ajánl. 8. Végül a feltöltés gomb.",
+        max_photos=8),
     "hardverapro": Platform(
         "hardverapro", "Hardverapró", "https://hardverapro.hu/", "https://hardverapro.hu/",
         "https://hardverapro.hu/aprok/keres.php?stext={q}", ("hardverapro.hu",),
@@ -166,6 +170,7 @@ class Item:
     shipping: str = ""
     search_query: str = ""
     edited: list[str] = field(default_factory=list)      # kézzel átírt mezők: Jarvis nem írja felül
+    extracted_sig: str = ""           # melyik leírásból olvasta ki az adatokat (ugyanabból nem olvassa ki újra)
     research: dict[str, Any] = field(default_factory=dict)
     platforms: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending: dict[str, Any] = field(default_factory=dict)  # visszakérdezés vagy árdöntés
@@ -202,7 +207,17 @@ class Item:
         data["name"] = self.name
         data["status"] = self.status
         data["verdict"] = price_verdict(self).text if self.research.get("at") else ""
+        since = self.online_since()
+        data["online_since"] = since
+        data["days_online"] = int((time.time() - since) // 86400) if since else None   # „12 napja fent”
         return data
+
+    def online_since(self) -> float | None:
+        """Mióta van fent (a legkorábban felkerült oldalon, ahol most is fent van); None, ha sehol."""
+        posted = [float(e.get("posted_at") or e.get("at") or 0) for e in self.platforms.values()
+                  if e.get("status") == POSTED]
+        posted = [at for at in posted if at > 0]
+        return min(posted) if posted else None
 
     def stored(self) -> dict[str, Any]:
         data = asdict(self)
@@ -427,6 +442,8 @@ class ItemStore:
                 value = [t for t in self.platform_keys if t in value]
             elif key == "research_wanted":
                 value = bool(value)
+            elif key == "extracted_sig":
+                value = str(value or "")[:64]
             elif key in TEXT_LIMITS:
                 text = str(value or "")
                 if key in MULTILINE:
@@ -482,10 +499,16 @@ class ItemStore:
                 if status not in (POSTED, NOT_POSTED, FAILED):
                     raise ItemError(f"Az állapot „{POSTED}”, „{NOT_POSTED}” vagy „{FAILED}” lehet.")
                 entry: dict[str, Any] = {"status": status, "at": time.time()}
+                before = item.platforms.get(platform, {})
+                if status == POSTED:
+                    # Mióta van fent: csak a felkerüléskor indul (egy sikertelen levétel utáni újbóli
+                    # „feltöltve” jelölés nem nullázza); a régi adatoknál a legutóbbi jelölés ideje.
+                    entry["posted_at"] = (before.get("posted_at") or before.get("at") or entry["at"]
+                                          if before.get("status") == POSTED else entry["at"])
                 if url.startswith(("http://", "https://")):
                     entry["url"] = url[:300]
-                elif status == POSTED and item.platforms.get(platform, {}).get("url"):
-                    entry["url"] = item.platforms[platform]["url"]
+                elif status == POSTED and before.get("url"):
+                    entry["url"] = before["url"]
                 if note:
                     entry["note"] = note[:300]
                 item.platforms[platform] = entry
@@ -627,20 +650,60 @@ EXTRACT_SCHEMA: dict[str, Any] = {
 }
 
 
+# Ha az EXTRACT_SYSTEM vagy a séma érdemben változik, emeld: a régi kiolvasások egyszer újra lefutnak.
+EXTRACT_VERSION = "1"
+# Ha a hirdetés már fent van valahol, ezeket Jarvis magától nem írja át (a többi oldalon is ugyanaz a
+# hirdetés legyen, és a begyakorolt lépések kulcsa se változzon); kézzel persze átírhatod.
+FROZEN_WHEN_POSTED = ("title", "description", "category", "product", "kind")
+
+
+def extract_signature(prompt: str) -> str:
+    """Melyik leírásból (és melyik kiolvasó-változattal) készültek az adatok."""
+    return hashlib.sha1(f"{EXTRACT_VERSION}\n{prompt}".encode("utf-8")).hexdigest()
+
+
 class ListingExtractor:
-    """Az eladó egy-két mondatos leírásából kiolvassa a hirdetés adatait (egy modellhívás)."""
+    """Az eladó egy-két mondatos leírásából kiolvassa a hirdetés adatait (egy modellhívás).
+
+    Ugyanabból a leírásból csak egyszer: az árdöntés vagy a „Feltöltés a hiányzó helyekre” már nem olvassa ki
+    újra (az idő, és a hirdetés sem változik oldalanként). Ha visszakérdezett, a válaszból csak a hiányzó
+    adatokat olvassa ki (rövid séma, rövid válasz)."""
 
     def __init__(self, llm: Any, store: ItemStore):
         self.llm = llm
         self.store = store
 
-    def extract(self, item_id: str) -> Item:
+    @staticmethod
+    def up_to_date(item: Item) -> bool:
+        """Ebből a leírásból már kiolvasta, és megvan a cím, a leírás és az ár."""
+        return (item.extracted_sig == extract_signature(item.prompt)
+                and bool(item.title and item.description and item.price))
+
+    @staticmethod
+    def appended(item: Item) -> bool:
+        """A legutóbbi kiolvasás óta a leírás csak bővült (pl. a visszakérdezésre adott válasszal)."""
+        if not item.extracted_sig:
+            return False
+        cut = item.prompt.rfind("\n")
+        while cut > 0:
+            if extract_signature(item.prompt[:cut].strip()) == item.extracted_sig:
+                return True
+            cut = item.prompt.rfind("\n", 0, cut)
+        return False
+
+    def extract(self, item_id: str, only: list[str] | None = None) -> Item:
+        """Kiolvassa az adatokat. `only`: csak ezeket a mezőket (pl. a visszakérdezett állapotot és várost)."""
         item = self.store.get(item_id)
         if not item.prompt.strip():
             raise ItemError("Írd le röviden, mit adsz el (pl. „Zara L-es fekete póló, 500 Ft”).")
-        messages = [{"role": "system", "content": EXTRACT_SYSTEM},
-                    {"role": "user", "content": f"Az eladó leírása:\n{item.prompt}"}]
-        data = self.llm.chat_json(messages, EXTRACT_SCHEMA, temperature=0.2, max_tokens=EXTRACT_MAX_TOKENS)
+        schema, request = EXTRACT_SCHEMA, f"Az eladó leírása:\n{item.prompt}"
+        if only:
+            only = [key for key in dict.fromkeys(only) if key in EXTRACT_SCHEMA["properties"]]
+            schema = {"type": "object", "required": only,
+                      "properties": {key: EXTRACT_SCHEMA["properties"][key] for key in only}}
+            request += f"\n\nMost csak ezeket töltsd ki (a többi már megvan): {', '.join(only)}."
+        messages = [{"role": "system", "content": EXTRACT_SYSTEM}, {"role": "user", "content": request}]
+        data = self.llm.chat_json(messages, schema, temperature=0.2, max_tokens=EXTRACT_MAX_TOKENS)
         values: dict[str, Any] = {key: str(data.get(key) or "").strip() for key in LISTING_FIELDS}
         values["kind"] = str(data.get("kind") or "").strip()
         try:
@@ -648,7 +711,11 @@ class ListingExtractor:
         except ItemError:
             values["price"] = None
         values = {k: v for k, v in values.items() if v not in ("", None)}   # amit nem mondott, nem törli
-        return self.store.update(item_id, **values)
+        if only:
+            values = {k: v for k, v in values.items() if k in only}
+        if any(e.get("status") == POSTED for e in item.platforms.values()):
+            values = {k: v for k, v in values.items() if k not in FROZEN_WHEN_POSTED}
+        return self.store.update(item_id, **values, extracted_sig=extract_signature(item.prompt))
 
 
 def missing_needs(item: Item, settings: dict[str, Any]) -> list[tuple[Need, list[str]]]:

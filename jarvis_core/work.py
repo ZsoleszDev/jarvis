@@ -1,12 +1,16 @@
 """A Munka menü. Az első munka az Adás/Vétel: Jarvis itt az eladásra szánt holmikon dolgozik.
 
 Egy eladás menete (a JarvisApp az ágens-szálon futtatja, lásd app.run_work):
-  1. a leírásodból egy modellhívással kiolvassa a hirdetés adatait (ListingExtractor),
-  2. ha a kiválasztott oldalakhoz hiányzik valami, visszakérdez, és megvárja a válaszod,
+  1. a leírásodból egy modellhívással kiolvassa a hirdetés adatait (ListingExtractor; ugyanabból a
+     leírásból csak egyszer),
+  2. ha a kiválasztott oldalakhoz hiányzik valami, visszakérdez, és megvárja a válaszod (abból csak a
+     hiányzó adatokat olvassa ki),
   3. ha kérted, megnézi, mennyiért kínálnak hasonlót; ha az árad sokkal drágább, megkérdezi,
      maradjon-e (csak ajánlás, a döntés a tiéd),
   4. sorban feltölti minden kiválasztott oldalra a saját böngészőjében (ehhez a Munka menü
-     saját beszélgetése és eszközei kellenek), a közzététel előtt mindig rákérdez.
+     saját beszélgetése és eszközei kellenek), a közzététel előtt mindig rákérdez. Ugyanazon az
+     oldalon két közzététel között pár perc szünetet tart: ezt a közzététel gombja előtt várja ki,
+     az űrlapot addigra kitölti, és amelyik oldalon épp nem kell várni, az jön előbb.
 """
 from __future__ import annotations
 
@@ -24,13 +28,12 @@ from .assistant import KEEP_ABOVE
 from .browser import BrowserError
 from .config import Config, data_path, resolve_path
 from .dossier import Dossiers
-from .llm import Cancelled
 from .replay import (FlowRecorder, FlowStore, Replayer, ReplayOutcome, entry_for, entry_problem, flow_key, item_values,
                      url_shape)
-from .selling import (CONDITIONS, NEEDS, NOT_POSTED, PARCEL_SIZES, PLATFORMS, POSTED, FAILED, Item,
+from .selling import (CONDITIONS, MAX_PRICE, NEEDS, NOT_POSTED, PARCEL_SIZES, PLATFORMS, POSTED, FAILED, Item,
                       ItemError, ItemStore, ListingExtractor, Platform, PriceResearcher, format_price,
-                      missing_needs, parse_price, price_verdict, question_for)
-from .textutil import fold
+                      missing_needs, price_verdict, question_for)
+from .textutil import fold, hu_amounts
 from .tools import Toolbox, ToolError, params
 from .vinted import ChoiceMemory, FillOutcome, VintedDelister, VintedFiller
 
@@ -94,31 +97,62 @@ def research_summary(research: dict[str, Any]) -> str:
     return text
 
 
-_AMOUNT_RE = re.compile(r"(\d[\d .]*\d|\d)\s*(ezer|e\b|k\b)?")
-# „Legyen a javasolt”, „oké, mehet”, „vidd lejjebb”: a javasolt ár
-_SUGGESTED_WORDS = {"legyen", "javasolt", "javasoltat", "javasoltra", "javaslat", "javaslatod", "rendben",
-                    "oke", "ok", "mehet", "lejjebb", "csokkentsd", "olcsobb", "olcsobban"}
+# „Legyen a javasolt”, „oké, mehet”, „vidd lejjebb”: a javasolt ár (gyenge jel: a többi felülírja)
+_SUGGESTED_WORDS = {"legyen", "rendben", "oke", "ok", "mehet", "lejjebb", "csokkentsd", "olcsobb", "olcsobban"}
+# Egyértelműen a javasolt ár („a javasolt”, „az ajánlott”, „a tiéd”); egy előtte álló „ne” megfordítja
+_SUGGESTED_STEMS = ("javasol", "javaslat", "ajanlott", "ajanlas", "tied")
+# Egyértelműen a mostani ár („maradjon”, „az enyém”, „hagyd”); egy előtte álló „ne” megfordítja
+_KEEP_STEMS = ("marad", "enyem", "sajatom", "hagyd")
+# Bizonytalan válasz: inkább újra kérdez, mint hogy tippeljen („nem tudom”, „mindegy”, „hmm”)
+_UNSURE_RE = re.compile(r"\b(nem tudom|nem tudok|nem tom|nemtom|nem biztos|mindegy|fogalmam sincs|passz|h+m+)\b")
+# A tagadás ezeken átnyúlik: „ne legyen a javasolt”
+_NEGATION_SKIP = {"a", "az", "legyen", "is", "inkabb"}
+# Visszakérdezés után („3 Ft-ra gondoltál?”): igen
+_YES_WORDS = {"igen", "aha", "persze", "pontosan", "ja", "jaja", "stimmel", "helyes", "nana", "ugy", "ugyvan", "jo",
+              "oke", "ok", "rendben", "mehet"}
 
 
-def interpret_price_reply(text: str) -> str | int | None:
-    """Árdöntésre adott válasz: "keep" (maradjon), "suggested" (legyen a javasolt), szám, vagy None."""
-    folded = fold(text or "")
-    amounts = []
-    for number, thousand in _AMOUNT_RE.findall(folded):
-        try:
-            value = parse_price(number)
-        except ItemError:
-            continue
-        if value:
-            amounts.append(value * 1000 if thousand and value < 10_000 else value)
+def interpret_price_reply(text: str, confirming: bool = False) -> str | int | None:
+    """Árdöntésre adott (írt vagy mondott) válasz: "keep" (maradjon), "suggested" (legyen a javasolt), egy összeg,
+    vagy None (nem egyértelmű: újra kell kérdezni). `confirming`: Jarvis épp egy furcsa összegre kérdezett vissza
+    („3 Ft-ra gondoltál?”); ilyenkor az igen "confirmed", a puszta nem pedig None (mondja meg újra).
+
+    A kérdés: „Maradjon a te árad, vagy legyen a javasolt?”. A tagadás csak arra vonatkozik, ami utána jön:
+    „ne maradjon, legyen a javasolt” a javasolt, „ne a javasolt legyen” a mostani ár."""
+    amounts = [a for a in hu_amounts(text) if 0 < a <= MAX_PRICE]
     if amounts:
         return amounts[-1]   # „ne 150 ezer legyen, hanem 120 ezer”: az utolsó a kért
-    tokens = re.findall(r"\w+", folded)
-    if any(t.startswith("marad") for t in tokens) or {"ne", "nem"} & set(tokens):
-        return "keep"        # a kérdés: „Maradjon a te árad, vagy legyen …?”; a nem a változtatásra nem
-    if any(t in _SUGGESTED_WORDS for t in tokens):
-        return "suggested"
-    return None
+    folded = _UNSURE_RE.sub(" ", fold(text or ""))
+    keep = suggest = weak = 0
+    bare_no = yes = False
+    for clause in re.split(r"[,;.!?]|\b(?:hanem|de|vagy)\b", folded):
+        negated = False
+        for token in re.findall(r"\w+", clause):
+            if token in ("ne", "nem"):
+                negated = True
+                continue
+            if negated and token in _NEGATION_SKIP:
+                continue
+            if token.startswith(_KEEP_STEMS):
+                keep, suggest = (keep, suggest + 1) if negated else (keep + 1, suggest)
+            elif token.startswith(_SUGGESTED_STEMS):
+                keep, suggest = (keep + 1, suggest) if negated else (keep, suggest + 1)
+            elif negated:
+                bare_no = True       # „nem kell”: a változtatásra mond nemet
+            else:
+                weak += token in _SUGGESTED_WORDS
+                yes = yes or token in _YES_WORDS
+            negated = False
+        bare_no = bare_no or negated     # „nem, jó így”
+    if keep or suggest:
+        if keep and suggest:
+            return None      # „maradjon, vagy legyen a javasolt”: mindkettő, nem dönthetünk helyette
+        return "keep" if keep else "suggested"
+    if confirming:
+        return "confirmed" if yes and not bare_no else None
+    if bare_no:
+        return "keep"
+    return "suggested" if weak else None
 
 
 @dataclass
@@ -152,6 +186,7 @@ class WorkDesk:
         self.researcher = (PriceResearcher(llm, self.store, lambda: toolbox.browser, sites)
                            if self.browser_ready and sites else None)
         self.current: tuple[str, str] | None = None   # (tárgy, oldal), amit épp feltölt
+        self._answered: dict[str, list[str]] = {}     # tárgy → amire a legutóbb visszakérdezett és válaszoltál
         self.approved = False    # feltöltés közben jóváhagytál-e egy kattintást (pl. a közzétételt)
         # (tárgy, oldal), amiről a modell épp megnézi, fent van-e: ilyenkor újra feltölteni nem szabad.
         self.checking: tuple[str, str] | None = None
@@ -166,8 +201,12 @@ class WorkDesk:
         # Hibacsomagok (dossier.py): ha egy feltöltés vagy levétel elakad, minden a javításhoz.
         self.dossiers = Dossiers(self.root / "hibak")
         self.trail: list[dict[str, Any]] = []      # a mostani feltöltés/levétel böngészős lépései
-        # Emberi tempó: oldal → mikortól jöhet a következő közzététel vagy levétel.
+        # Emberi tempó: oldal → mikortól jöhet a következő közzététel vagy levétel. A szünetet a közzététel
+        # gombja előtt várja ki (_before_publish), így az űrlap addigra ki van töltve.
         self._next_allowed: dict[str, float] = {}
+        self.published_in: tuple[str, str] | None = None   # (tárgy, oldal): ebben a menetben már volt közzététel
+        # A szünet kijelzése (a JarvisApp állítja be: napló, állapotsor); alapból csak a tárgy kártyáján látszik.
+        self.gap_waiter: Callable[[str, str], Any] | None = None
         self.recorder: FlowRecorder | None = None
         # A jóváhagyó ablakba: mivel töltötte ki (begyakorolt lépések vagy a Vinted-kitöltő), és mit választott.
         self.preview_title = ""
@@ -178,6 +217,7 @@ class WorkDesk:
             browser = toolbox.browser
             browser.on_action = self._on_browser_action
             browser.approve_hook = self._preapproved
+            browser.before_publish = self._before_publish
         self._register(toolbox)
 
     @property
@@ -246,8 +286,12 @@ class WorkDesk:
             raise ItemError("Pipáld be, hova töltsem fel.")
         if not item.photos:
             raise ItemError("Ehhez a tárgyhoz még nincs fotó.")
-        progress("a leírásod értelmezése")
-        item = self.extractor.extract(item_id)
+        answered = self._answered.pop(item_id, None)
+        if not self.extractor.up_to_date(item):   # ugyanabból a leírásból nem olvassa ki újra
+            progress("a leírásod értelmezése")
+            # a visszakérdezésre adott válaszból csak a hiányzó adatok (rövidebb séma, gyorsabb válasz)
+            only = answered if answered and item.title and self.extractor.appended(item) else None
+            item = self.extractor.extract(item_id, only=only)
         missing = missing_needs(item, self.settings)
         if missing:
             question = question_for(item, missing)
@@ -271,19 +315,38 @@ class WorkDesk:
         return Step("post")
 
     def answer(self, item_id: str, text: str) -> Item:
-        """A visszakérdezésre adott válasz a leírás mellé kerül; a következő menet már ezzel számol."""
+        """A visszakérdezésre adott válasz a leírás mellé kerül; a következő menet már ezzel számol (és a
+        válaszból csak azt olvassa ki, amire rákérdezett)."""
         item = self.store.get(item_id)
+        if item.pending.get("kind") == "info":
+            self._answered[item_id] = [need.field for need, _ in missing_needs(item, self.settings)]
         self.store.update(item_id, prompt=(item.prompt + "\n" + text.strip()).strip())
         return self.store.set_pending(item_id, None)
 
     def decide_price(self, item_id: str, choice: str | int) -> Item:
-        """Árdöntés: "keep" = marad az ár, "suggested" = a javasolt, vagy egy konkrét összeg."""
+        """Árdöntés: "keep" = marad az ár, "suggested" = a javasolt, egy konkrét összeg, vagy "confirmed" = a
+        visszakérdezett összeg. Ha az összeg gyanús (pl. a félrehallott „3 és fél ezer” 3 Ft lenne), nem írja át,
+        hanem visszakérdez: a kérdés a tárgy függő kérdése lesz („3 Ft-ra gondoltál?”)."""
         item = self.store.get(item_id)
-        if choice == "suggested":
+        if choice == "confirmed":
+            choice = item.pending.get("confirm") or "keep"
+        elif choice == "suggested":
             choice = item.pending.get("suggested") or item.research.get("suggested") or "keep"
+        elif choice != "keep" and choice != item.pending.get("confirm") and self.odd_price(item, int(choice)):
+            # (ha ugyanazt az összeget mondja vagy írja be újra, az is igen)
+            question = (f"{format_price(choice)}-ra gondoltál? Ha igen, mondd, hogy igen; ha nem, mondd meg újra, "
+                        "mennyi legyen.")
+            return self.store.set_pending(item_id, {**item.pending, "kind": "price", "question": question,
+                                                    "confirm": int(choice)})
         if choice != "keep":
             self.store.update(item_id, user=True, price=choice)
         return self.store.set_pending(item_id, None)
+
+    @staticmethod
+    def odd_price(item: Item, amount: int) -> bool:
+        """Gyanús összeg: a mostani és a javasolt ár 20%-ánál is kevesebb, vagy a háromszorosánál is több."""
+        references = [r for r in (item.price, item.pending.get("suggested"), item.research.get("suggested")) if r]
+        return bool(references) and not any(0.2 * r <= amount <= 3 * r for r in references)
 
     def pending_item(self) -> Item | None:
         """A legutóbb visszakérdezett tárgy (a Munka menüben írt válasz ehhez tartozik)."""
@@ -296,9 +359,15 @@ class WorkDesk:
                 and item.platforms.get(t, {}).get("status") != POSTED]
 
     def post_request(self, item: Item, key: str) -> str:
+        """A modell első üzenete egy feltöltéshez. Az első lépés mindig ugyanaz (item_post: az űrlap megnyitása, a
+        hirdetés adatai, a tippek), ezt a Jarvis maga végzi el, és az eredményével kezd a modell: egy modellkör
+        (a még hideg prompt feldolgozása) megspórolva. ToolError, ha nem lehet (pl. hiányzik a cím)."""
         site = self.platforms[key]
+        opened = self.tool_post(item.id, key)
         return (f"Töltsd fel a(z) „{item.name}” tárgyat (azonosító: {item.id}) a(z) {site.name} oldalra "
-                f"(platform: {site.key}). Kezdd az item_post eszközzel, a végén jelöld meg az item_mark eszközzel.")
+                f"(platform: {site.key}). Az item_post lépést már elvégeztem, a hirdetésfeladás nyitva van a "
+                "böngésződben (az item_post eszközt ne használd, mert elölről kezdené). Töltsd ki a hirdetés "
+                f"adataival, tedd közzé, és a végén jelöld meg az item_mark eszközzel.\n\n{opened}")
 
     def unmarked_publish(self, item_id: str, key: str) -> bool:
         """A közzétételt jóváhagytad, de a tárgy nincs megjelölve feltöltöttnek (pl. a modell válasza
@@ -380,10 +449,12 @@ class WorkDesk:
             del self.trail[:-200]
             if event.get("do") == "click" and event.get("risky"):
                 self.note_publish(self.current[1])
+                self.published_in = self.current
 
     def begin_trail(self) -> None:
         """Egy feltöltés vagy levétel kezdete: innen jegyezzük a lépéseket a hibacsomaghoz."""
         self.trail = []
+        self.published_in = None
 
     # --- emberi tempó: két közzététel között ugyanazon az oldalon ------------------------------------
 
@@ -424,13 +495,26 @@ class WorkDesk:
             time.sleep(min(1.0, remaining))
         return time.monotonic() - started
 
-    def _tool_gap(self, item_id: str, key: str) -> None:
-        """Ugyanez a modell eszközeiben (item_post, item_delist): a beszélgetésből indított feltöltés vagy
-        levétel is tartja a szünetet."""
+    def _before_publish(self, label: str, url: str) -> None:
+        """A böngésző hívja a közzététel (vagy törlés) kattintása előtt, még a jóváhagyó kérdés előtt: ha ezen az
+        oldalon nemrég volt közzététel, itt várja ki a szünetet (Állj: Cancelled). Így az űrlap kitöltése a szünetre
+        esik, nem utána. Feltöltésen vagy levételen kívül (pl. a Beszélgetés böngészésénél) nem vár, és egy menetben
+        csak az első ilyen kattintásnál (a megerősítő gomb vagy a hiba utáni újraküldés már nem vár)."""
+        if self.current is None or self.published_in == self.current:
+            return
+        item_id, key = self.current
+        if self.gap_remaining(key) <= 0:
+            return
         try:
+            busy = self.store.get(item_id).busy
+        except ItemError:
+            busy = ""
+        if self.gap_waiter is not None:
+            self.gap_waiter(item_id, key)
+        else:
             self.wait_gap(item_id, key)
-        except Cancelled:
-            raise ToolError("Megszakítottad.") from None
+        if busy:
+            self.store.set_busy(item_id, busy)    # a visszaszámlálás helyett újra az, amin dolgozik
 
     @property
     def recorder(self) -> FlowRecorder | None:
@@ -537,7 +621,7 @@ class WorkDesk:
         recording = self.flows.get(flow)
         if recording is None:
             return ReplayOutcome("no_plan", "nincs begyakorolt lépéssor")
-        photos = [str(p) for p in self.store.photo_paths(item.id)] if task == "post" else []
+        photos = self.photos_for(item, key) if task == "post" else []
         # A modell csak egy-egy rövid, kötött kérdésre kell (eltűnt elem, még nem látott érték), a lépésekhez nem.
         replayer = Replayer(self.toolbox.browser, recording, item_values(item, self.settings), photos,
                             check=self.check_stop, progress=progress, llm=self.llm)
@@ -601,7 +685,7 @@ class WorkDesk:
         """Kitölti (és jóváhagyással közzéteszi) a hirdetést a Vinted-kitöltővel."""
         item = self.store.get(item_id)
         filler = VintedFiller(self.toolbox.browser, self.llm, item_values(item, self.settings),
-                              [str(p) for p in self.store.photo_paths(item.id)], memory=self.choices,
+                              self.photos_for(item, key), memory=self.choices,
                               check=self.check_stop, progress=progress)
         self.recorder = None
         self.begin_trail()
@@ -735,10 +819,15 @@ class WorkDesk:
         return bool(_DELIST_OK_RE.search(folded)) and not _PAY_RE.search(folded)
 
     def delist_request(self, item: Item, key: str) -> str:
+        """A modell első üzenete egy levételhez: az item_delist első lépését (a hirdetés megnyitása) a Jarvis maga
+        végzi el, a modell ott folytatja. A modell nélküli levételt és a begyakorolt lépéseket a JarvisApp ekkorra
+        már megpróbálta, ezeket nem kezdi újra. ToolError, ha nem lehet (pl. nincs fent)."""
         site = self.platforms[key]
+        opened = self.open_delist(self._item(item.id), key, auto=False)
         return (f"Vedd le a(z) „{item.name}” hirdetést (azonosító: {item.id}) a(z) {site.name} oldalról "
-                f"(platform: {key}), mert eladtuk. Kezdd az item_delist eszközzel, a végén jelöld meg az item_mark "
-                "eszközzel (status: nincs fent). A levételt a felhasználó már jóváhagyta.")
+                f"(platform: {key}), mert eladtuk. A levételt a felhasználó már jóváhagyta. Az item_delist lépést már "
+                "elvégeztem (ne használd újra), az eredménye lent. A végén jelöld meg az item_mark eszközzel "
+                f"(status: nincs fent).\n\n{opened}")
 
     def finish_delist(self, item_id: str, key: str, last_reply: str = "") -> bool:
         """Egy oldalról levétel után: ha nem jelölte meg levettnek, a hirdetés fent marad, megjegyzéssel."""
@@ -768,8 +857,8 @@ class WorkDesk:
         for item in self.store.all():
             if item.sold:
                 continue
-            posted = [float(e.get("at") or now) for e in item.platforms.values() if e.get("status") == POSTED]
-            if not posted or now - min(posted) < days * 86400:
+            since = item.online_since()      # a felkerülés ideje (egy újbóli jelölés nem nullázza)
+            if since is None or now - since < days * 86400:
                 continue
             if item.reminded and now - item.reminded < 7 * 86400:
                 continue
@@ -796,8 +885,20 @@ class WorkDesk:
                 lines.append(f"{label}: {value}")
         if key == "vinted":
             lines.append(f"Csomagméret: {self.settings.get('parcel_size') or 'kicsi'}")
-        lines.append(f"Fotók: {len(item.photos)} db (a browser_upload_photos tölti fel őket)")
+        site = self.platforms.get(key)
+        if site is not None and len(item.photos) > site.max_photos:
+            lines.append(f"Fotók: {site.max_photos} db (a(z) {site.name} legfeljebb ennyit vesz fel, ezért "
+                         f"{len(item.photos)} helyett az első {site.max_photos}; a browser_upload_photos tölti fel "
+                         "őket)")
+        else:
+            lines.append(f"Fotók: {len(item.photos)} db (a browser_upload_photos tölti fel őket)")
         return "\n".join(lines)
+
+    def photos_for(self, item: Item, key: str = "") -> list[str]:
+        """A tárgy fotói ehhez az oldalhoz: legfeljebb annyi, amennyit az oldal felvesz (a borítókép az első)."""
+        paths = [str(p) for p in self.store.photo_paths(item.id)]
+        site = self.platforms.get(key)
+        return paths[:site.max_photos] if site is not None else paths
 
     # --- eszközök a Munka menü beszélgetéséhez -------------------------------------------------
 
@@ -965,7 +1066,7 @@ class WorkDesk:
         if self.checking == (found.id, platform):
             raise ToolError("Ezt a hirdetést már közzétetted (a felhasználó jóváhagyta), újra ne töltsd fel, mert "
                             "kétszer kerülne fel. Nézd meg a nyitott oldalt, és ha fent van, jelöld meg (item_mark).")
-        self._tool_gap(found.id, platform)
+        # (a közzétételek közti szünetet nem itt, hanem a közzététel gombja előtt várja ki: _before_publish)
         self.store.clear_note(found.id, platform)   # az előző próbálkozás megjegyzése már nem érvényes
         self.current = (found.id, platform)
         self.approved = False
@@ -991,13 +1092,16 @@ class WorkDesk:
         if not ref:
             raise ToolError("Melyik tárgy fotóit töltsem fel? Add meg az azonosítóját.")
         found = self._item(ref)
-        paths = [str(p) for p in self.store.photo_paths(found.id)]
-        if not paths:
-            raise ToolError("Ennek a tárgynak nincs fotója.")
         browser = self.toolbox.browser
         host = browser.current_host()
-        known = any(host == domain or host.endswith("." + domain)
-                    for site in self.platforms.values() for domain in site.domains)
+        sites = [site.key for site in self.platforms.values()
+                 if any(host == domain or host.endswith("." + domain) for domain in site.domains)]
+        known = bool(sites)
+        # az oldal fotólimitje: amit épp feltöltesz, különben amelyiken a böngésző áll
+        key = self.current[1] if self.current and (self.current[1] in sites or not sites) else next(iter(sites), "")
+        paths = self.photos_for(found, key)
+        if not paths:
+            raise ToolError("Ennek a tárgynak nincs fotója.")
         if not known and not self.confirm(
                 f"Jarvis feltöltené a(z) „{found.name}” {len(paths)} fotóját ide: {host or 'ismeretlen oldal'}"):
             return "A felhasználó nem engedélyezte a fotók feltöltését."
@@ -1037,7 +1141,11 @@ class WorkDesk:
         return text + "." + learned
 
     def tool_delist(self, item: str, platform: str) -> str:
-        found = self._item(item)
+        return self.open_delist(self._item(item), platform)
+
+    def open_delist(self, found: Item, platform: str, auto: bool = True) -> str:
+        """Az item_delist eszköz: ha lehet, modell nélkül vagy begyakorolt lépésekkel leveszi (`auto`), különben
+        megnyitja a hirdetést, és a modell fejezi be."""
         site = self.platforms.get(platform)
         if site is None:
             raise ToolError(f"Ismeretlen oldal: {platform}. Lehet: {', '.join(self.platforms)}")
@@ -1049,12 +1157,11 @@ class WorkDesk:
             if not self.confirm(f"Jarvis levenné a(z) „{found.name}” hirdetést innen: {site.name}."):
                 return "A felhasználó nem engedélyezte a levételt."
             self.begin_delist(found.id, platform)
-        self._tool_gap(found.id, platform)
-        self.current = (found.id, platform)
+        self.current = (found.id, platform)      # (a szünetet a törlés gombja előtt várja ki)
         self.begin_trail()
         self.store.set_busy(found.id, f"Levétel: {site.name}…")
         prefix, clicked = "", False
-        if self.can_autodelist(found.id, platform) and self.autodelisted != (found.id, platform):
+        if auto and self.can_autodelist(found.id, platform) and self.autodelisted != (found.id, platform):
             auto = self.autodelist(found.id, platform)
             answer = self._after_autodelist(found, platform, auto)
             if answer is not None:
@@ -1065,7 +1172,7 @@ class WorkDesk:
             prefix = (f"A Törlésre rákattintottam, de nem biztos, hogy sikerült ({auto.reason}). Nézd meg az "
                       "oldalt: ha a hirdetés már nincs fent, csak jelöld meg; ha még fent van, fejezd be.\n" if clicked
                       else f"A modell nélküli levétel nem ment végig ({auto.reason}); folytasd te.\n")
-        if not clicked and self.can_replay(found.id, platform, "delist"):
+        if auto and not clicked and self.can_replay(found.id, platform, "delist"):
             outcome = self.replay(found.id, platform, "delist")
             if outcome.status == "done":
                 self.store.mark(found.id, platform, NOT_POSTED, note=DELISTED_NOTE)

@@ -1337,6 +1337,9 @@ class BrowserController:
         self.recording = False
         # Előre megadott jóváhagyás (pl. a levételt már jóváhagytad): (felirat, webcím) → igaz/hamis.
         self.approve_hook: Callable[[str, str], bool] | None = None
+        # Közzététel (kockázatos kattintás) előtt, még a jóváhagyó kérdés előtt: (felirat, webcím). Pl. a Munka
+        # menü itt várja ki a két közzététel közti szünetet, így az űrlap a szünet alatt töltődik ki.
+        self.before_publish: Callable[[str, str], None] | None = None
         self.capture_error = ""   # a hibacsomaghoz: miért nem készült képernyőkép (capture)
         self._locate_seq = LOCATE_BASE
         # A hirdetés szavai (pl. kategória, állapot, település): egy hosszú lenyíló listából az oldalnézet ezekkel
@@ -1935,6 +1938,8 @@ class BrowserController:
         ordinal = self._ordinal(el)
         url_before = page.url
         risky = bool(self.cfg.confirm_risky and is_risky(label, link=navigates(el)))
+        if risky and self.before_publish is not None:
+            self.before_publish(label, page.url)   # az Állj gomb itt is megszakíthatja (Cancelled)
         if self.auto:   # modell nélkül: egy ember is megnézi, mire kattint (a közzététel előtt az egészet)
             if risky:
                 self.pace.review()

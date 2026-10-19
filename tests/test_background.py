@@ -416,7 +416,7 @@ class PauseTests(unittest.TestCase):
         old = work.store.create(targets=["vinted"], prompt="farmer")
         work.store.update(old.id, title="Farmer", price=5000)
         work.store.mark(old.id, "vinted", POSTED)
-        work.store.get(old.id).platforms["vinted"]["at"] = time.time() - 20 * 86400
+        work.store.get(old.id).platforms["vinted"]["posted_at"] = time.time() - 20 * 86400
         fresh = work.store.create(targets=["vinted"], prompt="póló")
         work.store.mark(fresh.id, "vinted", POSTED)
         self.assertEqual([i.id for i in work.stale_items(14)], [old.id])

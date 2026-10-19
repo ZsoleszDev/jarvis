@@ -610,6 +610,7 @@ class JarvisApp:
                                  on_change=getattr(self.ui, "work_item", None),
                                  on_remove=getattr(self.ui, "work_removed", None),
                                  confirm=self.confirm, check_stop=self._check_stop)
+            self.work.gap_waiter = self._respect_gap   # a közzététel előtti szünet a naplóban és az állapotsorban
         except Exception as exc:  # noqa: BLE001 - a Beszélgetés menü enélkül is működjön
             self.ui.warn(f"A Munka menü nem indult el ({exc}).")
             self.work = None
@@ -1402,7 +1403,8 @@ class JarvisApp:
                     if choice not in ("keep", "suggested"):
                         choice = parse_price(choice) or "keep"
                     self.work.decide_price(item_id, choice)
-                    self._sell(item_id)
+                    if not self._price_question(item_id):
+                        self._sell(item_id)
                 elif action == "cancel":
                     self.work.store.set_pending(item_id, None)
                     self.ui.info("Rendben, ezt most hagyom.")
@@ -1491,18 +1493,38 @@ class JarvisApp:
         item = self.work.store.get(item_id)
         self.ui.user(text, via)
         if item.pending.get("kind") == "price":
-            choice = interpret_price_reply(text)
+            confirming = bool(item.pending.get("confirm"))
+            choice = interpret_price_reply(text, confirming=confirming)
             if choice is None:
                 suggested = item.pending.get("suggested")
-                question = "Nem értettem. Maradjon a te árad, vagy legyen a javasolt"
-                question += f" ({format_price(suggested)})?" if suggested else "?"
+                question = "Akkor mennyi legyen?" if confirming else "Nem értettem."
+                question += " Maradjon a te árad"
+                question += f" ({format_price(item.price)})" if confirming and item.price else ""
+                question += f", vagy legyen a javasolt ({format_price(suggested)})?" if suggested else "?"
+                if confirming:   # a „3 Ft-ra gondoltál?” kérdésre nemet mondott: újra az eredeti kérdés
+                    rest = {k: v for k, v in item.pending.items() if k != "confirm"}
+                    self.work.store.set_pending(item_id, {**rest, "question": question})
                 self.ui.notice(question)
                 self.say(question)
                 return
             self.work.decide_price(item_id, choice)
+            if self._price_question(item_id):
+                return
         else:
             self.work.answer(item_id, text)
         self._sell(item_id)
+
+    def _price_question(self, item_id: str) -> bool:
+        """Ha az árdöntés után még kérdés maradt (pl. „3 Ft-ra gondoltál?”), felteszi. Igaz, ha kérdezett."""
+        assert self.work is not None
+        item = self.work.store.get(item_id)
+        if item.pending.get("kind") != "price":
+            return False
+        question = str(item.pending.get("question") or "")
+        self.ui.notice(question)
+        self.say(question)
+        self._tell("question", f"Kérdés: {item.name}", question, item=item_id)
+        return True
 
     def _post_all(self, item_id: str) -> None:
         """Sorban feltölti minden kiválasztott oldalra, ahol még nincs fent."""
@@ -1514,9 +1536,12 @@ class JarvisApp:
             self.say(text)
             return
         done, failed = [], []
-        for key in targets:
+        while targets:
             if self.stop_event.is_set():
                 raise Cancelled()
+            # Ahol épp nem kell kivárni a közzétételek közti szünetet, az jön előbb (különben a kiválasztás sorrendje).
+            key = min(targets, key=self.work.gap_remaining)
+            targets.remove(key)
             name = self.work.platforms[key].name
             (done if self._post_one(item_id, key) else failed).append(name)
         item = self.work.store.get(item_id)
@@ -1628,7 +1653,8 @@ class JarvisApp:
         assert self.work is not None and self.work_assistant is not None
         if key not in self.work.platforms:
             raise ItemError(f"Ismeretlen hirdetési oldal: {key}")
-        self._respect_gap(item_id, key)
+        # A közzétételek közti szünetet nem itt várja ki, hanem a közzététel gombja előtt (WorkDesk._before_publish):
+        # így az űrlap a szünet alatt töltődik ki.
         self.work.begin_trail()
         if self.work.can_autofill(item_id, key):
             result = self._autofill(item_id, key)
@@ -1639,12 +1665,16 @@ class JarvisApp:
             if result is not None:
                 return result
         item = self.work.store.get(item_id)
-        return self._model_post(item_id, key, self.work.post_request(item, key),
+        # Az első lépést (item_post: az űrlap megnyitása) a Jarvis maga végzi el, a modell már azzal kezd.
+        return self._model_post(item_id, key, lambda: self.work.post_request(item, key),
                                 shown=f"Feltöltés: {item.name} → {self.work.platforms[key].name}")
 
-    def _model_post(self, item_id: str, key: str, request: str, shown: str, guard: bool = False) -> bool:
+    def _model_post(self, item_id: str, key: str, request: str | Callable[[], str], shown: str,
+                    guard: bool = False) -> bool:
         """A feltöltést (vagy a félig kitöltött űrlap befejezését) a modell csinálja a Munka menü beszélgetésében.
-        `guard`: a közzététel már megtörtént (jóváhagytad), ezért újra feltölteni (item_post) nem szabad."""
+        `request`: a modell első üzenete, vagy ami elkészíti (ha ez ToolError-t dob, pl. mert hiányzik a cím, az
+        úgy jelenik meg, mintha a modell mondta volna). `guard`: a közzététel már megtörtént (jóváhagytad), ezért
+        újra feltölteni (item_post) nem szabad."""
         assert self.work is not None and self.work_assistant is not None
         self.work.store.set_busy(item_id, f"Feltöltés: {self.work.platforms[key].name}…")
         # Minden feltöltés tiszta lappal indul: rövidebb kérés, gyorsabb válasz.
@@ -1656,8 +1686,11 @@ class JarvisApp:
             self.work.checking = (item_id, key)
         try:
             try:
-                self.answer(request, via="auto", mode="work", shown=shown, tools=self.work.task_tools)
+                self.answer(request() if callable(request) else request, via="auto", mode="work", shown=shown,
+                            tools=self.work.task_tools)
                 last = self._last_work_reply()
+            except ToolError as exc:
+                last = self._tool_refusal(str(exc), shown)
             except OllamaError as exc:
                 last, failure = model_problem(exc, short=True), exc
             if self.work.unmarked_publish(item_id, key) and not guard:   # (a guard-os kérés maga is ellenőrzés)
@@ -1731,6 +1764,14 @@ class JarvisApp:
             work.remember_choices(outcome)
         return ok
 
+    def _tool_refusal(self, text: str, shown: str) -> str:
+        """Ha a Jarvis által elvégzett első lépés (item_post, item_delist) nem megy (pl. hiányzik a cím), az úgy
+        jelenik meg, mintha a modell mondta volna: a naplóban, felolvasva, és a kártyán ez lesz a megjegyzés."""
+        self.ui.info(shown)
+        self.ui.assistant_end(text, False)
+        self.say(text)
+        return text
+
     def _last_work_reply(self) -> str:
         """A Munka menü beszélgetésében a modell utolsó szöveges válasza."""
         history = self.work_assistant.history if self.work_assistant is not None else []
@@ -1758,7 +1799,8 @@ class JarvisApp:
 
     def _respect_gap(self, item_id: str, key: str) -> None:
         """Emberi tempó: ugyanazon az oldalon két közzététel (vagy levétel) között pár perc teljen el
-        ([work] publish_gap_minutes). Addig vár (az Állj gomb megszakítja)."""
+        ([work] publish_gap_minutes). Addig vár (az Állj gomb megszakítja). A WorkDesk hívja a közzététel (törlés)
+        gombja előtt, amikor az űrlap már ki van töltve."""
         assert self.work is not None
         remaining = self.work.gap_remaining(key)
         if remaining <= 0:
@@ -1848,8 +1890,7 @@ class JarvisApp:
         """Egy oldalról levétel: begyakorolt lépésekkel, ha lehet, különben a modell csinálja (és tanul)."""
         assert self.work is not None and self.work_assistant is not None
         work = self.work
-        self._respect_gap(item_id, key)
-        work.begin_trail()
+        work.begin_trail()                # (a szünetet a törlés gombja előtt várja ki)
         work.begin_delist(item_id, key)   # a levételt már jóváhagytad: a törlés gombjaira nem kérdez újra
         site = work.platforms[key]
         if work.can_autodelist(item_id, key):
@@ -1865,12 +1906,15 @@ class JarvisApp:
             work.begin_delist(item_id, key)
         last = ""
         cancelled = False
+        shown = f"Levétel: {item.name} → {site.name}"
         try:
             work.store.set_busy(item_id, f"Levétel: {site.name}…")
             self.work_assistant.reset()
-            self.answer(work.delist_request(item, key), via="auto", mode="work",
-                        shown=f"Levétel: {item.name} → {site.name}", tools=work.task_tools)
+            # Az első lépést (item_delist: a hirdetés megnyitása) a Jarvis maga végzi el, a modell már azzal kezd.
+            self.answer(work.delist_request(item, key), via="auto", mode="work", shown=shown, tools=work.task_tools)
             last = self._last_work_reply()
+        except ToolError as exc:
+            last = self._tool_refusal(str(exc), shown)
         except Cancelled:
             last = "Megszakítottad."
             cancelled = True
