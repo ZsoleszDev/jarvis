@@ -59,7 +59,7 @@ RESTART_LOG_DELAY = 5.0
 
 # Ezeknél az eszközöknél pár másodperc is lehet a várakozás, ezért Jarvis rögtön szól valamit.
 SLOW_TOOLS = {"web_search", "read_webpage", "browser_open", "browser_click", "browser_type", "browser_fill",
-              "browser_read", "browser_look", "look_at_screen", "find_files", "system_status",
+              "browser_choose", "browser_do", "browser_read", "browser_look", "look_at_screen", "find_files", "system_status",
               "item_research", "item_post", "browser_upload_photos"}
 FILLERS = ["Egy pillanat.", "Máris megnézem.", "Utánanézek.", "Rajta vagyok.", "Egy pillanat, megnézem."]
 
@@ -79,7 +79,7 @@ STATE_TEXT = {
 TOOL_ACTIVITY = {
     "web_search": "Keresek a weben", "read_webpage": "Olvasom az oldalt",
     "browser_open": "Böngészek", "browser_click": "Böngészek", "browser_type": "Böngészek",
-    "browser_fill": "Kitöltöm az űrlapot",
+    "browser_fill": "Kitöltöm az űrlapot", "browser_choose": "Választok a listából", "browser_do": "Böngészek",
     "browser_scroll": "Böngészek", "browser_back": "Böngészek", "browser_read": "Olvasom az oldalt",
     "browser_look": "Nézem az oldalt", "look_at_screen": "Nézem a képernyőt",
     "find_files": "Fájlokat keresek", "read_text_file": "Olvasom a fájlt", "open_file": "Megnyitom a fájlt",
@@ -181,6 +181,9 @@ def tool_label(name: str, args: dict[str, Any]) -> str:
         "browser_click": lambda: f"Kattintás a(z) {a.get('element')}. elemre",
         "browser_type": lambda: f"Gépelés: „{a.get('text', '')}”",
         "browser_fill": lambda: f"Űrlap kitöltése ({len(a.get('fields') or [])} mező)",
+        "browser_choose": lambda: f"Választás a(z) {a.get('element')}. listából: „{a.get('option', '')}”",
+        "browser_do": lambda: (f"{len(a['actions'])} lépés egyszerre" if isinstance(a.get("actions"), list)
+                               else "Több lépés egyszerre"),
         "browser_scroll": lambda: "Görgetés " + ("felfelé" if a.get("direction") == "up" else "lefelé"),
         "browser_back": lambda: "Vissza az előző oldalra",
         "browser_read": lambda: "Az oldal elolvasása",

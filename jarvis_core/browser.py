@@ -1343,6 +1343,7 @@ class BrowserController:
         # egyező lehetőségeit mutatja elöl. Üres lista: a lista elejét.
         self.hints: list[str] = []
         self._view_url = ""       # az előző oldalnézet címe (az új elemek csillagához)
+        self._numbers_url = ""    # az oldal címe, amelyen a letapogatás (scan) és a locate számai érvényesek
         # Emberi tempó (humanize.py). Az `auto` igaz, amíg modell nélküli lépéssor fut (begyakorolt
         # lépések): akkor gondolkodási és olvasási szüneteket is tart, mert nincs modell, ami lassítana.
         self.pace = Pace(getattr(cfg, "human_pace", True), getattr(cfg, "pace", 1.0))
@@ -1719,6 +1720,7 @@ class BrowserController:
             if found and found.get("count"):
                 item = found["item"]
                 self.elements[int(item["id"])] = item
+                self._numbers_url = page.url.split("#")[0]
                 return item
             if time.monotonic() >= deadline:
                 return None
@@ -1746,6 +1748,7 @@ class BrowserController:
         elements = [e for e in found or [] if isinstance(e, dict)]
         self.elements = {n: e for n, e in self.elements.items() if not SCAN_BASE <= n < SCAN_BASE + SCAN_SPAN}
         self.elements.update({int(e["id"]): e for e in elements})
+        self._numbers_url = page.url.split("#")[0]
         return elements
 
     @_restarts_after_crash
@@ -1844,7 +1847,9 @@ class BrowserController:
                 if int(el["id"]) > before:
                     el["new"] = True
         self._view_url = url
-        self.elements = {n: el for n, el in self.elements.items() if n >= SCAN_BASE}
+        # egy másik oldalon a korábbi letapogatás számai már nem érvényesek (az elemeik ott nincsenek meg)
+        keep = url == self._numbers_url and not data.get("newDoc")
+        self.elements = {n: el for n, el in self.elements.items() if n >= SCAN_BASE and keep}
         self.elements.update({int(el["id"]): el for el in shown})
 
     def _snapshot_data(self, page: Any) -> dict[str, Any]:

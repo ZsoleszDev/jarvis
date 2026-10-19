@@ -35,8 +35,8 @@ from .vinted import ChoiceMemory, FillOutcome, VintedDelister, VintedFiller
 
 # A Munka menü beszélgetése ezeket az eszközöket látja; a böngésző ugyanaz, mint a Beszélgetésé.
 SHARED_TOOLS = {"get_datetime", "web_search", "read_webpage", "browser_open", "browser_click",
-                "browser_type", "browser_fill", "browser_scroll", "browser_back", "browser_read",
-                "browser_look"}
+                "browser_type", "browser_fill", "browser_choose", "browser_do", "browser_scroll", "browser_back",
+                "browser_read", "browser_look"}
 WORK_ONLY_TOOLS = {"item_list", "item_get", "item_update", "item_research", "item_post", "item_mark",
                    "item_delist", "browser_upload_photos"}
 DELISTED_NOTE = "Levéve"
