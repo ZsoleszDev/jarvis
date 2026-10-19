@@ -25,7 +25,8 @@ from .browser import BrowserError
 from .config import Config, data_path, resolve_path
 from .dossier import Dossiers
 from .llm import Cancelled
-from .replay import FlowRecorder, FlowStore, Replayer, ReplayOutcome, flow_key, item_values
+from .replay import (FlowRecorder, FlowStore, Replayer, ReplayOutcome, entry_for, entry_problem, flow_key, item_values,
+                     url_shape)
 from .selling import (CONDITIONS, NEEDS, NOT_POSTED, PARCEL_SIZES, PLATFORMS, POSTED, FAILED, Item,
                       ItemError, ItemStore, ListingExtractor, Platform, PriceResearcher, format_price,
                       missing_needs, parse_price, price_verdict, question_for)
@@ -461,6 +462,16 @@ class WorkDesk:
             item = self.store.get(item_id)
         except ItemError:
             return ""
+        if task == "post":
+            self.learn_entry(key, recorder.entry_url())   # akkor is, ha a lépéssor nem elég tiszta a recepthez
+        browser = self.toolbox.browser if self.browser_ready else None
+        if browser is not None and browser.running:
+            # Ahol most áll (a modell már megnézte az eredményt): a sikeres oldal címe és címsora.
+            try:
+                title, heading = browser.headline()
+                recorder.landing = {"url": browser.url, "title": title, "heading": heading}
+            except BrowserError:
+                pass
         recording, reason = recorder.build(item_values(item, self.settings))
         if recording is None:
             return f" (A lépéseket most nem jegyeztem meg: {reason}.)"
@@ -472,6 +483,39 @@ class WorkDesk:
 
     def _flow_key(self, item: Item, key: str, task: str) -> str:
         return flow_key(key, task, item.kind, item.category)
+
+    def entry_url(self, key: str) -> str:
+        """Ahol ezen az oldalon legutóbb a hirdetésfeladás űrlapja kezdődött (üres, ha még nem tudjuk)."""
+        entry = (self.settings.get("entry_urls") or {}).get(key, "")
+        site = self.platforms.get(key)
+        return entry_for(entry, site.domains) if isinstance(entry, str) and site is not None else ""
+
+    def learn_entry(self, key: str, url: str) -> None:
+        """Sikeres feltöltés után megjegyzi, hol kezdődött az űrlap (a webcím útja, kérdőjeles rész nélkül, csak
+        az oldal saját címein): legközelebb közvetlenül azt nyitja meg, nem a főoldalról keresi."""
+        site = self.platforms.get(key)
+        entry = entry_for(url, site.domains) if site is not None else ""
+        if site is not None and entry and url_shape(entry) == url_shape(site.new_url):
+            self.forget_entry(key)    # ott kezdődik, ahol eddig is: nincs mit külön megjegyezni
+            return
+        if not entry or entry == self.entry_url(key):
+            return
+        self.settings["entry_urls"] = {**(self.settings.get("entry_urls") or {}), key: entry}
+        try:
+            self._save_settings()
+        except OSError:
+            pass
+
+    def forget_entry(self, key: str) -> None:
+        """A megjegyzett űrlapcím már nem jó (nincs meg, vagy máshová visz): legközelebb a kezdőoldalról."""
+        entries = dict(self.settings.get("entry_urls") or {})
+        if entries.pop(key, None) is None:
+            return
+        self.settings["entry_urls"] = entries
+        try:
+            self._save_settings()
+        except OSError:
+            pass
 
     def can_replay(self, item_id: str, key: str, task: str) -> bool:
         if not (self.cfg.work.replay and self.browser_ready) or key not in self.platforms:
@@ -494,8 +538,9 @@ class WorkDesk:
         if recording is None:
             return ReplayOutcome("no_plan", "nincs begyakorolt lépéssor")
         photos = [str(p) for p in self.store.photo_paths(item.id)] if task == "post" else []
+        # A modell csak egy-egy rövid, kötött kérdésre kell (eltűnt elem, még nem látott érték), a lépésekhez nem.
         replayer = Replayer(self.toolbox.browser, recording, item_values(item, self.settings), photos,
-                            check=self.check_stop, progress=progress)
+                            check=self.check_stop, progress=progress, llm=self.llm)
         problem = replayer.plan_problem()
         if problem:
             return ReplayOutcome("no_plan", problem)
@@ -504,14 +549,22 @@ class WorkDesk:
             return ReplayOutcome("no_plan", "nem tudom a hirdetés webcímét")
         self.recorder = None
         self.begin_trail()
-        self.replay_preview = replayer.preview()
+        self.replay_preview = replayer.shown     # menet közben pontosodik (pl. egy új értéknél mire kattintott)
         try:
             outcome = replayer.run(start)
         finally:
             self.replay_preview = []
         if outcome.status == "done":
+            if task == "post":
+                self.learn_entry(key, replayer.form_page)
+            if replayer.changed:
+                # Javított lépés vagy új érték: a recept így marad, legközelebb már kérdés nélkül megy.
+                try:
+                    self.flows.save(recording)
+                except OSError:
+                    pass
             self.flows.update_stats(flow, ok=True)
-        elif outcome.status == "miss":
+        elif outcome.status in ("miss", "partial"):
             self.flows.update_stats(flow, ok=False)
         return outcome
 
@@ -628,8 +681,9 @@ class WorkDesk:
         except OSError:
             pass
 
-    def continue_request(self, item: Item, key: str, outcome: FillOutcome, page: str) -> str:
-        """A Vinted-kitöltő után a modell a nyitott űrlapon folytatja (nem kezdi elölről)."""
+    def continue_request(self, item: Item, key: str, outcome: FillOutcome | ReplayOutcome, page: str) -> str:
+        """A Vinted-kitöltő (vagy az elakadt visszajátszás) után a modell a nyitott űrlapon folytatja (nem kezdi
+        elölről)."""
         site = self.platforms[key]
         mark = (f"jelöld meg az item_mark eszközzel (status: feltöltve, platform: {key}, és ha látod, a hirdetés "
                 "webcíme)")
@@ -879,6 +933,26 @@ class WorkDesk:
             self.store.set_busy(found.id, "")
         return research_summary(found.research) + "\n" + price_verdict(found).text
 
+    def _open_entry(self, key: str) -> tuple[str, str]:
+        """A modell feltöltésénél: ha tudjuk, hol kezdődik az űrlap, közvetlenül azt nyitja meg. Visszaad: (a
+        kiindulás webcíme, az oldalnézet); az oldalnézet üres, ha a megszokott kezdőoldalt kell megnyitni (nincs
+        megjegyzett cím, bejelentkezést kér, vagy az oldal már nincs meg: akkor el is felejti)."""
+        site = self.platforms[key]
+        entry = self.entry_url(key)
+        if not entry or url_shape(entry) == url_shape(site.new_url):
+            return site.new_url, ""
+        browser = self.toolbox.browser
+        try:
+            page = browser.open(entry)
+            problem = entry_problem(browser, entry)
+        except BrowserError:
+            page, problem = "", "gone"
+        if not problem:
+            return entry, page
+        if problem == "gone":
+            self.forget_entry(key)
+        return site.new_url, ""
+
     def tool_post(self, item: str, platform: str) -> str:
         found = self._item(item)
         site = self.platforms.get(platform)
@@ -897,14 +971,18 @@ class WorkDesk:
         self.approved = False
         self.begin_trail()
         self.store.set_busy(found.id, f"Feltöltés: {site.name}…")
-        self.start_recording(found, platform, "post", site.new_url)
-        try:
-            page = self.toolbox.browser.open(site.new_url)
-        except BrowserError as exc:
-            self.recorder = None
-            raise ToolError(str(exc)) from None
+        start, page = self._open_entry(platform)
+        self.start_recording(found, platform, "post", start)
+        if not page:
+            try:
+                page = self.toolbox.browser.open(site.new_url)
+            except BrowserError as exc:
+                self.recorder = None
+                raise ToolError(str(exc)) from None
+        where = ("Közvetlenül a hirdetésfeladás oldalát nyitottam meg (legutóbb itt kezdődött az űrlap): a "
+                 "hirdetésfeladás gombját nem kell megkeresned.\n" if start != site.new_url else "")
         return (f"A hirdetés adatai ({found.id}):\n{self.listing_block(found, platform)}\n\n"
-                f"Tippek ({site.name}): {site.hints}\n"
+                f"Tippek ({site.name}): {site.hints}\n{where}"
                 "A végső feltöltés előtt a rendszer jóváhagyást kér a felhasználótól. Ha bejelentkezés "
                 "vagy robot-ellenőrzés kell, állj meg, és kérd meg a felhasználót." + KEEP_ABOVE + page)
 
