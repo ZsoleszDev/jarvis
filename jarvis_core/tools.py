@@ -572,8 +572,8 @@ class Toolbox:
         )
         self.register(
             "browser_type",
-            "Beír egy szöveget a számmal jelölt mezőbe (lenyíló listánál kiválasztja a lehetőséget). "
-            "submit=true esetén Entert is nyom, pl. keresésnél.",
+            "Beír egy szöveget a számmal jelölt mezőbe (lenyíló listánál kiválasztja a lehetőséget, "
+            "jelölőnégyzetnél az igen/nem szerint beállítja). submit=true esetén Entert is nyom, pl. keresésnél.",
             params({
                 "element": element,
                 "text": {"type": "string", "description": "A beírandó szöveg."},
@@ -584,8 +584,8 @@ class Toolbox:
         self.register(
             "browser_fill",
             "Egy lépésben több mezőt tölt ki a legutóbbi oldalnézet számai szerint (pl. egy űrlap "
-            "címét, leírását és árát), Enter nélkül; lenyíló listánál kiválasztja a lehetőséget. "
-            "Űrlapnál ez gyorsabb, mint mezőnként a browser_type.",
+            "címét, leírását és árát), Enter nélkül; lenyíló listánál kiválasztja a lehetőséget, "
+            "jelölőnégyzetnél igen/nem. Űrlapnál ez gyorsabb, mint mezőnként a browser_type.",
             params({"fields": {
                 "type": "array", "description": "A kitöltendő mezők.",
                 "items": {"type": "object", "properties": {
@@ -593,6 +593,34 @@ class Toolbox:
                     "required": ["element", "text"]},
             }}, ["fields"]),
             self.browser_fill, ephemeral=True,
+        )
+        self.register(
+            "browser_choose",
+            "Kiválaszt egy lehetőséget egy lenyíló listából (a lista számával): kinyitja, megkeresi és rákattint, "
+            "kereshető listánál előbb beírja. Fánál add meg az utat: „Nők > Ruházat > Pólók”. A saját (nem "
+            "natív) lenyíló listákhoz ezt használd a kattintgatás helyett.",
+            params({
+                "element": element,
+                "option": {"type": "string", "description": "A lehetőség felirata (fánál az út, „>” jellel)."},
+            }, ["element", "option"]),
+            self.browser_choose, ephemeral=True,
+        )
+        self.register(
+            "browser_do",
+            "Legfeljebb 5 lépés egy körben ugyanazon az oldalon, sorban, a legutóbbi oldalnézet számaival: click, "
+            "type (szöveg), choose (lehetőség listából), check (igen/nem). Ha közben új oldal, lap vagy felugró "
+            "ablak nyílik, megáll, és megmondja, mi maradt ki. Kockázatos gomb (pl. közzététel) csak az utolsó "
+            "lehet. A végén egy oldalnézetet kapsz.",
+            params({"actions": {
+                "type": "array", "description": "A lépések sorban.",
+                "items": {"type": "object", "properties": {
+                    "do": {"type": "string", "enum": ["click", "type", "choose", "check"],
+                           "description": "A lépés fajtája."},
+                    "element": element,
+                    "text": {"type": "string", "description": "A szöveg, a lehetőség vagy igen/nem."}},
+                    "required": ["do", "element"]},
+            }}, ["actions"]),
+            self.browser_do, ephemeral=True,
         )
         self.register(
             "browser_scroll",
@@ -642,6 +670,17 @@ class Toolbox:
             except ValueError:
                 raise ToolError('A mezőket listában add meg: [{"element": 3, "text": "Zara póló"}]') from None
         return self._browse(lambda: self.browser.fill_fields(fields))
+
+    def browser_choose(self, element: int, option: str) -> str:
+        return self._browse(lambda: self.browser.choose(element, option))
+
+    def browser_do(self, actions: list[dict[str, Any]] | str) -> str:
+        if isinstance(actions, str):   # a modell néha szövegként küldi a listát
+            try:
+                actions = json.loads(actions)
+            except ValueError:
+                raise ToolError('A lépéseket listában add meg: [{"do": "click", "element": 7}]') from None
+        return self._browse(lambda: self.browser.do_actions(actions))
 
     def browser_scroll(self, direction: str = "down") -> str:
         return self._browse(lambda: self.browser.scroll(direction))

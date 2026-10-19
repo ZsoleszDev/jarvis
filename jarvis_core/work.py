@@ -422,6 +422,18 @@ class WorkDesk:
         except Cancelled:
             raise ToolError("Megszakítottad.") from None
 
+    @property
+    def recorder(self) -> FlowRecorder | None:
+        """A modell lépéseinek felvétele, amíg tart (lásd start_recording)."""
+        return self._recorder
+
+    @recorder.setter
+    def recorder(self, value: FlowRecorder | None) -> None:
+        # A böngésző csak felvétel közben számolja ki, hányadik egy elem a hasonlók között (ORDINAL_JS).
+        self._recorder = value
+        if self.browser_ready:
+            self.toolbox.browser.recording = value is not None
+
     def start_recording(self, item: Item, key: str, task: str, start_url: str) -> None:
         """A modell lépéseinek felvétele (a sikeres végén megjegyezzük őket)."""
         self.recorder = None

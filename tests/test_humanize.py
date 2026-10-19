@@ -237,6 +237,16 @@ class HumanBrowserTests(unittest.TestCase):
         self.assertGreater(len({(c[0], c[1]) for c in clicks}), 1, "nem mindig pont ugyanoda")
         self.assertEqual(browser.page.inner_text("#out"), "Mentve")
 
+    def test_a_mouse_move_lasts_as_long_as_planned(self):
+        browser = self.make(pace=1.0)
+        browser.pace.move_seconds = lambda start, end: 0.4
+        for target in ((900, 600), (100, 80)):
+            started = time.monotonic()
+            browser._move_mouse(browser.page, *target)
+            took = time.monotonic() - started
+            self.assertGreaterEqual(took, 0.38, "nem rövidebb az emberi mozdulatnál")
+            self.assertLess(took, 0.48, "a böngészőnek küldött mozdulatok ideje nem adódik hozzá")
+
     def test_far_elements_are_reached_with_the_wheel(self):
         browser = self.make()
         browser._human_click(browser.page, browser.page.locator("#far"))
