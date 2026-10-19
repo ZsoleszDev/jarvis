@@ -485,6 +485,13 @@ class JarvisApp:
             self.scheduler.register(Job("stale", "Régóta fent lévő hirdetések",
                                         lambda: 24 * 60.0 if int(self.cfg.scheduler.stale_days) > 0 else 0,
                                         self._stale_job, needs_models=False))
+        checker = self.work.checker if self.work is not None else None
+        if checker is not None:
+            # Modell nélkül, de a böngésző kell hozzá: készenlétben (bezárt böngészővel) nem fut.
+            self.scheduler.register(Job("listings", "Fent lévő hirdetések ellenőrzése",
+                                        lambda: 24 * 60.0 if int(self.cfg.scheduler.listing_checks) > 0 else 0,
+                                        self._listings_job, available=lambda: bool(checker.due()),
+                                        needs_models=False, needs_browser=True))
 
     def _register_watch_tools(self) -> None:
         box, watches = self.toolbox, self.watches
@@ -560,6 +567,11 @@ class JarvisApp:
                    "Ha olcsóbbra vennéd valamelyiket, szólj.", items=[i.id for i in stale])
         self.work.mark_reminded([i.id for i in stale])
         return f"{len(stale)} régóta fent lévő hirdetés."
+
+    def _listings_job(self, ctx: Any) -> str:
+        """Naponta: néhány fent lévő hirdetés oldala (csak olvasva): elkelt-e vagy eltűnt-e valahol."""
+        assert self.work is not None and self.work.checker is not None
+        return self.work.checker.run(int(self.cfg.scheduler.listing_checks), check=ctx.check, notify=ctx.notify)
 
     def _tell(self, kind: str, title: str, text: str, **extra: Any) -> None:
         """Értesítés a telefonra is (a naplóba nem kerül újra): pl. hogy egy feltöltés kész, vagy hogy Jarvis
@@ -1040,11 +1052,11 @@ class JarvisApp:
         return kind == "text" and isinstance(payload, dict) and is_pause_request(str(payload.get("text") or ""))
 
     def _light_job(self, payload: Any) -> bool:
-        """Készenlétben is lefuthat-e (a modell nélküli háttérmunkák: figyelők, régi hirdetések)."""
+        """Készenlétben is lefuthat-e (a modell és böngésző nélküli háttérmunkák: figyelők, régi hirdetések)."""
         if not self.standby or self.scheduler is None or not isinstance(payload, dict):
             return False
         job = self.scheduler.jobs.get(str(payload.get("key") or ""))
-        return job is not None and not job.needs_models
+        return job is not None and not job.needs_models and not job.needs_browser
 
     def _wake_up(self) -> None:
         """Készenlétből: betölti a modelleket, és utána jöhet a kérés."""

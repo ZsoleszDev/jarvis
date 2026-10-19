@@ -45,6 +45,9 @@ TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200
                "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20}
 MULTILINE = {"description", "prompt"}
 POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
+# Egy fent lévő hirdetés újbóli megjelölésekor (ugyanaz a hirdetés) ezek maradnak: a feltöltéskori ár és cím,
+# és a háttérellenőrzés eredménye (lásd listings.py).
+REMARK_KEEPS = ("posted_price", "posted_title", "checked_at", "check", "check_note")
 
 
 class ItemError(Exception):
@@ -110,6 +113,10 @@ PLATFORMS: dict[str, Platform] = {
         "megadott módok (pl. személyes átvétel, postázás, Foxpost). 7. Fotók: browser_upload_photos. "
         "8. Végül a feladás gomb."),
 }
+
+
+# Hol van fent, mondatba illesztve („a Vinteden még 9 000 Ft”).
+ON_SITE = {"vinted": "a Vinteden", "jofogas": "a Jófogáson", "vatera": "a Vaterán", "hardverapro": "a Hardveraprón"}
 
 
 # --- mit kér az egyes oldal ---------------------------------------------------------
@@ -197,11 +204,29 @@ class Item:
             return "részben fent"
         return "vázlat"
 
+    def drift(self) -> list[dict[str, Any]]:
+        """Ahol a fent lévő hirdetés ára vagy címe már nem az, ami itt van (itt átírtuk, ott nem):
+        [{"platform": "vinted", "price": 9000, "title": "…"}], csak az eltérő mezőkkel."""
+        out = []
+        for key, entry in self.platforms.items():
+            if entry.get("status") != POSTED:
+                continue
+            differs: dict[str, Any] = {}
+            if entry.get("posted_price") is not None and entry["posted_price"] != self.price:
+                differs["price"] = entry["posted_price"]
+            if entry.get("posted_title") and self.title and entry["posted_title"] != self.title:
+                differs["title"] = entry["posted_title"]
+            if differs:
+                out.append({"platform": key, **differs})
+        return out
+
     def public(self) -> dict[str, Any]:
         data = asdict(self)
         data["name"] = self.name
         data["status"] = self.status
         data["verdict"] = price_verdict(self).text if self.research.get("at") else ""
+        data["research_stale"] = bool(self.research.get("at")) and not research_fresh(self)
+        data["drift"] = self.drift()
         return data
 
     def stored(self) -> dict[str, Any]:
@@ -482,12 +507,22 @@ class ItemStore:
                 if status not in (POSTED, NOT_POSTED, FAILED):
                     raise ItemError(f"Az állapot „{POSTED}”, „{NOT_POSTED}” vagy „{FAILED}” lehet.")
                 entry: dict[str, Any] = {"status": status, "at": time.time()}
+                previous = item.platforms.get(platform, {})
                 if url.startswith(("http://", "https://")):
                     entry["url"] = url[:300]
-                elif status == POSTED and item.platforms.get(platform, {}).get("url"):
-                    entry["url"] = item.platforms[platform]["url"]
+                elif status == POSTED and previous.get("url"):
+                    entry["url"] = previous["url"]
                 if note:
                     entry["note"] = note[:300]
+                if status == POSTED:
+                    # Ugyanaz a hirdetés (pl. „Itt kelt el.” megjegyzéssel): a feltöltéskori ár és cím, és
+                    # amit a háttérben láttunk róla, marad. Új hirdetésnél a mostani ár és cím ment fel.
+                    if previous.get("status") == POSTED and previous.get("url", entry.get("url")) == entry.get("url"):
+                        entry.update({k: previous[k] for k in REMARK_KEEPS if k in previous})
+                    if item.price is not None:
+                        entry.setdefault("posted_price", item.price)
+                    if item.title:
+                        entry.setdefault("posted_title", item.title)
                 item.platforms[platform] = entry
             if sold is not None:
                 item.sold = bool(sold)
@@ -512,6 +547,22 @@ class ItemStore:
             if entry is None:
                 entry = item.platforms[platform] = {"status": NOT_POSTED, "at": time.time()}
             entry["dossier"] = str(name)[:120]
+            return self._changed(item)
+
+    def set_check(self, item_id: str, platform: str, state: str, when: float | None = None,
+                  detail: str = "") -> Item:
+        """A háttérben megnézett hirdetés állapota (fent van, elkelt, eltűnt): mikor, mit láttunk és miből."""
+        with self._lock:
+            item = self.get(item_id)
+            entry = item.platforms.get(platform)
+            if entry is None:
+                return item
+            entry["checked_at"] = time.time() if when is None else float(when)
+            entry["check"] = state
+            if detail:
+                entry["check_note"] = detail[:200]
+            else:
+                entry.pop("check_note", None)
             return self._changed(item)
 
     def set_reminded(self, item_id: str, when: float | None = None) -> Item:
@@ -714,6 +765,136 @@ def describe_item(item: Item) -> str:
     return "; ".join(parts)
 
 
+# --- előszűrés és robusztus statisztika (modell nélkül) ---------------------------------------
+
+RESEARCH_MAX_AGE = 7 * 86400   # egy hét után az árkutatás elavult: a következő árazás előtt újra megnézi
+JUDGE_ROWS = 25                # a modell legfeljebb ennyi találatot kap: a tárgyhoz leginkább illőket
+NEW_CONDITIONS = {"Új, címkével", "Új"}
+WORN_CONDITIONS = {"Elfogadható", "Hibás"}
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Ezek szinte minden hirdetésben ott vannak, ezért arról, hogy ugyanaz-e a termék, nem mondanak semmit.
+_STOPWORDS = {
+    "az", "egy", "es", "is", "de", "vagy", "nem", "meg", "mar", "csak", "mint", "the", "and", "for", "with",
+    "uj", "ujszeru", "hasznalt", "elado", "eladom", "jo", "nagyon", "szep", "allapot", "allapotu", "allapotban",
+    "meret", "meretu", "szinu", "ft", "huf", "forint", "db", "darab", "szemelyes", "atvetel", "postazas",
+    "szallitas", "foxpost", "new", "used", "size", "noi", "ferfi", "unisex",
+}
+# Kereső- és cserehirdetés: valaki venni vagy cserélni akar, az ára nem eladási ár. A „csere” csak akkor
+# számít, ha az eladás szava nincs mellette („Eladó vagy csere” még eladás).
+_WANTED_RE = re.compile(r"\b(keresek|keresem|keresunk|veszek|vennek|vennem|megvennem|felvasar\w*|beszamit\w*)\b")
+_SWAP_RE = re.compile(r"\b(csere|cseret|csereben|cserere|cserelnem|cserelnek|cserelek|elcserelnem|cserebere)\b")
+_SALE_RE = re.compile(r"\belad")
+# Csomag vagy több darab egyben: az ár nem egy darabé. A darabszám („3 db”, „x2”) csak elektronikán kívül
+# számít: ott a „2 db ventilátorral” vagy a „PCIe x4” a tárgy leírása, nem csomag.
+_LOT_RE = re.compile(r"\b(csomag|csomagban|csomagot|csomagkent|szett|szettben|lot|kotegben|tetelben)\b|"
+                     r"\btobb (db|darab)\b")
+_COUNT_RE = re.compile(r"\b([2-9]|[1-9]\d) ?(db|darab|par)\b|\bx[2-9]\b")
+# Alkatrész, hibás, vagy csak a doboza: nem a működő tárgy ára („nem hibás”, „nem törött” nem számít).
+_PARTS_RE = re.compile(r"(?<!nem )\b(alkatresz\w*|hibas|hibasan|hibasak|javitasra|torott|for parts|"
+                       r"csak (a )?doboz\w*|ures doboz\w*)\b|\b(nem mukodik|nem mukodo|mukodeskeptelen)\b")
+
+
+def research_fresh(item: Item, now: float | None = None) -> bool:
+    """Van-e egy hétnél frissebb árkutatás (a régebbit a következő árazás előtt újra megnézi)."""
+    at = float((item.research or {}).get("at") or 0)
+    now = time.time() if now is None else now
+    return bool(at) and now - at < RESEARCH_MAX_AGE
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in _TOKEN_RE.findall(fold(text or "")) if len(t) > 1 and t not in _STOPWORDS}
+
+
+def _shared(wanted: set[str], have: set[str]) -> set[str]:
+    """A közös szavak; a toldalékos és az összetett alak is számít (blézer ~ blézert, farmer ~ farmernadrág)."""
+    return {w for w in wanted if w in have or any((len(w) >= 4 and h.startswith(w)) or
+                                                  (len(h) >= 4 and w.startswith(h)) for h in have)}
+
+
+def listing_key(url: str) -> str:
+    """Egy hirdetés azonosítója a webcíméből: a gép és a hirdetés száma (ha van), különben az útvonal. Így a
+    saját hirdetésed más paraméterekkel vagy más címmel (slug) is felismerhető."""
+    parts = urllib.parse.urlsplit(url or "")
+    host = (parts.hostname or "").removeprefix("www.")
+    number = re.search(r"\d{5,}", parts.path)
+    return f"{host}#{number.group(0)}" if number else host + parts.path.rstrip("/").lower()
+
+
+def _same_listing(words: set[str], price: int, other: set[str], other_price: int) -> bool:
+    """Ugyanaz a hirdetés még egyszer (pl. az eladó több oldalra is feltette): szinte ugyanaz a cím és az ár."""
+    if not words or not other or abs(price - other_price) > 0.05 * max(price, other_price, 1):
+        return False
+    return len(words & other) / len(words | other) >= 0.8
+
+
+def prefilter(item: Item, rows: list[dict[str, Any]], limit: int = JUDGE_ROWS
+              ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Modell nélküli előszűrés a bíráló modellhívás előtt. Kimarad: a kereső- és a cserehirdetés, a csomag,
+    az alkatrész és a hibás (hacsak a te tárgyad nem ilyen), ami egy szóban sem egyezik a tárgyad címével,
+    márkájával, nevével vagy keresőszavával, a saját hirdetésed, és ugyanannak a hirdetésnek az ismétlése.
+    A maradékból a legjobban egyező `limit` darab marad, az eredeti sorrendben (a végső szót a modell
+    mondja ki). Visszaadja a megmaradtakat, és hogy miért mennyi esett ki."""
+    own = fold(" ".join((item.title, item.product, item.description, item.brand)))
+    lot_ok = bool(_LOT_RE.search(own) or _COUNT_RE.search(own))
+    parts_ok = item.condition == "Hibás" or bool(_PARTS_RE.search(own))
+    counts = item.kind != "elektronika"
+    wanted = _tokens(" ".join((item.title, item.brand, item.product, item.search_query)))
+    brand = _tokens(item.brand)
+    size = set(_TOKEN_RE.findall(fold(item.size)))
+    mine = {listing_key(e["url"]) for e in item.platforms.values() if isinstance(e, dict) and e.get("url")}
+    dropped: dict[str, int] = {}
+    scored: list[tuple[float, int, dict[str, Any]]] = []
+    seen: list[tuple[set[str], int]] = []
+    for index, row in enumerate(rows):
+        text = fold(str(row.get("text") or ""))
+        words, price = _tokens(text), int(row.get("price") or 0)
+        reason = ""
+        if row.get("url") and listing_key(str(row["url"])) in mine:
+            reason = "saját"
+        elif _WANTED_RE.search(text) or (_SWAP_RE.search(text) and not _SALE_RE.search(text)):
+            reason = "kereső"
+        elif not lot_ok and (_LOT_RE.search(text) or (counts and _COUNT_RE.search(text))):
+            reason = "csomag"
+        elif not parts_ok and _PARTS_RE.search(text):
+            reason = "alkatrész"
+        elif wanted and not _shared(wanted, words):
+            reason = "más termék"
+        elif any(_same_listing(words, price, other, other_price) for other, other_price in seen):
+            reason = "ismétlődő"
+        if reason:
+            dropped[reason] = dropped.get(reason, 0) + 1
+            continue
+        seen.append((words, price))
+        score = (len(_shared(wanted, words)) + (1.0 if brand and _shared(brand, words) else 0.0)
+                 + (0.5 if size and size & set(_TOKEN_RE.findall(text)) else 0.0))
+        scored.append((score, index, row))
+    best = sorted(scored, key=lambda s: (-s[0], s[1]))[:max(1, limit)]
+    if len(scored) > len(best):
+        dropped["kevésbé illő"] = len(scored) - len(best)
+    return [row for _, _, row in sorted(best, key=lambda s: s[1])], dropped
+
+
+def price_stats(prices: list[int] | list[float]) -> dict[str, Any]:
+    """Robusztus árstatisztika: a kilógó árakat (pl. egy tízszeres vagy egy 1 forintos hirdetés) a
+    negyedek közti terjedelemmel kidobja, a maradékból alsó negyed (p25), medián és felső negyed (p75).
+    „bizonytalan”, ha ötnél kevesebb ár maradt, vagy nagyon szórnak (a sáv a medián 60%-ánál szélesebb)."""
+    values = sorted(int(p) for p in prices)
+    if not values:
+        return {}
+    if len(values) >= 4:
+        q1, middle, q3 = statistics.quantiles(values, n=4, method="inclusive")
+        spread = max(q3 - q1, 0.2 * middle)   # sok egyforma árnál se essen ki minden kicsit eltérő
+        values = [v for v in values if q1 - 1.5 * spread <= v <= q3 + 1.5 * spread]
+    if len(values) >= 2:
+        p25, median, p75 = statistics.quantiles(values, n=4, method="inclusive")
+    else:
+        p25 = median = p75 = values[0]
+    confidence = "bizonytalan" if len(values) < 5 or p75 - p25 > 0.6 * median else "megbízható"
+    return {"min": values[0], "max": values[-1], "p25": int(round(p25)), "median": int(round(median)),
+            "p75": int(round(p75)), "n": len(values), "confidence": confidence}
+
+
 class PriceResearcher:
     """Megnézi a hirdetési oldalakon, mennyiért kínálnak hasonlót."""
 
@@ -752,18 +933,26 @@ class PriceResearcher:
             if not found:
                 errors.append(f"{site.name}: nem találtam árakat (lehet, hogy ellenőrzést kér az oldal)")
             for entry in found[:20]:
-                results.append({"site": site.name, "text": entry["text"][:180],
-                                "price": int(entry["price"]), "url": entry["url"]})
-        research: dict[str, Any] = {"query": query, "at": time.time(), "count": len(results),
-                                    "similar": [], "errors": errors}
-        if results:
+                row = {"site": site.name, "text": entry["text"][:180], "price": int(entry["price"]),
+                       "url": entry["url"]}
+                if entry.get("auction"):
+                    row["auction"] = True
+                results.append(row)
+        rows, dropped = prefilter(item, results)
+        research: dict[str, Any] = {"query": query, "at": time.time(), "count": len(results), "kept": len(rows),
+                                    "dropped": dropped, "similar": [], "errors": errors}
+        if rows:
             if progress:
                 progress("a hasonlók kiválasztása")
-            research.update(self._judge(item, results))
+            research.update(self._judge(item, rows))
+        elif results:
+            research["reason"] = ("A találatok között nem volt a tárgyadhoz hasonló (kereső- vagy csomaghirdetés, "
+                                  "alkatrész vagy más termék).")
         return self.store.set_research(item_id, research)
 
     def _judge(self, item: Item, results: list[dict[str, Any]]) -> dict[str, Any]:
         listing = "\n".join(f"{n}. [{r['site']}] {r['text']} – {format_price(r['price'])}"
+                            + (" (licit: a mostani ajánlat, nem végleges ár)" if r.get("auction") else "")
                             for n, r in enumerate(results, 1))
         messages = [
             {"role": "system", "content": SELECT_SYSTEM},
@@ -782,16 +971,21 @@ class PriceResearcher:
         if not picked:
             out["reason"] = out["reason"] or "Nem találtam elég hasonló hirdetést."
             return out
-        prices = sorted(r["price"] for r in picked)
-        median = statistics.median(prices)
-        out.update({"min": prices[0], "max": prices[-1], "median": int(median)})
+        fixed = [r for r in picked if not r.get("auction")]
+        basis = fixed if len(fixed) >= 3 else picked    # a licit csak a mostani ajánlat: ha lehet, kimarad
+        stats = price_stats([r["price"] for r in basis])
+        kept = [r for r in basis if stats["min"] <= r["price"] <= stats["max"]]
+        out["similar"] = kept[:12]
+        out.update(stats)
+        if len(kept) < len(basis):
+            out["outliers"] = len(basis) - len(kept)
         try:
             suggested = int(data.get("suggested_price") or 0)
         except (TypeError, ValueError):
             suggested = 0
-        if not prices[0] * 0.5 <= suggested <= prices[-1] * 1.2:
-            suggested = median   # irreális javaslat helyett a középérték
-        out["suggested"] = round_price(suggested)
+        if not stats["min"] * 0.5 <= suggested <= stats["max"] * 1.2:
+            suggested = stats["median"]   # irreális javaslat helyett a középérték
+        out["suggested"] = round_price(min(max(suggested, stats["p25"]), stats["p75"]))
         return out
 
 
@@ -802,8 +996,21 @@ class Verdict:
     suggested: int | None = None
 
 
+def _condition_note(item: Item, p25: int, p75: int) -> str:
+    """Az állapot szerint a sáv melyik része reális (csak tájékoztatás, a javasolt árat nem írja át)."""
+    if p25 >= p75:
+        return ""
+    if item.condition in NEW_CONDITIONS:
+        return f" Mivel új, a sáv felső része (kb. {format_price(p75)}) is reális."
+    if item.condition in WORN_CONDITIONS:
+        return f" Az állapota miatt inkább a sáv alsó része (kb. {format_price(p25)}) a reális."
+    return ""
+
+
 def price_verdict(item: Item) -> Verdict:
-    """Az árkutatás alapján: rendben van-e az ár. Csak ajánlás; a döntés az eladóé."""
+    """Az árkutatás alapján: rendben van-e az ár. Csak ajánlás; a döntés az eladóé. A szokásos sáv a hasonlók
+    alsó és felső negyede közt van: ha az árad e fölött, és a középérték 1,25-szörösénél is feljebb van,
+    megáll és megkérdezi."""
     r = item.research or {}
     similar = r.get("similar") or []
     prices = sorted(int(s["price"]) for s in similar if isinstance(s, dict) and isinstance(s.get("price"), (int, float)))
@@ -814,15 +1021,20 @@ def price_verdict(item: Item) -> Verdict:
         found = (f"Csak {len(prices)} hasonló hirdetést találtam, ez kevés az összevetéshez"
                  if prices else "Nem találtam hasonló hirdetést az összevetéshez")
         return Verdict(False, f"{found}; marad az árad ({format_price(price)}).")
-    low, high = r.get("min") or prices[0], r.get("max") or prices[-1]
-    median = r.get("median") or int(statistics.median(prices))
-    span = f"{format_price(low)} és {format_price(high)} között (középérték {format_price(median)})"
-    if price > median * 1.25:
+    stats = price_stats(prices)       # a régi (negyedek nélküli) kutatásnál ebből
+    median = int(r.get("median") or stats["median"])
+    p25, p75 = int(r.get("p25") or stats["p25"]), int(r.get("p75") or stats["p75"])
+    span = (f"többnyire {format_price(p25)} és {format_price(p75)} között (középérték {format_price(median)})"
+            if p25 < p75 else f"{format_price(median)} körül")
+    unsure = (" Kevés vagy nagyon eltérő ár alapján mondom, ezért csak tájékoztató."
+              if (r.get("confidence") or stats["confidence"]) == "bizonytalan" else "")
+    note = _condition_note(item, p25, p75)
+    if price > max(median * 1.25, p75):
         suggested = r.get("suggested") or round_price(median)
-        return Verdict(True, f"Hasonlót {span} kínálnak. {format_price(price)}-ért valószínűleg nehezen kel el, "
-                             f"én {format_price(suggested)}-ot kérnék. Maradjon a te árad, vagy legyen "
-                             f"{format_price(suggested)}?", suggested)
-    if price < median * 0.6:
-        return Verdict(False, f"Ennél többet is kérhetnél: hasonlót {span} kínálnak. Marad a te árad "
+        return Verdict(True, f"Hasonlót {span} kínálnak.{unsure}{note} {format_price(price)}-ért valószínűleg "
+                             f"nehezen kel el, én {format_price(suggested)}-ot kérnék. Maradjon a te árad, vagy "
+                             f"legyen {format_price(suggested)}?", suggested)
+    if price < min(median * 0.6, p25):
+        return Verdict(False, f"Ennél többet is kérhetnél: hasonlót {span} kínálnak.{note} Marad a te árad "
                               f"({format_price(price)}).")
-    return Verdict(False, f"Az árad rendben van: hasonlót {span} kínálnak.")
+    return Verdict(False, f"Az árad rendben van: hasonlót {span} kínálnak.{unsure}{note}")

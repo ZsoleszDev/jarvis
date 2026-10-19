@@ -178,6 +178,7 @@ class SchedulerCfg:
     active_hours: str = ""         # pl. "08:00-20:00"; üres = bármikor, amíg a Jarvis fut
     watch_minutes: float = 60.0    # a figyelők (mentett keresések) ellenőrzése
     stale_days: int = 14           # ennyi nap után szól, ha egy hirdetés nem kelt el (0 = soha)
+    listing_checks: int = 5        # naponta ennyi fent lévő hirdetést néz meg: elkelt-e, eltűnt-e (0 = soha)
     speak: bool = True             # a háttérmunka eredményét fel is olvassa
 
 

@@ -18,6 +18,7 @@ import statistics
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -163,6 +164,26 @@ class ItemStoreTests(unittest.TestCase):
         self.assertEqual(round_price(260), 250)
         self.assertEqual(selling.format_price(12990), "12 990 Ft")
         self.assertEqual(clean_for_speech("Javasolt ár: 4 500 Ft."), "Javasolt ár: 4500 forint.")
+
+    def test_posted_price_and_drift(self):
+        item = self.store.create(targets=["vinted", "jofogas"], title="Levi's farmer", price=9000)
+        url = "https://www.vinted.hu/items/1234567-levis-farmer"
+        item = self.store.mark(item.id, "vinted", POSTED, url=url)
+        self.assertEqual((item.platforms["vinted"]["posted_price"], item.platforms["vinted"]["posted_title"]),
+                         (9000, "Levi's farmer"))
+        self.assertEqual(item.public()["drift"], [])
+        item = self.store.update(item.id, user=True, price=8500, title="Levi's 501 farmer")
+        self.assertEqual(item.public()["drift"], [{"platform": "vinted", "price": 9000, "title": "Levi's farmer"}])
+        self.store.set_check(item.id, "vinted", "live")
+        item = self.store.mark(item.id, "vinted", POSTED, note="Itt kelt el.")
+        entry = item.platforms["vinted"]
+        self.assertEqual((entry["posted_price"], entry["url"], entry["check"]), (9000, url, "live"),
+                         "ugyanaz a hirdetés: a feltöltéskori ár és az ellenőrzés marad")
+        item = self.store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/7654321-uj")
+        self.assertEqual(item.platforms["vinted"]["posted_price"], 8500, "új hirdetés: a mostani ár")
+        self.assertNotIn("check", item.platforms["vinted"])
+        item = self.store.mark(item.id, "vinted", "nincs fent")
+        self.assertEqual(item.drift(), [], "ami nincs fent, ott nincs mit átírni")
 
     def test_photos(self):
         item = self.store.create()
@@ -398,6 +419,100 @@ class PriceResearchTests(unittest.TestCase):
         self.assertEqual(len(item.research["errors"]), 2)
         self.assertIn("nem találtam", research_summary(item.research))
 
+    def blazer(self, **values) -> Item:
+        item = self.store.create(price=5000)
+        values = {"title": "Zara fekete blézer, M", "product": "blézer", "brand": "Zara", "size": "M",
+                  "search_query": "Zara blézer", **values}
+        return self.store.update(item.id, **values)
+
+    def test_prefilter_drops_noise_before_the_model(self):
+        item = self.blazer()
+        self.store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/4455667-zara-blezer?ref=x")
+        item = self.store.get(item.id)
+        rows = [{"text": "Zara blézer M, fekete", "price": 4000, "url": "https://www.vinted.hu/items/1"},
+                {"text": "Keresek Zara blézert M-es méretben", "price": 3000, "url": "https://jofogas.hu/k_1.htm"},
+                {"text": "Zara blézer csere is érdekel", "price": 4200, "url": "https://jofogas.hu/k_2.htm"},
+                {"text": "Eladó vagy csere: Zara blézer S", "price": 4100, "url": "https://jofogas.hu/k_3.htm"},
+                {"text": "Zara blézer csomag (3 db)", "price": 9000, "url": "https://www.vinted.hu/items/2"},
+                {"text": "Zara blézer x2", "price": 7000, "url": "https://www.vinted.hu/items/3"},
+                {"text": "Zara blézer, hibás, alkatrésznek", "price": 800, "url": "https://www.vinted.hu/items/4"},
+                {"text": "Zara blézer, nem hibás, nem törött", "price": 4300, "url": "https://www.vinted.hu/items/5"},
+                {"text": "Mango kabát", "price": 6000, "url": "https://www.vinted.hu/items/6"},
+                {"text": "A saját hirdetésem: Zara blézer", "price": 5000,
+                 "url": "https://vinted.hu/items/4455667-zara-fekete-blezer"},
+                {"text": "Zara blézer M, fekete", "price": 4050, "url": "https://jofogas.hu/ugyanaz_7.htm"},
+                {"text": "Zara blézert adok, M", "price": 4600, "url": "https://www.vinted.hu/items/8"}]
+        kept, dropped = selling.prefilter(item, rows)
+        self.assertEqual([r["price"] for r in kept], [4000, 4100, 4300, 4600])
+        self.assertEqual(dropped, {"kereső": 2, "csomag": 2, "alkatrész": 1, "más termék": 1, "saját": 1,
+                                   "ismétlődő": 1})
+        broken = self.blazer(condition="Hibás")
+        kept, _ = selling.prefilter(broken, rows)
+        self.assertIn(800, [r["price"] for r in kept], "ha a te tárgyad is hibás, a hibás a hasonló")
+        gpu = self.store.update(self.blazer().id, kind="elektronika", title="RTX 3080 videókártya", product="RTX 3080",
+                                brand="", size="", search_query="rtx 3080")
+        kept, _ = selling.prefilter(gpu, [{"text": "RTX 3080, 2 db ventilátor, PCIe x4", "price": 1, "url": ""}])
+        self.assertEqual(len(kept), 1, "elektronikánál a darabszám a leírás része, nem csomag")
+
+    def test_the_judge_gets_at_most_25_best_rows(self):
+        rows = [{"text": f"Zara blézer {'M fekete' if n % 2 else 'kék'} modell{n}", "price": 4000 + n,
+                 "url": f"https://www.vinted.hu/items/{n}"} for n in range(40)]
+        item, _ = self.research({"vinted": rows[:20], "jofogas": rows[20:]},
+                                {"similar": [1, 2, 3], "suggested_price": 4000, "reason": ""})
+        prompt = self.fake.chat_bodies()[-1]["messages"][-1]["content"]
+        lines = [line for line in prompt.splitlines() if re.match(r"\d+\. \[", line)]
+        self.assertEqual(len(lines), 25)
+        self.assertEqual(sum("M fekete" in line for line in lines), 20, "a legjobban egyezők maradnak")
+        self.assertEqual((item.research["count"], item.research["kept"]), (40, 25))
+        self.assertEqual(item.research["dropped"], {"kevésbé illő": 15})
+
+    def test_nothing_similar_means_no_model_call(self):
+        rows = [{"text": "Mango kabát", "price": 6000, "url": "https://www.vinted.hu/items/6"}]
+        item, _ = self.research({"vinted": rows}, None)
+        self.assertEqual(self.fake.chat_bodies(), [])
+        self.assertEqual((item.research["count"], item.research["kept"], item.research["similar"]), (1, 0, []))
+        self.assertIn("nem volt a tárgyadhoz hasonló", item.research["reason"])
+
+    def test_outliers_are_trimmed_and_the_suggestion_stays_in_the_band(self):
+        prices = [4000, 4200, 4500, 4800, 5000, 50000, 100]
+        rows = [{"text": f"Zara blézer modell{n}", "price": p, "url": f"https://www.vinted.hu/items/{n}"}
+                for n, p in enumerate(prices)]
+        item, _ = self.research({"vinted": rows}, {"similar": list(range(1, 8)), "suggested_price": 5500,
+                                                   "reason": "Ennyiért mennek."})
+        r = item.research
+        self.assertEqual([s["price"] for s in r["similar"]], [4000, 4200, 4500, 4800, 5000], "a tízszeres kiesik")
+        self.assertEqual((r["min"], r["p25"], r["median"], r["p75"], r["max"]), (4000, 4200, 4500, 4800, 5000))
+        self.assertEqual((r["n"], r["outliers"], r["confidence"]), (5, 2, "megbízható"))
+        self.assertEqual(r["suggested"], 4800, "a javaslat a szokásos sávban marad")
+        self.assertIn("többnyire 4 200 Ft és 4 800 Ft között", research_summary(r))
+
+    def test_auctions_are_tagged_and_left_out_when_there_are_enough_fixed_prices(self):
+        rows = [{"text": f"Zara blézer modell{n}", "price": 4000 + 100 * n, "url": f"https://www.vatera.hu/{n}"}
+                for n in range(3)]
+        rows.append({"text": "Zara blézer, licit", "price": 500, "url": "https://www.vatera.hu/9", "auction": True})
+        item, _ = self.research({"vinted": rows}, {"similar": [1, 2, 3, 4], "suggested_price": 4100, "reason": ""})
+        prompt = self.fake.chat_bodies()[-1]["messages"][-1]["content"]
+        self.assertIn("500 Ft (licit: a mostani ajánlat, nem végleges ár)", prompt)
+        self.assertEqual([s["price"] for s in item.research["similar"]], [4000, 4100, 4200])
+
+    def test_stats_are_robust(self):
+        stats = selling.price_stats([5000, 5000, 5000, 5000, 5500])
+        self.assertEqual((stats["n"], stats["max"]), (5, 5500), "sok egyforma árnál a kicsit eltérő is marad")
+        wide = selling.price_stats([1000, 3000, 6000, 9000, 12000])
+        self.assertEqual(wide["confidence"], "bizonytalan", "nagyon szóró árak")
+        self.assertEqual(selling.price_stats([4000])["p25"], 4000)
+        self.assertEqual(selling.price_stats([]), {})
+
+    def test_research_gets_old_after_a_week(self):
+        item = self.store.set_research(self.blazer().id, {"at": time.time() - 8 * 86400, "query": "Zara blézer",
+                                                          "similar": []})
+        self.assertFalse(selling.research_fresh(item))
+        self.assertTrue(item.public()["research_stale"])
+        self.assertIn("8 napos, elavult", research_summary(item.research))
+        item = self.store.set_research(item.id, {"at": time.time(), "query": "Zara blézer", "similar": []})
+        self.assertTrue(selling.research_fresh(item))
+        self.assertFalse(item.public()["research_stale"])
+
 
 class PriceVerdictTests(unittest.TestCase):
     def item(self, price, prices) -> Item:
@@ -427,6 +542,22 @@ class PriceVerdictTests(unittest.TestCase):
         self.assertIn("Nem találtam", price_verdict(self.item(9000, [])).text)
         self.assertEqual(Item(id="a1b2c3d4", created=0, updated=0).public()["verdict"], "", "kutatás nélkül nincs")
         self.assertIn("rendben", self.item(5000, [4000, 4500, 5000]).public()["verdict"])
+
+    def test_typical_band_condition_and_uncertainty(self):
+        wide = self.item(6500, [2000, 3000, 5000, 7000, 9000, 10000])
+        verdict = price_verdict(wide)
+        self.assertFalse(verdict.pause, "a szokásos sávon (p25–p75) belül nem állít meg")
+        self.assertIn("többnyire", verdict.text)
+        self.assertIn("csak tájékoztató", verdict.text, "nagyon szórnak az árak")
+        new = self.item(5000, [4000, 4500, 5000, 5500, 6000])
+        new.condition = "Új, címkével"
+        self.assertIn("Mivel új, a sáv felső része (kb. 5 500 Ft) is reális.", price_verdict(new).text)
+        worn = self.item(9000, [4000, 4500, 5000, 5500, 6000])
+        worn.condition = "Elfogadható"
+        verdict = price_verdict(worn)
+        self.assertTrue(verdict.pause)
+        self.assertIn("inkább a sáv alsó része (kb. 4 500 Ft)", verdict.text)
+        self.assertTrue(verdict.text.endswith("Maradjon a te árad, vagy legyen 5 000 Ft?"), verdict.text)
 
     def test_spoken_or_typed_price_answers(self):
         cases = {"Maradjon": "keep", "maradjon az enyém": "keep", "nem, jó így": "keep", "nem kell": "keep",
@@ -521,7 +652,8 @@ class WorkDeskTests(unittest.TestCase):
                 self.calls += 1
                 self.only = only
                 similar = [{"site": "Vinted", "text": "Zara blézer", "price": p, "url": ""} for p in (4000, 4500, 5000)]
-                return self.store.set_research(item_id, {"at": 1, "query": "Zara blézer", "count": 3, "errors": [],
+                return self.store.set_research(item_id, {"at": time.time(), "query": "Zara blézer", "count": 3,
+                                                         "errors": [],
                                                          "similar": similar, "min": 4000, "max": 5000,
                                                          "median": 4500, "suggested": 4500})
 
@@ -543,6 +675,12 @@ class WorkDeskTests(unittest.TestCase):
         self.assertEqual(self.desk.decide_price(item.id, "suggested").price, 4500)
         self.assertEqual(self.desk.decide_price(item.id, 6000).price, 6000)
         self.assertIn("price", self.store.get(item.id).edited, "Jarvis később nem írja vissza")
+        old = dict(self.store.get(item.id).research, at=time.time() - 8 * 86400)
+        self.store.set_research(item.id, old)
+        self.fake.chat_script = [extracted(**blazer)]
+        step = self.desk.prepare(item.id, self.steps.append)
+        self.assertEqual(researcher.calls, 2, "a hétnél régebbi árkutatást az árazás előtt frissíti")
+        self.assertEqual(step.kind, "price", "a friss kutatás szerint a 6000 Ft is sok: újra megkérdezi")
 
     def test_failed_price_check_does_not_block_posting(self):
         class Broken:
@@ -591,6 +729,22 @@ class WorkDeskTests(unittest.TestCase):
         self.assertFalse(self.box.has("item_post"), "böngésző nélkül nincs feltöltés")
         self.assertFalse(self.box.has("item_research"))
         self.assertFalse(self.box.has("item_write"), "a hirdetést már nem a fotókból írja")
+
+    def test_price_change_after_posting_is_answered_honestly(self):
+        item = self.item(["vinted", "hardverapro"])
+        self.store.update(item.id, title="Levi's farmer", price=9000)
+        self.store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/1234567-levis")
+        self.store.mark(item.id, "hardverapro", POSTED, url="https://hardverapro.hu/apro/levis/friss.html")
+        answer = self.box.call("item_update", {"item": item.id, "price": 8500})
+        self.assertIn("Módosítva (Levi's farmer): ár. Csak itt írtam át; a Vinteden még 9 000 Ft, "
+                      "a Hardveraprón még 9 000 Ft.", answer)
+        self.assertIn("magamtól nem szerkesztem", answer)
+        self.assertIn("Vinted: feltöltve (ott még 9 000 Ft)", self.box.call("item_list", {}))
+        self.assertEqual(self.box.call("item_update", {"item": item.id, "description": "Alig hordott."}),
+                         "Módosítva (Levi's farmer): leírás", "ha az ár nem változott, nincs mit mondani róla")
+        self.store.set_check(item.id, "vinted", "sold")
+        self.assertIn("Vinted: feltöltve (ott még 9 000 Ft) (a háttérellenőrzés szerint elkelt)",
+                      self.box.call("item_get", {"item": item.id}))
 
     def test_acknowledgement_is_remembered(self):
         with self.assertRaises(ItemError):
@@ -651,6 +805,12 @@ PAGES = {
 <div class="item"><a href="/items/2-hm-blezer"><span>H&amp;M blézer</span></a><p>S</p><p>2&nbsp;000 Ft</p></div>
 <div class="item"><a href="/items/3-zara-kabat">Zara kabát</a><span>12 990 Ft</span></div>
 <div class="item"><a href="/items/4-nincs-ar">Ár nélküli</a></div>
+<div class="item"><a href="/items/5-levis-farmer">Levi's farmer</a><s>9 000 Ft</s> <b>6 500 Ft</b></div>
+<div class="item"><a href="/items/6-mango-szoknya">Mango szoknya</a>
+  <span style="text-decoration: line-through">3 000 Ft</span><span>1 800 Ft</span></div>
+<div class="item"><a href="/items/7-regi-erme">Régi érme</a><span>Licit: 1 200 Ft</span>
+  <span>Villámár: 5 000 Ft</span></div>
+<div class="item"><a href="/items/8-regi-belyeg">Régi bélyeg</a><span>Jelenlegi ár: 300 Ft, 4 licit</span></div>
 </div></main><footer><a href="/kapcsolat">Szállítás 0 Ft</a></footer></body></html>""",
     "feladas.html": """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Hirdetésfeladás</title></head>
 <body><h1>Új hirdetés</h1>
@@ -768,10 +928,14 @@ class BrowserWorkTests(unittest.TestCase):
 
     def test_extract_listings(self):
         found = self.browser.extract_listings(self.pages.url("katalogus.html"))
-        self.assertEqual([r["price"] for r in found], [4500, 2000, 12990])
+        self.assertEqual([r["price"] for r in found], [4500, 2000, 12990, 6500, 1800, 5000, 300],
+                         "az áthúzott régi ár nem számít; a villámár az ár")
         self.assertTrue(found[0]["url"].endswith("/items/1-zara-blezer"), "a hirdetés linkje, nem az eladóé")
         self.assertIn("Zara blézer", found[0]["text"])
         self.assertIn("H&M blézer", found[1]["text"])
+        self.assertNotIn("9 000", found[3]["text"], "a modell sem látja a régi árat")
+        self.assertEqual([bool(r.get("auction")) for r in found], [False] * 6 + [True],
+                         "csak a villámár nélküli licites kártya jelzett")
 
     def test_upload_with_the_photo_button(self):
         view = self.browser.open(self.pages.url("feladas.html"))
