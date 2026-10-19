@@ -442,6 +442,7 @@ Az újabb Ollama (0.40-től) a modellt egy beépített llama-serverrel tölti be
 - `[work] max_tool_rounds`: egy feltöltés legfeljebb ennyi lépés (40). `max_photos`: egy tárgyhoz legfeljebb ennyi fotó (20).
 - `[work] enabled = false`: a Munka menü kikapcsolása.
 - `[work] replay`: a begyakorolt feltöltés és levétel visszajátszása (alapból be).
+- `[work] temperature`: a Munka menü beszélgetésének mintavétele (0,3; a Beszélgetésé az `[llm] temperature`): kisebb érték = kevesebb véletlen az űrlapkitöltésnél. A modellt nem tölti újra.
 - `[work] autofill`: a Vinted űrlapját a Jarvis maga tölti ki, a modell csak a kategóriát választja ki; a Vinted-levételt is modell nélkül csinálja (alapból be).
 - `[work] publish_gap_minutes`: ugyanazon az oldalon két közzététel (vagy levétel) között legalább ennyi perc teljen el (2, véletlenszerűen ±30%; 0 = nincs várakozás).
 
@@ -460,6 +461,7 @@ Az újabb Ollama (0.40-től) a modellt egy beépített llama-serverrel tölti be
 - `[llm] think`: `true` esetén alaposabb, de jóval lassabb.
 - `[llm] warm_up`: induláskor előre feldolgozza a rendszerpromptot (gyorsabb első válasz).
 - `[assistant] max_tool_rounds`: egy kérésen belül legfeljebb ennyi lépés (20). Ha elfogy, a Jarvis a meglévőből válaszol.
+- `[assistant] keep_page_views`: hány legutóbbi oldalnézet marad meg teljes egészében (1); a régebbiek helyén egy rövid sor (mi történt, melyik oldalon).
 - `[tools] allowed_folders`: a fájlos eszközök csak itt dolgozhatnak. Ha a OneDrive átirányítja a Dokumentumokat, add meg a valódi utat.
 - `[apps]`: az indítható programok:
 
