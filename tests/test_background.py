@@ -30,7 +30,7 @@ from test_work import _QuietHandler  # noqa: E402
 
 from jarvis_core import web  # noqa: E402
 from jarvis_core.app import PAUSED_REPLY, JarvisApp, is_pause_request  # noqa: E402
-from jarvis_core.browser import BrowserController  # noqa: E402
+from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
 from jarvis_core.config import SchedulerCfg, WebCfg  # noqa: E402
 from jarvis_core.listings import BLOCKED, GONE, LIVE, SOLD, ListingChecker, classify  # noqa: E402
 from jarvis_core.notices import NoticeBoard  # noqa: E402
@@ -382,6 +382,37 @@ class ListingClassifyTests(unittest.TestCase):
                          (BLOCKED, "ki vagy jelentkezve"))
         self.assertEqual(classify({**live, "url": "https://www.jofogas.hu/belepes?next=x"},
                                   "https://www.jofogas.hu/zara_123456.htm")[0], BLOCKED)
+
+
+class ListingCheckErrorTests(unittest.TestCase):
+    """Ha egy hirdetés most nem nyílik meg, az előző eredmény és a megjegyzése marad (böngésző nélkül)."""
+
+    class FailingBrowser:
+        pace = types.SimpleNamespace(think=lambda: None)
+
+        def look_listing(self, url):
+            raise BrowserError("Nem tudom megnyitni az oldalt (net::ERR_TIMED_OUT).\nFriss oldalnézet: …")
+
+    def test_a_listing_that_does_not_open_keeps_its_last_result(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        clock = Clock()
+        platforms = {"vinted": Platform("vinted", "Vinted", "", "", "", ("127.0.0.1",), "")}
+        store = ItemStore(Path(tmp.name), platform_keys=["vinted"])
+        item = store.create(targets=["vinted"], title="Zara blézer", price=4500)
+        store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/1001-zara-blezer")
+        store.set_check(item.id, "vinted", SOLD, clock.now - 2 * 86400, "„Eladva” jelzés az oldalán")
+        store.get(item.id).platforms["vinted"]["at"] = clock.now - 3 * 86400
+        checker = ListingChecker(store, platforms, lambda: self.FailingBrowser(), clock=clock)
+        self.assertEqual(checker.run(5), "1 hirdetést néztem meg: 0 fent van, 1 nem nyílt meg.")
+        entry = store.get(item.id).platforms["vinted"]
+        self.assertEqual((entry["check"], entry["check_note"]), (SOLD, "„Eladva” jelzés az oldalán"),
+                         "a kártyán továbbra is az látszik, miért tűnt eladottnak, nem a hiba")
+        self.assertEqual(entry["check_error"], "Nem tudom megnyitni az oldalt (net::ERR_TIMED_OUT).")
+        self.assertEqual(entry["checked_at"], clock.now, "ma már nem próbálja újra")
+        self.assertEqual(checker.due(), [])
+        store.set_check(item.id, "vinted", LIVE, clock.now + 86400)
+        self.assertNotIn("check_error", store.get(item.id).platforms["vinted"], "egy sikeres ellenőrzés után")
 
 
 @unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")

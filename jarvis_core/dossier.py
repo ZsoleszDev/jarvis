@@ -4,7 +4,7 @@ egy mappába kerül (munka\\hibak\\<időpont>-<oldal>-<tárgy>-<feladat>):
   info.json         mi történt: oldal, tárgy, feladat, a hiba oka, az oldal címe, Jarvis válasza
   kepernyo.jpg      az oldal képe abban a pillanatban (ha nem túl hosszú, az egész oldal)
   oldal.txt         az oldalnézet, ahogy a modell látja (szöveg és a számozott elemek)
-  lepesek.txt       a böngészőben tett lépések (megnyitás, kattintás, gépelés, fotók)
+  lepesek.txt       a böngészőben tett lépések (megnyitás, kattintás, gépelés, fotók, billentyű)
   beszelgetes.txt   a modell kérései és az eszközök válaszai (ha a modell csinálta)
 
 Csak a gépeden marad. A kép és az oldalnézet személyes adatot is tartalmazhat (pl. a felhasználóneved),
@@ -44,7 +44,8 @@ def format_steps(events: list[dict[str, Any]]) -> str:
         if do == "goto":
             text = f"megnyitás: {event.get('final') or event.get('url', '')}"
         elif do == "click":
-            text = f"kattintás: {what}" + (" [közzététel/törlés]" if event.get("risky") else "")
+            mark = " [jóváhagyással]" if event.get("check") else " [közzététel/törlés]"
+            text = f"kattintás: {what}" + (mark if event.get("risky") else "")
             if event.get("url_after") and event.get("url_after") != event.get("url"):
                 text += f" → {event['url_after']}"
         elif do == "type":
@@ -57,6 +58,8 @@ def format_steps(events: list[dict[str, Any]]) -> str:
             text = f"NEM ENGEDÉLYEZTED: {what}"
         elif do == "back":
             text = "vissza az előző oldalra"
+        elif do == "press":
+            text = f"billentyű: {event.get('key', '')}"
         else:
             text = do
         lines.append(f"{number:3d}. {text}")

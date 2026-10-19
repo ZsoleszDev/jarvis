@@ -73,6 +73,15 @@ SITE = {
 <body><p>Elküldve.</p></body></html>""",
     "lapok.html": """<!doctype html><html><head><meta charset="utf-8"><title>Lapok</title></head>
 <body><a href="/lapok.html" target="_blank">Következő lap</a></body></html>""",
+    # Kockázatos jelölőnégyzet (a feltételek elfogadása) a közzététel előtt, és egy csak Esc-re bezáródó lista.
+    "feltetelek.html": """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Feltételek</title></head>
+<body><label><input type="checkbox" id="elfogad"> Megerősítem, hogy elfogadom a feltételeket</label>
+<button type="button" id="szin" aria-haspopup="listbox" onclick="szinek.hidden = !szinek.hidden">Színek</button>
+<div id="szinek" hidden><input type="checkbox" id="piros" aria-label="Piros">
+  <input type="checkbox" id="kek" aria-label="Kék"></div>
+<button type="button" onclick="out.textContent = 'Feltöltve'">Feltöltés</button><p id="out"></p>
+<script>document.addEventListener('keydown', (e) => { if (e.key === 'Escape') szinek.hidden = true; });</script>
+</body></html>""",
     "urlap.html": None,   # lent (URLAP)
     "regi.html": None,  # cp1250 kódolású oldal, lent írjuk ki
     "kep.png": None,
@@ -997,6 +1006,29 @@ class FormKindTests(unittest.TestCase):
                                         {"do": "click", "element": self.el("Mentés")}])
         self.assertIn("már nem az, ami az oldalnézetben volt", view, "az oldal újrarajzolta a gombot")
         self.assertEqual(self.state("() => out.textContent"), "")
+
+    def test_a_risky_checkbox_is_not_a_publish_and_esc_is_recorded(self):
+        events: list[dict] = []
+        self.browser.on_action = events.append
+        try:
+            self.browser.open(self.site.url("feltetelek.html"))
+            self.browser.type_text(self.el("Megerősítem, hogy elfogadom a feltételeket"), "igen")
+            self.browser.choose(self.el("Színek"), "Kék")
+            self.browser.click(self.el("Feltöltés"))
+        finally:
+            self.browser.on_action = None
+        self.assertEqual(self.state("() => [elfogad.checked, kek.checked, szinek.hidden, out.textContent]"),
+                         [True, True, True, "Feltöltve"])
+        self.assertEqual(len(self.asked), 2, "a feltételek elfogadása és a közzététel is jóváhagyással")
+        clicks = [e for e in events if e["do"] == "click"]
+        terms, publish = clicks[0], clicks[-1]
+        self.assertEqual((terms["el"]["kind"], terms["risky"], terms.get("check")), ("input:checkbox", True, True),
+                         "a kockázatos jelölőnégyzet: jelölőnégyzetként, nem gombként")
+        self.assertEqual((publish["el"]["label"], publish["risky"], publish.get("check")), ("Feltöltés", True, None))
+        presses = [i for i, e in enumerate(events) if e["do"] == "press"]
+        self.assertEqual([events[i] for i in presses], [{"do": "press", "key": "Escape"}],
+                         "a nyitva maradt listát Esc-cel zárta be, és ez is a lépések között van")
+        self.assertEqual(events[presses[0] - 1]["el"]["label"], "Kék")
 
     def test_steps_keep_the_approval_rules(self):
         with self.assertRaisesRegex(BrowserError, "csak utolsóként"):

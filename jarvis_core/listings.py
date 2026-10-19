@@ -111,8 +111,9 @@ class ListingChecker:
                 page = browser.look_listing(entry["url"])
             except BrowserError as exc:
                 counts[UNKNOWN] += 1      # ma már nem próbálja újra (naponta egy látogatás)
+                # az előző eredmény (pl. „elkelt”) és a megjegyzése marad, a hiba külön
                 self.store.set_check(item.id, key, str(entry.get("check") or UNKNOWN), self.clock(),
-                                     str(exc).splitlines()[0][:160])
+                                     error=(str(exc).strip().splitlines() or ["nem nyílt meg"])[0][:160])
                 continue
             state, detail = classify(page, entry["url"], str(entry.get("posted_title") or item.title), key)
             if state == BLOCKED:

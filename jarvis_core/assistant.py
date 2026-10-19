@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from . import web
+from .browser import NEW_LEGEND
 from .config import Config
 from .llm import Cancelled, OllamaClient
 from .textutil import fold, strip_think
@@ -71,6 +72,9 @@ STALL_NOTE = ("\n[Ez nem változtatott semmit; próbálj mást, vagy ha egy felu
 STALL_LIMIT = 3
 STALL_REPLY = ("Elakadtam: többször ugyanazt próbáltam ({name}), de az oldal nem változott, ezért "
                "abbahagytam.")
+# Az új elemek jele az oldalnézetben („*[12]”, és a magyarázata a fejlécben): egy változó lépés után ott van, a
+# következő, hatástalan lépés után már nincs, pedig az oldal ugyanaz. Az elakadás ujjlenyomatában nem számít.
+_NEW_MARK_RE = re.compile(r"\*(?=\[\d+\])|" + re.escape(NEW_LEGEND))
 # A képelemzés a futó beszélgetésben: a kérdéses eszközhívás helyén ez áll, a kép a következő üzenetben jön.
 VISION_PENDING = "(A képernyőkép a következő üzenetben van.)"
 # Egy képernyőkép kb. ennyi token a kérésben (1280 széles JPEG); ha így nem férne el, külön kérdés lesz belőle.
@@ -151,14 +155,14 @@ def _has_view(content: str) -> bool:
 
 
 def page_state(result: str) -> str | None:
-    """Az eszköz eredményében lévő oldalnézet ujjlenyomata (a fölötte álló megjegyzés nélkül): ha egy lépés
-    után ugyanaz, az oldal nem változott. None, ha az eredményben nincs oldalnézet."""
+    """Az eszköz eredményében lévő oldalnézet ujjlenyomata (a fölötte álló megjegyzés és az új elemek jele nélkül):
+    ha egy lépés után ugyanaz, az oldal nem változott. None, ha az eredményben nincs oldalnézet."""
     cut = result.find(KEEP_ABOVE)
     view = result[cut + len(KEEP_ABOVE):] if cut >= 0 else result
     if _view_header(view) is None:
         return None
     start = 0 if view.startswith("Oldal: ") else view.find("\nOldal: ") + 1
-    return hashlib.sha1(view[start:].encode("utf-8", "replace")).hexdigest()
+    return hashlib.sha1(_NEW_MARK_RE.sub("", view[start:]).encode("utf-8", "replace")).hexdigest()
 
 
 def _is_compacted(content: str) -> bool:
@@ -405,8 +409,9 @@ class Assistant:
         lépcsőzetesen rövidít.
 
         0. mindig: ha új oldalnézet jött, a korábbiak helyére egy-egy rövid tájékozódó sor kerül (mi történt,
-           melyik oldalon). A legutóbbi korábbi nézet közvetlenül az új rész előtt áll, így a prompt-gyorsítótár
-           megmarad, és a kérés nem nő oldalnézetenként. Az olvasmányok (cikk, keresés) itt még maradnak.
+           melyik oldalon), egy munka első üzenetében lévő nézet helyére is. A legutóbbi korábbi nézet közvetlenül
+           az új rész előtt áll, így a prompt-gyorsítótár megmarad, és a kérés nem nő oldalnézetenként. Az
+           olvasmányok (cikk, keresés) itt még maradnak.
         1. ha a kontextus 60%-a betelt: minden régi eszköz-eredményt tömörít (az olvasmányokat is),
         2. csak a legutolsó oldalnézetet hagyja meg,
         3. elhagyja a korábbi köröket (a mostani kérdés mindig marad),
@@ -428,7 +433,9 @@ class Assistant:
 
     def _compact(self, keep: int, views_only: bool = False) -> None:
         """Az elavult, hosszú eszköz-eredményeket rövidre cseréli: egy oldalnézetből a tájékozódó sor marad
-        (page_orientation), a KEEP_ABOVE fölötti rész (pl. a hirdetés adatai) változatlanul.
+        (page_orientation), a KEEP_ABOVE fölötti rész (pl. a hirdetés adatai) változatlanul. Egy felhasználói
+        üzenetből csak a KEEP_ABOVE utáni oldalnézet (egy munka első üzenete, pl. a megnyitott hirdetésfeladás):
+        a kérés maga mindig megmarad.
 
         `views_only`: csak a böngésző oldalnézeteit (az olvasmányokat és a hibaüzeneteket nem: egy sikertelen
         lépés után így is látszik a legutóbbi oldal)."""
@@ -436,6 +443,10 @@ class Assistant:
         for i, message in enumerate(self.history):
             name = message.get("tool_name", "")
             content = message.get("content") or ""
+            if message["role"] == "user":
+                if KEEP_ABOVE in content and _has_view(content) and not _is_compacted(content):
+                    positions.append(i)
+                continue
             if message["role"] != "tool" or not self.toolbox.is_ephemeral(name) or _is_compacted(content):
                 continue
             if views_only and (name in READ_TOOLS or not _has_view(content)):
