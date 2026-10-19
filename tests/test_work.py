@@ -1084,7 +1084,8 @@ def local_platforms(pages: Pages) -> dict[str, Platform]:
 def element_number(snapshot: str, label: str) -> int:
     # egy elem a saját sorában ([3] szövegmező "Cím"), vagy egy csoport sorában (Állapot (...): [7] Nagyon jó, [8] Jó)
     match = (re.search(rf'\[(\d+)\] [^\n"\[]*"{re.escape(label)}', snapshot)
-             or re.search(rf'\[(\d+)\] "?{re.escape(label)}"?(?: ✓)?(?=,|$| \()', snapshot, re.M))
+             or re.search(rf'\[(\d+)\] "?{re.escape(label)}"?(?: ✓)?(?=,|$| \()', snapshot, re.M)
+             or re.search(rf'\[(\d+)\] "?{re.escape(label)}[^,\n\[]*', snapshot))   # a felirat eleje („Nagyon jó állapotú”)
     if not match:
         raise AssertionError(f"nincs ilyen elem: {label}\n{snapshot}")
     return int(match.group(1))

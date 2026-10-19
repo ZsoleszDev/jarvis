@@ -429,7 +429,9 @@ class AppRecoveryTests(unittest.TestCase):
         store.add_photo(item.id, jpeg())
         store.update(item.id, **SHIRT)
         self.fake.chat_script = [crash(), crash()]
-        self.app.run_work({"action": "post", "ids": [item.id], "platform": "vinted"})
+        # Az első lépést (a hirdetésfeladás megnyitását) a Jarvis maga teszi meg; itt a modell leállása a kérdés.
+        with mock.patch.object(self.app.work, "tool_post", return_value="(a hirdetésfeladás oldalnézete)"):
+            self.app.run_work({"action": "post", "ids": [item.id], "platform": "vinted"})
         state = store.get(item.id).platforms["vinted"]
         self.assertEqual(state["status"], FAILED)
         self.assertIn("közben leállt", state["note"], "a kártyán a valódi ok")

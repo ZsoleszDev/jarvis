@@ -2054,6 +2054,8 @@ class BrowserController:
         ordinal = self._ordinal(el)
         if submit and self.cfg.confirm_risky and not is_search_field(el):
             label = el.get("label") or "mező"
+            if self.before_publish is not None:   # egy űrlap elküldése is közzététel lehet: előbb a szünet
+                self.before_publish(label, page.url)
             if not self.confirm(f'Jarvis ezt írná be és küldené el ("{label}"):\n    {text}'):
                 self._emit({"do": "declined", "el": self.describe(el, ordinal), "url": page.url})
                 return f"{DECLINED} az elküldést."
@@ -2256,8 +2258,11 @@ class BrowserController:
             raise BrowserError(f'„{label}”: a választógombot nem lehet kikapcsolni; jelöld be a másik lehetőséget.')
         if is_paid(label):
             raise BrowserError(f'„{label}” fizetős lehetőségnek látszik (kiemelés, előresorolás): erre nem kattintok.')
-        if self.cfg.confirm_risky and is_risky(label) and not self._approved(page, label):
-            return _Written("check", "", locator, declined=True)
+        if self.cfg.confirm_risky and is_risky(label):
+            if self.before_publish is not None:   # mint a gombnál: a közzétételek közti szünet a jóváhagyás előtt
+                self.before_publish(label, page.url)
+            if not self._approved(page, label):
+                return _Written("check", "", locator, declined=True)
         self._human_click(page, locator)
         for _ in range(20):     # a lap kicsit később is átírhatja (pl. egy keretrendszer újrarajzolja)
             try:

@@ -174,7 +174,7 @@ class StandbyAppTests(unittest.TestCase):
         old = store.create(targets=["vinted"], prompt="farmer")
         store.update(old.id, title="Farmer", price=5000)
         store.mark(old.id, "vinted", POSTED)
-        store.get(old.id).platforms["vinted"]["at"] = time.time() - 20 * 86400
+        store.get(old.id).platforms["vinted"].update(at=time.time() - 20 * 86400, posted_at=time.time() - 20 * 86400)
         self.app.run_job_now("stale")
         self.wait_idle()
         self.assertEqual([n["kind"] for n in self.app.notices.list()], ["stale"])

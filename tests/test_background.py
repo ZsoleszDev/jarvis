@@ -648,7 +648,7 @@ class PauseTests(unittest.TestCase):
         store = self.app.work.store
         item = store.create(targets=["vinted"], title="Farmer", price=5000)
         store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/1234567-farmer")
-        store.get(item.id).platforms["vinted"]["at"] = time.time() - 20 * 86400
+        store.get(item.id).platforms["vinted"].update(at=time.time() - 20 * 86400, posted_at=time.time() - 20 * 86400)
         self.assertTrue(job.available())
         self.assertEqual(job.every_minutes(), 24 * 60.0)
         self.assertEqual([i.id for i in self.app.work.stale_items(14)], [item.id])

@@ -422,7 +422,12 @@ def extract_text(content: bytes | str, url: str | None = None) -> tuple[str, str
         text = trafilatura.extract(page, url=url, include_comments=False, include_tables=True,
                                    favor_recall=True) or ""
         if len(text) < 200:
-            text = trafilatura.html2txt(page) or text
+            # Rövid kinyerésnél az egész oldal szövege is jöhet; de az újabb trafilatura (2.x) html2txt-je egy sorba
+            # olvasztja a bekezdéseket (a menüvel együtt), és a bekezdésenkénti válogatás (best_passages) elveszne.
+            # Ezért csak akkor, ha tényleg sokkal több; különben a saját feldolgozó jön (az megtartja a bekezdéseket).
+            fuller = trafilatura.html2txt(page) or ""
+            if len(fuller) > max(200, len(text) * 1.5):
+                text = fuller
     except ImportError:
         pass
     except Exception:  # noqa: BLE001 - extrém HTML-en a trafilatura is elhasalhat
