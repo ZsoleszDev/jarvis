@@ -27,6 +27,14 @@ VISIBLE_TEXT_CHARS = 1500
 # A modell nélküli kitöltés letapogatásának számai (az oldalnézeté 1-től, a visszajátszásé 9000-től megy).
 # Bőven kell: a lenyíló listák gyakran a lap legvégére kerülnek, a fejléc és a lábléc linkjei után.
 SCAN_BASE, SCAN_SPAN, SCAN_MAX = 5000, 3000, 1500
+LOCATE_BASE = 9000         # a visszajátszás (locate) számai innen indulnak
+BELOW_MAX = 15             # az oldalnézet alján legfeljebb ennyi lejjebb lévő űrlapelem („Lejjebb az űrlapon”)
+HREF_CHARS = 60            # a linkek címe az oldalnézetben legfeljebb ilyen hosszú
+ERRORS_CHARS = 400         # az oldalnézet „Hibaüzenetek” sora legfeljebb ilyen hosszú
+# A link címéből ezek a paraméterek maradnak meg (keresés, lapozás, rendezés, kategória); a többi (követés,
+# munkamenet, ajánló) csak a helyet foglalná. A teljes cím az elemek között (self.elements) megvan.
+_HREF_KEEP = frozenset({"q", "query", "search", "search_text", "s", "page", "p", "order", "sort", "catalog",
+                        "catalog[]", "category", "cat", "kategoria", "oldal"})
 # Robotvédelmi köztes oldal (pl. Cloudflare "Just a moment..."): egy valódi böngészőben ez
 # többnyire magától továbbenged pár másodperc alatt. Ha captchát kér, azt nem kerüljük meg.
 _CHALLENGE_RE = re.compile(
@@ -117,8 +125,10 @@ _JS_HELPERS = r"""
     if (aria) return aria;
     const by = el.getAttribute('aria-labelledby');
     if (by) {
+      const home = el.getRootNode();   // árnyék-DOM-ban a hivatkozott elem is ott van
       const t = clean(by.split(/\s+/).map(id => {
-        const n = document.getElementById(id); return n ? n.innerText : '';
+        const n = (home.getElementById && home.getElementById(id)) || document.getElementById(id);
+        return n ? n.innerText : '';
       }).join(' '));
       if (t) return t;
     }
@@ -159,106 +169,417 @@ _JS_HELPERS = r"""
   const fieldOf = (el) => ((el.getAttribute('name') || '') + ' ' + (el.id || '')).trim().slice(0, 40);
 """
 
+# Hibaüzenetek az űrlapon (pl. a Vinted: „Fill in colour to continue”), a közzététel után.
+FORM_ERRORS_JS = r"""
+() => {
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const shown = (el) => {
+    if (typeof el.checkVisibility === 'function' && !el.checkVisibility({visibilityProperty: true})) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  };
+  const out = [];
+  const nodes = document.querySelectorAll('[role=alert], [aria-live=assertive], [class*=error i], ' +
+                                          '[class*=invalid i], [data-testid*=error i]');
+  for (const el of nodes) {
+    if (out.length >= 6) break;
+    if (!shown(el)) continue;
+    const text = clean(el.innerText);
+    if (text && text.length <= 200 && !out.some((t) => t.includes(text) || text.includes(t))) out.push(text);
+  }
+  return out;
+}
+"""
+
 SNAPSHOT_JS = r"""
 (opts) => {
   const MAX = opts.max || 60;
   const TEXT_CHARS = opts.textChars || 1500;
+  const BASE = opts.base || 5000;
+  const BELOW_MAX = opts.below || 15;
+  const HINTS = opts.hints || [];
   const vh = window.innerHeight;
 """ + _JS_HELPERS + r"""
+  // Nyitott shadow DOM (pl. süti-ablak, beágyazott űrlapelem) tartalma is: a Playwright CSS-keresője ezekbe is
+  // belát, így a számukkal ugyanúgy kattinthatók. Ha nincs ilyen az oldalon, marad a gyors keresés.
+  const hosts = [];   // az árnyék-DOM gazdái (a beágyazottak is), a lap sorrendjében
+  const findHosts = (root) => {
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) {
+        hosts.push(el);
+        findHosts(el.shadowRoot);
+      }
+    }
+  };
+  findHosts(document);
+  const deep = hosts.length > 0;
+  const deepAll = (selector) => {
+    if (!deep) return Array.from(document.querySelectorAll(selector));
+    const out = [];
+    const visit = (root) => {
+      const hit = new Set(root.querySelectorAll(selector));   // gyorsabb, mint elemenként a matches()
+      for (const el of root.querySelectorAll('*')) {
+        if (hit.has(el)) out.push(el);
+        if (el.shadowRoot) visit(el.shadowRoot);
+      }
+    };
+    visit(document);
+    return out;
+  };
+  const closestDeep = (el, selector) => {
+    for (let node = el; node;) {
+      const hit = node.closest(selector);
+      if (hit) return hit;
+      const root = node.getRootNode();
+      node = root && root.host ? root.host : null;
+    }
+    return null;
+  };
+  const cut = (s, n) => {
+    s = clean(s);
+    if (s.length <= n) return s;
+    const head = s.slice(0, n - 1);
+    const space = head.lastIndexOf(' ');
+    return (space > n / 2 ? head.slice(0, space) : head) + '…';
+  };
+  const byIds = (el, ids) => clean((ids || '').split(/\s+/).map((id) => {
+    const root = el.getRootNode();
+    const n = id && ((root.getElementById && root.getElementById(id)) || document.getElementById(id));
+    return n ? n.innerText : '';
+  }).join(' '));
 
-  document.querySelectorAll('[data-jarvis-id]').forEach(el => el.removeAttribute('data-jarvis-id'));
+  // Állandó számok: egy elem a dokumentum élete alatt megtartja a számát, új számot csak az új elemek kapnak.
+  // A számok BASE (a letapogatásé) alatt maradnak; a letapogatás és a visszajátszás számai külön attribútumban
+  // vannak, azokhoz nem nyúlunk.
+  let state = window.__jarvisView;
+  const newDoc = !state;
+  if (!state) {
+    state = {seq: 0, ids: new WeakMap()};
+    try {
+      Object.defineProperty(window, '__jarvisView', {value: state, configurable: true});
+    } catch (e) { /* nem bővíthető ablak: minden nézet elölről számoz */ }
+  }
+  let renumbered = false;
+  if (state.seq + MAX + BELOW_MAX >= BASE) {
+    state.seq = 0;
+    state.ids = new WeakMap();
+    renumbered = true;
+  }
+  const seqBefore = state.seq;
+  // Egy lemásolt elemen (vagy az újraszámozás előtti) szám nem érvényes: csak az marad, amit mi adtunk neki.
+  for (const el of deepAll('[data-jarvis-id]')) {
+    if (state.ids.get(el) !== el.getAttribute('data-jarvis-id')) el.removeAttribute('data-jarvis-id');
+  }
+
   const CHROME = 'header, nav, footer, aside, [role=banner], [role=navigation], [role=contentinfo]';
+  const FIELD = /^(input|textbox|searchbox|combobox|textarea|select)/;
+  const CHOICE = /^(input:radio|input:checkbox|radio|checkbox|option|switch)$/;
+  const BUTTON = /^(button|input:submit|input:button|input:image)$/;
+  // Küldő jellegű gomb akkor is, ha nincs <form> körülötte (pl. React-űrlap „Feltöltés” gombja).
+  const SUBMIT = new RegExp('^(tovabb|kovetkezo|feltolt|kozzetesz|hirdetes ?felad|feladom|mentes|elkuld|kuld|' +
+                            'befejez|next|continue|submit|save|publish|upload)');
+  // Űrlapelem: mező, választó, vagy egy űrlap (küldő) gombja; ezeket az ablak alatt is felsoroljuk.
+  const formControl = (el, kind, name) => (
+    FIELD.test(kind) || (CHOICE.test(kind) && kind !== 'option') ||
+    (BUTTON.test(kind) && (!!el.closest('form') || el.getAttribute('type') === 'submit' || SUBMIT.test(fold(name)))));
   const candidates = [];
+  const beyond = [];
   const seen = new Set();
-  for (const el of document.querySelectorAll(SELECTOR)) {
+  let order = 0;
+  for (const el of deepAll(SELECTOR)) {
+    order++;
     if (el.disabled) continue;
     const r = el.getBoundingClientRect();
-    if (r.bottom < -vh * 0.25 || r.top > vh * 1.5) continue;
+    if (r.bottom < -vh * 0.25) continue;
+    const far = r.top > vh * 1.5;
+    const kind = kindOf(el);
+    if (far && !FIELD.test(kind) && !CHOICE.test(kind)) {
+      // a lap aljáról csak a küldő jellegű gombok kellenek: előbb olcsón, a nyers szövegükből szűrünk
+      if (!BUTTON.test(kind)) continue;
+      const quick = el.getAttribute('aria-label') || el.value || (el.textContent || '').slice(0, 60);
+      if (!el.closest('form') && el.getAttribute('type') !== 'submit' && !SUBMIT.test(fold(quick))) continue;
+    }
     if (!visible(el)) continue;
     const name = nameOf(el);
-    const kind = kindOf(el);
-    const isField = /^(input|textbox|searchbox|combobox|textarea|select)/.test(kind);
+    const isField = FIELD.test(kind);
     if (!name && !isField) continue;
+    const inChrome = !!closestDeep(el, CHROME);
+    const form = !inChrome && formControl(el, kind, name);
+    if (far && !form) continue;
     // ugyanaz a link többször (kép + cím ugyanarra a termékre): elég egyszer
     const key = kind + '|' + name + '|' + (el.getAttribute('href') || '');
     if (!isField && seen.has(key)) continue;
     seen.add(key);
     // a mezők (pl. a fejlécben lévő kereső) mindig fontosak, nem számítanak menünek
-    candidates.push({el, name, kind, inView: r.bottom > 0 && r.top < vh,
-                     chrome: !isField && !!el.closest(CHROME)});
+    (far ? beyond : candidates).push({el, name, kind, order, inView: r.bottom > 0 && r.top < vh,
+                                      below: r.top >= vh, chrome: !isField && inChrome, form});
   }
   // Sorrend: fő tartalom a képernyőn, fő tartalom alatta, menük a képernyőn, a többi menü.
   // Így egy webshopban a termékek és szűrők nem szorulnak ki a fejléc linkjei miatt.
   const rank = (c) => (c.chrome ? 2 : 0) + (c.inView ? 0 : 1);
-  candidates.sort((a, b) => rank(a) - rank(b));
+  candidates.sort((a, b) => rank(a) - rank(b) || a.order - b.order);
   const MAX_CHROME = Math.max(10, Math.floor(MAX / 3));
   let chromeCount = 0;
   const chosen = [];
+  const left = [];
   for (const c of candidates) {
-    if (chosen.length >= MAX) break;
-    if (c.chrome && chromeCount >= MAX_CHROME) continue;
+    if (chosen.length >= MAX || (c.chrome && chromeCount >= MAX_CHROME)) { left.push(c); continue; }
     if (c.chrome) chromeCount++;
     chosen.push(c);
   }
+  // Az űrlap lejjebb lévő mezői és gombjai (az ablak alatt, vagy ami nem fért ki) külön, röviden: így egy hosszú
+  // űrlap végén a küldőgomb sem vész el. A kattintás és a gépelés úgyis odagörget hozzájuk.
+  const pool = beyond.concat(left.filter((c) => c.below)).filter((c) => c.form);
+  pool.sort((a, b) => a.order - b.order);
+  const below = pool.filter((c) => BUTTON.test(c.kind)).slice(-3);
+  for (const c of pool) {
+    if (below.length >= BELOW_MAX) break;
+    if (!below.includes(c)) below.push(c);
+  }
+  below.sort((a, b) => a.order - b.order);
+  const dropped = left.filter((c) => !below.includes(c));
+  const droppedChrome = dropped.filter((c) => c.chrome).length;
+  const belowMore = pool.length - below.length;
   // A modell a lap sorrendjében könnyebben tájékozódik, ezért visszarendezzük.
-  chosen.sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
+  chosen.sort((a, b) => a.order - b.order);
+  for (const c of chosen.concat(below).sort((a, b) => a.order - b.order)) {
+    let id = state.ids.get(c.el);
+    if (!id) {
+      id = String(++state.seq);
+      state.ids.set(c.el, id);
+    }
+    c.id = parseInt(id, 10);
+    c.el.setAttribute('data-jarvis-id', id);
+  }
 
-  const elements = [];
-  for (const c of chosen) {
+  // Választók (rádiógomb, jelölőnégyzet, opció) csoportja és kérdése: a fieldset címe, a csoport felirata,
+  // vagy a csoport előtti cím (pl. „Állapot”, „Szín”).
+  const GROUP = 'fieldset, [role=radiogroup], [role=group], [role=listbox]';
+  const CONTROL = 'input:not([type=hidden]), select, textarea, button, [role=radio], [role=checkbox], ' +
+                  '[role=option], [role=combobox], [role=switch]';
+  const HEADING = 'h1, h2, h3, h4, h5, h6, legend, label, strong, b, [class*=label i], [class*=title i], ' +
+                  '[class*=heading i]';
+  const titleBefore = (el) => {
+    let node = el;
+    for (let depth = 0; depth < 4 && node && node.parentElement; depth++) {
+      let sib = node.previousElementSibling;
+      for (let k = 0; k < 3 && sib; k++, sib = sib.previousElementSibling) {
+        if (sib.matches(CONTROL) || sib.querySelector(CONTROL)) return '';
+        const t = clean(sib.innerText);
+        if (t && t.length <= 60 && (sib.matches(HEADING) || sib.querySelector(HEADING))) return t;
+      }
+      node = node.parentElement;
+    }
+    return '';
+  };
+  const boxTitle = (box) => {
+    const aria = clean(box.getAttribute('aria-label')) || byIds(box, box.getAttribute('aria-labelledby'));
+    if (aria) return aria;
+    const legend = box.tagName === 'FIELDSET' ? box.querySelector(':scope > legend') : null;
+    if (legend && clean(legend.innerText)) return clean(legend.innerText);
+    if (box.id) {
+      const owner = document.querySelector('[aria-controls~="' + CSS.escape(box.id) + '"]');
+      if (owner) return nameOf(owner);
+    }
+    return titleBefore(box);
+  };
+  const boxes = new Map();
+  const named = new Map();
+  const groupOf = (el, kind) => {
+    const sort = kind.replace('input:', '');
+    // a rádiógombok csoportját a nevük adja (egy dobozban több kérdés is lehet)
+    const name = el.tagName === 'INPUT' ? el.getAttribute('name') || '' : '';
+    const box = el.closest(GROUP);
+    if (box) {
+      if (!boxes.has(box)) {
+        const size = box.querySelectorAll('input[type=radio], input[type=checkbox], [role=radio], [role=checkbox], ' +
+                                          '[role=option], [role=switch]').length;
+        boxes.set(box, {n: boxes.size, size, question: size > 1 ? cut(boxTitle(box), 60) : ''});
+      }
+      const b = boxes.get(box);
+      return b.size > 1 ? {key: 'g' + b.n + sort + (sort === 'radio' ? ':' + name : ''), question: b.question} : null;
+    }
+    if (!name) return null;
+    const key = sort + ':' + name;
+    if (!named.has(key)) {
+      const members = Array.from(el.getRootNode().querySelectorAll('input[name="' + CSS.escape(name) + '"]'))
+        .filter((x) => x.type === el.type);
+      // a kérdés a csoport első tagja előtt áll (akkor is, ha az épp nem fért a nézetbe)
+      const question = members.length > 1 ? cut(titleBefore(members[0]), 60) : '';
+      named.set(key, {key: 'n' + named.size + sort, size: members.length, question});
+    }
+    const g = named.get(key);
+    return g.size > 1 ? g : null;
+  };
+  // A választó saját, rövid felirata: a címke első sora, a beágyazott magyarázat (small, leírás) nélkül.
+  const SUBTEXT = 'small, [class*=desc i], [class*=help i], [class*=hint i], [class*=subtitle i], ' +
+                  '[class*=caption i], [class*=note i]';
+  const shortOf = (el, name) => {
+    if (clean(el.getAttribute('aria-label'))) return cut(name, 40);
+    let src = el.labels && el.labels.length ? el.labels[0] : null;
+    const by = el.getAttribute('aria-labelledby');
+    if (!src && by) {
+      const root = el.getRootNode();
+      const first = by.split(/\s+/)[0];
+      src = (root.getElementById && root.getElementById(first)) || document.getElementById(first);
+    }
+    if (!src && el.tagName !== 'INPUT') src = el;
+    if (!src) return cut(name, 40);
+    let text = (src.innerText || '').split('\n').map(clean).find(Boolean) || '';
+    for (const sub of src.querySelectorAll(SUBTEXT)) {
+      const t = clean(sub.innerText);
+      if (t && t.length < text.length && text.includes(t)) text = clean(text.replace(t, ''));
+    }
+    return cut(text || name, 40);
+  };
+  // A mezőt körülölelő címke saját szövege, a lenyíló lista lehetőségei nélkül (a teljes felirat a felvételé marad).
+  const ownLabel = (el) => {
+    const l = el.labels && el.labels.length ? el.labels[0] : null;
+    if (!l || !l.contains(el) || el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')) return '';
+    const copy = l.cloneNode(true);
+    copy.querySelectorAll('select, textarea, option, [role=listbox]').forEach((n) => n.remove());
+    return clean(copy.textContent);
+  };
+  // Hirdetéskártya ára a hirdetés linkje mellé (ha a link felirata nem mondja): a kártya első, nem profil-linkje
+  // kapja, az eladó profiljára mutató link nem.
+  const PRICE = /(\d{1,3}(?:[ \u00a0\u202f.]\d{3})+|\d+)(?:,\d{1,2})?\s?(?:Ft|HUF)(?![a-zá-ű])/i;
+  const PRICE_FIRST = /(?:Ft|HUF)\s?\d[\d \u00a0\u202f.]*\d/;
+  const PROFILE = /\/(member|members|user|users|profil|profile|seller|felhasznalo)(\/|$|\?)/i;
+  const CARD = 'li, article, [class*=card i], [class*=item i], [class*=product i]';
+  const priceOf = (el, name) => {
+    if (PRICE.test(name) || PRICE_FIRST.test(name)) return '';
+    const card = el.parentElement && el.parentElement.closest(CARD);
+    if (!card) return '';
+    const text = clean(card.innerText);
+    const m = text.length <= 400 ? (text.match(PRICE) || text.match(PRICE_FIRST)) : null;
+    if (!m) return '';
+    const links = Array.from(card.querySelectorAll('a[href]'));
+    const first = links.find((a) => !PROFILE.test(a.getAttribute('href') || ''));
+    return first === el ? clean(m[0]) : '';
+  };
+
+  const noValue = ['password', 'checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file'];
+  const itemOf = (c, inView) => {
     const el = c.el;
-    const id = elements.length + 1;
-    el.setAttribute('data-jarvis-id', String(id));
-    const item = {id, kind: c.kind, label: c.name.slice(0, 100), inView: c.inView};
-    if (el.tagName === 'A') item.href = (el.getAttribute('href') || '').slice(0, 120);
-    const noValue = ['password', 'checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file'];
+    const item = {id: c.id, kind: c.kind, label: c.name.slice(0, 100), inView};
+    if (c.chrome) item.chrome = true;
+    if (el.tagName === 'A') {
+      item.href = (el.getAttribute('href') || '').slice(0, 120);
+      if (typeof el.href === 'string') item.url = el.href.slice(0, 600);   // a feloldott, teljes cím
+      const price = c.chrome ? '' : priceOf(el, c.name);
+      if (price) item.price = price;
+    }
     if ((el.tagName === 'INPUT' && !noValue.includes(el.type)) || el.tagName === 'TEXTAREA') {
       item.value = (el.value || '').slice(0, 60);
     }
     if (el.type === 'checkbox' || el.type === 'radio') item.checked = !!el.checked;
     if (el.getAttribute('aria-checked')) item.checked = el.getAttribute('aria-checked') === 'true';
+    if (c.kind === 'option' && el.getAttribute('aria-selected') === 'true') item.checked = true;
     if (el.isContentEditable) item.editable = true;
+    const expanded = el.getAttribute('aria-expanded');
+    if (expanded === 'true' || expanded === 'false') item.expanded = expanded === 'true';
+    if (el.required || el.getAttribute('aria-required') === 'true') item.required = true;
+    let invalid = el.getAttribute('aria-invalid') === 'true';
+    try { invalid = invalid || el.matches(':user-invalid'); } catch (e) { /* régi böngésző */ }
+    if (invalid) item.invalid = true;
+    if (el.getAttribute('aria-disabled') === 'true') item.disabled = true;
+    if (el.tagName === 'SELECT' || el.tagName === 'TEXTAREA') {
+      const own = ownLabel(el);
+      if (own && own !== item.label) item.short = cut(own, 60);
+    }
     if (el.tagName === 'SELECT') {
       item.select = true;
-      const chosen = el.options[el.selectedIndex];
-      item.value = chosen ? clean(chosen.text).slice(0, 60) : '';
-      item.options = Array.from(el.options).slice(0, 12).map(o => clean(o.text).slice(0, 40));
+      const picked = el.options[el.selectedIndex];
+      item.value = picked ? clean(picked.text).slice(0, 60) : '';
+      const all = Array.from(el.options).map((o) => clean(o.text).slice(0, 40));
+      if (all.length > 12) {
+        // Sok lehetőség: elöl azok, amelyek a hirdetés szavaival (BrowserController.hints) egyeznek.
+        const score = (t) => {
+          const words = fold(t).split(/[^a-z0-9]+/).filter(Boolean);
+          const hit = (h) => words.some((w) => w.startsWith(h) || (w.length >= 4 && h.startsWith(w)));
+          return HINTS.filter(hit).length;
+        };
+        const ranked = all.map((t, i) => ({t, i, s: HINTS.length ? score(t) : 0}));
+        ranked.sort((a, b) => b.s - a.s || a.i - b.i);
+        item.options = ranked.slice(0, 12).map((o) => o.t);
+        item.more = all.length - 12;
+      } else {
+        item.options = all;
+      }
+    }
+    if (CHOICE.test(c.kind)) {
+      const group = groupOf(el, c.kind);
+      if (group) {
+        item.group = group.key;
+        if (group.question) item.question = group.question;
+      }
+      const short = shortOf(el, c.name);
+      if (short && short !== item.label) item.short = short;
     }
     if (sensitive(el)) item.sensitive = true;
     const fieldName = (el.getAttribute('name') || '') + ' ' + (el.id || '');
     if (fieldName.trim()) item.field = fieldName.trim().slice(0, 40);
-    elements.push(item);
-  }
+    return item;
+  };
+  const elements = chosen.map((c) => itemOf(c, c.inView));
+  const belowItems = below.map((c) => itemOf(c, false));
 
-  // A képernyőn látható szöveg: előbb a fő tartalom, a menük szövege csak a maradék helyre.
+  // A képernyőn látható szöveg: előbb a fő tartalom, a menük szövege csak a maradék helyre. A felsorolt elemek
+  // felirata (link, gomb, mező címkéje) nem kerül bele még egyszer, az elemlistában úgyis ott van; a menükből
+  // csak a nem kattintható szöveg.
+  const listed = new Set();
+  chosen.forEach((c, i) => {
+    // a felirata nem fért ki: a szövegben marad
+    if ((elements[i].short || c.name).length > 100 && !CHOICE.test(c.kind)) return;
+    listed.add(c.el);
+    if (c.el.labels) for (const l of c.el.labels) listed.add(l);
+    const by = c.el.getAttribute('aria-labelledby');
+    for (const id of by ? by.split(/\s+/) : []) {
+      const home = c.el.getRootNode();
+      const n = (home.getElementById && home.getElementById(id)) || document.getElementById(id);
+      if (n) listed.add(n);
+    }
+  });
+  const isListed = (node) => {
+    for (let n = node; n; n = n.parentElement) if (listed.has(n)) return true;
+    return false;
+  };
+  const ACTIVE = 'a[href], button, [role=button], [role=link], [role=menuitem], [role=tab]';
   const root = document.body || document.documentElement;
   const shown = new Map();
   const collect = (wantChrome, budget) => {
     const parts = [];
     let total = 0;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const p = node.parentElement;
-        if (!p || ['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(p.tagName)) {
-          return NodeFilter.FILTER_REJECT;
+    const walk = (start) => {
+      const walker = document.createTreeWalker(start, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          const p = node.parentElement;
+          if (!p || ['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(p.tagName)) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return clean(node.textContent) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
         }
-        return clean(node.textContent) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      });
+      while (total < budget && walker.nextNode()) {
+        const node = walker.currentNode;
+        const p = node.parentElement;
+        if (!!closestDeep(p, CHROME) !== wantChrome || isListed(p)) continue;
+        if (wantChrome && p.closest(ACTIVE)) continue;
+        let ok = shown.get(p);
+        if (ok === undefined) {
+          const r = p.getBoundingClientRect();
+          ok = r.bottom > 0 && r.top < vh && r.width > 0 && r.height > 0 &&
+               (typeof p.checkVisibility !== 'function' || p.checkVisibility({visibilityProperty: true}));
+          shown.set(p, ok);
+        }
+        if (!ok) continue;
+        const t = clean(node.textContent);
+        parts.push(t);
+        total += t.length + 1;
       }
-    });
-    while (total < budget && walker.nextNode()) {
-      const p = walker.currentNode.parentElement;
-      if (!!p.closest(CHROME) !== wantChrome) continue;
-      let ok = shown.get(p);
-      if (ok === undefined) {
-        const r = p.getBoundingClientRect();
-        ok = r.bottom > 0 && r.top < vh && r.width > 0 && r.height > 0 &&
-             (typeof p.checkVisibility !== 'function' || p.checkVisibility({visibilityProperty: true}));
-        shown.set(p, ok);
-      }
-      if (!ok) continue;
-      const t = clean(walker.currentNode.textContent);
-      parts.push(t);
-      total += t.length + 1;
-    }
+    };
+    walk(root);
+    for (const host of hosts) if (total < budget) walk(host.shadowRoot);   // az árnyék-DOM szövege a végén
     return parts.join(' ').slice(0, budget);
   };
   const mainText = collect(false, TEXT_CHARS);
@@ -273,6 +594,14 @@ SNAPSHOT_JS = r"""
     scrollHeight: Math.round(doc ? doc.scrollHeight : vh),
     viewportHeight: vh,
     elements,
+    below: belowItems,
+    dropped: dropped.length,
+    droppedChrome,
+    belowMore,
+    newDoc,
+    renumbered,
+    seqBefore,
+    errors: (""" + FORM_ERRORS_JS + r""")(),
   };
 }
 """
@@ -374,9 +703,9 @@ LOCATE_JS = r"""
   const best = Math.max(...found.map((f) => f.score));
   const top = found.filter((f) => f.score === best);
   const pick = top[Math.min(Math.max(0, want.ordinal || 0), top.length - 1)];
-  document.querySelectorAll('[data-jarvis-id="' + want.id + '"]').forEach((e) => e.removeAttribute('data-jarvis-id'));
+  document.querySelectorAll('[data-jarvis-loc="' + want.id + '"]').forEach((e) => e.removeAttribute('data-jarvis-loc'));
   const el = pick.el;
-  el.setAttribute('data-jarvis-id', String(want.id));
+  el.setAttribute('data-jarvis-loc', String(want.id));
   const item = {id: want.id, kind: pick.kind, label: pick.name.slice(0, 100), inView: true};
   if (el.tagName === 'A') item.href = (el.getAttribute('href') || '').slice(0, 120);
   if (el.tagName === 'SELECT') {
@@ -392,16 +721,13 @@ LOCATE_JS = r"""
 
 # Modell nélküli kitöltés (vinted.py): az oldal ÖSSZES látható, kezelhető eleme (nem csak a képernyőn
 # lévők, és nincs 60-as korlát), megszámozva, hogy a click/type_text használhassa őket. A számok külön
-# tartományban vannak (SCAN_BASE-től), és minden letapogatás az előzőét törli.
+# tartományban (SCAN_BASE-től) és külön attribútumban vannak, így az oldalnézet nem írja felül őket; minden
+# letapogatás az előzőét törli.
 SCAN_JS = r"""
 (opts) => {
 """ + _JS_HELPERS + r"""
-  const BASE = opts.base, END = opts.base + opts.span;
-  document.querySelectorAll('[data-jarvis-scan]').forEach((el) => {
-    el.removeAttribute('data-jarvis-scan');
-    const id = parseInt(el.getAttribute('data-jarvis-id') || '0', 10);
-    if (id >= BASE && id < END) el.removeAttribute('data-jarvis-id');
-  });
+  const BASE = opts.base;
+  document.querySelectorAll('[data-jarvis-scan]').forEach((el) => el.removeAttribute('data-jarvis-scan'));
   const CHROME = 'header, nav, footer, [role=banner], [role=navigation], [role=contentinfo]';
   const vh = window.innerHeight;
   const noValue = ['password', 'checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file'];
@@ -415,8 +741,7 @@ SCAN_JS = r"""
     const isField = /^(input|textbox|searchbox|combobox|textarea|select)/.test(kind);
     if (!name && !isField) continue;
     const id = BASE + out.length;
-    el.setAttribute('data-jarvis-id', String(id));
-    el.setAttribute('data-jarvis-scan', '1');
+    el.setAttribute('data-jarvis-scan', String(id));
     const r = el.getBoundingClientRect();
     const item = {id, kind, label: name.slice(0, 160), field: fieldOf(el), inView: r.bottom > 0 && r.top < vh};
     if (el.closest(CHROME)) item.chrome = true;
@@ -444,33 +769,11 @@ SCAN_JS = r"""
 }
 """
 
-# Hibaüzenetek az űrlapon (pl. a Vinted: „Fill in colour to continue”), a közzététel után.
-FORM_ERRORS_JS = r"""
-() => {
-  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
-  const shown = (el) => {
-    if (typeof el.checkVisibility === 'function' && !el.checkVisibility({visibilityProperty: true})) return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  };
-  const out = [];
-  const nodes = document.querySelectorAll('[role=alert], [aria-live=assertive], [class*=error i], [class*=invalid i], ' +
-                                          '[data-testid*=error i]');
-  for (const el of nodes) {
-    if (out.length >= 6) break;
-    if (!shown(el)) continue;
-    const text = clean(el.innerText);
-    if (text && text.length <= 200 && !out.some((t) => t.includes(text) || text.includes(t))) out.push(text);
-  }
-  return out;
-}
-"""
-
 # Felvétel: hányadik az elem a hozzá hasonlók (ugyanolyan fajta és felirat) között az egész oldalon.
 ORDINAL_JS = r"""
-(id) => {
+(selector) => {
 """ + _JS_HELPERS + r"""
-  const target = document.querySelector('[data-jarvis-id="' + id + '"]');
+  const target = document.querySelector(selector);
   if (!target) return 0;
   const kind = kindOf(target);
   const label = fold(nameOf(target));
@@ -581,27 +884,136 @@ def _short(exc: BaseException | None) -> str:
     return text[0][:200] if text else type(exc).__name__
 
 
-def format_element(el: dict[str, Any]) -> str:
-    text = f"[{el['id']}] {KIND_NAMES.get(el['kind'], el['kind'])}"
-    if el.get("label"):
-        text += f' "{el["label"]}"'
-    href = el.get("href") or ""
-    if href and not href.startswith(("javascript", "#")):
+def id_selector(number: Any) -> str:
+    """Az elem CSS-választója a száma alapján. Az oldalnézet (1-től), a letapogatás (SCAN_BASE-től) és a
+    visszajátszás (LOCATE_BASE-től) számai külön attribútumban vannak, így egymást nem írják felül: egy
+    letapogatás után készült oldalnézet mellett a letapogatás számai is érvényesek maradnak."""
+    n = int(number)
+    if n >= LOCATE_BASE:
+        return f'[data-jarvis-loc="{n}"]'
+    if n >= SCAN_BASE:
+        return f'[data-jarvis-scan="{n}"]'
+    return f'[data-jarvis-id="{n}"]'
+
+
+def _readable_path(path: str) -> str:
+    """Az ékezetes, %-kódolt útvonal olvasható alakja (ha a visszafejtés nem változtat a jelentésén)."""
+    text = urllib.parse.unquote(path)
+    return path if any(ch in text for ch in "?# ") else text
+
+
+def short_href(el: dict[str, Any], page_url: str = "") -> str:
+    """A link címe az oldalnézetben: azonos oldalon csak az útvonal, máshova a gépnév és az útvonal, a lekérdezésből
+    csak a keresés, lapozás, rendezés, kategória (_HREF_KEEP), legfeljebb HREF_CHARS karakter. A menük (fejléc,
+    navigáció, lábléc) linkjeinél semmi: azokat a feliratuk úgyis megmondja. Üres, ha nincs mit mutatni."""
+    raw = str(el.get("href") or "").strip()
+    if not raw or raw.startswith(("#", "javascript")) or el.get("chrome"):
+        return ""
+    full = str(el.get("url") or "") or urllib.parse.urljoin(page_url, raw)
+    try:
+        parts = urllib.parse.urlsplit(full)
+        here = urllib.parse.urlsplit(page_url) if page_url else None
+    except ValueError:
+        parts, here = None, None
+    if parts is None or parts.scheme not in ("http", "https"):
+        text = full
+    else:
+        kept = [(key, value) for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+                if key.lower() in _HREF_KEEP]
+        query = "&".join(f"{key}={value.replace('&', '%26').replace('#', '%23').replace(' ', '+')}"
+                         for key, value in kept)
+        path = _readable_path(parts.path or "/")
+        same = here is not None and parts.netloc.lower() == here.netloc.lower()
+        text = (path if same else parts.netloc + path) + (f"?{query}" if query else "")
+    return text if len(text) <= HREF_CHARS else text[:HREF_CHARS - 1] + "…"
+
+
+_STATE_NAMES = (("required", "kötelező"), ("invalid", "hibás"), ("disabled", "tiltva"))
+
+
+def _states(el: dict[str, Any], skip: frozenset[str] = frozenset()) -> str:
+    """Az elem állapota röviden: nyitva/csukva, kötelező, hibás, tiltva (a `skip`-beliek nélkül)."""
+    text = ""
+    if "expanded" in el:
+        text += " (nyitva)" if el["expanded"] else " (csukva)"
+    for key, name in _STATE_NAMES:
+        if el.get(key) and key not in skip:
+            text += f" ({name})"
+    return text
+
+
+def _mark(el: dict[str, Any]) -> str:
+    """Az elem száma; a csillag jelzi, hogy az előző nézet óta jelent meg (ugyanazon az oldalon)."""
+    return f"{'*' if el.get('new') else ''}[{el['id']}]"
+
+
+def format_element(el: dict[str, Any], page_url: str = "") -> str:
+    text = f"{_mark(el)} {KIND_NAMES.get(el['kind'], el['kind'])}"
+    label = el.get("short") or el.get("label") or ""
+    if el.get("price"):
+        label = f"{label} · {el['price']}" if label else el["price"]
+    if label:
+        text += f' "{label}"'
+    if el.get("question"):
+        text += f" (csoport: {el['question']})"
+    href = short_href(el, page_url)
+    if href:
         text += f" -> {href}"
     if el.get("select"):
         text += f' (kiválasztva: "{el.get("value", "")}"'
         if el.get("options"):
             text += "; lehetőségek: " + ", ".join(el["options"])
+            if el.get("more"):
+                text += f" (+{el['more']} további; írd be a nevét)"
         text += ")"
     elif el.get("value"):
         text += f' (érték: "{el["value"]}")'
     if "checked" in el:
         text += " [bejelölve]" if el["checked"] else " [nincs bejelölve]"
+    text += _states(el)
     if el.get("sensitive"):
         text += " (érzékeny adat, ezt nem töltöm ki)"
-    if not el.get("inView", True):
-        text += " (a látható részen kívül)"
     return text
+
+
+# Egy csoport választói egy sorban: „Szín (jelölőnégyzetek): [30] Fekete, [31] Barna ✓, …”.
+_CHOICE_PLURAL = {"input:radio": "választógombok", "radio": "választógombok", "input:checkbox": "jelölőnégyzetek",
+                  "checkbox": "jelölőnégyzetek", "option": "opciók", "switch": "kapcsolók"}
+
+
+def format_choices(run: list[dict[str, Any]]) -> str:
+    """Egy csoport egymás utáni választói (rádiógombok, jelölőnégyzetek, opciók) egy sorban, a kérdésükkel; a
+    bejelöltek mellett ✓. Minden szám külön kattintható."""
+    plural = _CHOICE_PLURAL.get(run[0].get("kind", ""), "lehetőségek")
+    question = run[0].get("question") or ""
+    # a mindegyikre igaz állapot (pl. kötelező) egyszer, a csoport címénél
+    common = frozenset(key for key, _ in _STATE_NAMES if all(el.get(key) for el in run))
+    parts = []
+    for el in run:
+        label = el.get("short") or el.get("label") or "?"
+        text = f"{_mark(el)} " + (f'"{label}"' if "," in label else label)
+        if el.get("checked"):
+            text += " ✓"
+        parts.append(text + _states(el, common))
+    head = f"{question} ({plural})" if question else plural[:1].upper() + plural[1:]
+    head += "".join(f" ({name})" for key, name in _STATE_NAMES if key in common)
+    return f"{head}: " + ", ".join(parts)
+
+
+def format_elements(elements: list[dict[str, Any]], page_url: str = "") -> list[str]:
+    """Az elemek sorai; egy csoport egymás utáni választói egy sorba kerülnek (format_choices)."""
+    lines, index = [], 0
+    while index < len(elements):
+        group, end = elements[index].get("group"), index + 1
+        if group and elements[index].get("kind") in _CHOICE_PLURAL:
+            while end < len(elements) and elements[end].get("group") == group:
+                end += 1
+        if end - index > 1:
+            lines.append(format_choices(elements[index:end]))
+        else:
+            lines.append(format_element(elements[index], page_url))
+        index = end
+    return lines
 
 
 def format_snapshot(data: dict[str, Any], note: str = "") -> str:
@@ -609,7 +1021,11 @@ def format_snapshot(data: dict[str, Any], note: str = "") -> str:
     if note:
         lines.append(note)
     lines.append(f"Oldal: {data.get('title') or '(cím nélkül)'}")
-    lines.append(f"Cím: {data.get('url', '')}")
+    page_url = str(data.get("url") or "")
+    lines.append(f"Cím: {page_url}")
+    errors = " | ".join(str(text) for text in data.get("errors") or [] if text)
+    if errors:   # az űrlap látható hibaüzenetei (FORM_ERRORS_JS), pl. egy kötelező, de üres mező
+        lines.append("Hibaüzenetek: " + (errors if len(errors) <= ERRORS_CHARS else errors[:ERRORS_CHARS - 1] + "…"))
     height, view, pos = data.get("scrollHeight", 0), data.get("viewportHeight", 1), data.get("scrollY", 0)
     if height > view * 1.05:
         percent = min(100, round((pos + view) / height * 100))
@@ -617,11 +1033,28 @@ def format_snapshot(data: dict[str, Any], note: str = "") -> str:
         lines.append(f"Görgetés: az oldal {percent}%-áig látszik ({more}).")
     lines += ["", "Látható szöveg:", data.get("text") or "(nincs)", ""]
     elements = data.get("elements") or []
+    below = data.get("below") or []
+    # A csillag magyarázata egyszer, az első fejlécben.
+    legend = "; *: új az előző nézet óta" if any(el.get("new") for el in elements + below) else ""
     if elements:
-        lines.append("Kezelhető elemek (a számukkal hivatkozz rájuk):")
-        lines += [format_element(el) for el in elements]
+        lines.append(f"Kezelhető elemek (a számukkal hivatkozz rájuk{legend}):")
+        legend = ""
+        outside = [el for el in elements if not el.get("inView", True)]
+        lines += format_elements([el for el in elements if el.get("inView", True)], page_url)
+        if outside:
+            lines.append("A látható részen kívül (görgetés nélkül is elérhetők):")
+            lines += format_elements(outside, page_url)
     else:
         lines.append("Nincs kezelhető elem a látható részen.")
+    dropped, menu = int(data.get("dropped") or 0), int(data.get("droppedChrome") or 0)
+    if dropped:   # a korlát miatt kimaradt elemek (a menük linkjei külön számolva)
+        lines.append(f"(+{menu} menüpont nem fért ki)" if menu == dropped else
+                     f"(+{dropped} elem nem fért ki" + (f", ebből {menu} menüpont)" if menu else ")"))
+    if below:
+        lines.append(f"Lejjebb az űrlapon (görgetés nélkül is elérhetők{legend}):")
+        lines += format_elements(below, page_url)
+        if data.get("belowMore"):
+            lines.append(f"(+{data['belowMore']} további űrlapelem lejjebb)")
     return "\n".join(lines)
 
 
@@ -646,7 +1079,11 @@ class BrowserController:
         # Előre megadott jóváhagyás (pl. a levételt már jóváhagytad): (felirat, webcím) → igaz/hamis.
         self.approve_hook: Callable[[str, str], bool] | None = None
         self.capture_error = ""   # a hibacsomaghoz: miért nem készült képernyőkép (capture)
-        self._locate_seq = 9000
+        self._locate_seq = LOCATE_BASE
+        # A hirdetés szavai (pl. kategória, állapot, település): egy hosszú lenyíló listából az oldalnézet ezekkel
+        # egyező lehetőségeit mutatja elöl. Üres lista: a lista elejét.
+        self.hints: list[str] = []
+        self._view_url = ""       # az előző oldalnézet címe (az új elemek csillagához)
         # Emberi tempó (humanize.py). Az `auto` igaz, amíg modell nélküli lépéssor fut (begyakorolt
         # lépések): akkor gondolkodási és olvasási szüneteket is tart, mert nincs modell, ami lassítana.
         self.pace = Pace(getattr(cfg, "human_pace", True), getattr(cfg, "pace", 1.0))
@@ -848,7 +1285,7 @@ class BrowserController:
         return self.elements[n]
 
     def _locator(self, number: int) -> Any:
-        return self.page.locator(f'[data-jarvis-id="{int(number)}"]').first
+        return self.page.locator(id_selector(number)).first
 
     def _fail(self, message: str) -> BrowserError:
         """Hibaüzenet friss oldalnézettel, hogy a modell újra tudjon tervezni."""
@@ -871,7 +1308,7 @@ class BrowserController:
         if self.on_action is None or self.page is None:
             return 0
         try:
-            return int(self.page.evaluate(ORDINAL_JS, int(el["id"])) or 0)
+            return int(self.page.evaluate(ORDINAL_JS, id_selector(el["id"])) or 0)
         except Exception:  # noqa: BLE001
             return 0
 
@@ -891,7 +1328,7 @@ class BrowserController:
         """Megkeres egy korábban rögzített elemet (lásd describe), és használhatóvá teszi a
         click/type_text/upload_files számára. Ha `timeout` alatt sem jelenik meg, None."""
         page = self._ensure()
-        self._locate_seq = 9000 if self._locate_seq > 9900 else self._locate_seq + 1
+        self._locate_seq = LOCATE_BASE if self._locate_seq > LOCATE_BASE + 900 else self._locate_seq + 1
         query = {**want, "id": self._locate_seq}
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
@@ -914,8 +1351,8 @@ class BrowserController:
     def scan(self) -> list[dict[str, Any]]:
         """Az oldal összes látható, kezelhető eleme (a látható részen kívüliek is), megszámozva: a modell nélküli
         kitöltés (vinted.py) ebből keresi meg a mezőket és egy lenyitott lista lehetőségeit, és a számukkal
-        kattint vagy gépel (click, type_text). Egy kattintás vagy gépelés után a számok már nem érvényesek
-        (az oldalnézet újraszámoz), ezért utána újra le kell tapogatni."""
+        kattint vagy gépel (click, type_text). A számok egy oldalnézet után is érvényesek (külön attribútumban
+        vannak), de egy kattintás vagy gépelés után az oldal megváltozhat, ezért utána érdemes újra letapogatni."""
         page = self._ensure()
         found = None
         for attempt in range(3):
@@ -1012,14 +1449,32 @@ class BrowserController:
             self._release(exc)
             data = self._snapshot_data(self._ensure())
             note = " ".join(part for part in (note, RESTARTED_NOTE) if part)
-        self.elements = {int(e["id"]): e for e in data.get("elements", [])}
+        self._remember_view(data)
         return format_snapshot(data, note)
 
+    def _remember_view(self, data: dict[str, Any]) -> None:
+        """Az oldalnézet elemei lesznek érvényesek; a letapogatás (scan) és a visszajátszás (locate) számai is
+        megmaradnak. Ugyanazon az oldalon megjelöli az előző nézet óta megjelent elemeket (csillag)."""
+        shown = [el for el in (data.get("elements") or []) + (data.get("below") or []) if isinstance(el, dict)]
+        url = str(data.get("url") or "").split("#")[0]
+        before = int(data.get("seqBefore") or 0)
+        if (url == self._view_url and not data.get("newDoc") and not data.get("renumbered")
+                and any(int(el["id"]) <= before for el in shown)):
+            for el in shown:
+                if int(el["id"]) > before:
+                    el["new"] = True
+        self._view_url = url
+        self.elements = {n: el for n, el in self.elements.items() if n >= SCAN_BASE}
+        self.elements.update({int(el["id"]): el for el in shown})
+
     def _snapshot_data(self, page: Any) -> dict[str, Any]:
+        hints = sorted({word for hint in self.hints for word in re.split(r"[^a-z0-9]+", fold(str(hint)))
+                        if len(word) >= 3})
+        options = {"max": int(self.cfg.max_elements), "textChars": VISIBLE_TEXT_CHARS, "base": SCAN_BASE,
+                   "below": BELOW_MAX, "hints": hints}
         for attempt in range(3):
             try:
-                return page.evaluate(SNAPSHOT_JS, {"max": int(self.cfg.max_elements),
-                                                   "textChars": VISIBLE_TEXT_CHARS})
+                return page.evaluate(SNAPSHOT_JS, options)
             except Exception as exc:  # noqa: BLE001 - pl. épp navigál az oldal
                 if attempt == 2 or is_closed_error(exc):
                     raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(exc)}).") from None
