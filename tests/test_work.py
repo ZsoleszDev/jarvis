@@ -18,6 +18,7 @@ import statistics
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -458,6 +459,17 @@ class WorkDeskTests(unittest.TestCase):
         item = self.store.create(targets=targets, prompt=prompt, **values)
         return self.store.add_photo(item.id, jpeg())
 
+    def test_the_browser_counts_ordinals_only_while_recording(self):
+        self.cfg.browser.enabled = True
+        desk = WorkDesk(self.cfg, None, Toolbox(self.cfg))
+        browser = desk.toolbox.browser
+        self.assertFalse(browser.recording)
+        desk.start_recording(self.item(["vinted"]), "vinted", "post", "https://www.vinted.hu/items/new")
+        self.assertTrue(browser.recording, "felvétel közben kell, hányadik az elem a hasonlók között")
+        desk.end_request()
+        self.assertFalse(browser.recording, "visszajátszásnál és modell nélküli kitöltésnél nem")
+        self.assertFalse(browser.running, "a böngészőt ettől nem indítja el")
+
     def test_describe_for_the_interface(self):
         info = self.desk.describe()
         self.assertEqual([p["name"] for p in info["platforms"]], ["Vinted", "Jófogás", "Vatera", "Hardverapró"])
@@ -791,6 +803,14 @@ class BrowserWorkTests(unittest.TestCase):
         with self.assertRaises(BrowserError):
             self.browser.open(self.pages.url("katalogus.html"))
             self.browser.upload_files(self.files)
+
+    def test_a_single_file_input_gets_the_next_photo_once_it_took_the_previous(self):
+        self.browser.open(self.pages.url("egyes.html"))
+        started = time.monotonic()
+        view = self.browser.upload_files(self.files)
+        self.assertLess(time.monotonic() - started, 1.2, "nincs fotónkénti fix várakozás (régen 0,6 mp)")
+        self.assertIn("Fotó: 01.jpg", view)
+        self.assertIn("Fotó: 02.jpg", view)
 
     def test_fill_several_fields_in_one_step(self):
         view = self.browser.open(self.pages.url("feladas.html"))

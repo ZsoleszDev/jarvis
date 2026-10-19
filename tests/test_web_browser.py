@@ -31,7 +31,8 @@ from test_offline import FakeOllama, make_cfg, reply, tool_reply  # noqa: E402
 
 from jarvis_core import web  # noqa: E402
 from jarvis_core.assistant import STALE_NOTE, Assistant  # noqa: E402
-from jarvis_core.browser import BrowserController, BrowserError, is_risky, is_search_field  # noqa: E402
+from jarvis_core.browser import (ORDINAL_JS, BrowserController, BrowserError, is_risky, is_search_field,  # noqa: E402
+                                 match_option, same_site, wanted_state)
 from jarvis_core.config import load_config  # noqa: E402
 from jarvis_core.llm import OllamaClient  # noqa: E402
 from jarvis_core.tools import Toolbox, params  # noqa: E402
@@ -67,9 +68,87 @@ SITE = {
 <script>var titok = "ez nem látszhat";</script><button>Kosárba</button></body></html>""",
     "koszonjuk.html": """<!doctype html><html><head><meta charset="utf-8"><title>Köszönjük</title></head>
 <body><p>Elküldve.</p></body></html>""",
+    "lapok.html": """<!doctype html><html><head><meta charset="utf-8"><title>Lapok</title></head>
+<body><a href="/lapok.html" target="_blank">Következő lap</a></body></html>""",
+    "urlap.html": None,   # lent (URLAP)
     "regi.html": None,  # cp1250 kódolású oldal, lent írjuk ki
     "kep.png": None,
 }
+
+_SIZES = ["Válassz", "XXS", "XS", "S", "M", "L", "XL", "XXL", "3XL", "4XL", "34", "36", "38", "40", "42", "44", "46",
+          "48", "Egy méret", "Egyedi méret"] + [f"Gyerek {n}" for n in range(98, 153, 6)]
+# Egy hirdetésfeladó űrlap a jellemző mezőfajtákkal: jelölőnégyzet, választógomb, kapcsoló, 30 elemű natív lista,
+# saját lenyíló lista, kétszintű kategóriafa, kereshető márkamező, saját keresővel nyíló lista, nyitva maradó lista.
+URLAP = """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Új hirdetés</title></head><body>
+<label>Cím <input id="cim"></label>
+<p>Szín: <label><input type="checkbox" id="fekete"> Fekete</label>
+<label><input type="checkbox" id="sotetkek"> Sötétkék</label>
+Állapot: <label><input type="radio" name="allapot" id="uj"> Új</label>
+<label><input type="radio" name="allapot" id="nagyonjo"> Nagyon jó</label></p>
+<div role="switch" id="alku" aria-checked="false" tabindex="0" style="display:inline-block"
+  onclick="this.setAttribute('aria-checked', String(this.getAttribute('aria-checked') !== 'true'))"
+  >Alku lehetséges</div>
+<label for="ruhameret">Ruhaméret</label>
+<select id="ruhameret">""" + "".join(f"<option>{s}</option>" for s in _SIZES) + """</select>
+<div role="combobox" id="meret" aria-label="Méret" aria-expanded="false" tabindex="0" style="display:inline-block"
+  onclick="nyit('meretek', this)">Válassz</div>
+<div role="listbox" id="meretek" hidden><div role="option" onclick="valaszt(this)">S</div>
+  <div role="option" onclick="valaszt(this)">M</div><div role="option" onclick="valaszt(this)">L</div></div>
+<button type="button" id="kat" aria-haspopup="true" onclick="nyit('fa', this)">Kategória</button>
+<span id="kat-ertek"></span>
+<div id="fa" hidden>
+  <div id="fa-0"><button type="button" onclick="szint('fa-0', 'fa-nok')">Nők</button>
+    <button type="button" onclick="szint('fa-0', 'fa-ferfi')">Férfiak</button></div>
+  <div id="fa-nok" hidden><button type="button" onclick="szint('fa-nok', 'fa-nok-ruha')">Ruházat</button>
+    <button type="button">Cipők</button></div>
+  <div id="fa-ferfi" hidden><button type="button">Ruházat</button></div>
+  <div id="fa-nok-ruha" hidden><div role="option" onclick="kat(this)">Pólók</div>
+    <div role="option" onclick="kat(this)">Pólók és trikók</div><div role="option" onclick="kat(this)">Ingek</div></div>
+</div>
+<label>Márka <input id="marka" role="combobox" aria-autocomplete="list" autocomplete="off"></label>
+<div role="listbox" id="markak"></div>
+<button type="button" id="marka2" aria-haspopup="listbox" onclick="nyit('m2', this)">Márka listából</button>
+<span id="marka2-ertek"></span>
+<div id="m2" hidden><input type="search" placeholder="Márka keresése" oninput="szur(this.value)">
+  <div id="m2-lista"></div></div>
+<button type="button" id="szin" aria-haspopup="listbox" onclick="nyit('szinek', this)">Színek</button>
+<div id="szinek" hidden><input type="checkbox" id="piros" aria-label="Piros">
+  <input type="checkbox" id="kek" aria-label="Kék">
+  <button type="button" onclick="szinek.hidden = true">Kész</button></div>
+<p><button type="button" id="mentes" onclick="out.textContent = 'Mentve: ' + cim.value">Mentés</button>
+<button type="button" onclick="out.textContent = 'Közzétéve'">Közzététel</button>
+<button type="button" onclick="out.textContent = 'Kiemelve'">Kiemelés 990 Ft</button>
+<button type="button" onclick="reszletek.showModal()">Részletek</button>
+<button type="button" onclick="mentes.replaceWith(mentes.cloneNode(true))">Frissítés</button>
+<a href="/termek.html">Másik oldal</a></p><p id="out"></p>
+<dialog id="reszletek"><p>Részletek</p><button type="button" onclick="reszletek.close()">Bezárás</button></dialog>
+<script>
+function nyit(id, gomb) { const l = document.getElementById(id); l.hidden = !l.hidden;
+  gomb.setAttribute('aria-expanded', String(!l.hidden)); }
+function valaszt(o) { meret.textContent = o.textContent; meretek.hidden = true;
+  meret.setAttribute('aria-expanded', 'false'); }
+function szint(innen, ide) { document.getElementById(innen).hidden = true;
+  document.getElementById(ide).hidden = false; }
+function kat(o) { document.getElementById('kat-ertek').textContent = 'Nők > Ruházat > ' + o.textContent;
+  fa.hidden = true; for (const id of ['fa-nok', 'fa-ferfi', 'fa-nok-ruha']) document.getElementById(id).hidden = true;
+  document.getElementById('fa-0').hidden = false; }
+const MARKAK = ['Zara', 'Zara Kids', 'H&M', 'Mango', 'Nike', 'Reserved'];
+let kesleltet;
+marka.addEventListener('input', () => { clearTimeout(kesleltet); kesleltet = setTimeout(() => {
+  markak.innerHTML = '';
+  const q = marka.value.toLowerCase();
+  if (q) for (const m of MARKAK.filter((m) => m.toLowerCase().includes(q))) {
+    const o = document.createElement('div'); o.setAttribute('role', 'option'); o.textContent = m;
+    o.onclick = () => { marka.value = m; markak.innerHTML = ''; }; markak.appendChild(o); }
+}, 300); });
+function szur(q) { const lista = document.getElementById('m2-lista'); lista.innerHTML = '';
+  const talalt = q ? MARKAK.filter((m) => m.toLowerCase().includes(q.toLowerCase())) : MARKAK.slice(0, 3);
+  for (const m of talalt) {
+    const o = document.createElement('div'); o.setAttribute('role', 'option'); o.textContent = m;
+    o.onclick = () => { document.getElementById('marka2-ertek').textContent = m; m2.hidden = true; };
+    lista.appendChild(o); } }
+szur('');
+</script></body></html>"""
 
 
 class LocalSite:
@@ -86,6 +165,7 @@ class LocalSite:
             '<body><p>Árvíztűrő tükörfúrógép, ez egy régi kódolású magyar oldal.</p></body></html>'
             .encode("cp1250"))
         (root / "kep.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (root / "urlap.html").write_text(URLAP, encoding="utf-8")
         handler = functools.partial(_QuietHandler, directory=self.dir.name)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -320,6 +400,58 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("Új lapon nyílt meg.", view)
         self.assertIn("Oldal: Kávéfőző X200", view)
 
+    def test_own_tabs_are_closed_but_not_the_users(self):
+        context = self.browser._context
+        first = self.browser.page = context.new_page()   # a felhasználó lapjai (kézzel nyitotta)
+        by_hand = context.new_page()
+        self.browser.open(self.site.url("lapok.html"))
+        before = len([p for p in context.pages if not p.is_closed()])
+        opened = []
+        for _ in range(5):
+            self.browser.click(self.find(lambda e: e["label"] == "Következő lap"))
+            opened.append(self.browser.page)
+        try:
+            pages = [p for p in context.pages if not p.is_closed()]
+            self.assertIs(self.browser.page, opened[-1], "a legújabb lapon dolgozik")
+            self.assertLessEqual(len(pages), before + 2, "csak az aktív és az előző saját lap marad")
+            self.assertTrue(all(p in pages for p in (first, by_hand, opened[-2])))
+            self.assertTrue(all(p.is_closed() for p in opened[:-2]), "a régebbi saját lapokat bezárta")
+            self.assertIsNone(getattr(first, "_jarvis_network", None), "a háttérbe került lapot nem figyeli")
+            self.assertIsNotNone(getattr(opened[-1], "_jarvis_network", None))
+        finally:
+            by_hand.close()
+
+    def test_model_free_steps_keep_the_scan_numbers(self):
+        self.browser.auto = True       # modell nélküli lépéssor: nincs oldalnézet, amit senki nem olvasna
+        try:
+            elements = self.browser.scan()
+            name = next(e for e in elements if e["label"] == "Név")
+            news = next(e for e in elements if e["label"] == "Hírlevél")
+            self.assertEqual(self.browser.type_text(name["id"], "Teszt Elek"), 'Beírtam: "Teszt Elek".')
+            note = self.browser.click(news["id"])       # a letapogatás száma még érvényes
+            self.assertEqual(note, 'Rákattintottam: "Hírlevél".')
+            self.assertTrue(self.browser.page.is_checked("input[name=hirlevel]"))
+            self.assertEqual(self.browser.page.input_value("input[name=nev]"), "Teszt Elek")
+        finally:
+            self.browser.auto = False
+
+    def test_ordinals_are_counted_only_while_recording(self):
+        page, scripts, events = self.browser.page, [], []
+        original = page.evaluate
+        page.evaluate = lambda script, *args, **kwargs: scripts.append(script) or original(script, *args, **kwargs)
+        self.browser.on_action = events.append
+        try:
+            self.browser.click(self.find(lambda e: e["label"] == "Hírlevél"))
+            self.assertNotIn(ORDINAL_JS, scripts, "felvétel nélkül nem járja be az egész lapot")
+            self.browser.recording = True
+            self.browser.click(self.find(lambda e: e["label"] == "Hírlevél"))
+            self.assertIn(ORDINAL_JS, scripts)
+            self.assertEqual([e["do"] for e in events], ["click", "click"])
+        finally:
+            del page.evaluate
+            self.browser.on_action = None
+            self.browser.recording = False
+
     def test_scroll_to_bottom(self):
         for _ in range(6):
             view = self.browser.scroll("down")
@@ -347,6 +479,173 @@ class BrowserTests(unittest.TestCase):
         with self.assertRaisesRegex(BrowserError, "allow_local"):
             strict.open(self.site.url("index.html"))
         self.assertFalse(strict.running, "tiltott címnél el sem indul a böngésző")
+
+
+# --- mezők a fajtájuk szerint, választás listából, több lépés egy körben ----------------------------------
+
+class ChoiceMatchTests(unittest.TestCase):
+    def test_option_matching_is_strict_about_ambiguity(self):
+        sizes = ["Egy méret", "Egyedi méret", "M", "Gyerek 104", "Gyerek 110"]
+        self.assertEqual(match_option(sizes, "m"), (2, [2]), "a pontos egyezés nyer")
+        self.assertEqual(match_option(sizes, "egyedi")[0], 1, "egyetlen ezzel kezdődő")
+        self.assertEqual(match_option(sizes, "104")[0], 3, "egyetlen, amelyben egy szó így kezdődik")
+        self.assertEqual(match_option(sizes, "egy"), (None, [0, 1]), "nem egyértelmű: a jelöltek")
+        self.assertEqual(match_option(["Női pólók", "Férfi ingek"], "pólók női")[0], 0, "a legtöbb közös szó")
+        self.assertEqual(match_option(sizes, "XL"), (None, []))
+        self.assertEqual(match_option(sizes, "L"), (None, []), "az L nem az XL része")
+
+    def test_wanted_state_of_a_checkbox(self):
+        for text in ("igen", "Igen", "x", "✓", "be", "true", "Fekete"):
+            self.assertIs(wanted_state(text, "Fekete"), True, text)
+        for text in ("nem", "ki", "false"):
+            self.assertIs(wanted_state(text, "Fekete"), False, text)
+        self.assertIsNone(wanted_state("Sötétkék", "Fekete"))
+
+    def test_same_site(self):
+        self.assertTrue(same_site("https://api.vinted.hu/x", "https://www.vinted.hu/items/new"))
+        self.assertTrue(same_site("https://static.bbc.co.uk/a.js", "https://www.bbc.co.uk/"))
+        self.assertFalse(same_site("https://securepubads.g.doubleclick.net/x", "https://www.jofogas.hu/"))
+        self.assertFalse(same_site("http://localhost:9/x", "http://127.0.0.1:8/"))
+        self.assertTrue(same_site("http://127.0.0.1:9/x", "http://127.0.0.1:8/"))
+
+
+@unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
+class FormKindTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.site = LocalSite()
+        cls.profile = tempfile.TemporaryDirectory()
+        cfg = load_config(ROOT / "config.toml").browser
+        cfg.headless = True
+        cfg.profile_dir = cls.profile.name
+        cfg.pace = 0.0
+        cls.asked: list[str] = []
+        cls.browser = BrowserController(cfg, allow_local=True, confirm=lambda prompt: cls.asked.append(prompt) or True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.site.close()
+        cls.profile.cleanup()
+
+    def setUp(self):
+        self.asked.clear()
+        self.view = self.browser.open(self.site.url("urlap.html"))
+
+    def el(self, label: str) -> int:
+        return next(i for i, e in self.browser.elements.items() if e["label"] == label)
+
+    def state(self, script: str):
+        return self.browser.page.evaluate(script)
+
+    def test_fill_sets_each_field_by_its_kind(self):
+        note = self.browser.fill_fields([
+            {"element": self.el("Cím"), "text": "Zara póló"}, {"element": self.el("Fekete"), "text": "igen"},
+            {"element": self.el("Sötétkék"), "text": "Sötétkék"},
+            {"element": self.el("Nagyon jó"), "text": "Nagyon jó"},
+            {"element": self.el("Ruhaméret"), "text": "egyedi"}, {"element": self.el("Alku lehetséges"), "text": "✓"}])
+        self.assertIn('Kitöltöttem: "Cím", "Fekete" (bejelöltem), "Sötétkék" (bejelöltem), "Nagyon jó" (bejelöltem), '
+                      '"Ruhaméret" (Egyedi méret), "Alku lehetséges" (bejelöltem).', note)
+        self.assertNotIn("Nem sikerült", note)
+        self.assertEqual(self.state("() => [cim.value, fekete.checked, sotetkek.checked, nagyonjo.checked, "
+                                    "ruhameret.value, alku.getAttribute('aria-checked')]"),
+                         ["Zara póló", True, True, True, "Egyedi méret", "true"])
+        note = self.browser.type_text(self.el("Fekete"), "igen")
+        self.assertIn('"Fekete": már be volt jelölve.', note, "nem kattint rá még egyszer (az kivenné)")
+        self.browser.type_text(self.el("Fekete"), "nem")
+        self.assertFalse(self.state("() => fekete.checked"))
+
+    def test_nothing_is_typed_into_what_is_not_a_text_field(self):
+        with self.assertRaisesRegex(BrowserError, "nem szövegmező.*browser_choose"):
+            self.browser.type_text(self.el("Méret"), "M")
+        self.assertEqual(self.state("() => meret.textContent"), "Válassz", "nem mondja, hogy beírta")
+        with self.assertRaisesRegex(BrowserError, "igen.*nem"):
+            self.browser.type_text(self.el("Fekete"), "Zara póló")
+        self.assertFalse(self.state("() => fekete.checked"))
+
+    def test_an_ambiguous_option_lists_the_candidates_at_once(self):
+        started = time.monotonic()
+        with self.assertRaisesRegex(BrowserError, "Több lehetőség.*„Egy méret”, „Egyedi méret”"):
+            self.browser.type_text(self.el("Ruhaméret"), "egy")
+        with self.assertRaisesRegex(BrowserError, "Nincs ilyen lehetőség.*„Válassz”"):
+            self.browser.type_text(self.el("Ruhaméret"), "óriás")
+        self.assertLess(time.monotonic() - started, 4, "nem vár a nem létező feliratra")
+        self.assertIn('Kiválasztottam: "Gyerek 104"', self.browser.type_text(self.el("Ruhaméret"), "104"))
+
+    def test_choose_from_a_custom_dropdown(self):
+        view = self.browser.choose(self.el("Méret"), "m")
+        self.assertIn('Kiválasztottam: "M" ("Méret").', view)
+        self.assertIn("Oldal: Új hirdetés", view, "a végén egy friss oldalnézet")
+        self.assertEqual(self.state("() => [meret.textContent, meretek.hidden]"), ["M", True])
+
+    def test_choose_walks_a_tree_level_by_level(self):
+        view = self.browser.choose(self.el("Kategória"), "Nők > Ruházat > Pólók")
+        self.assertIn('Kiválasztottam: "Nők > Ruházat > Pólók" ("Kategória").', view)
+        self.assertEqual(self.state("() => document.getElementById('kat-ertek').textContent"),
+                         "Nők > Ruházat > Pólók")
+        self.browser.snapshot()
+        with self.assertRaisesRegex(BrowserError, "Több lehetőség.*„Pól”.*„Pólók”, „Pólók és trikók”"):
+            self.browser.choose(self.el("Kategória"), "Nők > Ruházat > Pól")
+
+    def test_choose_types_into_a_searchable_field_first(self):
+        self.assertIn('Kiválasztottam: "Zara" ("Márka").', self.browser.choose(self.el("Márka"), "Zara"))
+        self.assertEqual(self.state("() => [marka.value, markak.children.length]"), ["Zara", 0])
+        self.browser.snapshot()
+        self.assertIn('Kiválasztottam: "Mango"', self.browser.choose(self.el("Márka listából"), "Mango"),
+                      "a lista saját keresőjébe írta, mert a nyitott listában nem volt")
+        self.assertEqual(self.state("() => document.getElementById('marka2-ertek').textContent"), "Mango")
+
+    def test_a_list_that_stays_open_is_closed(self):
+        self.browser.choose(self.el("Színek"), "Kék")
+        self.assertEqual(self.state("() => [kek.checked, piros.checked, szinek.hidden]"), [True, False, True],
+                         "a „Kész” gombbal bezárta")
+
+    def test_several_steps_in_one_round(self):
+        view = self.browser.do_actions([
+            {"do": "type", "element": self.el("Cím"), "text": "Zara póló"},
+            {"do": "check", "element": self.el("Fekete"), "text": "igen"},
+            {"do": "choose", "element": self.el("Méret"), "text": "L"},
+            {"do": "click", "element": self.el("Mentés")}])
+        self.assertIn("Elvégeztem mind a 4 lépést", view)
+        self.assertEqual(view.count("Oldal: "), 1, "egyetlen oldalnézet a végén")
+        self.assertEqual(self.state("() => [out.textContent, fekete.checked, meret.textContent]"),
+                         ["Mentve: Zara póló", True, "L"])
+
+    def test_steps_stop_when_the_page_changes(self):
+        view = self.browser.do_actions([{"do": "click", "element": self.el("Másik oldal")},
+                                        {"do": "type", "element": self.el("Cím"), "text": "Zara"}])
+        self.assertIn("A 2 lépésből 1 lett kész", view)
+        self.assertIn("Megálltam, mert megváltozott az oldal címe", view)
+        self.assertIn('Kihagytam: 2. gépelés', view)
+        self.assertIn("Oldal: Kávéfőző X200", view)
+
+        self.browser.open(self.site.url("urlap.html"))
+        view = self.browser.do_actions([{"do": "click", "element": self.el("Részletek")},
+                                        {"do": "click", "element": self.el("Mentés")}])
+        self.assertIn("felugró ablak nyílt meg", view)
+        self.assertEqual(self.state("() => out.textContent"), "", "a Mentés kimaradt")
+
+        self.browser.open(self.site.url("urlap.html"))
+        view = self.browser.do_actions([{"do": "click", "element": self.el("Frissítés")},
+                                        {"do": "click", "element": self.el("Mentés")}])
+        self.assertIn("már nem az, ami az oldalnézetben volt", view, "az oldal újrarajzolta a gombot")
+        self.assertEqual(self.state("() => out.textContent"), "")
+
+    def test_steps_keep_the_approval_rules(self):
+        with self.assertRaisesRegex(BrowserError, "csak utolsóként"):
+            self.browser.do_actions([{"do": "click", "element": self.el("Közzététel")},
+                                     {"do": "click", "element": self.el("Mentés")}])
+        with self.assertRaisesRegex(BrowserError, "fizetős"):
+            self.browser.do_actions([{"do": "click", "element": self.el("Kiemelés 990 Ft")}])
+        with self.assertRaisesRegex(BrowserError, "legfeljebb 5"):
+            self.browser.do_actions([{"do": "click", "element": self.el("Mentés")}] * 6)
+        self.assertEqual(self.state("() => out.textContent"), "", "semmit nem csinált")
+        self.assertEqual(self.asked, [])
+        view = self.browser.do_actions([{"do": "type", "element": self.el("Cím"), "text": "Zara"},
+                                        {"do": "click", "element": self.el("Közzététel")}])
+        self.assertIn("Közzététel", self.asked[0], "a kockázatos lépés utolsóként jóváhagyással mehet")
+        self.assertIn("Elvégeztem mind a 2 lépést", view)
+        self.assertEqual(self.state("() => out.textContent"), "Közzétéve")
 
 
 # --- eszközök a böngészővel, látás, tömörítés ----------------------------------------------
@@ -461,7 +760,7 @@ class VisionAndToolTests(unittest.TestCase):
             self.fake.chat_script = [reply("Egy webbolt főoldala, kávéfőző akcióval.")]
             box = Toolbox(self.cfg, llm=self.llm)
             for name in ("browser_open", "browser_click", "browser_type", "browser_scroll",
-                         "browser_back", "browser_read", "browser_look"):
+                         "browser_back", "browser_read", "browser_look", "browser_choose", "browser_do"):
                 self.assertIn(name, box.names())
             view = box.call("browser_open", {"url": site.url("index.html")})
             self.assertIn("Kezelhető elemek", view)
@@ -470,6 +769,17 @@ class VisionAndToolTests(unittest.TestCase):
             view = box.call("browser_type", {"element": f"#{search}", "text": "kávé", "submit": "true"})
             self.assertIn("Találatok: kávé", view)
             self.assertTrue(box.call("browser_click", {"element": "nem szám"}).startswith("HIBA"))
+            box.call("browser_open", {"url": site.url("index.html")})
+            name = next(i for i, e in box.browser.elements.items() if e["label"] == "Név")
+            size = next(i for i, e in box.browser.elements.items() if e.get("select"))
+            actions = json.dumps([{"do": "type", "element": f"#{name}", "text": "Teszt Elek"},
+                                  {"do": "choose", "element": size, "text": "nagy"}])
+            view = box.call("browser_do", {"actions": actions})     # a listát néha szövegként küldi
+            self.assertIn("Elvégeztem mind a 2 lépést", view)
+            self.assertIn('kiválasztva: "Nagy"', view)
+            size = next(i for i, e in box.browser.elements.items() if e.get("select"))
+            self.assertIn('Kiválasztottam: "Kicsi"', box.call("browser_choose", {"element": size, "option": "kicsi"}))
+            self.assertTrue(box.call("browser_do", {"actions": "nem lista"}).startswith("HIBA"))
             look = box.call("browser_look", {"question": "Mi ez az oldal?"})
             self.assertIn("webbolt", look)
             self.assertTrue(self.fake.chat_bodies()[0]["messages"][0]["images"])
@@ -494,6 +804,25 @@ NETWORK_PAGES = {
 const keresek = Array.from({length: 300}, (_, i) => fetch('/apro?i=' + i).then(r => r.text()));
 Promise.all(keresek).then(() => window.kesz = true);
 </script></body></html>""",
+    # Semmi nem tölt: egy kattintás után azonnal kész.
+    "/statikus.html": """<!doctype html><html><head><meta charset="utf-8"><title>Statikus</title></head><body>
+<p id="szoveg">Eredeti</p><button onclick="szoveg.textContent = 'Átírva'">Átírás</button></body></html>""",
+    # A tartalom a betöltés után 600 ms-mal, egy időzítőből jön (közben semmi nem változik, és nem is tölt).
+    "/kesobb.html": """<!doctype html><html><head><meta charset="utf-8"><title>Később</title></head><body>
+<h1>Hirdetés</h1><script>setTimeout(() => { const p = document.createElement('p');
+  p.textContent = 'Későn jött tartalom'; document.body.appendChild(p); }, 600);</script></body></html>""",
+    # Kattintásra indul a (lassú) adatkérés.
+    "/gomb.html": """<!doctype html><html><head><meta charset="utf-8"><title>Gomb</title></head><body>
+<ul id="lista"></ul><button onclick="fetch('/adat').then(r => r.json()).then(d => { for (const t of d) {
+  const li = document.createElement('li'); li.textContent = t; lista.appendChild(li); } })">Betöltés</button>
+</body></html>""",
+    # Mint egy reklám és egy statisztika: egy másik oldal lassú kérései és egy beacon. Ezekre nem kell várni.
+    "/kulso.html": """<!doctype html><html><head><meta charset="utf-8"><title>Reklámos</title></head><body>
+<p id="szoveg">Hirdetés</p>
+<button onclick="fetch('KULSO/lassu?gomb', {mode: 'no-cors'}); szoveg.textContent = 'Frissítve'"
+  >Hirdetés frissítése</button>
+<script>fetch('KULSO/lassu?betolt', {mode: 'no-cors'}); navigator.sendBeacon('/beacon', 'megnyitva');</script>
+</body></html>""",
 }
 
 
@@ -509,7 +838,8 @@ class _NetworkHandler(BaseHTTPRequestHandler):
         elif path == "/apro":
             body, kind = b"ok", "text/plain"
         elif path in NETWORK_PAGES:
-            body, kind = NETWORK_PAGES[path].encode("utf-8"), "text/html; charset=utf-8"
+            page = NETWORK_PAGES[path].replace("KULSO", f"http://localhost:{getattr(self.server, 'other_port', 0)}")
+            body, kind = page.encode("utf-8"), "text/html; charset=utf-8"
         else:
             body, kind = b"", "text/plain"
         self.send_response(200 if body else 404)
@@ -517,6 +847,29 @@ class _NetworkHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        if self.path == "/beacon":   # a statisztika lassan válaszol
+            self.server.beacons.append(time.monotonic())
+            time.sleep(4)
+        self.send_response(204)
+        self.end_headers()
+
+
+class _AdHandler(BaseHTTPRequestHandler):
+    """Egy másik oldal (reklámszerver), ami lassan válaszol."""
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.server.hits.append(time.monotonic())
+        time.sleep(4)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(b"ok")
 
 
 class NetworkBusyTests(unittest.TestCase):
@@ -534,7 +887,10 @@ class NetworkWaitTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _NetworkHandler)
-        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.other = ThreadingHTTPServer(("127.0.0.1", 0), _AdHandler)   # „localhost” néven: másik oldal
+        cls.server.other_port, cls.server.beacons, cls.other.hits = cls.other.server_address[1], [], []
+        for server in (cls.server, cls.other):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
         cls.profile = tempfile.TemporaryDirectory()
         cfg = load_config(ROOT / "config.toml").browser
         cfg.headless = True
@@ -545,12 +901,58 @@ class NetworkWaitTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.browser.close()
-        cls.server.shutdown()
-        cls.server.server_close()
+        for server in (cls.server, cls.other):
+            server.shutdown()
+            server.server_close()
         cls.profile.cleanup()
 
     def url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}{path}"
+
+    def find(self, label: str) -> int:
+        return next(i for i, e in self.browser.elements.items() if e["label"] == label)
+
+    def timed_settles(self) -> list[float]:
+        """A _settle hívások ideje (a teszt végéig mérve)."""
+        durations: list[float] = []
+        original = self.browser._settle
+
+        def timed(*args, **kwargs):
+            started = time.monotonic()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                durations.append(time.monotonic() - started)
+
+        self.browser._settle = timed
+        self.addCleanup(lambda: delattr(self.browser, "_settle"))
+        return durations
+
+    def test_a_static_page_settles_at_once(self):
+        self.browser.open(self.url("/statikus.html"))
+        durations = self.timed_settles()
+        self.browser._settle(self.browser.page)
+        view = self.browser.click(self.find("Átírás"))
+        self.assertIn("Átírva", view)
+        self.assertEqual(len(durations), 2)
+        self.assertLess(max(durations), 0.4, f"nincs fix várakozás: {durations}")
+
+    def test_late_content_is_still_waited_for(self):
+        view = self.browser.open(self.url("/kesobb.html"))
+        self.assertIn("Későn jött tartalom", view, "a betöltés után időzítővel beszúrt részt is megvárta")
+        self.browser.open(self.url("/gomb.html"))
+        view = self.browser.click(self.find("Betöltés"))
+        self.assertIn("Kávéfőző X200", view, "a kattintásra indult saját adatkérést megvárta")
+
+    def test_other_sites_requests_do_not_hold_it(self):
+        self.browser.open(self.url("/kulso.html"))
+        durations = self.timed_settles()
+        self.browser._settle(self.browser.page)
+        view = self.browser.click(self.find("Hirdetés frissítése"))
+        self.assertIn("Frissítve", view)
+        self.assertGreaterEqual(len(self.other.hits), 2, "a lassú kérések tényleg elindultak (betöltéskor és most)")
+        self.assertTrue(self.server.beacons, "a beacon is elindult")
+        self.assertLess(max(durations), 1.5, f"a reklám és a statisztika nem tartja vissza: {durations}")
 
     def test_waits_for_data_that_arrives_late(self):
         view = self.browser.open(self.url("/lassu.html"))

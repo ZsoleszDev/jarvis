@@ -16,6 +16,8 @@ import functools
 import re
 import time
 import urllib.parse
+from collections import Counter
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from . import web
@@ -39,8 +41,30 @@ RESTARTED_NOTE = ("A böngésző közben bezárult vagy összeomlott (pl. elfogy
 # Ennél régebben indult, be nem fejezett adatkérésre nem várunk (pl. egy hosszan nyitva tartott kapcsolat,
 # vagy egy kérés, aminek a vége elveszett, mert közben átnavigált az oldal).
 STUCK_REQUEST_SECONDS = 15.0
+# Egy másik oldalról jövő szkriptre (pl. a webshop CDN-jéről, de egy reklámé is lehet) csak ennyit várunk.
+FOREIGN_SCRIPT_SECONDS = 2.0
 # Az oldal adatkéréseit (XHR, fetch, dokumentum, szkript) a Chromium hálózati eseményeiből számoljuk.
 _TRACKED_TYPES = {"XHR", "Fetch", "Document", "Script"}
+# Az oldal megnyugvása (_settle): ennyi ideig nem változhat a lap (új oldalnál tovább, mert ott a szkriptek még
+# szakaszosan rajzolnak), ilyen sűrűn nézzük, és egy folyton változó lapnál (pl. futó óra) ennyi ideig nem változhat
+# a szöveg hossza. Ez nem az emberi tempó (az a humanize.py-ban van), csak a lap figyelése.
+QUIET_SECONDS = 0.2
+QUIET_AFTER_LOAD = 0.4
+SETTLE_POLL = 0.1
+CHURN_AFTER, CHURN_STABLE = 0.6, 0.5
+# Egy új oldal legalább ennyi idős legyen (a megnyitása óta), mire kész: a szkriptjei a betöltés után még
+# késleltetve is rajzolhatnak (egy valódi oldal betöltése úgyis tovább tart, ez a gyors oldalaknál számít).
+MIN_DOC_AGE = 1.0
+# Gépelés után egy kereső- vagy javaslatos mezőnél legalább ennyit várunk a javaslatokra (az oldal a gépelés
+# végét kivárva, késleltetve kérdezi le őket).
+SUGGEST_REACT = 0.8
+# Egyesével fogadó fájlmezőnél legfeljebb ennyit várunk, hogy az oldal átvegye a fotót (lásd _wait_taken).
+UPLOAD_TAKE_SECONDS = 5.0
+# Ezek a második szintű tartományok (pl. co.uk) a webcím „oldalának” részei (lásd same_site).
+_SECOND_LEVEL = {"co", "com", "org", "net", "gov", "edu", "ac", "or", "ne", "go", "info", "nom"}
+DECLINED = "A felhasználó nem engedélyezte"
+MAX_ACTIONS = 5            # a browser_do legfeljebb ennyi lépést tesz egy körben
+MAX_CHOOSE_LEVELS = 6      # a browser_choose fája (pl. Nők > Ruházat > Pólók) legfeljebb ennyi szint
 _CLOSED_RE = re.compile(r"has been closed|target closed|browser closed|browser has disconnected|"
                         r"connection closed", re.IGNORECASE)
 # A Playwright-meghajtó (node) elhalt, pl. mert elfogyott a gép memóriája: ilyenkor a context.close() örökre
@@ -79,6 +103,8 @@ _RISKY_RE = re.compile(
     r"leiratkoz|unsubscribe|regisztr|register|sign up|megerosit|confirm|jovahagy|utal|"
     r"transfer|lemond)"
 )
+# Fizetős extrák (kiemelés, előresorolás): a browser_choose és a browser_do ezekre soha nem kattint.
+_PAID_RE = re.compile(r"(kiemel|elore ?sorol|elorehoz|elofizet|fizetos|\bbump|\bboost|\bpromot)")
 # Hirdetés közzététele (Vinted: "Feltöltés"); a fotófeltöltő gomb viszont nem kockázatos.
 _PUBLISH_RE = re.compile(r"\b(feltolt|tolts fel|upload|hirdetes ?felad|feladom|meghirdet|list it|list item)")
 _PHOTO_WORDS_RE = re.compile(r"(foto|kep|photo|image|picture|kepek)")
@@ -485,14 +511,118 @@ ORDINAL_JS = r"""
 }
 """
 
+# A lap változásainak figyelése (lásd _settle): egy MutationObserver számolja a DOM változásait, és jegyzi az
+# utolsó idejét. A context.add_init_script minden új dokumentumban az oldal saját szkriptjei előtt indítja, így a
+# betöltés közbeni változásokat is látja; a beágyazott keretekben (pl. reklámok) nem indul el, ott nincs rá szükség.
+# A stílus változásait nem nézi: egy folyamatos animáció (pl. egy körhinta) különben soha nem engedné megnyugodni
+# a lapot.
+_QUIET_INSTALL = r"""
+  if (!window.__jarvisQuiet) {
+    const state = {count: 0, last: performance.now()};
+    Object.defineProperty(window, '__jarvisQuiet', {value: state});
+    try {
+      new MutationObserver((records) => { state.count += records.length; state.last = performance.now(); })
+        .observe(document, {subtree: true, childList: true, characterData: true, attributes: true,
+                            attributeFilter: ['class', 'hidden', 'open', 'disabled', 'aria-busy', 'aria-expanded',
+                                              'aria-hidden', 'aria-checked', 'aria-selected']});
+    } catch (e) {}
+  }
+"""
+QUIET_INIT_JS = "(() => {\n  if (window !== window.top) return;" + _QUIET_INSTALL + "})();"
+
+# Egy pillanatkép a lap nyugalmáról: mióta nem változik (de legfeljebb amióta várunk), új dokumentum-e, és ha már
+# csendes (vagy régóta nyugtalan), a szöveg hossza, a „Betöltés…” felirat és a rövid animációk (pl. egy lenyíló
+# lista beúszása). Az innerText a nagy oldalakon drága, ezért csak akkor olvassuk ki, ha kell.
 _SETTLE_JS = r"""
-() => {
+(opts) => {
+""" + _QUIET_INSTALL + r"""
+  const q = window.__jarvisQuiet;
+  const fresh = performance.timeOrigin !== opts.doc;
+  const windowSec = fresh ? opts.longQuiet : opts.quiet;
+  const quietFor = Math.min((performance.now() - q.last) / 1000, opts.elapsed);
+  const res = {doc: performance.timeOrigin, count: q.count, quietFor, window: windowSec, size: -1,
+               loading: false, moving: false, young: performance.now() / 1000 < opts.minAge};
   const body = document.body;
-  if (!body) return [0, true];
+  if (!body) { res.loading = true; return res; }
+  if (!opts.churn && (quietFor < windowSec || res.young)) return res;
   const text = body.innerText;
-  const loading = /(^|\s)(betöltés|töltés|loading)\s*(…|\.\.\.)/i.test(text.slice(0, 20000)) ||
-                  !!document.querySelector('[aria-busy="true"]');
-  return [text.length, loading];
+  res.size = text.length;
+  res.loading = /(^|\s)(betöltés|töltés|loading)\s*(…|\.\.\.)/i.test(text.slice(0, 20000)) ||
+                !!document.querySelector('[aria-busy="true"]');
+  if (typeof document.getAnimations === 'function') {
+    res.moving = document.getAnimations().some((a) => {
+      if (a.playState !== 'running' || !a.effect) return false;
+      const t = a.effect.getComputedTiming();
+      return isFinite(t.endTime) && t.endTime - (t.localTime || 0) < 1000;
+    });
+  }
+  return res;
+}
+"""
+
+# Írás előtt: milyen az elem valójában (szövegmező, lenyíló lista, jelölőnégyzet, vagy egyik sem).
+_WRITE_INFO_JS = r"""
+(el) => {
+  const tag = el.tagName;
+  const type = (el.type || '').toLowerCase();
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  const NOT_TEXT = ['checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file', 'range', 'color'];
+  const info = {select: tag === 'SELECT', check: false, checked: false, radio: false, text: false,
+                readonly: !!el.readOnly || el.getAttribute('aria-readonly') === 'true'};
+  if (tag === 'INPUT' && (type === 'checkbox' || type === 'radio')) {
+    info.check = true; info.checked = !!el.checked; info.radio = type === 'radio';
+  } else if (['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio', 'option'].includes(role) ||
+             el.hasAttribute('aria-checked') || el.hasAttribute('aria-pressed')) {
+    info.check = true;
+    info.radio = ['radio', 'menuitemradio', 'option'].includes(role);
+    info.checked = ['aria-checked', 'aria-pressed', 'aria-selected'].some((a) => el.getAttribute(a) === 'true');
+  }
+  info.text = !info.check && !info.select && !el.disabled &&
+              ((tag === 'INPUT' && !NOT_TEXT.includes(type)) || tag === 'TEXTAREA' || el.isContentEditable);
+  return info;
+}
+"""
+
+# Kattintás után: hová került a fókusz (abba gépelünk). A „suggests”: javaslatos, kereső jellegű mező.
+_FOCUS_JS = r"""
+(target) => {
+  let el = document.activeElement;
+  while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+  if (!el || el === document.body) return {editable: false};
+  const tag = el.tagName;
+  const type = (el.type || '').toLowerCase();
+  const NOT_TEXT = ['checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file', 'range', 'color'];
+  const editable = !el.disabled && !el.readOnly &&
+                   ((tag === 'INPUT' && !NOT_TEXT.includes(type)) || tag === 'TEXTAREA' || el.isContentEditable);
+  const suggests = type === 'search' || (el.getAttribute('role') || '') === 'combobox' ||
+                   ['aria-autocomplete', 'aria-haspopup', 'aria-controls', 'aria-owns', 'list']
+                     .some((a) => el.hasAttribute(a));
+  return {editable, same: el === target, suggests, input: tag === 'INPUT' || tag === 'TEXTAREA',
+          value: tag === 'INPUT' || tag === 'TEXTAREA' ? el.value : ''};
+}
+"""
+
+_SELECT_OPTIONS_JS = r"""
+(el) => Array.from(el.options).map((o) => ({text: (o.text || '').replace(/\s+/g, ' ').trim(), value: o.value,
+                                            disabled: !!o.disabled}))
+"""
+
+# browser_do: a modell által látott elem még ugyanaz-e (a lap nem rajzolta-e újra), és újra megjelöli a számával.
+_IDENTITY_JS = r"""
+(el, id) => {
+""" + _JS_HELPERS + r"""
+  if (!el.isConnected) return {connected: false};
+  el.setAttribute('data-jarvis-id', String(id));
+  return {connected: true, kind: kindOf(el), label: nameOf(el).slice(0, 100)};
+}
+"""
+
+# Hány felugró ablak (párbeszédablak) látszik: ha egy lépés után több lett, a browser_do megáll.
+_DIALOGS_JS = r"""
+() => {
+""" + _JS_HELPERS + r"""
+  return Array.from(document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [aria-modal="true"]'))
+    .filter(visible).length;
 }
 """
 
@@ -503,6 +633,17 @@ class BrowserError(Exception):
 
 class Covered(Exception):
     """Egy másik elem (nyitva maradt lenyíló lista, felugró ablak, süti-sáv) eltakarja, amire kattintana."""
+
+
+@dataclass
+class _Written:
+    """Egy mező kitöltésének eredménye (lásd _write)."""
+    kind: str             # text (beírta) | select (kiválasztotta) | check (bejelölte vagy kivette a jelölést)
+    shown: str            # röviden, mit állított be (a megjegyzésbe)
+    locator: Any = None
+    react: float = 0.0    # utána legalább ennyit várjon az oldal reakciójára (pl. javaslatok)
+    clicked: bool = False   # jelölőnégyzetnél: rá kellett-e kattintani (vagy már jó állásban volt)
+    declined: bool = False  # a kattintást nem engedélyezted
 
 
 UNCOVER_HINT = ("Előbb zárd be: válassz a nyitott listából, vagy kattints a felugró ablak gombjára (pl. „Elfogadom”, "
@@ -576,6 +717,121 @@ def is_search_field(element: dict[str, Any]) -> bool:
     return any(word == "q" or _SEARCH_RE.search(word) for word in words)
 
 
+def is_paid(label: str) -> bool:
+    """Fizetős extra-e (kiemelés, előresorolás, Bump): a többlépéses eszközök ezekre soha nem kattintanak."""
+    return bool(_PAID_RE.search(fold(label or "")))
+
+
+def site_of(url: str) -> str:
+    """A webcím „oldala” (egyszerűsített regisztrálható tartomány): www.vinted.hu → vinted.hu, a.b.co.uk → b.co.uk."""
+    try:
+        host = (urllib.parse.urlsplit(url or "").hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+    labels = host.split(".")
+    if len(labels) <= 2 or re.fullmatch(r"[\d.]+", host) or ":" in host:
+        return host
+    take = 3 if len(labels[-1]) == 2 and labels[-2] in _SECOND_LEVEL else 2
+    return ".".join(labels[-take:])
+
+
+def same_site(url: str, document_url: str) -> bool:
+    """Ugyanannak az oldalnak a kérése-e (az api.vinted.hu a www.vinted.hu-é igen, egy reklámszerveré nem).
+    Ha valamelyik nem webcím (pl. about:blank), nem tudjuk eldönteni: akkor igen."""
+    first, second = site_of(url), site_of(document_url)
+    return not first or not second or first == second
+
+
+def _norm(text: str) -> str:
+    """Összehasonlításhoz: kisbetűs, ékezet és írásjelek nélkül, egy szóközzel."""
+    return " ".join(re.sub(r"[^\w\s]", " ", fold(text or "")).split())
+
+
+def match_option(labels: list[str], wanted: str) -> tuple[int | None, list[int]]:
+    """A kért lehetőség egy lista feliratai közül, ékezet és kis-nagybetű nélkül: a pontos egyezés, az egyetlen
+    ezzel kezdődő, az egyetlen, amelyben egy szó így kezdődik, végül a legtöbb közös szót tartalmazó (ha az
+    egyértelmű). Visszaadja a választott indexét (vagy None-t, ha nincs vagy nem egyértelmű) és a jelölteket."""
+    want = _norm(wanted)
+    if not want:
+        return None, []
+    norms = [_norm(label) for label in labels]
+    exact = [i for i, n in enumerate(norms) if n == want]
+    if exact:
+        return exact[0], exact
+    word_start = re.compile(r"(?<!\w)" + re.escape(want))
+    for hits in ([i for i, n in enumerate(norms) if n.startswith(want)],
+                 [i for i, n in enumerate(norms) if word_start.search(n)]):
+        if len(hits) == 1:
+            return hits[0], hits
+        if hits:
+            return None, hits
+    tokens = set(want.split())
+    scores = [len(tokens & set(n.split())) for n in norms]
+    best = max(scores, default=0)
+    if not best:
+        return None, []
+    top = [i for i, score in enumerate(scores) if score == best]
+    return (top[0] if len(top) == 1 else None), top
+
+
+_ON_WORDS = {"igen", "i", "true", "x", "✓", "✔", "be", "bekapcsol", "bekapcsolva", "bejelol", "bejelolve", "on",
+             "yes", "1", "pipa", "kell", "valaszt", "kivalaszt", "kivalasztva"}
+_OFF_WORDS = {"nem", "n", "false", "ki", "kikapcsol", "kikapcsolva", "off", "no", "0", "nem kell", "torol", "ures"}
+
+
+def wanted_state(text: str, label: str) -> bool | None:
+    """Be vagy ki legyen-e egy jelölőnégyzet (választógomb, kapcsoló) a szöveg szerint: igen/x/✓/be, vagy a saját
+    felirata: be; nem/ki: ki. None, ha nem lehet eldönteni."""
+    word = _norm(text) or (text or "").strip()
+    if word in _ON_WORDS:
+        return True
+    if word in _OFF_WORDS:
+        return False
+    own = _norm(label)
+    if word and own and (word.replace(" ", "") == own.replace(" ", "") or own.startswith(word)
+                         or word.startswith(own)):
+        return True
+    return None
+
+
+# browser_choose: ami egy kinyitott listában választható (az onclick-es div, li is), és a lista vezérlőgombjai.
+_OPTION_KINDS = {"button", "radio", "input:radio", "checkbox", "input:checkbox", "option", "menuitem",
+                 "menuitemradio", "menuitemcheckbox", "switch", "link", "input:button", "div", "li", "span",
+                 "label", "td", "p", "treeitem", "gridcell"}
+_FINAL_KINDS = {"radio", "input:radio", "checkbox", "input:checkbox", "option", "menuitemradio",
+                "menuitemcheckbox"}
+_TEXT_KINDS = {"input:text", "input:search", "searchbox", "textbox", "combobox", "textarea"}
+_CONTROL_RE = re.compile(r"^(vissza|back|bezar|bezaras|close|megse|cancel|torles|clear|clear all|kesz|done|ok|"
+                         r"rendben|alkalmaz|apply|mentes|save|tovabb|next|elozo|previous|kereses|search|"
+                         r"(back to|vissza a|vissza az) .*)$")
+_DONE_RE = re.compile(r"^(kesz|done|ok|rendben|alkalmaz|apply|bezar|bezaras|close)$")
+
+
+def _elem_key(el: dict[str, Any]) -> tuple[str, str, str]:
+    """Egy elem azonosítása két letapogatás között (a szám közben megváltozik)."""
+    return el.get("kind", ""), _norm(el.get("label", ""))[:60], el.get("field", "")
+
+
+def _appeared(before: Counter, elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ami a letapogatás óta jelent meg (ha egy felirat korábban is ott volt, a későbbi előfordulás az új)."""
+    seen: Counter = Counter()
+    fresh = []
+    for el in elements:
+        key = _elem_key(el)
+        seen[key] += 1
+        if seen[key] > before.get(key, 0):
+            fresh.append(el)
+    return fresh
+
+
+def _is_option(el: dict[str, Any]) -> bool:
+    """Választható lehetőség-e egy kinyitott listában (a mező, a vezérlőgomb és a fejléc nem)."""
+    if el.get("chrome") or el.get("disabled") or el.get("kind", "") not in _OPTION_KINDS:
+        return False
+    label = _norm(el.get("label", ""))
+    return bool(label) and not _CONTROL_RE.match(label)
+
+
 def _short(exc: BaseException | None) -> str:
     text = str(exc or "").strip().splitlines()
     return text[0][:200] if text else type(exc).__name__
@@ -643,6 +899,9 @@ class BrowserController:
         # Felvétel: minden sikeres lépés (megnyitás, kattintás, gépelés, fotó) ide is megy, ha be van
         # állítva; ebből tanulja meg a Jarvis egy feltöltés vagy levétel lépéseit.
         self.on_action: Callable[[dict[str, Any]], None] | None = None
+        # Igaz, amíg egy felvétel tart (a WorkDesk állítja): csak ilyenkor számoljuk ki, hányadik az elem a
+        # hasonlók között (ORDINAL_JS, az egész lapot bejárja).
+        self.recording = False
         # Előre megadott jóváhagyás (pl. a levételt már jóváhagytad): (felirat, webcím) → igaz/hamis.
         self.approve_hook: Callable[[str, str], bool] | None = None
         self.capture_error = ""   # a hibacsomaghoz: miért nem készült képernyőkép (capture)
@@ -654,6 +913,12 @@ class BrowserController:
         self.auto = False
         self._mouse: tuple[float, float] | None = None
         self._starts = 0          # hányszor indult el a böngésző (lásd _restarts_after_crash)
+        # A Jarvis kattintásaira megnyílt lapok, sorrendben: ezekből csak az aktív és az előző marad nyitva
+        # (a felhasználó által nyitott lapokat soha nem zárja be).
+        self._own_tabs: list[Any] = []
+        # Igaz, amíg egy többlépéses művelet (browser_choose, browser_do) fut: a közbenső hibákhoz nem kell
+        # oldalnézet, a végén úgyis egy készül.
+        self._batch = False
 
     # --- indítás és leállítás ------------------------------------------------------
 
@@ -708,6 +973,11 @@ class BrowserController:
             if _PROFILE_BUSY_RE.search(message):
                 raise BrowserError("A böngészőprofil már használatban van (fut egy másik Jarvis?).") from last_error
             raise BrowserError(f"A böngésző nem indult: {_short(last_error)}") from last_error
+        try:   # a lap változásainak figyelése minden új dokumentumban (lásd _settle)
+            self._context.add_init_script(script=QUIET_INIT_JS)
+        except Exception:  # noqa: BLE001 - nélküle is működik: a _settle maga indítja el
+            pass
+        self._own_tabs = []
         pages = self._context.pages
         self.page = pages[0] if pages else self._context.new_page()
 
@@ -738,6 +1008,7 @@ class BrowserController:
                     pass
         self._context = self._pw = self.page = None
         self.elements = {}
+        self._own_tabs = []
 
     def _release(self, exc: BaseException) -> None:
         """Elengedi a bezárult vagy összeomlott böngészőt: a következő lépés újraindítja (_ensure)."""
@@ -753,7 +1024,12 @@ class BrowserController:
         azoknál a Playwright minden kéréshez és válaszhoz Python-objektumot készít, és típusonként 10 000-et
         meg is tart. Egy hosszabb böngészésnél (pl. a Vinted egy oldala több száz kérés) ez több száz MB, és
         amíg a modell gondolkodik, az események feltorlódnak, majd egyszerre jönnek: egyszer MemoryError lett
-        belőle. A CDP-eseményekből nem marad meg semmi, csak a kérés azonosítója, amíg tart."""
+        belőle. A CDP-eseményekből nem marad meg semmi, csak a kérés azonosítója, amíg tart.
+
+        Csak a fő keret kérései számítanak, és az adatkérések (XHR, fetch) közül csak az oldal sajátjai: a
+        reklámok, a statisztikák és a beágyazott keretek folyton küldenek valamit, és miattuk minden lépés a
+        teljes várakozási időt kivárná. Egy másik oldalról jövő szkriptre (pl. a webshop CDN-jéről) csak
+        rövid ideig várunk (FOREIGN_SCRIPT_SECONDS)."""
         if getattr(page, "_jarvis_watched", False):
             return
         page._jarvis_watched = True
@@ -767,12 +1043,26 @@ class BrowserController:
                                                 "maxPostDataSize": 0})
             except Exception:  # noqa: BLE001 - ha a böngésző ezeket nem ismeri, az alapbeállítással
                 session.send("Network.enable")
-        except Exception:  # noqa: BLE001 - pl. nem Chromium: akkor csak a szöveg megnyugvását figyeljük
+        except Exception:  # noqa: BLE001 - pl. nem Chromium: akkor csak a lap megnyugvását figyeljük
             return
+        try:
+            main = str(session.send("Page.getFrameTree")["frameTree"]["frame"]["id"])
+        except Exception:  # noqa: BLE001 - ha nem derül ki, minden keret kérése számít
+            main = ""
 
         def started(params: dict[str, Any]) -> None:
-            if params.get("type") in _TRACKED_TYPES and params.get("requestId"):
-                inflight[params["requestId"]] = time.monotonic()
+            kind, request_id = params.get("type"), params.get("requestId")
+            if kind not in _TRACKED_TYPES or not request_id:
+                return
+            if main and params.get("frameId") and params["frameId"] != main:
+                return            # egy beágyazott keret (pl. reklám) kérése
+            when = time.monotonic()
+            if kind != "Document" and not same_site((params.get("request") or {}).get("url", ""),
+                                                    params.get("documentURL", "")):
+                if kind != "Script":
+                    return        # egy másik oldal adatkérése (reklám, statisztika): nem várunk rá
+                when -= STUCK_REQUEST_SECONDS - FOREIGN_SCRIPT_SECONDS   # így hamarabb „elakadtnak” számít
+            inflight[request_id] = when
 
         def finished(params: dict[str, Any]) -> None:
             inflight.pop(params.get("requestId"), None)
@@ -781,6 +1071,25 @@ class BrowserController:
         session.on("Network.loadingFinished", finished)
         session.on("Network.loadingFailed", finished)
         page._jarvis_network = session
+
+    @staticmethod
+    def _unwatch(page: Any) -> None:
+        """Leválasztja a lap hálózatfigyelését (háttérbe került vagy bezárjuk): a háttérben futó reklámok és
+        frissítések eseményei így nem jönnek feleslegesen a Pythonnak. Ha újra aktív lesz, a _watch_network
+        újra bekapcsolja."""
+        if page is None:
+            return
+        session = getattr(page, "_jarvis_network", None)
+        page._jarvis_network = None
+        page._jarvis_watched = False
+        inflight = getattr(page, "_jarvis_inflight", None)
+        if inflight:
+            inflight.clear()
+        if session is not None:
+            try:
+                session.detach()
+            except Exception:  # noqa: BLE001 - pl. már bezárult a lap
+                pass
 
     @staticmethod
     def _network_busy(page: Any) -> bool:
@@ -794,53 +1103,120 @@ class BrowserController:
                 inflight.pop(request_id, None)
         return bool(inflight)
 
-    def _settle(self, page: Any, max_wait: float = 5.0) -> None:
-        """Megvárja, amíg az oldal betölt és a tartalma megnyugszik.
-
-        A modern webshopok (pl. Vinted) a találatokat a betöltés után, JavaScripttel töltik
-        be. Ezért addig várunk, amíg nincs folyamatban adatkérés, az oldal szövege fél
-        másodpercig nem változik, és nem látszik rajta "Betöltés…" jellegű felirat.
-        Egy egyszerű oldalnál ez fél másodperc, egy lassan töltődő webshopnál több.
-        """
-        self._watch_network(page)
+    @staticmethod
+    def _loaded(page: Any) -> bool:
+        """Megvárja a dokumentum betöltését. Hamis, ha közben a lap bezárult vagy összeomlott."""
         for state, timeout in (("domcontentloaded", 10000), ("load", 4000)):
             try:
                 page.wait_for_load_state(state, timeout=timeout)
             except Exception as exc:  # noqa: BLE001
                 if is_closed_error(exc):
-                    return            # bezárult vagy összeomlott: nincs mire várni
-        previous, stable = -1, 0
-        deadline = time.monotonic() + max_wait
-        while time.monotonic() < deadline:
+                    return False      # bezárult vagy összeomlott: nincs mire várni
+        return True
+
+    def _settle(self, page: Any, max_wait: float = 5.0, react: float = 0.0) -> bool:
+        """Megvárja, amíg az oldal betölt és a tartalma megnyugszik.
+
+        A modern webshopok (pl. Vinted) a találatokat a betöltés után, JavaScripttel töltik be. Ezért addig
+        várunk, amíg nincs folyamatban az oldal saját adatkérése (lásd _watch_network), a lap egy rövid ideig
+        (QUIET_SECONDS, egy új oldalnál QUIET_AFTER_LOAD, és az új oldal legalább MIN_DOC_AGE idős) nem változik,
+        nem úszik be épp valami (rövid animáció), és nem látszik rajta "Betöltés…" jellegű felirat. Egy egyszerű
+        oldalnál ez kb. 0,2 másodperc, egy lassan töltődő webshopnál több, de legfeljebb `max_wait`. Ha a lap
+        folyton változik (pl. egy futó óra), a szöveg hossza dönt (CHURN_STABLE).
+
+        `react`: legalább ennyi ideig várja az oldal első változását (pl. egy kereső javaslatai a gépelés után
+        késleltetve jönnek); ha addig sem változik semmi, kész. Ez nem az emberi tempó (az a humanize.py-ban
+        van, és ettől független), csak a lap figyelése: a szükségesnél nem tovább.
+
+        Igaz, ha az oldal megnyugodott; hamis, ha letelt az idő, vagy a lap közben bezárult."""
+        self._watch_network(page)
+        if not self._loaded(page):
+            return False
+        start = time.monotonic()
+        deadline = start + max_wait
+        first_doc = first_count = None
+        size, size_since = -2, start
+        while True:
+            now = time.monotonic()
+            elapsed = now - start
+            churn = elapsed >= CHURN_AFTER
             try:
-                page.wait_for_timeout(250)
-                size, loading = page.evaluate(_SETTLE_JS)
+                state = page.evaluate(_SETTLE_JS, {"doc": getattr(page, "_jarvis_doc", None), "elapsed": elapsed,
+                                                   "quiet": QUIET_SECONDS, "longQuiet": QUIET_AFTER_LOAD,
+                                                   "minAge": MIN_DOC_AGE, "churn": churn})
             except Exception as exc:  # noqa: BLE001 - épp navigál
                 if is_closed_error(exc):
-                    return
-                stable = 0
-                continue
-            busy = self._network_busy(page) or loading
-            stable = stable + 1 if size == previous and size > 0 and not busy else 0
-            previous = size
-            if stable >= 2:
-                return
+                    return False
+                state = None
+            wait = SETTLE_POLL
+            if state:
+                if first_doc is None or state["doc"] != first_doc:
+                    if first_doc is not None and not self._loaded(page):   # közben átnavigált
+                        return False
+                    first_doc, first_count = state["doc"], state["count"]
+                if state["size"] >= 0 and state["size"] != size:
+                    size, size_since = state["size"], now
+                busy = self._network_busy(page) or state["loading"] or state["moving"]
+                reacted = state["count"] != first_count or elapsed >= react
+                calm = not state.get("young") and (state["quietFor"] >= state["window"] or
+                                                   (churn and size > 0 and now - size_since >= CHURN_STABLE))
+                if not busy and reacted and calm:
+                    page._jarvis_doc = state["doc"]
+                    return True
+                if not busy and not state.get("young"):   # csak a hiányzó időt várja ki, ne egy egész kört
+                    left = max(state["window"] - state["quietFor"], react - elapsed if not reacted else 0.0)
+                    wait = min(SETTLE_POLL, max(0.02, left))
+            if time.monotonic() + wait > deadline:
+                if state:
+                    page._jarvis_doc = state["doc"]
+                return False
+            try:
+                page.wait_for_timeout(wait * 1000)
+            except Exception as exc:  # noqa: BLE001
+                if is_closed_error(exc):
+                    return False
+                time.sleep(wait)
 
     def _adopt_new_page(self, pages_before: int) -> bool:
+        """Ha a kattintás új lapot nyitott, arra vált. Az előző lap hálózatfigyelését leválasztja, és a Jarvis
+        kattintásaira nyílt régebbi lapokat bezárja (lásd _prune_tabs)."""
         pages = [p for p in self._context.pages if not p.is_closed()]
-        if len(pages) > pages_before:
-            self.page = pages[-1]
-            try:
-                self.page.bring_to_front()
-            except Exception:  # noqa: BLE001
-                pass
-            self._settle(self.page)
-            return True
-        return False
+        if len(pages) <= pages_before:
+            return False
+        previous = self.page
+        self.page = pages[-1]
+        self._own_tabs.extend(p for p in pages[pages_before:] if p not in self._own_tabs)
+        try:
+            self.page.bring_to_front()
+        except Exception:  # noqa: BLE001
+            pass
+        if previous is not None and previous is not self.page:
+            self._unwatch(previous)
+        self._prune_tabs(keep=(self.page, previous))
+        self._settle(self.page)
+        return True
+
+    def _prune_tabs(self, keep: tuple[Any, ...]) -> None:
+        """A Jarvis kattintásaira megnyílt lapok közül csak az aktív és az előző marad nyitva: a többi
+        (pl. egy hirdetés, ami új lapon nyílt meg, és már továbbmentünk) memóriát és processzort fogyaszt. A
+        felhasználó által nyitott lapokhoz nem nyúl."""
+        for tab in list(self._own_tabs):
+            if any(tab is other for other in keep):
+                continue
+            self._own_tabs.remove(tab)
+            self._close_page(tab)
+
+    def _close_page(self, page: Any) -> None:
+        self._unwatch(page)
+        try:
+            if not page.is_closed():
+                page.close()
+        except Exception:  # noqa: BLE001 - pl. már bezárult
+            pass
 
     def _element(self, number: Any) -> dict[str, Any]:
-        try:
-            n = int(number)
+        try:   # a modell néha szövegként vagy "#3" alakban adja meg (egy lista elemeiben is)
+            n = int(number) if isinstance(number, int) else int(float(str(number).strip().lstrip("#[").rstrip("]")))
         except (TypeError, ValueError):
             raise BrowserError("Az elemet a számával add meg (pl. 12).") from None
         if n not in self.elements:
@@ -851,7 +1227,11 @@ class BrowserController:
         return self.page.locator(f'[data-jarvis-id="{int(number)}"]').first
 
     def _fail(self, message: str) -> BrowserError:
-        """Hibaüzenet friss oldalnézettel, hogy a modell újra tudjon tervezni."""
+        """Hibaüzenet friss oldalnézettel, hogy a modell újra tudjon tervezni. Modell nélküli lépéssorban
+        (auto) nincs oldalnézet: azt senki nem olvasná, és a letapogatás számait is érvényben hagyjuk. Egy
+        többlépéses művelet közben sincs (lásd _batched): az a végén egyszer ad oldalnézetet."""
+        if self.auto or self._batch:
+            return BrowserError(message)
         try:
             return BrowserError(f"{message}\n\nFriss oldalnézet:\n{self.snapshot()}")
         except BrowserError:
@@ -868,7 +1248,7 @@ class BrowserController:
 
     def _ordinal(self, el: dict[str, Any]) -> int:
         """Hányadik az elem az ugyanilyen feliratúak között (csak felvételkor számoljuk)."""
-        if self.on_action is None or self.page is None:
+        if self.on_action is None or not self.recording or self.page is None:
             return 0
         try:
             return int(self.page.evaluate(ORDINAL_JS, int(el["id"])) or 0)
@@ -1060,7 +1440,25 @@ class BrowserController:
     @_restarts_after_crash
     def click(self, element: Any) -> str:
         page = self._ensure()
-        el = self._element(element)
+        note, outcome = self._press(page, self._element(element))
+        # Modell nélküli lépéssornál (auto) nincs oldalnézet: senki nem olvasná, és a letapogatás számai így
+        # érvényben maradnak (a vinted.py és a replay.py csak azt nézi, engedélyezted-e).
+        return note if self.auto or outcome == "declined" else self.snapshot(note)
+
+    def _approved(self, page: Any, label: str) -> bool:
+        """Egy kockázatos kattintás jóváhagyása: előre megadva (approve_hook, pl. a levételnél), vagy most kérdezi."""
+        if self.approve_hook is not None:
+            try:
+                if self.approve_hook(label, page.url):
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        return bool(self.confirm(f'Jarvis erre kattintana: "{label}"\n    ({page.url})'))
+
+    def _press(self, page: Any, el: dict[str, Any]) -> tuple[str, str]:
+        """Kattintás egy elemre, oldalnézet nélkül: kockázatosnál jóváhagyással, emberi mozdulattal. Visszaadja a
+        megjegyzést, és hogy mi történt: "" (rendben), "declined" (nem engedélyezted), "chooser" (fájlt kér)
+        vagy "tab" (új lapon nyílt meg)."""
         label = el.get("label", "")
         ordinal = self._ordinal(el)
         url_before = page.url
@@ -1070,16 +1468,9 @@ class BrowserController:
                 self.pace.review()
             else:
                 self.pace.think()
-        if risky:
-            preapproved = False
-            if self.approve_hook is not None:
-                try:
-                    preapproved = bool(self.approve_hook(label, page.url))
-                except Exception:  # noqa: BLE001
-                    preapproved = False
-            if not preapproved and not self.confirm(f'Jarvis erre kattintana: "{label}"\n    ({page.url})'):
-                self._emit({"do": "declined", "el": self.describe(el, ordinal), "url": url_before})
-                return "A felhasználó nem engedélyezte ezt a kattintást."
+        if risky and not self._approved(page, label):
+            self._emit({"do": "declined", "el": self.describe(el, ordinal), "url": url_before})
+            return f"{DECLINED} ezt a kattintást.", "declined"
         pages_before = len([p for p in self._context.pages if not p.is_closed()])
         # Ha a gomb fájlválasztót nyitna, nem engedjük feljönni a Windows-ablakot (azt a Jarvis
         # nem tudná kezelni); helyette szólunk, hogy a feltöltő eszköz kell.
@@ -1099,52 +1490,86 @@ class BrowserController:
                              "Lehet, hogy valami (pl. süti-ablak) eltakarja.") from None
         finally:
             page.remove_listener("filechooser", on_chooser)
-        note = f'Rákattintottam: "{label}".'
+        note, outcome = f'Rákattintottam: "{label}".', ""
         if choosers:
             note += (" Ez a gomb fájlt (pl. fotót) kér. A feltöltéshez a browser_upload_photos "
                      "eszközt használd ugyanerre az elemre.")
+            outcome = "chooser"
         if self._adopt_new_page(pages_before):
             note += " Új lapon nyílt meg."
+            outcome = outcome or "tab"
         self._emit({"do": "click", "el": self.describe(el, ordinal), "url": url_before, "url_after": self.url,
                     "risky": risky, "chooser": bool(choosers)})
-        return self.snapshot(note)
+        return note, outcome
 
     @_restarts_after_crash
     def type_text(self, element: Any, text: str, submit: bool = False) -> str:
         page = self._ensure()
-        el = self._element(element)
+        note = self._type(page, self._element(element), text, submit)
+        return note if self.auto or note.startswith(DECLINED) else self.snapshot(note)
+
+    @staticmethod
+    def _refuse_sensitive(el: dict[str, Any]) -> None:
         if el.get("sensitive") or el.get("kind") == "input:password":
             raise BrowserError("Jelszót és bankkártyaadatot nem írok be. Kérlek, ezt a "
                                "böngészőablakban add meg te, utána folytatom.")
+
+    def _type(self, page: Any, el: dict[str, Any], text: str, submit: bool = False) -> str:
+        """Egy mező kitöltése oldalnézet nélkül, a mező fajtája szerint (lásd _write). Visszaadja a megjegyzést."""
+        self._refuse_sensitive(el)
         ordinal = self._ordinal(el)
         if submit and self.cfg.confirm_risky and not is_search_field(el):
             label = el.get("label") or "mező"
             if not self.confirm(f'Jarvis ezt írná be és küldené el ("{label}"):\n    {text}'):
                 self._emit({"do": "declined", "el": self.describe(el, ordinal), "url": page.url})
-                return "A felhasználó nem engedélyezte az elküldést."
+                return f"{DECLINED} az elküldést."
         if self.auto:
             self.pace.think()
+        url_before = page.url
         try:
-            locator = self._put_text(page, el, text)
-            if submit:
+            written = self._write(page, el, text)
+            if submit and written.kind == "text":
                 self.pace.wait(0.2, 0.6)
-                locator.press("Enter")
+                page.keyboard.press("Enter")   # oda megy, ahová gépelt
         except Covered as exc:
             raise self._fail(f"Nem sikerült beírni a szöveget, mert {exc}. {UNCOVER_HINT}") from None
+        except BrowserError as exc:
+            raise self._fail(str(exc)) from None
         except Exception as exc:  # noqa: BLE001
             raise self._fail(f"Nem sikerült beírni a szöveget ({_short(exc)}).") from None
-        self._settle(page)
-        self._emit({"do": "type", "el": self.describe(el, ordinal), "text": text, "submit": bool(submit),
-                    "search": is_search_field(el)})
-        note = f'Beírtam: "{text}"' + (", és elküldtem (Enter)." if submit else ".")
-        return self.snapshot(note)
+        if written.declined:
+            return f"{DECLINED} ezt a kattintást."
+        self._settle(page, react=SUGGEST_REACT if submit else written.react)
+        self._record_write(el, ordinal, text, written, url_before, submit)
+        return self._written_note(el, text, written, submit)
+
+    def _record_write(self, el: dict[str, Any], ordinal: int, text: str, written: _Written, url_before: str,
+                      submit: bool) -> None:
+        """A felvételnek: a beírás és a kiválasztás gépelésként, a jelölőnégyzet kattintásként (ha rákattintott)."""
+        if written.kind != "check":
+            self._emit({"do": "type", "el": self.describe(el, ordinal), "text": text, "submit": bool(submit),
+                        "search": is_search_field(el)})
+        elif written.clicked:
+            self._emit({"do": "click", "el": self.describe(el, ordinal), "url": url_before, "url_after": self.url,
+                        "risky": bool(self.cfg.confirm_risky and is_risky(el.get("label", ""))), "chooser": False})
+
+    @staticmethod
+    def _written_note(el: dict[str, Any], text: str, written: _Written, submit: bool = False) -> str:
+        label = el.get("label") or f"{el['id']}. elem"
+        if written.kind == "select":
+            return f'Kiválasztottam: "{written.shown}" ("{label}").'
+        if written.kind == "check":
+            return f'"{label}": {written.shown}.'
+        note = f'Beírtam: "{text}"' + (f" ({written.shown})" if written.shown else "")
+        return note + (", és elküldtem (Enter)." if submit else ".")
 
     @_restarts_after_crash
     def fill_fields(self, fields: list[dict[str, Any]]) -> str:
         """Több mezőt tölt ki egy lépésben (a legutóbbi oldalnézet számai szerint), Enter nélkül.
 
         Egy űrlapnál (cím, leírás, ár…) így egy modellkör az, ami mezőnként öt lenne, és csak
-        egy oldalnézet kerül a beszélgetésbe."""
+        egy oldalnézet kerül a beszélgetésbe. A mezők fajtája szerint: a szövegmezőbe gépel, a lenyíló
+        listából (select) kiválasztja a lehetőséget, a jelölőnégyzetet a kért állásba teszi (lásd _write)."""
         page = self._ensure()
         if not isinstance(fields, list) or not fields:
             raise BrowserError('Add meg a mezőket, pl.: [{"element": 3, "text": "Zara póló"}]')
@@ -1153,51 +1578,81 @@ class BrowserController:
             if not isinstance(entry, dict) or "element" not in entry:
                 raise BrowserError('Minden mezőnél kell az elem száma és a szöveg: {"element": 3, "text": "…"}')
             el = self._element(entry["element"])
-            if el.get("sensitive") or el.get("kind") == "input:password":
-                raise BrowserError("Jelszót és bankkártyaadatot nem írok be. Kérlek, ezt a "
-                                   "böngészőablakban add meg te, utána folytatom.")
+            self._refuse_sensitive(el)
             plan.append((el, str(entry.get("text") if entry.get("text") is not None else "")))
         ordinals = [self._ordinal(el) for el, _text in plan]
         done, failed = [], []
+        react = 0.0
         for index, ((el, text), ordinal) in enumerate(zip(plan, ordinals)):
             label = el.get("label") or f"{el['id']}. elem"
             if index:
                 self.pace.wait(0.3, 0.9)   # a következő mezőre átnéz
+            url_before = page.url
             try:
-                self._put_text(page, el, text)
-                done.append(f'"{label}"')
-                self._emit({"do": "type", "el": self.describe(el, ordinal), "text": text, "submit": False,
-                            "search": is_search_field(el)})
+                written = self._write(page, el, text)
             except Exception as exc:  # noqa: BLE001 - a többi mezőt attól még kitöltjük
                 failed.append(f'"{label}" ({_short(exc)})')
-        self._settle(page)
+                continue
+            if written.declined:
+                failed.append(f'"{label}" (nem engedélyezted)')
+                continue
+            react = max(react, written.react)
+            done.append(f'"{label}"' + (f" ({written.shown})" if written.kind != "text" else ""))
+            self._record_write(el, ordinal, text, written, url_before, False)
+        self._settle(page, react=react)
         note = f"Kitöltöttem: {', '.join(done)}." if done else ""
         if failed:
             note += (f" Nem sikerült: {'; '.join(failed)}. Ezeket a friss oldalnézet alapján egyenként "
-                     "próbáld (browser_type).")
-        return self.snapshot(note.strip())
+                     "próbáld (browser_type; saját lenyíló listánál browser_choose).")
+        return note.strip() if self.auto else self.snapshot(note.strip())
 
-    def _put_text(self, page: Any, el: dict[str, Any], text: str) -> Any:
-        """Szöveg egy mezőbe (lenyíló listánál a lehetőség kiválasztása).
-
-        Emberi tempóban: a mezőbe kattint, kijelöli a régi szöveget, és a rövid szöveget
-        billentyűnként begépeli, a hosszút (pl. leírás) beilleszti, ahogy az ember a jegyzetéből."""
+    def _write(self, page: Any, el: dict[str, Any], text: str) -> _Written:
+        """Egy mező beállítása a fajtája szerint (amit az oldalon ténylegesen talál):
+        - szövegmező: begépeli (lásd _write_text),
+        - lenyíló lista (select): a felirata alapján kiválasztja a lehetőséget (lásd _select),
+        - jelölőnégyzet, választógomb, kapcsoló: a kért állásba teszi, és csak akkor kattint, ha nem abban áll
+          (lásd _set_checked); gépelni soha nem gépel bele.
+        Ami egyik sem (pl. egy gomb), abba nem gépel: hibát ad, és a megfelelő eszközt ajánlja."""
         locator = self._locator(el["id"])
-        if el.get("select"):
-            try:
-                locator.select_option(label=text, timeout=5000)
-            except Exception:  # noqa: BLE001
-                locator.select_option(value=text, timeout=5000)
-            return locator
+        try:
+            info = locator.evaluate(_WRITE_INFO_JS, timeout=5000) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(f'Nem találom ezt a mezőt: "{el.get("label", "")}" ({_short(exc)}).') from None
+        if info.get("select"):
+            return self._select(el, locator, text)
+        if info.get("check"):
+            return self._set_checked(page, el, locator, info, text)
+        return self._write_text(page, el, locator, info, text)
+
+    @staticmethod
+    def _not_text(el: dict[str, Any]) -> str:
+        kind = KIND_NAMES.get(el.get("kind", ""), el.get("kind", "") or "elem")
+        return (f'"{el.get("label", "")}" nem szövegmező ({kind}), ezért nem írtam bele semmit. Saját lenyíló '
+                "listánál a browser_choose, gombnál a browser_click eszközt használd.")
+
+    def _write_text(self, page: Any, el: dict[str, Any], locator: Any, info: dict[str, Any], text: str) -> _Written:
+        """Szöveg egy mezőbe. Emberi tempóban: a mezőbe kattint, kijelöli a régi szöveget, és a rövid szöveget
+        billentyűnként begépeli, a hosszút (pl. leírás) beilleszti, ahogy az ember a jegyzetéből.
+
+        Ami nem szövegmező (pl. egy gomb vagy egy saját lenyíló lista), abba nem gépel (különben „Beírtam”-ot
+        mondana, pedig semmi nem változott). Ha a mező csak olvasható, de a kattintás egy másik szövegmezőbe vitte
+        a kurzort (pl. a megnyílt lista keresőjébe), oda gépel."""
+        if not info.get("text"):
+            raise BrowserError(self._not_text(el))
         if not self.pace.enabled:
+            if not info.get("text") or info.get("readonly"):
+                raise BrowserError(self._not_text(el))
             if el.get("editable"):
                 locator.click(timeout=5000)
                 page.keyboard.press("Control+A")
                 page.keyboard.type(text, delay=10)
             else:
                 locator.fill(text, timeout=8000)
-            return locator
+            return _Written("text", "", locator, react=self._suggest_react(el, self._focus(locator)))
         self._human_click(page, locator)
+        focus = self._focus(locator)
+        if not focus.get("editable"):
+            raise BrowserError(self._not_text(el))
         self.pace.wait(0.1, 0.35)
         page.keyboard.press("Control+A")
         if not text:
@@ -1210,9 +1665,74 @@ class BrowserController:
                 page.keyboard.type(char)
                 if delay:
                     self._sleep(delay)
-        if not el.get("editable"):
+        if focus.get("same") and not el.get("editable"):
             self._ensure_value(locator, text)
-        return locator
+        shown = "" if focus.get("same") else "a megnyílt mezőbe"
+        return _Written("text", shown, locator, react=self._suggest_react(el, focus))
+
+    @staticmethod
+    def _focus(locator: Any) -> dict[str, Any]:
+        try:
+            return locator.evaluate(_FOCUS_JS, timeout=3000) or {}
+        except Exception:  # noqa: BLE001 - pl. épp újrarajzolta az oldal
+            return {}
+
+    @staticmethod
+    def _suggest_react(el: dict[str, Any], focus: dict[str, Any]) -> float:
+        """Kereső vagy javaslatos mezőnél a gépelés után kivárja a javaslatokat (lásd SUGGEST_REACT)."""
+        return SUGGEST_REACT if focus.get("suggests") or is_search_field(el) else 0.0
+
+    def _select(self, el: dict[str, Any], locator: Any, text: str) -> _Written:
+        """Lenyíló lista (select): a lehetőség a felirata alapján (pontosan, vagy ha egyértelmű, közelítőleg:
+        ékezet és kis-nagybetű nélkül, az elejéből vagy egy szavából), és a sorszámával választja ki, így nincs
+        várakozás egy nem létező feliratra. Ha több is illik, vagy egyik sem, a jelölteket adja vissza."""
+        options = [o for o in (locator.evaluate(_SELECT_OPTIONS_JS, timeout=5000) or []) if isinstance(o, dict)]
+        usable = [i for i, o in enumerate(options) if not o.get("disabled")]
+        exact = ([i for i in usable if _norm(options[i]["text"]) == _norm(text)] or
+                 [i for i in usable if text and options[i].get("value") == text])
+        if exact:
+            chosen = exact[0]
+        else:
+            labels = [options[i]["text"] for i in usable]
+            index, hits = match_option(labels, text)
+            if index is None:
+                shown = ", ".join(f"„{labels[i]}”" for i in (hits or range(len(labels)))[:5])
+                if hits:
+                    raise BrowserError(f'Több lehetőség is illik erre: „{text}” ({len(hits)} db, pl. {shown}). '
+                                       "Írd be pontosan a választottat.")
+                more = " …" if len(labels) > 5 else ""
+                raise BrowserError(f"Nincs ilyen lehetőség a listában: „{text}”. A lehetőségek: {shown}{more}.")
+            chosen = usable[index]
+        locator.select_option(index=chosen, timeout=5000)
+        return _Written("select", options[chosen]["text"], locator)
+
+    def _set_checked(self, page: Any, el: dict[str, Any], locator: Any, info: dict[str, Any],
+                     text: str) -> _Written:
+        """Jelölőnégyzet, választógomb, kapcsoló: a kért állásba teszi. A szöveg: igen/x/✓/be (vagy a saját
+        felirata) = bejelölve, nem/ki = nincs bejelölve. Csak akkor kattint, ha nem abban áll (egy második
+        kattintás kivenné a jelölést), és utána megnézi, átállt-e."""
+        label = el.get("label", "")
+        want = wanted_state(text, label)
+        if want is None:
+            kind = KIND_NAMES.get(el.get("kind", ""), "jelölőnégyzet")
+            raise BrowserError(f'„{text}”: ez egy {kind} („{label}”); a szöveg legyen igen (bejelölve) vagy nem.')
+        if bool(info.get("checked")) == want:
+            return _Written("check", "már be volt jelölve" if want else "nem volt bejelölve", locator)
+        if not want and info.get("radio"):
+            raise BrowserError(f'„{label}”: a választógombot nem lehet kikapcsolni; jelöld be a másik lehetőséget.')
+        if is_paid(label):
+            raise BrowserError(f'„{label}” fizetős lehetőségnek látszik (kiemelés, előresorolás): erre nem kattintok.')
+        if self.cfg.confirm_risky and is_risky(label) and not self._approved(page, label):
+            return _Written("check", "", locator, declined=True)
+        self._human_click(page, locator)
+        for _ in range(20):     # a lap kicsit később is átírhatja (pl. egy keretrendszer újrarajzolja)
+            try:
+                if bool((locator.evaluate(_WRITE_INFO_JS, timeout=2000) or {}).get("checked")) == want:
+                    return _Written("check", "bejelöltem" if want else "kivettem a jelölést", locator, clicked=True)
+            except Exception:  # noqa: BLE001 - pl. épp újrarajzolja
+                pass
+            self._sleep(0.05)
+        raise BrowserError(f'Rákattintottam erre: „{label}”, de nem állt át ({"be" if want else "ki"}).')
 
     @staticmethod
     def _ensure_value(locator: Any, text: str) -> None:
@@ -1224,6 +1744,316 @@ class BrowserController:
             return
         if not same_value(value, text):
             locator.fill(text, timeout=8000)
+
+    # --- választás listából, több lépés egy körben -------------------------------------------------------
+
+    @_restarts_after_crash
+    def choose(self, element: Any, option: str) -> str:
+        """Kiválaszt egy lehetőséget egy lenyíló listából vagy választóból (a modell browser_choose eszköze).
+
+        Natív listánál (select) a felirat alapján választ (lásd _select). Saját listánál (combobox, listbox,
+        lenyíló gomb) emberi kattintással kinyitja, megkeresi a megjelent lehetőségek közül a kértet (közelítő
+        egyezéssel, ha egyértelmű), és rákattint; fánál szintenként („Nők > Ruházat > Pólók”). Kereshető
+        mezőnél előbb beírja a szöveget, és a javaslatok közül választ. Ha a lista nyitva marad, bezárja
+        („Kész” gomb vagy Esc). Ha nem egyértelmű, a jelölteket adja vissza; minden kattintás a szokásos módon,
+        kockázatos feliratnál jóváhagyással megy."""
+        page = self._ensure()
+        el = self._element(element)
+        note = self._batched(lambda: self._choose(page, el, str(option or "")))
+        return note if self.auto or note.startswith(DECLINED) else self.snapshot(note)
+
+    def _batched(self, action: Callable[[], Any]) -> Any:
+        """Egy többlépéses művelet: a közbenső hibák oldalnézet nélkül jönnek (lásd _fail), és ha elakad, a
+        hibához a végén egyetlen friss oldalnézet kerül."""
+        if self._batch:
+            return action()
+        self._batch = True
+        try:
+            return action()
+        except BrowserError as exc:
+            message = str(exc)
+        finally:
+            self._batch = False
+        raise self._fail(message) from None
+
+    def _choose(self, page: Any, el: dict[str, Any], option: str) -> str:
+        label = el.get("label", "") or f"{el['id']}. elem"
+        path = [part.strip() for part in re.split(r"\s*[>›»]\s*", option) if part.strip()]
+        if not path:
+            raise BrowserError("Add meg, mit válasszak (pl. „M”, vagy fánál „Nők > Ruházat > Pólók”).")
+        if len(path) > MAX_CHOOSE_LEVELS:
+            raise BrowserError(f"Legfeljebb {MAX_CHOOSE_LEVELS} szintet tudok egyszerre választani.")
+        self._refuse_sensitive(el)
+        locator = self._locator(el["id"])
+        try:
+            info = locator.evaluate(_WRITE_INFO_JS, timeout=5000) or {}
+            handle = locator.element_handle(timeout=3000)
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(f'Nem találom ezt az elemet: "{label}" ({_short(exc)}).') from None
+        if info.get("select") or info.get("check"):
+            return self._type(page, el, option)
+        before = self.scan()
+        self._retag(handle, el)        # a letapogatás átszámozta: a modell számával is megtalálható maradjon
+        base = Counter(_elem_key(e) for e in before)
+        if info.get("text") and not info.get("readonly"):     # kereshető mező: előbb beírja, aztán választ
+            typed = self._type(page, el, path[0])
+            if typed.startswith(DECLINED):
+                return typed
+            options, search, seen = self._list_state(base, handle, el)
+        else:
+            note, outcome = self._press(page, el)
+            if outcome:
+                return note
+            options, search, seen = self._list_state(base, handle, el)
+            if not options and search is None:   # lehet, hogy a lista már nyitva volt, és a kattintás bezárta
+                base = seen
+                note, outcome = self._press(page, el)
+                if outcome:
+                    return note
+                options, search, seen = self._list_state(base, handle, el)
+        if not options and search is None:
+            raise BrowserError(f'Erre kattintva nem nyílt ki lista: "{label}". Ha nem lenyíló lista, a browser_click '
+                               "vagy a browser_type kell.")
+        chosen: list[str] = []
+        shown = list(options)
+        for level, wanted in enumerate(path):
+            pick, seen = self._pick_option(page, options, search, wanted, base, handle, el, chosen, seen)
+            note, outcome = self._press(page, pick)
+            if outcome:
+                return note
+            chosen.append(pick.get("label", ""))
+            shown.append(pick)
+            if level == len(path) - 1:
+                break
+            options, search, seen = self._list_state(base, handle, el, chosen, since=seen)
+            if not options and search is None:
+                raise BrowserError(f'„{" > ".join(chosen)}” után nem nyílt újabb szint, pedig ezt is kérted: '
+                                   f'„{" > ".join(path[level + 1:])}”.')
+            shown += options
+        self._close_list(page, shown, base)
+        return f'Kiválasztottam: "{" > ".join(chosen)}" ("{label}").'
+
+    def _retag(self, handle: Any, el: dict[str, Any]) -> bool:
+        """Az elem újra a modell által látott számot kapja (egy letapogatás vagy újrarajzolás után), ha még
+        ugyanaz az elem: ugyanolyan fajta és felirat. Hamis, ha már nincs az oldalon, vagy megváltozott."""
+        try:
+            found = handle.evaluate(_IDENTITY_JS, int(el["id"])) or {}
+        except Exception:  # noqa: BLE001 - pl. a lap közben átnavigált
+            return False
+        if not found.get("connected") or found.get("kind") != el.get("kind"):
+            return False
+        now, seen = _norm(found.get("label", "")), _norm(el.get("label", ""))
+        # az oldalnézet a feliratot rövidebbre vághatja: elég, ha az egyik a másik eleje
+        return now == seen or bool(now and seen and (now.startswith(seen) or seen.startswith(now)))
+
+    def _list_state(self, base: Counter, handle: Any, el: dict[str, Any], chosen: list[str] | None = None,
+                    since: Counter | None = None) -> tuple[list[dict[str, Any]], dict[str, Any] | None, Counter]:
+        """A kinyitott lista: a lehetőségei (ami a kinyitás óta jelent meg; a lista mezője, a vezérlőgombok és az
+        eddig kiválasztottak nem), a saját keresője, ha van, és hogy mi látszik most (a következő szinthez). Egy
+        mélyebb szinten (`since`: ami az előző szinten látszott) előbb az újonnan megjelentek közül választ, így
+        egy egymás mellett nyíló menüben a felső szint lehetőségei nem keverednek bele. Ha egy felirat kétszer
+        is szerepel (pl. a sor és a benne lévő gomb), csak egyszer, a pontosabbal."""
+        elements = self.scan()
+        self._retag(handle, el)
+        taken = {_norm(c) for c in chosen or []}
+        opener = _elem_key(el)
+
+        def usable(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [e for e in items if _is_option(e) and _elem_key(e) != opener
+                    and _norm(e.get("label", "")) not in taken]
+
+        fresh = _appeared(base, elements)
+        found = usable(_appeared(since, elements)) if since is not None else []
+        found = found or usable(fresh)
+        search = next((e for e in fresh if e.get("kind") in _TEXT_KINDS and not e.get("readonly")
+                       and not e.get("chrome") and not e.get("disabled")), None)
+
+        def rank(item: dict[str, Any]) -> int:
+            return 0 if item.get("kind") in _FINAL_KINDS else 1 if item.get("kind") in ("button", "option") else 2
+
+        best: dict[str, dict[str, Any]] = {}
+        for item in found:
+            key = _norm(item.get("label", ""))
+            if key not in best or rank(item) < rank(best[key]):
+                best[key] = item
+        options = [item for item in found if best.get(_norm(item.get("label", ""))) is item]
+        return options, search, Counter(_elem_key(e) for e in elements)
+
+    def _pick_option(self, page: Any, options: list[dict[str, Any]], search: dict[str, Any] | None, wanted: str,
+                     base: Counter, handle: Any, el: dict[str, Any], chosen: list[str],
+                     seen: Counter) -> tuple[dict[str, Any], Counter]:
+        """A kért lehetőség a lista elemei közül (lásd match_option), és ami most látszik. Ha nincs meg (vagy
+        nem egyértelmű), de a listának van saját keresője (pl. egy márkalista), beírja oda, és a találatok közül
+        választ."""
+        index, hits = match_option([o.get("label", "") for o in options], wanted)
+        if index is None and search is not None:
+            typed = self._type(page, search, wanted)
+            if typed.startswith(DECLINED):
+                raise BrowserError(typed)
+            options, _search, seen = self._list_state(base, handle, el, chosen)
+            index, hits = match_option([o.get("label", "") for o in options], wanted)
+        where = f" (eddig: {' > '.join(chosen)})" if chosen else ""
+        if index is None:
+            labels = [options[i].get("label", "") for i in (hits or range(len(options)))]
+            listed = ", ".join(f"„{text[:40]}”" for text in labels[:8]) + (" …" if len(labels) > 8 else "")
+            if hits:
+                raise BrowserError(f"Több lehetőség is illik erre: „{wanted}”{where}: {listed}. Add meg pontosabban "
+                                   "(a teljes felirattal); a lista nyitva maradt.")
+            tree = " Ha ez egy fa, add meg az utat: „Felső > Alsó”." if not chosen else ""
+            raise BrowserError(f"Nem találom a listában: „{wanted}”{where}. A lehetőségek: {listed or '(nincs)'}."
+                               f"{tree}")
+        pick = options[index]
+        if is_paid(pick.get("label", "")):
+            raise BrowserError(f'„{pick.get("label", "")}” fizetős lehetőségnek látszik (kiemelés, előresorolás): '
+                               "erre nem kattintok.")
+        return pick, seen
+
+    def _close_list(self, page: Any, shown: list[dict[str, Any]], base: Counter) -> None:
+        """Ha a lista nyitva maradt (pl. több színt is lehet választani), bezárja: a lista „Kész” gombjával
+        (csak az a gomb, ami a listával jelent meg), vagy Esc-cel, ahogy az ember. Csak a listával megjelent
+        elemeket nézi: ami már előtte is látszott (pl. az űrlap, ha egy felugró ablakban van), az nem a lista."""
+        keys = {_elem_key(o) for o in shown}
+        for _ in range(2):
+            fresh = _appeared(base, self.scan())
+            if not any(_elem_key(e) in keys for e in fresh):
+                return
+            done = next((e for e in fresh if e.get("kind") in ("button", "input:button", "input:submit")
+                         and not e.get("chrome") and _DONE_RE.match(_norm(e.get("label", "")))), None)
+            if done is not None:
+                self._press(page, done)
+            else:
+                self.press("Escape")
+                self._settle(page)
+
+    @_restarts_after_crash
+    def do_actions(self, actions: list[dict[str, Any]]) -> str:
+        """Több lépés egy körben ugyanazon az oldalon (a modell browser_do eszköze): kattintás, gépelés, választás
+        listából, jelölőnégyzet, sorban, emberi tempóban, és a végén egyetlen oldalnézet.
+
+        Megáll (és megmondja, mi futott le és mi maradt ki), ha közben megváltozik az oldal címe, új lap vagy
+        fájlválasztó nyílik, új felugró ablak jelenik meg, vagy ha egy elem már nem az, amit a modell az
+        oldalnézetben látott. Kockázatos kattintás (pl. közzététel) legfeljebb egy lehet, és csak utolsóként;
+        fizetős lehetőség (kiemelés) egy sem."""
+        page = self._ensure()
+        plan = self._plan_actions(actions)
+        handles = []
+        for _do, el, _text in plan:
+            try:
+                handles.append(self._locator(el["id"]).element_handle(timeout=2000))
+            except Exception:  # noqa: BLE001
+                raise self._fail(f'Nincs már ilyen elem az oldalon: [{el["id"]}] "{el.get("label", "")}". '
+                                 "Nézd meg a friss oldalnézetet.") from None
+        start_url, dialogs = page.url, self._dialogs(page)
+        done: list[str] = []
+        stop = ""
+        self._batch = True
+        try:
+            for index, ((do, el, text), handle) in enumerate(zip(plan, handles)):
+                page = self.page
+                if not self._retag(handle, el):
+                    stop = f'a(z) [{el["id"]}] "{el.get("label", "")}" elem már nem az, ami az oldalnézetben volt'
+                    break
+                if index:
+                    self.pace.wait(0.3, 0.9)   # a következő mezőre, gombra átnéz
+                try:
+                    note, outcome = self._do_one(page, do, el, text)
+                except BrowserError as exc:
+                    message = str(exc).split("\n\nFriss oldalnézet:")[0].strip()
+                    stop = f"a(z) {index + 1}. lépés nem sikerült: {message[:400].rstrip('.')}"
+                    break
+                done.append(f"{index + 1}. {note}")
+                if outcome == "declined":
+                    stop = "ezt nem engedélyezted"
+                elif outcome == "chooser":
+                    stop = "a gomb fájlt kér (a feltöltéshez a browser_upload_photos kell)"
+                elif outcome == "tab":
+                    stop = "új lapon nyílt meg valami"
+                elif index < len(plan) - 1 and self.url != start_url:
+                    stop = "megváltozott az oldal címe"
+                elif index < len(plan) - 1 and self._dialogs(self.page) > dialogs:
+                    stop = "felugró ablak nyílt meg"
+                if stop:
+                    break
+        finally:
+            self._batch = False
+        if len(done) == len(plan):
+            note = f"Elvégeztem mind a {len(plan)} lépést: " + " ".join(done)
+        else:
+            note = f"A {len(plan)} lépésből {len(done)} lett kész" + (": " + " ".join(done) if done else ".")
+        if stop:
+            failed = stop.startswith(f"a(z) {len(done) + 1}. lépés")
+            rest = [f"{n}. {self._action_text(*plan[n - 1])}" for n in range(len(done) + 1 + failed, len(plan) + 1)]
+            note += f" Megálltam, mert {stop}." + (f" Kihagytam: {'; '.join(rest)}." if rest else "")
+            if rest:
+                note += " Az új oldalnézet alapján folytasd."
+        return note if self.auto else self.snapshot(note)
+
+    def _plan_actions(self, actions: Any) -> list[tuple[str, dict[str, Any], str]]:
+        """A browser_do lépéseinek ellenőrzése, mielőtt bármit csinálna."""
+        example = '[{"do": "type", "element": 3, "text": "Zara póló"}, {"do": "click", "element": 7}]'
+        if not isinstance(actions, list) or not actions:
+            raise BrowserError(f"Add meg a lépéseket listában, pl.: {example}")
+        if len(actions) > MAX_ACTIONS:
+            raise BrowserError(f"Egyszerre legfeljebb {MAX_ACTIONS} lépést teszek; a többit a következő körben kérd.")
+        plan = []
+        for entry in actions:
+            if not isinstance(entry, dict) or "element" not in entry:
+                raise BrowserError(f"Minden lépésnél kell a fajtája és az elem száma, pl.: {example}")
+            do = str(entry.get("do") or "click").strip().lower()
+            do = {"select": "choose", "fill": "type", "write": "type"}.get(do, do)
+            if do not in ("click", "type", "choose", "check"):
+                raise BrowserError(f"Ismeretlen lépés: „{do}”. Lehet: click, type, choose, check.")
+            el = self._element(entry["element"])
+            text = str(entry.get("text") if entry.get("text") is not None else "")
+            if do in ("type", "choose", "check"):
+                self._refuse_sensitive(el)
+            if do == "choose" and not text.strip():
+                raise BrowserError(f'A választáshoz add meg a lehetőséget is: [{el["id"]}] "{el.get("label", "")}".')
+            plan.append((do, el, text))
+        risky = [n for n, (do, el, _text) in enumerate(plan) if self._risky_action(do, el)]
+        for do, el, _text in plan:
+            if do in ("click", "check") and is_paid(el.get("label", "")):
+                raise BrowserError(f'„{el.get("label", "")}” fizetős lehetőségnek látszik (kiemelés, előresorolás): '
+                                   "erre nem kattintok.")
+        if len(risky) > 1 or (risky and risky[0] != len(plan) - 1):
+            label = plan[risky[0]][1].get("label", "")
+            raise BrowserError(f"Kockázatos lépés (pl. közzététel, törlés, küldés: „{label}”) csak egy lehet, és "
+                               "csak utolsóként: előbb a többit végezd el, és nézd meg az eredményt.")
+        return plan
+
+    def _risky_action(self, do: str, el: dict[str, Any]) -> bool:
+        if not self.cfg.confirm_risky or do not in ("click", "check"):
+            return False
+        return is_risky(el.get("label", ""), link=do == "click" and navigates(el))
+
+    @staticmethod
+    def _action_text(do: str, el: dict[str, Any], text: str) -> str:
+        names = {"click": "kattintás", "type": "gépelés", "choose": "választás", "check": "jelölés"}
+        return f'{names[do]} [{el["id"]}] "{el.get("label", "")}"' + (f": „{text}”" if text and do != "click" else "")
+
+    def _do_one(self, page: Any, do: str, el: dict[str, Any], text: str) -> tuple[str, str]:
+        """Egy lépés a browser_do-ból, oldalnézet nélkül: (megjegyzés, mi történt; lásd _press)."""
+        if do == "click":
+            return self._press(page, el)
+        if do == "choose":
+            note = self._choose(page, el, text)
+        elif do == "check":
+            try:
+                info = self._locator(el["id"]).evaluate(_WRITE_INFO_JS, timeout=5000) or {}
+            except Exception as exc:  # noqa: BLE001
+                raise BrowserError(f'Nem találom ezt az elemet: "{el.get("label", "")}" ({_short(exc)}).') from None
+            if not info.get("check"):
+                raise BrowserError(f'"{el.get("label", "")}" nem jelölőnégyzet; gépeléshez a "type" lépés kell.')
+            note = self._type(page, el, text or "igen")
+        else:
+            note = self._type(page, el, text)
+        return note, "declined" if note.startswith(DECLINED) else ""
+
+    def _dialogs(self, page: Any) -> int:
+        try:
+            return int(page.evaluate(_DIALOGS_JS) or 0)
+        except Exception:  # noqa: BLE001 - épp navigál
+            return 0
 
     # --- emberi mozdulatok (humanize.py) ---------------------------------------------------
 
@@ -1241,15 +2071,20 @@ class BrowserController:
         time.sleep(seconds)
 
     def _move_mouse(self, page: Any, x: float, y: float) -> None:
-        """Az egér odamegy (x, y)-ra, enyhe ívben, ahogy a kéz mozgatja."""
+        """Az egér odamegy (x, y)-ra, enyhe ívben, ahogy a kéz mozgatja. A mozdulat a tervezett ideig tart
+        (Pace.move_seconds): egy pont után csak a hátralévő időt várja ki, mert a böngészőnek küldött mozdulat
+        maga is időbe telik (különben a kéz lassabb lenne, mint ahogy az emberi tempó előírja)."""
         start = self._mouse or (self.cfg.width * self.pace.rng.uniform(0.3, 0.7),
                                 self.cfg.height * self.pace.rng.uniform(0.3, 0.7))
         points = self.pace.path(start, (x, y))
         step = self.pace.move_seconds(start, (x, y)) / max(1, len(points))
-        for px, py in points:
+        began = time.monotonic()
+        for index, (px, py) in enumerate(points, 1):
             page.mouse.move(px, py)
             if step > 0:
-                self._sleep(step)
+                left = began + index * step - time.monotonic()
+                if left > 0:
+                    self._sleep(left)
         self._mouse = (x, y)
 
     def _view_height(self, page: Any) -> float:
@@ -1465,10 +2300,7 @@ class BrowserController:
                 raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(exc)}).") from None
             return page.url, title, text
         finally:
-            try:
-                page.close()
-            except Exception:  # noqa: BLE001
-                pass
+            self._close_page(page)
 
     def read_url(self, url: str) -> str:
         """Mint a read_webpage, de a saját böngészővel (külön lapon)."""
@@ -1549,17 +2381,34 @@ class BrowserController:
                 raise self._fail(f"Nem sikerült feltölteni a fotókat ({_short(exc)}).") from None
         self._settle(page)
         self._emit({"do": "upload", "el": used, "count": len(files)})
-        return self.snapshot(note)
+        return note if self.auto else self.snapshot(note)
 
-    @staticmethod
-    def _fill_input(page: Any, locator: Any, files: list[str]) -> None:
+    def _fill_input(self, page: Any, locator: Any, files: list[str]) -> None:
+        """A fájlok egy fájlfeltöltő mezőbe. Ha a mező egyszerre csak egyet fogad, fotónként újra: a következőt
+        akkor adja, amikor az oldal az előzőt átvette (lásd _wait_taken)."""
         multiple = locator.get_attribute("multiple") is not None
         if multiple or len(files) == 1:
             locator.set_input_files(files, timeout=15000)
             return
-        for file in files:   # egyesével fogadó mező: fotónként újra
+        for index, file in enumerate(files):   # egyesével fogadó mező: fotónként újra
             locator.set_input_files([file], timeout=15000)
-            page.wait_for_timeout(600)
+            if index < len(files) - 1:
+                self._wait_taken(page, locator)
+
+    def _wait_taken(self, page: Any, locator: Any) -> None:
+        """Megvárja, amíg az oldal átveszi a mezőbe tett fotót: kiüríti vagy lecseréli a mezőt, vagy (ha a mezőben
+        hagyja) már nem tölt semmit, és nem változik a lap. Legfeljebb UPLOAD_TAKE_SECONDS-ig; egy fix szünet
+        helyett, ami egy gyors oldalnál felesleges, egy lassúnál kevés."""
+        deadline = time.monotonic() + UPLOAD_TAKE_SECONDS
+        while True:
+            try:
+                if not locator.evaluate("(el) => (el.isConnected && el.files) ? el.files.length : 0", timeout=2000):
+                    return        # átvette: kiürítette, vagy már egy új (üres) mező van a helyén
+            except Exception:  # noqa: BLE001 - a mező eltűnt: az oldal átvette
+                return
+            left = deadline - time.monotonic()
+            if left <= 0 or self._settle(page, max_wait=min(1.0, left)):
+                return
 
     @_restarts_after_crash
     def extract_listings(self, url: str) -> list[dict[str, Any]]:
