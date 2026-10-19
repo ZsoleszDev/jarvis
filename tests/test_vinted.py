@@ -507,8 +507,9 @@ class MatchingTests(unittest.TestCase):
             def __init__(self, answer):
                 self.answer, self.asked = answer, []
 
-            def chat_json(self, messages, schema, temperature=0.3):
+            def chat_json(self, messages, schema, temperature=0.3, max_tokens=None):
                 self.asked.append((messages, schema, temperature))
+                self.max_tokens = max_tokens
                 return self.answer
 
         options = [el("button", "Jeans"), el("button", "Tops & t-shirts")]

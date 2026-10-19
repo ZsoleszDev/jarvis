@@ -611,6 +611,10 @@ EXTRACT_SYSTEM = (
     "- search_query: 2–4 szó a hasonló hirdetések kereséséhez (márka és típus, méret nélkül)."
 )
 
+# A JSON-válaszok felső határa (token): a hirdetés adatai (2–4 mondatos leírással) és az ár-ajánlás bőven
+# beleférnek, egy beragadt, ismétlődő válasz viszont nem foglalja percekig a modellt.
+EXTRACT_MAX_TOKENS = 800
+SELECT_MAX_TOKENS = 400
 EXTRACT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -636,7 +640,7 @@ class ListingExtractor:
             raise ItemError("Írd le röviden, mit adsz el (pl. „Zara L-es fekete póló, 500 Ft”).")
         messages = [{"role": "system", "content": EXTRACT_SYSTEM},
                     {"role": "user", "content": f"Az eladó leírása:\n{item.prompt}"}]
-        data = self.llm.chat_json(messages, EXTRACT_SCHEMA, temperature=0.2)
+        data = self.llm.chat_json(messages, EXTRACT_SCHEMA, temperature=0.2, max_tokens=EXTRACT_MAX_TOKENS)
         values: dict[str, Any] = {key: str(data.get(key) or "").strip() for key in LISTING_FIELDS}
         values["kind"] = str(data.get("kind") or "").strip()
         try:
@@ -769,7 +773,7 @@ class PriceResearcher:
             {"role": "system", "content": SELECT_SYSTEM},
             {"role": "user", "content": f"A tárgy: {describe_item(item)}\n\nTalálatok:\n{listing}"},
         ]
-        data = self.llm.chat_json(messages, SELECT_SCHEMA, temperature=0.2)
+        data = self.llm.chat_json(messages, SELECT_SCHEMA, temperature=0.2, max_tokens=SELECT_MAX_TOKENS)
         picked = []
         for number in data.get("similar") or []:
             try:

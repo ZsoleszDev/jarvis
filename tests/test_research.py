@@ -244,7 +244,7 @@ class AssistantResearchTests(unittest.TestCase):
         self.fake.chat_script.append(final)
         answer = self.assistant.ask("melyik ébresztőórát vegyem?")
         self.assertEqual(answer, "A Kaufland 2990 forintos órája a legjobb választás.")
-        self.assertFalse(seen_final["tools"])
+        self.assertTrue(seen_final["tools"], "az utolsó körben is ugyanazok az eszközök (a gyorsítótár miatt)")
         self.assertEqual(seen_final["last"], {"role": "user", "content": WRAP_UP})
         tool_results = [m["content"] for m in self.assistant.history if m["role"] == "tool"]
         self.assertIn("[Még 3 lépésed maradt.", tool_results[0])

@@ -1004,6 +1004,33 @@ class SellFlowTests(unittest.TestCase):
         self.app.run_work({"action": "sell", "ids": [item.id]})
         self.assertIn("már fent van mindenhol", self.notices()[-1])
 
+    def test_model_post_sees_only_the_task_tools(self):
+        # Egy modellel végzett feltöltés csak a böngészőt és a tárgy néhány eszközét látja, végig ugyanazt a
+        # listát (a prompt eleje így az Ollama gyorsítótárában marad); a Munka menü szabad beszélgetése mindet.
+        item = self.ready_item(["jofogas"])
+        self.fake.chat_script = [tool_reply("item_post", {"item": item.id, "platform": "jofogas"}),
+                                 tool_reply("web_search", {"query": "póló ár"}),
+                                 tool_reply("item_mark", {"item": item.id, "status": "feltöltve",
+                                                          "platform": "jofogas"}),
+                                 reply("Fent van a Jófogáson.")]
+        self.app.run_work({"action": "post", "ids": [item.id], "platform": "jofogas"})
+        self.assertEqual(self.store.get(item.id).platforms["jofogas"]["status"], POSTED)
+        bodies = self.fake.chat_bodies()
+        names = {t["function"]["name"] for t in bodies[0]["tools"]}
+        self.assertEqual(names, self.app.work.task_tools)
+        self.assertTrue({"item_post", "item_mark", "item_get", "browser_click", "browser_fill",
+                         "browser_upload_photos"} <= names)
+        self.assertFalse({"web_search", "item_update", "item_research", "item_list", "get_datetime"} & names)
+        self.assertTrue(all(body["tools"] == bodies[0]["tools"] for body in bodies))
+        self.assertIn("itt nincs ilyen eszköz: web_search", self.last_tool(bodies[2]))
+        options = bodies[0]["options"]
+        self.assertEqual((options["temperature"], options["num_predict"]), (0.3, 1024), "a Munka menü mintavétele")
+
+        self.fake.chat_script = [reply("Egy tárgyad van.")]
+        self.app.respond("Hány tárgyam van?", mode="work")
+        names = {t["function"]["name"] for t in self.fake.chat_bodies()[-1]["tools"]}
+        self.assertEqual(names, self.app.work.agent_tools, "a szabad beszélgetés minden eszközt lát")
+
     def test_login_opens_the_site_in_jarvis_browser(self):
         self.app.run_work({"action": "login", "platform": "jofogas"})
         self.assertIn("Jelentkezz be", self.notices()[-1])

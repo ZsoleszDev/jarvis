@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from jarvis_core import cuda_libs, textutil  # noqa: E402
-from jarvis_core.assistant import FALLBACK_REPLY, TOO_MANY_STEPS, Assistant  # noqa: E402
+from jarvis_core.assistant import FALLBACK_REPLY, TOO_LONG_REPLY, TOO_MANY_STEPS, Assistant  # noqa: E402
 from jarvis_core.config import Config, load_config  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, normalize_message  # noqa: E402
 from jarvis_core.recorder import Recorder, resample  # noqa: E402
@@ -331,16 +331,64 @@ class AssistantTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.assistant.last_stats.tool_calls, 1)
 
-    def test_last_round_has_no_tools(self):
+    def test_last_round_keeps_the_tools(self):
+        # Az utolsó körben is ugyanazok az eszközök mennek (különben az egész promptot újra kellene
+        # feldolgozni), de amit akkor hívna, azt nem futtatjuk.
         self.cfg.assistant.max_tool_rounds = 2
-
-        def final(body):
-            assert "tools" not in body
-            return 200, reply("kész")
-
-        self.fake.chat_script = [tool_reply("get_datetime", {}), tool_reply("get_datetime", {}), final]
+        self.fake.chat_script = [tool_reply("get_datetime", {}), tool_reply("get_datetime", {}), reply("kész")]
         self.assertEqual(self.assistant.ask("csináld"), "kész")
         self.assertEqual(self.assistant.last_stats.tool_calls, 2)
+        bodies = self.fake.chat_bodies()
+        self.assertEqual(bodies[-1]["tools"], bodies[-2]["tools"])
+        self.assertIn("Elfogyott a lépéskereted", bodies[-1]["messages"][-1]["content"])
+
+        # ha az utolsó körben is eszközt hívna: nem fut le, és a mentőválasz jön
+        self.fake.chat_script = [tool_reply("get_datetime", {})] * 3
+        answer = self.assistant.ask("megint")
+        self.assertTrue(answer.startswith(TOO_MANY_STEPS), answer)
+        self.assertEqual(self.assistant.last_stats.tool_calls, 2)
+        bodies = self.fake.chat_bodies()
+        self.assertEqual(bodies[-1]["tools"], bodies[-2]["tools"])
+
+    def test_reply_length_is_bounded(self):
+        # Minden kör válasza korlátos (num_predict): egy beragadt, ismétlődő válasz se foglalja percekig a modellt.
+        self.fake.chat_script = [reply("Szia!")]
+        self.assistant.ask("szia")
+        self.assertEqual(self.fake.chat_bodies()[0]["options"]["num_predict"], 2048)
+        work = Assistant(self.cfg, OllamaClient(self.cfg.llm), Toolbox(self.cfg), "munka",
+                         options={"temperature": 0.3, "num_predict": 1024})
+        self.fake.chat_script = [reply("Kész.")]
+        work.ask("töltsd fel")
+        options = self.fake.chat_bodies()[1]["options"]
+        self.assertEqual((options["temperature"], options["num_predict"]), (0.3, 1024))
+        self.assertEqual(options["num_ctx"], self.fake.chat_bodies()[0]["options"]["num_ctx"],
+                         "a kontextus ugyanaz, különben az Ollama újratöltené a modellt")
+
+    def test_cut_short_tool_call_is_retried_once_then_given_up(self):
+        # A válasz a hosszhatárnál félbemaradt, mielőtt az eszközhívás kész lett volna: egyszer újrakérdezzük
+        # röviden, és ha megint így jár, tiszta hibaüzenet lesz belőle (nem akad el).
+        cut = {**reply('<tool_call>{"name": "browser_click", "arguments": {"element": 1' + ", 1" * 50),
+               "done_reason": "length"}
+        self.fake.chat_script = [cut, tool_reply("get_datetime", {}), reply("Este van.")]
+        self.assertEqual(self.assistant.ask("Hány óra?"), "Este van.")
+        bodies = self.fake.chat_bodies()
+        self.assertIn("félbemaradt", bodies[1]["messages"][-1]["content"])
+        self.assertNotIn("félbemaradt", str(bodies[2]["messages"]), "a jelzés nem marad az előzményekben")
+        self.assertEqual([m["role"] for m in self.assistant.history[-4:]], ["user", "assistant", "tool", "assistant"])
+
+        self.fake.chat_script = [dict(cut), dict(cut)]
+        self.assertEqual(self.assistant.ask("Hány óra?"), TOO_LONG_REPLY)
+        self.assertEqual(self.assistant.history[-1]["content"], TOO_LONG_REPLY)
+
+    def test_long_text_answer_is_kept_when_cut(self):
+        self.fake.chat_script = [{**reply("Ez egy nagyon hosszú válasz"), "done_reason": "length"}]
+        self.assertEqual(self.assistant.ask("Mesélj"), "Ez egy nagyon hosszú válasz …")
+
+    def test_json_side_calls_are_bounded(self):
+        client = OllamaClient(self.cfg.llm)
+        self.fake.chat_script = [reply('{"choice": 2}')]
+        self.assertEqual(client.chat_json([{"role": "user", "content": "melyik?"}], max_tokens=16), {"choice": 2})
+        self.assertEqual(self.fake.chat_bodies()[-1]["options"]["num_predict"], 16)
 
     def test_empty_replies_get_polite_text(self):
         self.fake.chat_script = [reply("")]

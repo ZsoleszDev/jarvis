@@ -38,6 +38,7 @@ from .textutil import fold
 
 MAX_LEVELS = 6             # a kategóriafa (vagy egy méretválasztó) legfeljebb ennyi szint
 MAX_ASK_OPTIONS = 60       # a modell legfeljebb ennyi lehetőséget lát egy kérdésben
+ASK_MAX_TOKENS = 16        # a válasz egy szám ({"choice": 3}): ennél hosszabb már csak beragadt válasz lehet
 PUBLISH_WAIT = 25.0        # a közzététel után ennyi ideig várja, hogy a Vinted továbbengedjen
 LABELS = {"photos": "Fotók", "title": "Cím", "description": "Leírás", "category": "Kategória", "brand": "Márka",
           "size": "Méret", "condition": "Állapot", "color": "Szín", "price": "Ár", "parcel_size": "Csomagméret"}
@@ -669,7 +670,7 @@ class VintedFiller:
         numbers = list(range(0 if allow_none else 1, len(shown) + 1))
         schema = {"type": "object", "properties": {"choice": {"type": "integer", "enum": numbers}},
                   "required": ["choice"]}
-        data = self.llm.chat_json(messages, schema, temperature=0.0)
+        data = self.llm.chat_json(messages, schema, temperature=0.0, max_tokens=ASK_MAX_TOKENS)
         try:
             number = int(data.get("choice"))
         except (TypeError, ValueError):

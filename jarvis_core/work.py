@@ -39,6 +39,10 @@ SHARED_TOOLS = {"get_datetime", "web_search", "read_webpage", "browser_open", "b
                 "browser_read", "browser_look"}
 WORK_ONLY_TOOLS = {"item_list", "item_get", "item_update", "item_research", "item_post", "item_mark",
                    "item_delist", "browser_upload_photos"}
+# Egy modellel végzett feltöltés, levétel vagy ellenőrzés csak ezeket látja (és a böngésző minden eszközét, a
+# browser_ kezdetűeket): kevesebb eszközleírás = rövidebb prompt, és a modell nem téved el (pl. egy keresésbe
+# a kitöltés közepén). A feladat végéig ugyanaz a lista, így a prompt eleje az Ollama gyorsítótárában marad.
+TASK_TOOLS = {"item_get", "item_mark", "item_post", "item_delist"}
 DELISTED_NOTE = "Levéve"
 # Levétel közben (amit már jóváhagytál) ezekre a gombokra nem kérdez újra, de fizetősre soha nem kattint.
 _DELIST_OK_RE = re.compile(r"\b(torol|torl|delete|remove|eltavolit|inaktiv|lezar|befejez|visszavon|eladva|"
@@ -178,6 +182,11 @@ class WorkDesk:
     @property
     def agent_tools(self) -> set[str]:
         return (SHARED_TOOLS | WORK_ONLY_TOOLS) & set(self.toolbox.names())
+
+    @property
+    def task_tools(self) -> set[str]:
+        """A modellel végzett feltöltés, levétel és ellenőrzés eszközei (lásd TASK_TOOLS)."""
+        return {name for name in self.toolbox.names() if name.startswith("browser_") or name in TASK_TOOLS}
 
     def describe(self) -> dict[str, Any]:
         """A felületnek: milyen oldalak vannak, mit kérnek, és mik az alapadataid."""

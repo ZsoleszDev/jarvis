@@ -24,7 +24,7 @@ class AssistantCfg:
     system_prompt_file: str = "system_prompt.txt"
     max_history_turns: int = 12
     max_tool_rounds: int = 20
-    keep_page_views: int = 2
+    keep_page_views: int = 1
     show_timings: bool = True
     stream: bool = True
     fillers: bool = True
@@ -156,6 +156,9 @@ class WorkCfg:
     # Két közzététel (vagy levétel) között ugyanazon az oldalon legalább ennyi perc teljen el
     # (véletlenszerűen ±30%), ahogy egy embernél. 0 = nincs várakozás.
     publish_gap_minutes: float = 2.0
+    # A Munka menü beszélgetésének mintavétele: kisebb, mint a Beszélgetésé ([llm] temperature), hogy az
+    # űrlapkitöltésnél (elemszámok, mezőértékek) kevesebb legyen a véletlen. A modellt nem tölti újra.
+    temperature: float = 0.3
 
 
 @dataclass

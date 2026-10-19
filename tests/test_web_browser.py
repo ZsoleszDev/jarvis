@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_offline import FakeOllama, make_cfg, reply, tool_reply  # noqa: E402
 
+from jarvis_core import assistant as assistant_module  # noqa: E402
 from jarvis_core import web  # noqa: E402
 from jarvis_core.assistant import STALE_NOTE, Assistant  # noqa: E402
 from jarvis_core.browser import (ORDINAL_JS, SCAN_BASE, BrowserController, BrowserError,  # noqa: E402
@@ -1068,6 +1069,58 @@ class VisionAndToolTests(unittest.TestCase):
         self.assertEqual(image.size, (200, 100))   # kicsinyítve a max_width-re
         self.assertFalse(self.fake.chat_bodies()[0]["think"])
 
+    def test_look_runs_inside_the_conversation(self):
+        # A kép a futó beszélgetés végére kerül (ugyanaz a rendszerprompt, előzmény, eszközök), így az Ollama
+        # gyorsítótárában a beszélgetés eleje megmarad; a kép nem kerül az előzmények közé.
+        self.fake.chat_script = [tool_reply("look_at_screen", {"question": "Mi ez a hiba?"}),
+                                 reply("Egy piros hibaüzenet: Fájl nem található."),
+                                 reply("A Fájl nem található hibát látom.")]
+        with mock.patch.dict(sys.modules, {"mss": fake_mss_module()}):
+            box = Toolbox(self.cfg, llm=self.llm)
+            assistant = Assistant(self.cfg, self.llm, box, "rendszer")
+            self.assertEqual(assistant.ask("Mit látsz a képernyőn?"), "A Fájl nem található hibát látom.")
+        first, look, last = self.fake.chat_bodies()
+        self.assertEqual(look["messages"][:2], first["messages"])
+        self.assertEqual(look["messages"][2], last["messages"][2], "az eszközhívás is közös előzmény")
+        self.assertEqual(look["messages"][3]["role"], "tool")
+        self.assertTrue(look["messages"][-1]["images"])
+        self.assertIn("Mi ez a hiba?", look["messages"][-1]["content"])
+        self.assertEqual(look["tools"], first["tools"])
+        self.assertEqual(look["options"]["temperature"], first["options"]["temperature"])
+        self.assertEqual(look["options"]["num_predict"], 400)
+        self.assertEqual(look["think"], first["think"])
+        self.assertIn("Fájl nem található", last["messages"][-1]["content"])
+        self.assertFalse(any("images" in m for m in last["messages"]))
+        self.assertFalse(any("images" in m for m in assistant.history))
+        self.assertIsNone(box.conversation, "a kérés után nincs futó beszélgetés")
+
+    def test_look_falls_back_to_a_separate_question(self):
+        # Ha a beszélgetésben eszközt hívna szöveg helyett, külön (előzmények nélküli) kérdés lesz belőle.
+        self.fake.chat_script = [tool_reply("look_at_screen", {"question": "Mi ez?"}),
+                                 tool_reply("get_datetime", {}), reply("Egy piros ablak."), reply("Piros ablak.")]
+        with mock.patch.dict(sys.modules, {"mss": fake_mss_module()}):
+            box = Toolbox(self.cfg, llm=self.llm)
+            assistant = Assistant(self.cfg, self.llm, box, "rendszer")
+            self.assertEqual(assistant.ask("Mit látsz?"), "Piros ablak.")
+        separate = self.fake.chat_bodies()[2]
+        self.assertEqual(len(separate["messages"]), 1)
+        self.assertNotIn("tools", separate)
+        self.assertIn("Egy piros ablak.", assistant.history[2]["content"])
+        self.assertEqual([m["role"] for m in assistant.history], ["user", "assistant", "tool", "assistant"])
+
+    def test_look_is_separate_when_the_image_would_not_fit(self):
+        # Ha a kép már nem férne el a beszélgetés kontextusában, külön (előzmények nélküli) kérdés lesz belőle.
+        self.fake.chat_script = [tool_reply("look_at_screen", {"question": "Mi ez?"}), reply("Egy piros ablak."),
+                                 reply("Piros ablak.")]
+        with mock.patch.dict(sys.modules, {"mss": fake_mss_module()}), \
+                mock.patch.object(assistant_module, "IMAGE_TOKENS", 10**6):
+            box = Toolbox(self.cfg, llm=self.llm)
+            assistant = Assistant(self.cfg, self.llm, box, "rendszer")
+            self.assertEqual(assistant.ask("Mit látsz?"), "Piros ablak.")
+        separate = self.fake.chat_bodies()[1]
+        self.assertEqual(len(separate["messages"]), 1)
+        self.assertTrue(separate["messages"][0]["images"])
+
     def test_no_vision_tools_without_model(self):
         with mock.patch.dict(sys.modules, {"mss": fake_mss_module()}):
             box = Toolbox(self.cfg)
@@ -1106,15 +1159,25 @@ class VisionAndToolTests(unittest.TestCase):
         # az utolsó modellhívás a legelső oldalt már nem látta
         self.assertNotIn("OLDAL-1", str(self.fake.chat_bodies()[-1]["messages"]))
 
-    def test_no_compaction_while_context_has_room(self):
-        # Bőven van hely: semmi nem változik visszamenőleg, így a prompt-gyorsítótár
-        # minden lépésnél megmarad (az előző kérés eleje szó szerint ismétlődik).
-        assistant = self._paging_assistant(context_tokens=100_000)
-        assistant.ask("lapozz")
+    def test_compaction_keeps_the_prompt_cache(self):
+        # Bőven van hely, az előző oldalnézet mégis rögtön rövid sorra cserélődik, amint új jön: az az előző
+        # kérés utolsó üzenete, így a kérések eleje szó szerint ismétlődik (a prompt-gyorsítótár megmarad),
+        # és minden kérésben csak egy teljes oldalnézet van.
+        from test_context import first_difference, page_view
+
+        box = Toolbox(self.cfg)
+        pages = iter([page_view(1), page_view(2), page_view(3)])
+        box.register("page", "teszt oldalnézet", params(), lambda: next(pages), ephemeral=True)
+        self.fake.chat_script = [tool_reply("page", {}), tool_reply("page", {}), tool_reply("page", {}),
+                                 reply("kész")]
+        assistant = Assistant(self.cfg, self.llm, box, "rendszer")
+        assistant.context_tokens = 100_000
+        self.assertEqual(assistant.ask("lapozz"), "kész")
         bodies = self.fake.chat_bodies()
         for earlier, later in zip(bodies, bodies[1:]):
             n = len(earlier["messages"])
-            self.assertEqual(later["messages"][:n], earlier["messages"])
+            self.assertGreaterEqual(first_difference(earlier["messages"], later["messages"]), n - 1)
+            self.assertEqual(sum("Kezelhető elemek" in m["content"] for m in later["messages"]), 1)
 
     @unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
     def test_browser_tools_through_toolbox(self):

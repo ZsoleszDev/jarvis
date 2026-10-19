@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_offline import FakeOllama, make_cfg, reply  # noqa: E402
+from test_offline import FakeOllama, is_warm_up, make_cfg, reply  # noqa: E402
 from test_streaming import RecordingUI  # noqa: E402
 from test_work import _QuietHandler  # noqa: E402
 
@@ -368,6 +368,48 @@ class PauseTests(unittest.TestCase):
                          "ugyanúgy kezdődik, mint az igazi kérések (a dátummal együtt)")
         self.assertEqual(len(body["tools"]), len(self.app.toolbox.schemas(self.app.assistant.tool_names)),
                          "ugyanazokkal az eszközökkel, mint a valódi kérdések, különben nem közös az eleje")
+
+    def warm_bodies(self, count: int, timeout: float = 5.0) -> list[dict]:
+        deadline = time.monotonic() + timeout
+        while self.fake.warm_ups < count and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return [b for m, p, b in self.fake.requests if p == "/api/chat" and is_warm_up(b)]
+
+    def test_switching_to_the_work_menu_warms_its_prompt(self):
+        # A Munka menü eleje más, mint a Beszélgetésé: ha átváltasz, és Jarvis épp nem dolgozik, előre
+        # feldolgoztatja, szó szerint úgy, ahogy az első igazi kérés kezdődik.
+        self.app.set_mode("work")
+        [warm] = self.warm_bodies(1)
+        self.assertEqual(warm["messages"][0]["content"], self.app.work_assistant.system_message())
+        self.fake.chat_script = [reply("Két tárgyad van.")]
+        self.app.answer("Hány tárgyam van?", mode="work")
+        real = self.fake.chat_bodies()[-1]
+        self.assertEqual(warm["messages"][0], real["messages"][0])
+        self.assertEqual(warm["tools"], real["tools"], "ugyanazok az eszközök, ugyanabban a sorrendben")
+        self.assertEqual((warm["think"], warm["options"]["num_ctx"], warm["options"]["temperature"]),
+                         (real["think"], real["options"]["num_ctx"], real["options"]["temperature"]))
+        self.app.set_mode("work")                      # nem váltott menüt: nem melegít újra
+        self.app.set_mode("chat")
+        time.sleep(0.2)
+        self.assertEqual(self.fake.warm_ups, 1)
+
+    def test_warm_up_follows_the_request_and_waits_for_nobody(self):
+        self.fake.chat_script = [reply("Szia!")]
+        self.app.answer("Szia", mode="chat")
+        self.app._warm_up("chat")
+        [warm] = self.warm_bodies(1)
+        real = self.fake.chat_bodies()[-1]
+        self.assertEqual(warm["messages"][:-1], [*real["messages"], self.app.assistant.history[-1]],
+                         "az eddigi beszélgetés is benne van: a következő kérdésnél csak az új rész kell")
+        # ha már vár a sorban egy kérésed, a melegítés csak feltartaná
+        self.app.requests.put(("text", {"text": "Szia", "mode": "chat"}))
+        self.app._warm_up("chat")
+        self.app.set_mode("work")
+        time.sleep(0.2)
+        self.assertEqual(self.fake.warm_ups, 1)
+        self.assertEqual(self.app._request_mode("text", {"text": "x", "mode": "work"}), "work")
+        self.assertEqual(self.app._request_mode("work", {}), "work")
+        self.assertEqual(self.app._request_mode("voice", "wake"), "work", "a hang az elöl lévő menübe megy")
 
     def test_stale_listings_are_mentioned_once_a_week(self):
         work = self.app.work

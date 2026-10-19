@@ -11,6 +11,7 @@ from typing import Any, Callable, TypeVar
 import requests
 
 from .config import LlmCfg
+from .ollama_log import user_setting
 from .textutil import strip_think
 
 T = TypeVar("T")
@@ -26,6 +27,11 @@ CONTEXT_STEPS = (16384, 12288, 8192)
 MEANINGFUL_GAIN = 0.05
 # A megjegyzett betöltési döntés ennyi ideig érvényes; utána újra kipróbálja (hátha azóta több a hely).
 FIT_MEMORY_DAYS = 7
+# Az Ollama felhasználói beállításai, amelyek a modell és a kontextus memóriaigényét változtatják: ha
+# valamelyik megváltozik, a megjegyzett betöltési döntés már nem érvényes (újra kipróbálja a méreteket).
+FIT_SETTINGS = ("OLLAMA_KV_CACHE_TYPE", "OLLAMA_FLASH_ATTENTION", "LLAMA_ARG_FIT_TARGET")
+# A képről szóló válasz felső határa (token): pár mondat elég, egy beragadt válasz se foglalja a modellt.
+VISION_MAX_TOKENS = 400
 
 # Az Ollama a modellt külön folyamatban futtatja (llama-server, runner). Ha az futás közben leáll (pl. az
 # Ollama-hiba miatt: std::bad_alloc), a kérés ezek valamelyikével tér vissza; a következő kérésnél az
@@ -310,7 +316,12 @@ class OllamaClient:
         return best_possible + 0.015 >= min(FULL_GPU, share0 + MEANINGFUL_GAIN)
 
     def _fit_key(self, candidates: list[int]) -> str:
-        return f"{_with_tag(self.cfg.model)}|{self.server_version}|{','.join(map(str, candidates))}"
+        key = f"{_with_tag(self.cfg.model)}|{self.server_version}|{','.join(map(str, candidates))}"
+        # A KV-gyorsítótár típusa, a flash attention és a tartalék a kártyákon mást enged elférni: ha
+        # változtattál rajtuk, újra kipróbálja (a beállítás nélküli kulcs a régivel egyezik).
+        settings = [f"{name}={value.strip()}" for name in FIT_SETTINGS
+                    if (value := user_setting(name) or "").strip()]
+        return key + ("|" + ",".join(settings) if settings else "")
 
     def _remembered_fit(self, candidates: list[int]) -> tuple[int, float] | None:
         if self.fit_memory is None or len(candidates) < 2:
@@ -370,19 +381,20 @@ class OllamaClient:
                 continue
         return unloaded
 
-    def warm(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> None:
+    def warm(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
+             options: dict[str, Any] | None = None) -> None:
         """Előre feldolgoztatja a beszélgetés elejét (rendszerprompt, eszközök) egyetlen tokennel.
 
         Az Ollama megjegyzi a feldolgozott elejét, így az első igazi kérdésnél már csak a kérdést
         kell feldolgoznia. A kérésnek ugyanúgy kell kinéznie, mint a későbbieknek (modell,
-        kontextus, eszközök, gondolkodó mód), különben nem lesz közös az eleje.
+        kontextus, eszközök, gondolkodó mód, beállítások), különben nem lesz közös az eleje.
         """
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "messages": messages,
             "stream": False,
             "keep_alive": self.cfg.keep_alive,
-            "options": {**self._options(), "num_predict": 1},
+            "options": {**self._options(), **(options or {}), "num_predict": 1},
         }
         if tools:
             payload["tools"] = tools
@@ -501,18 +513,22 @@ class OllamaClient:
 
     def chat(self, messages: list[dict[str, Any]],
              tools: list[dict[str, Any]] | None = None,
-             on_text: Callable[[str], None] | None = None) -> dict[str, Any]:
+             on_text: Callable[[str], None] | None = None,
+             options: dict[str, Any] | None = None) -> dict[str, Any]:
         """Egy kör a modellel. Visszaadja az asszisztens üzenetét (content + esetleg tool_calls).
 
         Ha `on_text` meg van adva, a válasz folyamatosan érkezik, és minden szövegdarab
         azonnal megy tovább (pl. a felolvasónak), még mielőtt a modell befejezné.
+        `options`: a beszélgetés saját mintavétele és válaszhossza (pl. temperature, num_predict); a
+        kontextusméret mindig a betöltötté, így a modellt nem kell újratölteni.
+        A `last_stats` "done_reason" mezője "length", ha a válasz a num_predict határnál maradt abba.
         """
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "messages": messages,
             "stream": on_text is not None,
             "keep_alive": self.cfg.keep_alive,
-            "options": self._options(),
+            "options": {**self._options(), **(options or {})},
         }
         if tools:
             payload["tools"] = tools
@@ -531,19 +547,25 @@ class OllamaClient:
         self.last_stats = {
             key: data.get(key)
             for key in ("total_duration", "load_duration", "prompt_eval_count",
-                        "eval_count", "eval_duration")
+                        "eval_count", "eval_duration", "done_reason")
         }
         return normalize_message(data.get("message") or {})
 
     def chat_json(self, messages: list[dict[str, Any]], schema: dict[str, Any] | None = None,
-                  temperature: float = 0.3) -> dict[str, Any]:
-        """Egy kérdés, amire a modell JSON-objektummal válaszol (az Ollama a sémához köti)."""
+                  temperature: float = 0.3, max_tokens: int | None = None) -> dict[str, Any]:
+        """Egy kérdés, amire a modell JSON-objektummal válaszol (az Ollama a sémához köti).
+
+        `max_tokens`: a válasz felső határa (num_predict). Ha a válasz eléri, a félbemaradt JSON-t nem lehet
+        értelmezni, és OllamaError jön; így egy beragadt válasz sem foglalja percekig a modellt."""
+        options: dict[str, Any] = {**self._options(), "temperature": float(temperature)}
+        if max_tokens:
+            options["num_predict"] = int(max_tokens)
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "messages": messages,
             "stream": False,
             "keep_alive": self.cfg.keep_alive,
-            "options": {**self._options(), "temperature": float(temperature)},
+            "options": options,
             "format": schema or "json",
         }
         if self._think_supported:
@@ -613,17 +635,33 @@ class OllamaClient:
                 "cancelled": False, "eval_count": data.get("eval_count") or 0,
                 "eval_duration": data.get("eval_duration") or 0}
 
-    def vision(self, prompt: str, image_b64: str) -> str:
-        """Külön, egyszeri kérdés egy képről (a beszélgetés előzményei nélkül, hogy ne teljen be a kontextus)."""
+    def vision(self, prompt: str, image_b64: str, conversation: dict[str, Any] | None = None) -> str:
+        """Kérdés egy képről.
+
+        `conversation` nélkül külön, egyszeri kérdés (előzmények nélkül). Ha meg van adva (a futó beszélgetés:
+        "messages", "tools", "options"), a kép a beszélgetés végére kerül egy új üzenetben, ugyanazzal a
+        rendszerprompttal, eszközökkel és beállításokkal: így a modell a feladat ismeretében néz rá, és az Ollama
+        gyorsítótárában a beszélgetés eleje megmarad (a következő körben nem kell újra feldolgoznia). A válaszban
+        kért eszközhívásokat figyelmen kívül hagyja, csak a szöveg számít; a kép nem kerül az előzmények közé."""
+        if conversation is not None:
+            messages = [*conversation.get("messages", []), {"role": "user", "content": prompt, "images": [image_b64]}]
+            options = {**self._options(), **(conversation.get("options") or {})}
+            think = bool(self.cfg.think)
+        else:
+            messages = [{"role": "user", "content": prompt, "images": [image_b64]}]
+            options = {**self._options(), "temperature": 0.2}
+            think = False
         payload: dict[str, Any] = {
             "model": self.cfg.model,
-            "messages": [{"role": "user", "content": prompt, "images": [image_b64]}],
+            "messages": messages,
             "stream": False,
             "keep_alive": self.cfg.keep_alive,
-            "options": {**self._options(), "temperature": 0.2},
+            "options": {**options, "num_predict": VISION_MAX_TOKENS},
         }
+        if conversation is not None and conversation.get("tools"):
+            payload["tools"] = conversation["tools"]
         if self._think_supported:
-            payload["think"] = False
+            payload["think"] = think
         data = run_interruptible(lambda: self._chat_request(payload), external=self.stop_event)
         content = (data.get("message") or {}).get("content") or ""
         return content.replace("<think>", "").replace("</think>", "").strip()
