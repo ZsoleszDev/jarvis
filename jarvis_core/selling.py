@@ -47,8 +47,8 @@ TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200
 MULTILINE = {"description", "prompt"}
 POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
 # Egy fent lévő hirdetés újbóli megjelölésekor (ugyanaz a hirdetés) ezek maradnak: mióta van fent, a feltöltéskori ár és cím,
-# és a háttérellenőrzés eredménye (lásd listings.py).
-REMARK_KEEPS = ("posted_at", "posted_price", "posted_title", "checked_at", "check", "check_note")
+# és a háttérellenőrzés eredménye (lásd listings.py), a „Nem igaz, fent van” jelöléssel együtt.
+REMARK_KEEPS = ("posted_at", "posted_price", "posted_title", "checked_at", "check", "check_note", "check_dismissed")
 
 
 class ItemError(Exception):
@@ -583,6 +583,20 @@ class ItemStore:
                 entry["check_note"] = detail[:200]
             else:
                 entry.pop("check_note", None)
+            return self._changed(item)
+
+    def dismiss_check(self, item_id: str, platform: str) -> Item:
+        """„Nem igaz, fent van”: a háttérellenőrzés jelzése (elkelt, eltűnt) téves. A jelzés eltűnik, és ha a
+        következő ellenőrzés ugyanazt látja ennél a hirdetésnél, nem jelzi újra (lásd listings.py)."""
+        with self._lock:
+            item = self.get(item_id)
+            entry = item.platforms.get(platform)
+            if entry is None or entry.get("status") != POSTED:
+                raise ItemError("Ezen az oldalon a nyilvántartás szerint nincs fent.")
+            if entry.get("check") in ("sold", "gone"):
+                entry["check_dismissed"] = entry["check"]
+            entry["check"] = "live"
+            entry.pop("check_note", None)
             return self._changed(item)
 
     def set_reminded(self, item_id: str, when: float | None = None) -> Item:

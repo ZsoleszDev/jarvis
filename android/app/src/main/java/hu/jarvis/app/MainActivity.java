@@ -4,6 +4,7 @@ import android.Manifest;
 import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.DownloadManager;
+import android.app.NotificationManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
@@ -56,7 +57,9 @@ import org.json.JSONObject;
  * - új hirdetés: parancsikon;
  * - megosztás a Jarvisnak: fotók a galériából (az új hirdetéshez; a felület a /__jarvis_shared/ címről kéri le
  *   őket, ezt a WebView-ban mi szolgáljuk ki), vagy szöveg, link (a beszélgetésbe);
- * - párosító link a gép QR-kódjából (jarvis://pair): kitölti a beállító oldalt, a párosítást te indítod.
+ * - párosító link a gép QR-kódjából (jarvis://pair): kitölti a beállító oldalt, a párosítást te indítod;
+ * - egy elkeltnek látszó hirdetés értesítésének gombja (NotifyService.soldAction): a hirdetés Eladva ablaka, előre
+ *   kiválasztva; a levételt ott, a Rendben gombbal hagyod jóvá.
  */
 public class MainActivity extends Activity {
     /** Látszik-e az ablak: ilyenkor a háttérszolgáltatás nem értesít (a felületen úgyis látod). */
@@ -64,6 +67,7 @@ public class MainActivity extends Activity {
 
     static final String ACTION_VOICE = "hu.jarvis.app.VOICE";
     static final String ACTION_NEW_LISTING = "hu.jarvis.app.NEW_LISTING";
+    static final String ACTION_SOLD = "hu.jarvis.app.SOLD";
     private static final String SETUP = "file:///android_asset/setup.html";
     private static final String SHARED_PATH = "/__jarvis_shared/";
     private static final int MAX_SHARED = 20;
@@ -85,6 +89,7 @@ public class MainActivity extends Activity {
     private volatile boolean photosNew;
     private volatile String pairServer = "";
     private volatile String pairCode = "";
+    private volatile String wantSold = "";
 
     @Override
     protected void onCreate(Bundle state) {
@@ -142,6 +147,9 @@ public class MainActivity extends Activity {
             case ACTION_NEW_LISTING:
                 wantListing = true;
                 return false;
+            case ACTION_SOLD:
+                wantSold = soldRequest(intent);
+                return false;
             case Intent.ACTION_SEND:
             case Intent.ACTION_SEND_MULTIPLE:
                 String type = intent.getType();
@@ -170,6 +178,28 @@ public class MainActivity extends Activity {
                 return true;
             default:
                 return false;
+        }
+    }
+
+    /**
+     * Az értesítés „Eladva itt…” gombja: melyik tárgy, hol kelt el, és vegye-e le a többi oldalról (a felület ezzel
+     * nyitja meg az Eladva ablakot; magától nem jelöl meg és nem vesz le semmit). Az értesítés eltűnik.
+     */
+    private String soldRequest(Intent intent) {
+        int id = intent.getIntExtra("notification", 0);
+        if (id != 0) {
+            getSystemService(NotificationManager.class).cancel(id);
+        }
+        String item = intent.getStringExtra("item");
+        if (item == null || item.isEmpty()) {
+            return "";
+        }
+        try {
+            String where = intent.getStringExtra("where");
+            return new JSONObject().put("item", item).put("where", where == null ? "" : where)
+                    .put("delist", intent.getBooleanExtra("delist", true)).toString();
+        } catch (Exception e) {
+            return "";
         }
     }
 
@@ -494,7 +524,7 @@ public class MainActivity extends Activity {
             }
         }
 
-        /** Amit egy parancsikon, a csempe, az értesítés vagy egy megosztás kért (egyszer adjuk oda). */
+        /** Amit egy parancsikon, a csempe, egy értesítés gombja vagy egy megosztás kért (egyszer adjuk oda). */
         @JavascriptInterface
         public String pending() {
             try {
@@ -503,10 +533,14 @@ public class MainActivity extends Activity {
                 if (photosNew) {
                     result.put("photos", sharedPhotos.size()).put("batch", sharedBatch);
                 }
+                if (!wantSold.isEmpty()) {
+                    result.put("sold", new JSONObject(wantSold));
+                }
                 wantVoice = false;
                 wantListing = false;
                 sharedText = "";
                 photosNew = false;
+                wantSold = "";
                 return result.toString();
             } catch (Exception e) {
                 return "{}";

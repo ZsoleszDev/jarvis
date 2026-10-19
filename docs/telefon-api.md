@@ -110,7 +110,7 @@ fent lévő hirdetések) fut, szünetben semmi.
 | GET | `/work` | | `{items, platforms, needs, settings, acknowledged, conditions, max_photos, research, browser}` |
 | POST | `/work/items` | `{targets: ["vinted", …], prompt, research_wanted?}` | új tárgy (201) |
 | GET | `/work/items/{id}` | | egy tárgy |
-| PATCH | `/work/items/{id}` | `{fields: {title?, description?, price?, …}}` | amit itt átírsz, azt Jarvis már nem írja felül |
+| PATCH | `/work/items/{id}` | `{fields: {title?, description?, price?, …}}` | amit itt átírsz, azt Jarvis már nem írja felül; a válaszban `drift_note` (lásd lent) |
 | DELETE | `/work/items/{id}` | | a `_torolt` mappába kerül |
 | POST | `/work/items/{id}/photos` | nyers kép (JPG, PNG, WEBP, HEIC) | 201, a tárgy |
 | GET | `/work/items/{id}/photos/01.jpg?thumb=1` | | `image/jpeg` (a kulcs lehet `access_token`) |
@@ -118,19 +118,43 @@ fent lévő hirdetések) fut, szünetben semmi.
 | POST | `/work/items/{id}/photos/order` | `{order: ["03.jpg", …]}` | az első a borítókép |
 | POST | `/work/items/{id}/sell` | `{resume?}` | adatok a leírásból, visszakérdezés, árkutatás, feltöltés (202) |
 | POST | `/work/items/{id}/reply` | `{text}` | válasz Jarvis kérdésére (a tárgy `pending` mezője) |
-| POST | `/work/items/{id}/price` | `{choice: "keep" \| "suggested" \| 4500}` | árdöntés |
+| POST | `/work/items/{id}/price` | `{choice: "keep" \| "suggested" \| "confirmed" \| 4500}` | árdöntés; `confirmed`: igen a visszakérdezett összegre (`pending.confirm`) |
 | POST | `/work/items/{id}/cancel` | | a függő kérdés elvetése |
 | POST | `/work/items/{id}/post` | `{platform}` | egy oldalra (újra) |
 | POST | `/work/items/{id}/research` | | „Mennyit ér?” |
 | POST | `/work/items/{id}/sold` | `{where?: "vinted", delist?: true}` vagy `{sold: false}` | Eladva; `delist`-tel a többi oldalról Jarvis leveszi |
 | POST | `/work/items/{id}/delist` | `{platforms?: ["jofogas"]}` | levétel (alapból mindenhonnan, ahol fent van) |
 | POST | `/work/items/{id}/mark` | `{platform, status: "feltöltve" \| "nincs fent" \| "hiba", url?}` | csak a nyilvántartás |
+| POST | `/work/items/{id}/dismiss` | `{platform}` | „Nem igaz, fent van”: a háttérellenőrzés téves jelzése (elkelt, eltűnt) azon az oldalon; 200, a tárgy (400, ha ott nincs fent) |
 | PUT | `/work/settings` | `{settings: {city, shipping, parcel_size}}` | Alapadatok |
 | POST | `/work/ack` | `{platform}` | tudomásul vetted, hogy az oldal szabályai tilthatják a botokat |
 
-A tárgy fontos mezői: `status` (`vázlat`, `kérdés`, `árdöntés`, `részben fent`, `fent`, `eladva`),
-`pending` (`{kind: "info" | "price", question, suggested?}`), `platforms[kulcs]`
-(`{status, at, url?, note?}`), `busy` (min dolgozik épp), `photos`, `price`, `research`.
+A tárgy fontos mezői:
+
+- `status` (`vázlat`, `kérdés`, `árdöntés`, `részben fent`, `fent`, `eladva`), `busy` (min dolgozik épp), `photos`,
+  `price`, `sold`.
+- `pending`: `{kind: "info" | "price", question, suggested?, confirm?}`. A `confirm` egy furcsa összeg, amire Jarvis
+  visszakérdezett („3 Ft-ra gondoltál?”): ilyenkor a `price` `{choice: "confirmed"}` az igen.
+- `platforms[kulcs]`: `{status, at, url?, note?, dossier?, posted_at?, posted_price?, posted_title?, check?,
+  checked_at?, check_note?, check_dismissed?}`. `posted_at`: mióta van fent; `posted_price`, `posted_title`: az ár és
+  a cím a feltöltéskor. A háttérellenőrzés (lásd lent) eredménye: `check` (`live` fent van, `sold` elkeltnek látszik,
+  `gone` már nincs fent, `unknown` nem nyílt meg), `checked_at` (mikor), `check_note` (miből látszik, vagy miért
+  nem nyílt meg); `check_dismissed`: ezt a jelzést nem igaznak jelölted (`/dismiss`), ugyanazt nem hozza fel újra.
+- `drift`: ahol a fent lévő hirdetésben még a régi ár vagy cím van (itt átírtad, ott nem; Jarvis a fent lévő
+  hirdetést magától nem szerkeszti): `[{platform, price?, title?}]`, csak az eltérő mezőkkel.
+- `online_since` (mióta van fent valahol, Unix-idő vagy `null`), `days_online` („12 napja fent”, vagy `null`).
+- `research`: `{query, at, count, kept, dropped, similar, errors, reason?, min?, max?, p25?, median?, p75?, n?,
+  confidence?, outliers?, suggested?}`. `count`: ennyi találat volt; `kept`: ennyi ment a modell elé; `dropped`: miért
+  maradt ki a többi (`{"kereső": 3, "csomag": 1, "alkatrész": 1, "saját": 1, "más termék": 4, "ismétlődő": 1,
+  "kevésbé illő": 5}`); `similar`: a hasonlók (`{site, text, price, url, auction?}`, az `auction` licit, csak a
+  mostani ajánlat); `p25`–`p75`: a hasonlók középső fele, `median` a középérték, `n` ennyi ár alapján, `outliers`
+  ennyi kilógó ár maradt ki; `confidence`: `megbízható` vagy `bizonytalan` (kevés vagy nagyon eltérő ár).
+  `research_stale`: igaz, ha a kutatás egy hétnél régebbi (a következő árazás előtt frissül). `verdict`: Jarvis
+  véleménye az árról, egy mondatban.
+
+**`drift_note`** (a `PATCH /work/items/{id}` válaszában): ha a most átírt ár vagy cím a fent lévő hirdetésben még
+a régi, Jarvis ezt mondja róla, pl. „Csak itt írtam át; a Vinteden még 9 000 Ft. A fent lévő hirdetést magamtól nem
+szerkesztem: ott kézzel kell átírni (vagy levenni, és újra feltölteni).”; különben üres. Az app írja ki.
 
 A feltöltés és a levétel menet közben jóváhagyást kérhet (közzététel): ilyenkor `confirm` esemény jön,
 és a telefonról is jóváhagyhatod (`POST /confirm`).
@@ -140,15 +164,29 @@ A feltöltés és a levétel menet közben jóváhagyást kérhet (közzététel
 | Módszer | Útvonal | Törzs | Megjegyzés |
 |---|---|---|---|
 | GET | `/jobs` | | `{free, blocked, snoozed_until, running, jobs: [{key, title, every_minutes, on, last_run, next_run, result, error}]}` (`on`: hamis, ha a gépen, az Automatikus munkák ablakban kikapcsoltad) |
-| POST | `/jobs/{key}/run` | | most rögtön (`watches`, `stale`) |
+| POST | `/jobs/{key}/run` | | most rögtön (`watches`, `stale`, `listings`) |
 | POST | `/jobs/snooze` | `{minutes}` | ennyi ideig nincs háttérmunka (0: újra mehet) |
 | GET | `/watches` | | `{watches: [{id, query, site, recency, label, hits, last_check, error}]}` |
 | POST | `/watches` | `{query, site?, recency?: "nap"\|"hét"\|"hónap"\|"év"}` | új figyelő (201) |
 | DELETE | `/watches/{id}` | | |
-| GET | `/notifications?unread=1&limit=50` | | `{notifications: [{id, at, kind, title, text, read, url?, item?}], unread}`; `kind`: `watch`, `stale`, `delist`, `post` (kész vagy elakadt feltöltés), `question` (kérdés egy tárgyról), `error`, `info` |
+| GET | `/notifications?unread=1&limit=50` | | `{notifications: [{id, at, kind, title, text, read, url?, item?, items?, platform?, state?, actions?}], unread}`; `kind`: `watch`, `stale`, `sold` (elkeltnek vagy eltűntnek látszik, lásd lent), `delist`, `post` (kész vagy elakadt feltöltés), `question` (kérdés egy tárgyról), `error`, `info` |
 | POST | `/notifications/read` | `{ids?: [...]}` | olvasottnak jelöl (ids nélkül mindet) |
 | GET | `/devices` | | párosított eszközök (`current`: ez az) |
 | DELETE | `/devices/{id}` | | visszavonás (a sajátodat is: kijelentkezés) |
+
+A háttérmunkák (`key`): `watches` (figyelők), `stale` (régóta fent lévő hirdetések), `listings` (a fent lévő
+hirdetések ellenőrzése: naponta legfeljebb `[scheduler] listing_checks` hirdetés oldalát nyitja meg Jarvis
+böngészőjében, csak olvasva, emberi tempóban; böngésző kell hozzá, modell nem).
+
+**Elkelt máshol? (`kind: "sold"`)** Ha a `listings` szerint egy hirdetés elkeltnek vagy eltűntnek látszik:
+`{kind: "sold", item, platform: "vinted", state: "sold" | "gone", actions: [{action: "sold", where: "vinted",
+delist: true, label: "Eladva itt, vedd le a többiről"}]}` (ha máshol nincs fent: `delist: false`, `label: "Eladva
+itt"`). Az app gombként mutassa: nyissa meg a tárgy Eladva-kérdését előre kiválasztva (`where`, `delist`), és csak a
+felhasználó jóváhagyása után küldje: `POST /work/items/{item}/sold {where, delist}`. Ha a jelzés téves:
+`POST /work/items/{item}/dismiss {platform}`. Ha az ellenőrzés robot-ellenőrzésbe (captcha) vagy kijelentkezett
+oldalba ütközött: `{kind: "error", platform, actions: [{action: "login", platform, label: "Bejelentkezés a
+böngészőmben"}]}`; ez a gép Jarvis-ablakában (`/api/work/action {action: "login", platform}`) megnyitja az oldalt
+Jarvis böngészőjében, ahol a felhasználó maga lép be.
 
 ### Értesítés bezárt ablaknál (Web Push)
 
@@ -164,8 +202,10 @@ Mozilla, Apple).
 | POST | `/push/unsubscribe` | `{endpoint?}` | endpoint nélkül az eszköz minden feliratkozása |
 | POST | `/push/answer` | `{key, approved}` | **kulcs nélkül**: a jóváhagyó push-üzenet egyszer használható `answer` kulcsával (5 percig, vagy amíg a jóváhagyás vár) |
 
-A push-üzenet (JSON, titkosítva): `{kind: "notice", title, text, tag}` vagy `{kind: "confirm", id, title, text,
-answer, tag}`.
+A push-üzenet (JSON, titkosítva): `{kind: "notice", title, text, tag, item?, actions?}` vagy `{kind: "confirm", id,
+title, text, answer, tag}`. Az `actions` az értesítés gombjai (`sold`, `login`, legfeljebb kettő, lásd fent); a
+service worker gombként mutatja, és a gomb a Jarvis ablakát nyitja meg (`/#act=sold&item=…&where=…&delist=1`, nyitott
+ablaknak `postMessage`-dzsel szól), ahol a felhasználó dönt. A gomb maga semmit nem küld a gépnek.
 
 ## Események (élő napló)
 
@@ -193,7 +233,7 @@ Ha nincs új esemény, a kérés legfeljebb `wait` másodpercig vár, aztán ür
 | `info`, `warn`, `error`, `timing` | `text, channel` | megjegyzések |
 | `confirm` / `confirm_done` | `id, prompt` / `id, approved` | jóváhagyás kell / megvolt |
 | `work_item` / `work_removed` | `item` / `id` | egy tárgy változott / törölve |
-| `notification` | `notice` | értesítés (figyelő, régóta fent lévő hirdetés, levétel) |
+| `notification` | `notice` | értesítés (figyelő, régóta fent lévő hirdetés, elkeltnek látszó hirdetés, levétel), a gombjaival (`actions`) |
 | `request_done` | `request_id` | a kérésed feldolgozása véget ért |
 
 A `channel` mondja meg, melyik menühöz tartozik (`chat` = Beszélgetés, `work` = Munka). A telefonról
@@ -245,7 +285,11 @@ A felület kérései (`/events`, `/api/...`, kulccsal a címben vagy az `X-Jarvi
 felülethez mennek tovább; ami csak a gép előtt ülve szabad (kilépés, új párosító kód, a gép mikrofonja), az 403.
 Telepíthető alkalmazás (PWA): `/manifest.webmanifest`, `/sw.js`, `/icon-192.png`, `/icon-512.png`. Az
 Android-alkalmazás (android/) ezt mutatja, és a `GET /api/v1/events` hosszú lekérdezéssel értesít a háttérben
-(`confirm`, `confirm_done`, `notification`, és a `state` alapján az állandó értesítés Szünet / Folytatás gombja).
+(`confirm`, `confirm_done`, `notification`, és a `state` alapján az állandó értesítés Szünet / Folytatás gombja). Egy
+`sold` gombos értesítésnél az Android-értesítésen is ott a gomb: az alkalmazást a tárgy Eladva ablakánál nyitja meg
+(a felület a `JarvisApp.pending()` válaszának `sold: {item, where, delist}` részéből), a levétel ott, jóváhagyással
+indul. A gép felületének saját végpontjai ehhez: `GET /api/notices` (az Értesítések ablak), `POST /api/notices/read`,
+`POST /api/work/dismiss {id, platform}`, és a `POST /api/work/update` válaszában is ott a `drift_note`.
 
 Párosítás QR-kóddal: a gép Telefon ablaka (ha a `tailscale serve` már átadja a portot) a `https://<gép>/#pair=<kód>`
 címet mutatja QR-kódként. A belépő oldal a `#` utáni kódot beírja (a gépnek nem megy el), Android-böngészőben pedig

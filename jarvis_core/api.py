@@ -32,6 +32,7 @@ from .config import ApiCfg
 from .selling import FAILED, MAX_PHOTO_BYTES, NOT_POSTED, POSTED, ItemError
 from .watches import WatchError
 from .webpush import INSTALL_HINT, PushError, WebPush, available as push_available
+from .work import PRICE_CHOICES
 
 API_VERSION = 1
 MAX_JSON = 256 * 1024
@@ -636,7 +637,9 @@ class _ApiHandler(BaseHTTPRequestHandler):
         values = {k: v for k, v in fields.items() if k in EDITABLE}
         if not values:
             raise ApiError(400, "bad_request", "Nincs módosítható mező.")
-        self._json(200, {"ok": True, "item": work.store.update(item_id, user=True, **values).public()})
+        item = work.store.update(item_id, user=True, **values)
+        # ha a fent lévő hirdetésben még a régi ár vagy cím van, megmondja (különben üres)
+        self._json(200, {"ok": True, "item": item.public(), "drift_note": work.drift_note(item, set(values))})
 
     def r_item_delete(self, item_id: str, query: dict[str, list[str]]) -> None:
         self._work().store.delete(item_id)
@@ -679,6 +682,9 @@ class _ApiHandler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "item": work.store.get(item_id).public()})
         if action == "sold":
             return self._sold(work, item, body)
+        if action == "dismiss":       # „Nem igaz, fent van”: a háttérellenőrzés téves jelzése egy oldalon
+            item = work.store.dismiss_check(item_id, platform)
+            return self._json(200, {"ok": True, "item": item.public()})
         if action == "mark":
             status = str(body.get("status") or POSTED)
             if status not in (POSTED, NOT_POSTED, FAILED):
@@ -699,7 +705,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
                 raise ApiError(400, "bad_request", "Üres válasz (text).")
         if action == "price":
             choice = body.get("choice")
-            extra["choice"] = choice if choice in ("keep", "suggested") else str(choice or "")[:20]
+            extra["choice"] = choice if choice in PRICE_CHOICES else str(choice or "")[:20]
         if action == "delist":
             posted = work.posted_on(item)
             wanted = [str(p) for p in body.get("platforms") or [] if str(p) in posted] or posted
@@ -825,7 +831,7 @@ ROUTES: list[tuple[str, re.Pattern[str], str]] = [(m, re.compile(p), n) for m, p
     ("POST", rf"/work/items/{_ID}/photos/order", "r_photo_order"),
     ("GET", rf"/work/items/{_ID}/photos/(\d{{2}}\.jpg)", "r_photo_get"),
     ("DELETE", rf"/work/items/{_ID}/photos/(\d{{2}}\.jpg)", "r_photo_delete"),
-    ("POST", rf"/work/items/{_ID}/(sell|reply|price|cancel|post|research|sold|delist|mark)", "r_item_action"),
+    ("POST", rf"/work/items/{_ID}/(sell|reply|price|cancel|post|research|sold|delist|mark|dismiss)", "r_item_action"),
     ("PUT", r"/work/settings", "r_settings"),
     ("POST", r"/work/ack", "r_ack"),
     ("GET", r"/jobs", "r_jobs"),

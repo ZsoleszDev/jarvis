@@ -314,6 +314,9 @@ fieldset.sites legend { padding: 0; margin-bottom: 8px; font-size: 13.5px; color
 .card .busy, .detail .busy { font-size: 12.5px; color: var(--silver); }
 .card .busy::before, .detail .busy::before { content: "◌ "; }
 .card.sold { opacity: 0.55; }
+/* amire érdemes ránézni: elkeltnek vagy eltűntnek látszik valahol, vagy a hirdetésben még a régi ár, cím van */
+.card .flags { display: grid; gap: 2px; font-size: 12.5px; color: var(--white); }
+.card .flag::before { content: "! "; }
 .chip { justify-self: start; padding: 1px 8px; border: 1px solid var(--steel); border-radius: 999px;
         font-size: 12px; color: var(--ash); letter-spacing: 0.02em; }
 /* rád vár (kérdés): fehér keret; kész: ezüst; fent: fehér alapon fekete; eladva: visszahúzódik */
@@ -371,6 +374,10 @@ fieldset.sites legend { padding: 0; margin-bottom: 8px; font-size: 13.5px; color
 .platform .pstatus.on { color: var(--paper); }
 .platform .pnote { flex-basis: 100%; padding-left: 24px; font-size: 13px; color: var(--ash);
                    overflow-wrap: anywhere; }
+.platform .pnote.bad { color: var(--paper); }
+/* kézi átírás után: a fent lévő hirdetésben még a régi ár vagy cím van */
+.drift-note { margin: 0; padding: 8px 11px; border: 1px solid rgba(255, 255, 255, 0.6); border-radius: 8px;
+              font: 15px/1.45 var(--voice); overflow-wrap: anywhere; }
 .danger { display: flex; gap: 10px; padding-top: 6px; border-top: 1px solid var(--rule); }
 .danger .delete { margin-left: auto; color: var(--ash); border-color: transparent; }
 .danger .delete:hover { color: var(--white); border-color: var(--white); }
@@ -436,6 +443,15 @@ body[data-state="standby"] #state { color: var(--ash); }
 .jobs .check { align-items: flex-start; }
 .jobs .check input { margin-top: 2px; }
 #sold-where { border: 0; padding: 0; margin: 6px 0 10px; display: grid; gap: 6px; }
+/* az Értesítések ablak: a legutóbbiak felül, az olvasatlanok fehérrel; egy értesítés gombjai alatta */
+#notices.on { border-color: var(--white); color: var(--white); }
+#notices-dialog { width: min(560px, 92vw); }
+.notices { display: grid; max-height: 60vh; overflow-y: auto; margin: 4px 0 16px; padding: 0; list-style: none; }
+.notices li { display: grid; gap: 6px; padding: 10px 0; border-bottom: 1px solid var(--rule); color: var(--ash); }
+.notices li.new { color: var(--paper); }
+.notices li b { color: var(--paper); font-weight: 600; }
+.notices li.new b { color: var(--white); }
+.notices .text { font: 15px/1.45 var(--voice); overflow-wrap: anywhere; }
 #sold-dialog > .check { margin-bottom: 16px; }
 
 /* --- Kreatív menü ------------------------------------------------------------------- */

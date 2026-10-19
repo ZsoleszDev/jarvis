@@ -40,7 +40,8 @@ from .tools import Toolbox, ToolError, params
 from .tts import Speaker, SpeechQueue
 from .wakeword import WakeWordError, WakeWordListener, chime
 from .watches import WatchError, WatchList
-from .work import DELISTED_NOTE, WORK_ONLY_TOOLS, WorkDesk, interpret_price_reply, load_work_prompt, mmss
+from .work import (DELISTED_NOTE, PRICE_CHOICES, WORK_ONLY_TOOLS, WorkDesk, interpret_price_reply, load_work_prompt,
+                   mmss)
 
 MODES = ("chat", "work")
 # Az Adás/Vétel feladatai, amik egy tárgyon dolgoznak (a kártyán látszik, hogy épp mi történik)
@@ -1412,7 +1413,7 @@ class JarvisApp:
                     self._reply(item_id, str(payload.get("text") or ""), str(payload.get("via") or "text"))
                 elif action == "price":
                     choice = payload.get("choice")
-                    if choice not in ("keep", "suggested"):
+                    if choice not in PRICE_CHOICES:
                         choice = parse_price(choice) or "keep"
                     self.work.decide_price(item_id, choice)
                     if not self._price_question(item_id):

@@ -6,7 +6,10 @@ telefonos felület innen kérdezi le őket, olvasottnak is innen jelöli.
 Egy értesítés a szövegén túl hivatkozhat egy tárgyra (item), egy oldalra (platform), és felajánlhat
 műveleteket (actions): pl. az elkeltnek látszó hirdetésnél [{"action": "sold", "where": "vinted",
 "delist": true, "label": "Eladva itt, vedd le a többiről"}]. A művelet a felületen a meglévő Eladva-út
-(/work/items/{id}/sold), a levétel ott is a te kattintásodra indul.
+(/work/items/{id}/sold): az értesítés gombja (a gép Értesítések ablakában, a laptop push-értesítésében és az
+Android-alkalmazásban) csak megnyitja a hirdetés Eladva ablakát, előre kiválasztva; a levétel ott is a te
+kattintásodra indul. Ha a háttérellenőrzés bejelentkezést vagy robot-ellenőrzést talált: [{"action": "login",
+"platform": "vinted", "label": "Bejelentkezés a böngészőmben"}], ez megnyitja az oldalt Jarvis böngészőjében.
 """
 from __future__ import annotations
 

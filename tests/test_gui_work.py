@@ -162,6 +162,34 @@ class WorkSecurityTests(unittest.TestCase):
         evil = {**self.ok, "Origin": "https://gonosz.example"}
         self.assertEqual(self.post("/api/work/action", {"action": "login", "platform": "vinted"}, evil)[0], 403)
 
+    def test_dismiss_drift_note_and_notices(self):
+        store = self.h.store
+        item = store.create(targets=["vinted", "jofogas"], prompt="farmer", title="Levi's farmer", price=9000)
+        store.mark(item.id, "vinted", "feltöltve", url="https://www.vinted.hu/items/1234567-levis")
+        status, data = self.post("/api/work/update", {"id": item.id, "fields": {"price": 8500}})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["drift_note"].startswith("Csak itt írtam át; a Vinteden még 9 000 Ft."), data)
+        store.set_check(item.id, "vinted", "gone", detail="az oldala szerint már nem található")
+        for platform in ("jofogas", "ebay"):
+            self.assertEqual(self.post("/api/work/dismiss", {"id": item.id, "platform": platform})[0], 400, platform)
+        status, data = self.post("/api/work/dismiss", {"id": item.id, "platform": "vinted"})
+        self.assertEqual((status, data["item"]["platforms"]["vinted"]["check"]), (200, "live"))
+        evil = {**self.ok, "Origin": "https://gonosz.example"}
+        self.assertEqual(self.post("/api/work/dismiss", {"id": item.id, "platform": "vinted"}, evil)[0], 403)
+        # az Értesítések ablak: a kulccsal olvasható, és olvasottnak jelölhető
+        host = {"Host": f"127.0.0.1:{self.port}"}
+        notice = self.h.app.notices.add("sold", "Elkelt? Farmer", "A Vinteden eladottnak látszik.", item=item.id,
+                                        actions=[{"action": "sold", "where": "vinted", "delist": True,
+                                                  "label": "Eladva itt, vedd le a többiről"}])
+        self.assertEqual(request(self.port, "GET", "/api/notices", host)[0], 403)
+        status, raw = request(self.port, "GET", f"/api/notices?t={self.h.server.token}", host)
+        data = json.loads(raw)
+        self.assertEqual((status, data["notifications"][0]["id"], data["notifications"][0]["actions"][0]["where"]),
+                         (200, notice["id"], "vinted"))
+        self.assertGreaterEqual(data["unread"], 1)
+        self.assertEqual(self.post("/api/notices/read", {"ids": [notice["id"]]}, {"Host": host["Host"]})[0], 403)
+        self.assertEqual(self.post("/api/notices/read", {"ids": [notice["id"]]})[1]["marked"], 1)
+
     def test_settings_and_acknowledgement(self):
         status, data = self.post("/api/work/settings", {"settings": {"city": "Szeged", "parcel_size": "nagy"}})
         self.assertEqual((status, data["settings"]["city"], data["settings"]["parcel_size"]), (200, "Szeged", "nagy"))
@@ -355,6 +383,137 @@ class WorkBrowserTests(unittest.TestCase):
         found = store.get(item.id)
         self.assertTrue(found.sold)
         self.assertEqual(found.platforms["vinted"]["note"], "Itt kelt el.")
+
+    def test_flags_filter_last_check_and_a_false_flag(self):
+        store = self.h.store
+        item = self.h.ready_item(("vinted", "hardverapro", "jofogas"), price=5000)
+        store.mark(item.id, "vinted", "feltöltve", url="https://www.vinted.hu/items/1234567-zara")
+        store.mark(item.id, "hardverapro", "feltöltve", url="https://hardverapro.hu/apro/zara/friss.html")
+        store.mark(item.id, "jofogas", "feltöltve", url="https://www.jofogas.hu/zara_1.htm")
+        store.update(item.id, user=True, title="Zara póló, újszerű")
+        when = time.time() - 3600
+        store.set_check(item.id, "vinted", "sold", when=when, detail="„Eladva” jelzés az oldalán")
+        store.set_check(item.id, "hardverapro", "live", when=when)
+        store.set_check(item.id, "jofogas", "live", when=when, detail="Timeout 30000ms exceeded")
+        other = self.h.ready_item()
+        page = self.page
+        card = f'.card[data-id="{item.id}"]'
+        page.wait_for_selector(f'{card} .flag:has-text("Vinted: elkeltnek látszik")')
+        flags = page.inner_text(f"{card} .flags")
+        self.assertIn("A hirdetésben még a régi cím: Vinted, Hardverapró, Jófogás", flags)
+        self.assertIn("ma került fel", page.inner_text(f"{card} .facts"), "mióta van fent")
+        page.click('[data-filter="check"]')
+        page.wait_for_selector(f'.card[data-id="{other.id}"]', state="detached")
+        self.assertIn("1", page.inner_text('[data-filter="check"] .count'))
+        self.open_item(item.id)
+        stamp = page.evaluate("(t) => new Date(t * 1000).toLocaleString('hu-HU', { month: 'short', day: 'numeric', "
+                              "hour: '2-digit', minute: '2-digit' })", when)
+        vinted, hardverapro = '.platform:has-text("Vinted")', '.platform:has-text("Hardverapró")'
+        self.assertIn(f"Ellenőrizve: {stamp}, „Eladva” jelzés az oldalán.", page.inner_text(vinted))
+        self.assertIn(f"Ellenőrizve: {stamp}, fent van.", page.inner_text(hardverapro))
+        self.assertIn("Cím eltér: a hirdetésben még „Zara fekete póló, L”.", page.inner_text(hardverapro))
+        self.assertIn("de nem nyílt meg (Timeout 30000ms exceeded); holnap újra megnézem.",
+                      page.inner_text('.platform:has-text("Jófogás")'))
+        page.click(f'{vinted} [data-action="dismiss"]')
+        page.wait_for_selector('.toast:has-text("Ezt a jelzést többé nem hozom fel")')
+        page.wait_for_selector(f"{vinted} .pstatus.on")
+        entry = store.get(item.id).platforms["vinted"]
+        self.assertEqual((entry["check"], entry["check_dismissed"]), ("live", "sold"))
+        self.assertEqual(page.locator('[data-action="dismiss"]').count(), 0)
+        self.assertNotIn("elkeltnek látszik", page.inner_text("#w-detail"))
+
+    def test_research_breakdown_and_auctions(self):
+        item = self.h.ready_item(price=4500)
+        similar = [{"site": "Vinted", "text": f"Zara póló {n}", "price": 4000 + 100 * n,
+                    "url": f"https://www.vinted.hu/items/{n}"} for n in range(5)]
+        similar.append({"site": "Vatera", "text": "Zara póló licit", "price": 3000, "url": "https://www.vatera.hu/1",
+                        "auction": True})
+        self.h.store.set_research(item.id, {
+            "query": "Zara póló", "at": time.time(), "count": 30, "kept": 25, "similar": similar, "errors": [],
+            "dropped": {"kereső": 2, "más termék": 1, "ismétlődő": 1, "kevésbé illő": 1},
+            "min": 3000, "max": 4400, "p25": 4000, "median": 4200, "p75": 4300, "n": 6, "confidence": "bizonytalan",
+            "outliers": 1, "suggested": 4200, "reason": "Ennyiért mennek."})
+        self.page.wait_for_selector(f'.card[data-id="{item.id}"]')
+        self.open_item(item.id)
+        text = self.page.inner_text(".research")
+        self.assertIn("30 találat (5 kiszűrve: 2 kereső vagy csere, 1 más termék, 1 ismétlődő, 1 kevésbé illő "
+                      "(a 25 legjobban illő maradt)), ebből 6 hasonló:", text)
+        self.assertIn("A hasonlók középső fele: 4 000 Ft – 4 300 Ft, középérték 4 200 Ft (6 ár alapján, bizonytalan: "
+                      "kevés vagy nagyon eltérő ár). 1 kilógó árat kihagytam.", text)
+        self.assertIn("Zara póló licit – 3 000 Ft (licit)", text)
+        self.assertEqual(self.page.locator(".research .auction").count(), 1, "csak a licites sor")
+
+    def test_drift_message_after_editing_a_posted_listing(self):
+        item = self.h.ready_item(("vinted",), price=5000)
+        self.h.store.mark(item.id, "vinted", "feltöltve", url="https://www.vinted.hu/items/1234567-zara")
+        page = self.page
+        page.wait_for_selector(f'.card[data-id="{item.id}"]')
+        self.open_item(item.id)
+        self.assertEqual(page.locator(".drift-note").count(), 0)
+        page.fill("#f-price", "4500")
+        page.press("#f-price", "Tab")
+        note = page.wait_for_selector(".drift-note")
+        self.assertIn("Csak itt írtam át; a Vinteden még 5 000 Ft.", note.inner_text())
+        self.assertIn("ott kézzel kell átírni", note.inner_text())
+        self.assertIn("Ár eltér: a hirdetésben még 5 000 Ft, itt 4 500 Ft.",
+                      page.inner_text('.platform:has-text("Vinted")'))
+        page.fill("#f-price", "5000")              # vissza a fent lévő árra: nincs mit mondani
+        page.press("#f-price", "Tab")
+        page.wait_for_selector(".drift-note", state="detached")
+
+    def test_price_confirmation_button(self):
+        item = self.h.ready_item(price=9000, size="")
+        self.h.store.set_pending(item.id, {"kind": "price", "suggested": 4500, "confirm": 3,
+                                           "question": "3 Ft-ra gondoltál? Ha igen, mondd, hogy igen."})
+        self.page.wait_for_selector('[data-price="confirmed"]:has-text("Igen: 3 Ft")')
+        self.assertEqual(self.page.locator('.card [data-price]').count(), 3, "Igen, Marad, Legyen")
+        self.h.fake.chat_script = [extracted(**{**SHIRT, "size": ""})]   # utána a méretre kérdez rá
+        self.page.click('[data-price="confirmed"]')
+        self.page.wait_for_selector('.card .ask p:has-text("még kell: méret (Vinted)")')
+        self.assertEqual(self.h.store.get(item.id).price, 3, "az Igen: a visszakérdezett összeg")
+
+    def test_notification_button_opens_the_sold_dialog(self):
+        item = self.h.ready_item(("vinted", "hardverapro"))
+        store = self.h.store
+        store.mark(item.id, "vinted", "feltöltve", url="https://www.vinted.hu/items/1234567-zara")
+        store.mark(item.id, "hardverapro", "feltöltve", url="https://hardverapro.hu/apro/zara/friss.html")
+        calls = []
+        self.h.app.submit_work = lambda *args, **kwargs: calls.append((args, kwargs))
+        page = self.page
+        self.h.app.notices.add("sold", "Elkelt? Zara póló", "Zara póló: a Vinteden eladottnak látszik.", item=item.id,
+                               platform="vinted", state="sold",
+                               actions=[{"action": "sold", "where": "vinted", "delist": True,
+                                         "label": "Eladva itt, vedd le a többiről"}])
+        self.h.app.notices.add("error", "Hirdetések ellenőrzése: Vatera", "Be kell jelentkezni.", platform="vatera",
+                               actions=[{"action": "login", "platform": "vatera", "label": "Bejelentkezés a böngészőmben"}])
+        page.wait_for_selector('#notices-unread:has-text("2")')
+        page.click("#notices")
+        page.wait_for_selector("#notices-dialog[open] .notices li.new")
+        self.assertIn("Zara póló: a Vinteden eladottnak látszik.", page.inner_text("#notices-body"))
+        self.wait_for(lambda: self.h.app.notices.unread_count() == 0)
+        self.assertEqual(page.inner_text("#notices-unread"), "", "megnyitva olvasott")
+        page.click('#notices-body button:has-text("Eladva itt, vedd le a többiről")')
+        page.wait_for_selector("#sold-dialog[open]")
+        self.assertEqual(page.get_attribute("body", "data-mode"), "work")
+        self.assertTrue(page.is_checked('#sold-where input[value="vinted"]'), "ahol elkeltnek látszik")
+        self.assertTrue(page.is_checked("#sold-delist"))
+        self.assertFalse(store.get(item.id).sold, "magától nem jelöl meg semmit")
+        page.click("#sold-no")
+        self.assertEqual(calls, [], "a Mégse után nem vesz le semmit")
+        self.assertFalse(store.get(item.id).sold)
+        page.click("#notices")
+        page.click('#notices-body button:has-text("Eladva itt, vedd le a többiről")')
+        page.wait_for_selector("#sold-dialog[open]")
+        page.click("#sold-yes")
+        page.wait_for_selector('.toast:has-text("Jarvis leveszi innen: Hardverapró")')
+        self.assertEqual([(args, kwargs["platforms"]) for args, kwargs in calls],
+                         [(("delist", [item.id], ""), ["hardverapro"])], "a jóváhagyás után, a többi oldalról")
+        self.assertTrue(store.get(item.id).sold)
+        calls.clear()
+        page.click("#notices")
+        page.click('#notices-body button:has-text("Bejelentkezés a böngészőmben")')
+        page.wait_for_selector('.toast:has-text("Megnyitom a Jarvis böngészőjében")')
+        self.assertEqual([args for args, _ in calls], [("login", [], "vatera")])
 
     def test_dossier_button_on_the_listing_page(self):
         item = self.h.ready_item()

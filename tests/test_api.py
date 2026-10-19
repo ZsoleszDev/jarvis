@@ -235,6 +235,31 @@ class ApiTests(unittest.TestCase):
         status, data, _ = h.request("POST", f"/api/v1/work/items/{item.id}/sold", {"sold": False})
         self.assertFalse(data["item"]["sold"])
 
+    def test_drift_note_false_flag_and_price_confirmation(self):
+        h = self.h
+        store = h.app.work.store
+        item = store.create(targets=["vinted", "jofogas"], prompt="farmer", title="Levi's farmer", price=9000)
+        store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/1234567-levis")
+        status, data, _ = h.request("PATCH", f"/api/v1/work/items/{item.id}", {"fields": {"price": 8500}})
+        self.assertEqual((status, data["item"]["drift"]), (200, [{"platform": "vinted", "price": 9000}]))
+        self.assertTrue(data["drift_note"].startswith("Csak itt írtam át; a Vinteden még 9 000 Ft."), data["drift_note"])
+        status, data, _ = h.request("PATCH", f"/api/v1/work/items/{item.id}", {"fields": {"prompt": "Levi's 501"}})
+        self.assertEqual(data["drift_note"], "", "a leírásod nincs a hirdetésben")
+        # „Nem igaz, fent van”: a háttérellenőrzés téves jelzése
+        store.set_check(item.id, "vinted", "sold", detail="„Eladva” jelzés az oldalán")
+        status, data, _ = h.request("POST", f"/api/v1/work/items/{item.id}/dismiss", {"platform": "vinted"})
+        self.assertEqual((status, data["item"]["platforms"]["vinted"]["check"]), (200, "live"))
+        self.assertEqual(data["item"]["platforms"]["vinted"]["check_dismissed"], "sold")
+        status, data, _ = h.request("POST", f"/api/v1/work/items/{item.id}/dismiss", {"platform": "jofogas"})
+        self.assertEqual((status, data["code"]), (400, "bad_request"), "ott nincs fent")
+        # az „Igen” a „… Ft-ra gondoltál?” kérdésre
+        store.set_pending(item.id, {"kind": "price", "question": "45 Ft-ra gondoltál?", "suggested": 4500,
+                                    "confirm": 45})
+        self.assertEqual(h.request("POST", f"/api/v1/work/items/{item.id}/price", {"choice": "confirmed"})[0], 202)
+        h.wait(lambda: store.get(item.id).price == 45)
+        h.idle()
+        self.assertEqual(store.get(item.id).pending, {})
+
     def test_jobs_watches_and_notifications(self):
         h = self.h
         status, data, _ = h.request("GET", "/api/v1/jobs")
@@ -483,6 +508,81 @@ class RemoteWindowBrowserTests(unittest.TestCase):
         finally:
             h.close()
 
+    def test_a_notification_button_opens_the_window_at_the_sold_dialog(self):
+        """A push-értesítés gombja bezárt ablaknál: a service worker a /#act=sold&… címet nyitja meg, a belépő oldal
+        a megjegyzett kulccsal továbbviszi, és a Jarvis ablaka az Eladva ablakot mutatja. Magától semmit nem jelöl."""
+        from playwright.sync_api import sync_playwright
+
+        h = Harness()
+        try:
+            store = h.app.work.store
+            item = store.create(targets=["vinted", "jofogas"], prompt="farmer", title="Levi's farmer", price=9000)
+            store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/1234567-levis")
+            store.mark(item.id, "jofogas", POSTED, url="https://www.jofogas.hu/x_1.htm")
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                context = browser.new_context()
+                context.add_init_script("try { localStorage.setItem('jarvis-token', %s); } catch { /* about:blank */ }"
+                                        % json.dumps(h.token))
+                page = context.new_page()
+                errors: list[str] = []
+                page.on("pageerror", lambda exc: errors.append(str(exc)))
+                page.goto(f"http://127.0.0.1:{h.api.port}/#act=sold&item={item.id}&where=vinted&platform=&delist=0")
+                page.wait_for_selector("#sold-dialog[open]", timeout=15000)
+                self.assertTrue(page.is_checked('#sold-where input[value="vinted"]'), "ahol a jelzés volt")
+                self.assertFalse(page.is_checked("#sold-delist"), "ahogy az értesítés kérte")
+                self.assertEqual(page.evaluate("location.hash"), "", "a kérés nem marad a címben")
+                self.assertIn("Levi's farmer", page.inner_text("#w-detail h2"))
+                page.click("#sold-no")
+                self.assertFalse(store.get(item.id).sold, "a Mégse után semmi nem változik")
+                self.assertEqual(errors, [])
+                browser.close()
+        finally:
+            h.close()
+
+    def test_service_worker_shows_the_buttons_of_a_notice(self):
+        """A service worker (remote.SERVICE_WORKER) egy hamis böngészőkörnyezetben: a push-üzenet gombjai az
+        értesítésen, a gomb pedig az ablakot nyitja meg (nyitott ablaknál üzenetet küld neki), semmi mást."""
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            result = page.evaluate("""async (code) => {
+                const listeners = {}, shown = [], opened = [], posted = [], fetched = [];
+                let windows = [];
+                const worker = { addEventListener: (type, fn) => { listeners[type] = fn; }, skipWaiting() {},
+                  clients: { claim: async () => {}, matchAll: async () => windows,
+                             openWindow: async (url) => { opened.push(url); } },
+                  registration: { showNotification: async (title, options) => { shown.push({ title, options }); } } };
+                new Function("self", "fetch", code)(worker, async (url) => { fetched.push(url); return { ok: true }; });
+                const run = async (type, event) => {
+                  let wait = null;
+                  event.waitUntil = (p) => { wait = p; };
+                  listeners[type](event);
+                  await wait;
+                };
+                const message = { kind: "notice", title: "Elkelt? Farmer", text: "A Vinteden eladottnak látszik.",
+                                  tag: "notice-n1", item: "a1b2c3d4", actions: [{ action: "sold", where: "vinted",
+                                  delist: true, label: "Eladva itt, vedd le a többiről" }] };
+                await run("push", { data: { json: () => message } });
+                const options = shown[0].options;
+                const click = (action) => run("notificationclick", { action, notification: { data: options.data,
+                                                                                             close() {} } });
+                await click(options.actions[0].action);            // bezárt ablak: megnyitja
+                windows = [{ postMessage: (m) => posted.push(m), focus: async () => {} }];
+                await click(options.actions[0].action);            // nyitott ablak: szól neki
+                await click("");                                   // az értesítés maga: csak megnyitja
+                return { actions: options.actions, opened, posted, fetched };
+            }""", remote.SERVICE_WORKER)
+            browser.close()
+        self.assertEqual(result["actions"], [{"action": "notice-0", "title": "Eladva itt, vedd le a többiről"}])
+        self.assertEqual(result["opened"], ["/#act=sold&item=a1b2c3d4&where=vinted&platform=&delist=1"])
+        self.assertEqual(result["posted"], [{"type": "jarvis-action", "action": {
+            "action": "sold", "where": "vinted", "delist": True, "label": "Eladva itt, vedd le a többiről",
+            "item": "a1b2c3d4"}}])
+        self.assertEqual(result["fetched"], [], "a gomb nem küld semmit a gépnek")
+
 
 
 class FakeStt:
@@ -584,6 +684,42 @@ class AndroidAppRequestsBrowserTests(unittest.TestCase):
         finally:
             h.close()
 
+
+    def test_sold_button_of_a_notification_opens_the_sold_dialog(self):
+        """Az Android-alkalmazás értesítésének „Eladva itt, vedd le a többiről” gombja: az alkalmazás megnyílik, és
+        a hirdetés Eladva ablaka előre kiválasztva jön fel; a levétel csak a Rendben gombra indul."""
+        from playwright.sync_api import sync_playwright
+
+        h = Harness()
+        try:
+            store = h.app.work.store
+            item = store.create(targets=["vinted", "jofogas"], prompt="farmer", title="Levi's farmer", price=9000)
+            store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/1234567-levis")
+            store.mark(item.id, "jofogas", POSTED, url="https://www.jofogas.hu/x_1.htm")
+            calls = []
+            h.app.submit_work = lambda *args, **kwargs: calls.append((args, kwargs))
+            with sync_playwright() as pw:
+                browser, page, errors = self.open(pw, h, {"sold": {"item": item.id, "where": "vinted", "delist": True}})
+                page.goto(f"http://127.0.0.1:{h.api.port}/?t={h.token}")
+                page.wait_for_selector("#sold-dialog[open]", timeout=15000)
+                self.assertEqual(page.get_attribute("body", "data-mode"), "work")
+                self.assertTrue(page.is_checked('#sold-where input[value="vinted"]'))
+                self.assertTrue(page.is_checked("#sold-delist"))
+                self.assertFalse(store.get(item.id).sold, "magától nem jelöl meg semmit")
+                self.assertEqual(calls, [], "és nem is vesz le")
+                page.click("#sold-yes")
+                deadline = time.monotonic() + 10
+                while not calls and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual([(args, kwargs["platforms"]) for args, kwargs in calls],
+                                 [(("delist", [item.id], ""), ["jofogas"])], "a többi oldalról, a Rendben után")
+                found = store.get(item.id)
+                self.assertTrue(found.sold)
+                self.assertEqual(found.platforms["vinted"]["note"], "Itt kelt el.")
+                self.assertEqual(errors, [])
+                browser.close()
+        finally:
+            h.close()
 
     def test_recording_stops_after_silence(self):
         """A felvétel magától leáll a beszéd utáni csendnél: a mikrofon helyett egy hangfájl (csend, 1 mp hang,

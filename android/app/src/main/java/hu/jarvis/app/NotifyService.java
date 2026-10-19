@@ -21,7 +21,8 @@ import org.json.JSONObject;
  * Háttérszolgáltatás: akkor is szól, ha az alkalmazás be van zárva. A gép eseményeit kérdezi le (hosszú
  * lekérdezéssel, a Tailscale-en át), és értesít, ha a Jarvis jóváhagyást kér (a gombokkal az értesítésből is
  * megadhatod), ha kész vagy elakadt egy feladat, vagy ha kérdez valamit. A Firebase nem kell hozzá: minden a te
- * gépedről jön.
+ * gépedről jön. Egy elkeltnek látszó hirdetés értesítésén az „Eladva itt, vedd le a többiről” gomb az alkalmazást
+ * a hirdetés Eladva ablakánál nyitja meg (innen nem vesz le semmit: a levételt ott hagyod jóvá).
  *
  * Az állandó értesítés mutatja, hogy éri-e el a gépet, és szünetel-e a Jarvis; a gombjaival hangutasítást adhatsz,
  * vagy szüneteltetheted (a gépen minden modell leáll, pl. játékhoz), és folytathatod.
@@ -77,15 +78,45 @@ public class NotifyService extends Service {
     }
 
     static void show(Context context, String channel, int id, String title, String text) {
-        Notification notification = new Notification.Builder(context, channel)
+        show(context, channel, id, title, text, null);
+    }
+
+    static void show(Context context, String channel, int id, String title, String text, Notification.Action action) {
+        Notification.Builder builder = new Notification.Builder(context, channel)
                 .setSmallIcon(R.drawable.ic_notify)
                 .setContentTitle(title)
                 .setContentText(text)
                 .setStyle(new Notification.BigTextStyle().bigText(text))
                 .setContentIntent(openApp(context))
-                .setAutoCancel(true)
-                .build();
-        context.getSystemService(NotificationManager.class).notify(id, notification);
+                .setAutoCancel(true);
+        if (action != null) {
+            builder.addAction(action);
+        }
+        context.getSystemService(NotificationManager.class).notify(id, builder.build());
+    }
+
+    /**
+     * Az elkeltnek látszó hirdetés értesítésének gombja (a notice "actions" listájából a "sold"): megnyitja az
+     * alkalmazást, és a felület a hirdetés Eladva ablakát mutatja, előre kiválasztva (MainActivity.ACTION_SOLD).
+     * Null, ha az értesítésnek nincs ilyen gombja.
+     */
+    static Notification.Action soldAction(Context context, JSONObject notice, int id) {
+        JSONArray actions = notice.optJSONArray("actions");
+        String item = notice.optString("item");
+        for (int i = 0; actions != null && !item.isEmpty() && i < actions.length(); i++) {
+            JSONObject action = actions.optJSONObject(i);
+            if (action == null || !"sold".equals(action.optString("action"))) {
+                continue;
+            }
+            Intent intent = new Intent(context, MainActivity.class).setAction(MainActivity.ACTION_SOLD)
+                    .putExtra("item", item).putExtra("where", action.optString("where"))
+                    .putExtra("delist", action.optBoolean("delist", true)).putExtra("notification", id)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            PendingIntent open = PendingIntent.getActivity(context, id, intent,
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+            return new Notification.Action.Builder((Icon) null, action.optString("label", "Eladva itt"), open).build();
+        }
+        return null;
     }
 
     @Override
@@ -247,8 +278,9 @@ public class NotifyService extends Service {
         } else if ("notification".equals(type) && !MainActivity.visible) {
             JSONObject notice = event.optJSONObject("notice");
             if (notice != null) {
-                show(this, CHANNEL_NEWS, NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff),
-                        notice.optString("title", "Jarvis"), notice.optString("text"));
+                int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
+                show(this, CHANNEL_NEWS, id, notice.optString("title", "Jarvis"), notice.optString("text"),
+                        soldAction(this, notice, id));
             }
         }
     }

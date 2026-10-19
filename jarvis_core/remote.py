@@ -57,6 +57,9 @@ self.addEventListener("push", (event) => {
     if (message.kind === "confirm" && message.answer) {
       options.actions = [{ action: "approve", title: "Engedélyezem" }, { action: "deny", title: "Mégse" }];
       options.requireInteraction = true;
+    } else if (Array.isArray(message.actions) && message.actions.length) {
+      options.actions = message.actions.slice(0, 2).map((a, i) => ({ action: "notice-" + i,
+                                                                      title: a.label || "Megnyitás" }));
     }
     return self.registration.showNotification(message.title || "Jarvis", options);
   }));
@@ -65,6 +68,20 @@ self.addEventListener("push", (event) => {
 function openWindow() {
   return self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) =>
     windows.length ? windows[0].focus() : self.clients.openWindow("/"));
+}
+
+// Egy értesítés gombja (pl. „Eladva itt, vedd le a többiről”): megnyitja a Jarvis ablakát, és az a hirdetés Eladva
+// ablakát mutatja, előre kiválasztva (app.js, work.js). Innen semmi nem indul el: a döntés az ablakban a tiéd.
+function openAction(action) {
+  return self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
+    if (windows.length) {
+      windows[0].postMessage({ type: "jarvis-action", action });
+      return windows[0].focus();
+    }
+    const hash = new URLSearchParams({ act: action.action || "", item: action.item || "", where: action.where || "",
+                                       platform: action.platform || "", delist: action.delist ? "1" : "0" });
+    return self.clients.openWindow("/#" + hash.toString());
+  });
 }
 
 self.addEventListener("notificationclick", (event) => {
@@ -81,6 +98,12 @@ self.addEventListener("notificationclick", (event) => {
                                                             tag: message.tag, icon: "/icon-192.png" });
     }).catch(() => self.registration.showNotification("Jarvis", {
       body: "Nem érem el a gépet; nyisd meg a Jarvist, és ott válaszolj.", tag: message.tag, icon: "/icon-192.png" })));
+    return;
+  }
+  const button = String(event.action || "");
+  const action = button.startsWith("notice-") && (message.actions || [])[Number(button.slice(7))];
+  if (action) {
+    event.waitUntil(openAction({ ...action, item: message.item || "" }));
     return;
   }
   event.waitUntil(openWindow());
@@ -182,7 +205,8 @@ if (scanned) {
   history.replaceState(null, "", "/");
   say("A párosítás megszűnt (talán a gépen visszavontad). Párosítsd újra.");
 } else if (saved) {
-  location.replace("/?t=" + encodeURIComponent(saved));
+  // Egy értesítés gombja (/#act=…, lásd a service workert) a Jarvis ablakában folytatódik.
+  location.replace("/?t=" + encodeURIComponent(saved) + (/^#act=/.test(location.hash) ? location.hash : ""));
 }
 const guess = /Android/i.test(navigator.userAgent) ? "Telefon" : /Windows/i.test(navigator.userAgent) ? "Laptop" : "Eszköz";
 document.getElementById("device").value = guess;

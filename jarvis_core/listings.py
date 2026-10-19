@@ -3,9 +3,11 @@
 Modell nélkül, és csak olvas: naponta egyszer néhány hirdetést nyit meg véletlen sorrendben, emberi
 tempóban (betöltés, egy pillantás és egy kis görgetés, olvasás), és a lap szövegéből dönt. Semmire nem
 kattint. Egy hirdetést naponta legfeljebb egyszer néz meg. Ha egy oldal robot-ellenőrzést (captchát) kér,
-vagy be kell jelentkezni, az egész kört abbahagyja, és egyszer szól. Ha valahol elkeltnek vagy eltűntnek
-látszik egy hirdetés, értesítést küld (kind: sold): a kártyán az „Eladva itt, vedd le a többiről” gombbal,
-jóváhagyás után, a többi oldalról is leveszi. Magától nem jelöl meg és nem vesz le semmit.
+vagy be kell jelentkezni, az egész kört abbahagyja, és egyszer szól (az értesítés gombja megnyitja az oldalt
+Jarvis böngészőjében, ott te lépsz be). Ha valahol elkeltnek vagy eltűntnek látszik egy hirdetés, értesítést
+küld (kind: sold): a kártyán (és az értesítésben) az „Eladva itt, vedd le a többiről” gombbal, jóváhagyás
+után, a többi oldalról is leveszi. Magától nem jelöl meg és nem vesz le semmit. Ha egy jelzésre azt mondtad,
+hogy nem igaz (ItemStore.dismiss_check), ugyanazt a jelzést annál a hirdetésnél többé nem hozza fel.
 """
 from __future__ import annotations
 
@@ -116,10 +118,15 @@ class ListingChecker:
                 continue
             state, detail = classify(page, entry["url"], str(entry.get("posted_title") or item.title), key)
             if state == BLOCKED:
+                # be kell jelentkezni, vagy ki vagy jelentkezve: belépés; captchánál csak megnyitja (te oldod meg)
+                label = "Bejelentkezés a böngészőmben" if "jelentkez" in detail else "Megnyitás a böngészőmben"
                 notify("error", f"Hirdetések ellenőrzése: {site.name}",
                        f"A hirdetéseid ellenőrzését abbahagytam: a(z) {site.name} {detail}. Nézd meg a "
-                       "böngészőablakomban; holnap újra megpróbálom.", platform=key)
+                       "böngészőablakomban; holnap újra megpróbálom.", platform=key,
+                       actions=[{"action": "login", "platform": key, "label": label}])
                 return f"Abbahagytam: {site.name} – {detail}."
+            if state in (SOLD, GONE) and entry.get("check_dismissed") == state:
+                state, detail = LIVE, ""      # ezt a jelzést már nem igaznak jelölted: nem hozza fel újra
             before = entry.get("check")
             self.store.set_check(item.id, key, state, self.clock(), detail)
             counts[state] += 1

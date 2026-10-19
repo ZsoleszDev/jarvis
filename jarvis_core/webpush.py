@@ -8,6 +8,9 @@ küldőt a gép kulcsa igazolja (VAPID, RFC 8292). Ehhez a gépen a cryptography
 
 A jóváhagyás gombjai (Engedélyezem / Mégse) az értesítésben egyszer használható válaszkulccsal mennek vissza
 (/api/v1/push/answer): a böngésző háttérszála (service worker) nem ismeri az eszköz kulcsát.
+
+Egy értesítés gombjai (notices.py, pl. „Eladva itt, vedd le a többiről”) is az üzenetbe kerülnek; ezek csak
+megnyitják a Jarvis ablakát a megfelelő lapon (pl. a hirdetés Eladva ablakát), a döntés ott a tiéd.
 """
 from __future__ import annotations
 
@@ -37,6 +40,9 @@ QUEUE_LIMIT = 100
 PUSH_HOSTS = ("notify.windows.com", "fcm.googleapis.com", "android.googleapis.com", "push.services.mozilla.com",
               "push.apple.com")
 INSTALL_HINT = "A laptopos értesítésekhez a gépen ez kell: pip install cryptography (utána indítsd újra a Jarvist)."
+# Az értesítések gombjai, amiket a push-üzenet is visz (a böngésző legfeljebb kettőt mutat).
+NOTICE_ACTIONS = ("sold", "login")
+NOTICE_ACTION_FIELDS = ("action", "where", "platform", "delist", "label")
 
 
 class PushError(Exception):
@@ -105,6 +111,17 @@ def vapid_header(endpoint: str, key: Any, now: float | None = None) -> str:
     r, s = decode_dss_signature(key.sign(f"{head}.{body}".encode(), ec.ECDSA(hashes.SHA256())))
     signature = b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
     return f"vapid t={head}.{body}.{signature}, k={b64u(_public_bytes(key))}"
+
+
+def notice_actions(notice: dict[str, Any]) -> list[dict[str, Any]]:
+    """Az értesítés gombjai a push-üzenetbe: csak az ismert műveletek, rövid mezőkkel."""
+    out = []
+    for action in notice.get("actions") or []:
+        if not isinstance(action, dict) or action.get("action") not in NOTICE_ACTIONS:
+            continue
+        out.append({k: (bool(action[k]) if k == "delist" else str(action[k])[:60])
+                    for k in NOTICE_ACTION_FIELDS if k in action})
+    return out[:2]
 
 
 def push_host_ok(endpoint: str) -> bool:
@@ -251,6 +268,11 @@ class WebPush:
             notice = event.get("notice") if isinstance(event.get("notice"), dict) else {}
             message = {"kind": "notice", "title": str(notice.get("title") or "Jarvis")[:80],
                        "text": str(notice.get("text") or "")[:300], "tag": f"notice-{notice.get('id') or ''}"}
+            actions = notice_actions(notice)
+            if actions:
+                message["actions"] = actions
+                if notice.get("item"):
+                    message["item"] = str(notice["item"])[:16]
             self._enqueue(message, ttl=12 * 3600, urgency="normal")
 
     def answer(self, key: str) -> int | None:
