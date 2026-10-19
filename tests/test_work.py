@@ -18,6 +18,7 @@ import statistics
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,10 +39,11 @@ from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError, is_risky, navigates  # noqa: E402
 from jarvis_core.config import load_config  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, parse_json_object  # noqa: E402
-from jarvis_core.selling import (FAILED, POSTED, Item, ItemError, ItemStore, ListingExtractor,  # noqa: E402
+from jarvis_core.selling import (FAILED, NOT_POSTED, POSTED, Item, ItemError, ItemStore,  # noqa: E402
+                                 ListingExtractor,
                                  Platform, PriceResearcher, missing_needs, needs_for, parse_price,
                                  price_verdict, question_for, round_price)
-from jarvis_core.textutil import clean_for_speech  # noqa: E402
+from jarvis_core.textutil import clean_for_speech, hu_amounts, parse_hu_amount  # noqa: E402
 from jarvis_core.tools import Toolbox  # noqa: E402
 from jarvis_core.work import WorkDesk, interpret_price_reply, research_summary  # noqa: E402
 
@@ -63,6 +65,25 @@ def png_with_alpha() -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, "PNG")
     return buffer.getvalue()
+
+
+class FakeClock:
+    """Hamis óra a work modulnak (mock.patch("jarvis_core.work.time", ...)): a várakozás azonnal lefut, csak
+    előreállítja az órát, így mérhető, mi történt a közzétételek közti szünet előtt és után."""
+
+    def __init__(self, now: float = 1_000_000.0):
+        self.now = now
+        self.slept: list[float] = []
+
+    def time(self) -> float:
+        return self.now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
 
 
 def extracted(**values) -> dict:
@@ -154,6 +175,27 @@ class ItemStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get(item.id).edited, ["price", "title"], "a leírásod nem hirdetésmező")
         item = self.store.update(item.id, title="Jarvis címe", price=500, brand="Zara")
         self.assertEqual((item.title, item.price, item.brand), ("Saját cím", 900, "Zara"))
+
+    def test_time_online_starts_when_the_listing_goes_up(self):
+        item = self.store.create(targets=["vinted"], prompt="farmer")
+        day = 86400
+        with mock.patch("jarvis_core.selling.time.time", return_value=1000.0):
+            self.store.mark(item.id, "vinted", POSTED, url="https://www.vinted.hu/items/1")
+        with mock.patch("jarvis_core.selling.time.time", return_value=1000.0 + 20 * day):
+            item = self.store.mark(item.id, "vinted", POSTED, note="A levétel nem sikerült: nincs Törlés gomb.")
+            public = item.public()
+        entry = item.platforms["vinted"]
+        self.assertEqual((entry["posted_at"], entry["at"]), (1000.0, 1000.0 + 20 * day), "az újbóli jelölés nem nulláz")
+        self.assertEqual(entry["url"], "https://www.vinted.hu/items/1")
+        self.assertEqual((public["online_since"], public["days_online"]), (1000.0, 20))
+        item = self.store.mark(item.id, "vinted", NOT_POSTED)
+        self.assertNotIn("posted_at", item.platforms["vinted"])
+        self.assertIsNone(item.public()["days_online"])
+        with mock.patch("jarvis_core.selling.time.time", return_value=5000.0):
+            item = self.store.mark(item.id, "vinted", POSTED)
+        self.assertEqual(item.platforms["vinted"]["posted_at"], 5000.0, "levétel után újra felkerült")
+        item.platforms["vinted"] = {"status": POSTED, "at": 700.0}      # a régi adatoknál a jelölés ideje
+        self.assertEqual(item.online_since(), 700.0)
 
     def test_prices(self):
         for text, value in (("4500", 4500), ("4 500 Ft", 4500), ("4.500", 4500), ("12,5", 12),
@@ -432,9 +474,39 @@ class PriceVerdictTests(unittest.TestCase):
         cases = {"Maradjon": "keep", "maradjon az enyém": "keep", "nem, jó így": "keep", "nem kell": "keep",
                  "Legyen a javasolt": "suggested", "oké, mehet": "suggested", "vidd lejjebb": "suggested",
                  "Legyen 4000": 4000, "3 500 Ft": 3500, "120 ezer": 120000,
-                 "ne 150 ezer legyen, hanem 120 ezer": 120000, "hmm": None, "igen": None}
+                 "ne 150 ezer legyen, hanem 120 ezer": 120000, "hmm": None, "igen": None,
+                 # számszavak (a Whisper gyakran betűvel írja), tizedes ezrek
+                 "legyen ötezer": 5000, "legyen négyezer-ötszáz": 4500, "legyen 4,5 ezer": 4500,
+                 "legyen 3 és fél ezer": 3500, "4.5k": 4500, "másfél ezer": 1500, "hát legyen ötezer": 5000,
+                 # a tagadás csak arra vonatkozik, ami utána jön
+                 "nem, legyen a javasolt": "suggested", "ne maradjon, legyen a javasolt": "suggested",
+                 "ne a javasolt legyen": "keep", "ne legyen az ajánlott": "keep", "legyen a tiéd": "suggested",
+                 # bizonytalan: inkább újra kérdez
+                 "nem tudom": None, "mindegy": None, "hmm, nem tudom": None, "maradjon, vagy legyen a javasolt": None,
+                 # a számszó máshol nem ár
+                 "egy kicsit olcsóbb": "suggested", "hát legyen": "suggested"}
         for text, expected in cases.items():
             self.assertEqual(interpret_price_reply(text), expected, text)
+
+    def test_answers_to_a_confirmation_question(self):
+        cases = {"igen": "confirmed", "igen, pontosan": "confirmed", "oké, mehet": "confirmed", "nem": None,
+                 "nem, 3500": 3500, "nem jó": None,
+                 "maradjon": "keep", "hmm": None, "legyen a javasolt": "suggested"}
+        for text, expected in cases.items():
+            self.assertEqual(interpret_price_reply(text, confirming=True), expected, text)
+
+    def test_hungarian_amounts(self):
+        cases = {"ötezer": 5000, "négyezer ötszáz": 4500, "kétszázötvenezer": 250000, "tizenkétezer": 12000,
+                 "huszonötezer": 25000, "egymillió kétszázezer": 1_200_000, "fél millió": 500_000,
+                 "félmillió": 500_000, "két és fél millió": 2_500_000, "1,5 millió": 1_500_000, "5k": 5000,
+                 "5e": 5000, "10.000": 10000, "4.500 Ft": 4500, "ötezerre": 5000, "ezret": 1000, "százhúsz": 120,
+                 "öt forint": 5, "legyen negyven": 40, "vidd fel ötezerre": 5000, "5000-re": 5000,
+                 "egy kicsit olcsóbb": None, "hát legyen": None, "egyszer hordott": None, "hét": None,
+                 "fel": None, "5000 öt": 5000}
+        for text, expected in cases.items():
+            self.assertEqual(parse_hu_amount(text), expected, text)
+        self.assertEqual(hu_amounts("ne 150 ezer legyen, hanem 120 ezer"), [150000, 120000])
+        self.assertEqual(hu_amounts("ötezer, nem, hatezer"), [5000, 6000])
 
 
 # --- a Munka menü asztala (böngésző nélkül) ---------------------------------------------------
@@ -482,6 +554,36 @@ class WorkDeskTests(unittest.TestCase):
         self.assertIn("Budapesten veheted át", self.fake.chat_bodies()[-1]["messages"][1]["content"],
                       "a válaszod a leírás része lett")
         self.assertEqual(self.steps, ["a leírásod értelmezése"] * 2)
+        targeted = self.fake.chat_bodies()[-1]["format"]
+        self.assertEqual(sorted(targeted["properties"]), ["condition", "location"], "csak amire rákérdezett")
+        self.assertEqual(sorted(self.fake.chat_bodies()[0]["format"]["properties"]),
+                         sorted([*selling.LISTING_FIELDS, "kind", "price"]))
+        item = self.store.get(item.id)
+        self.assertEqual((item.condition, item.location, item.title), ("Nagyon jó", "Budapest", SHIRT["title"]))
+        self.assertEqual(self.desk.prepare(item.id, self.steps.append).kind, "post")
+        self.assertEqual(len(self.fake.chat_bodies()), 2, "ugyanabból a leírásból nem olvassa ki újra")
+
+    def test_extraction_runs_once_and_a_posted_listing_keeps_its_text(self):
+        item = self.item(["vinted", "jofogas"])
+        self.fake.chat_script = [extracted(**SHIRT)]
+        self.assertEqual(self.desk.prepare(item.id, self.steps.append).kind, "post")
+        self.assertEqual(self.desk.prepare(item.id, self.steps.append).kind, "post")
+        self.assertEqual((len(self.fake.chat_bodies()), self.steps), (1, ["a leírásod értelmezése"]))
+        self.store.mark(item.id, "vinted", POSTED)
+        title = self.store.get(item.id).title
+        # a leírást átírod: újra kiolvassa, de a már fent lévő hirdetés szövege nem változik magától
+        self.store.update(item.id, user=True, prompt="Zara L-es fekete póló, egyszer hordtam, 600 Ft")
+        self.fake.chat_script = [extracted(**{**SHIRT, "title": "Más cím", "description": "Más szöveg.",
+                                              "category": "Férfi > Pólók", "price": 600})]
+        self.desk.prepare(item.id, self.steps.append)
+        item = self.store.get(item.id)
+        self.assertEqual(len(self.fake.chat_bodies()), 2)
+        self.assertEqual((item.title, item.description, item.category, item.price),
+                         (title, SHIRT["description"], SHIRT["category"], 600), "az ár viszont frissül")
+        self.store.update(item.id, user=True, title="Saját cím")
+        self.assertEqual(self.store.get(item.id).title, "Saját cím", "a kézi átírás számít")
+        self.store.update(item.id, extracted_sig="régi")         # pl. új kiolvasó-változat után
+        self.assertFalse(selling.ListingExtractor.up_to_date(self.store.get(item.id)))
 
     def test_needs_sites_and_photos(self):
         bare = self.store.create(prompt="póló")
@@ -536,13 +638,33 @@ class WorkDeskTests(unittest.TestCase):
         self.assertEqual(self.store.get(item.id).status, "árdöntés")
         self.desk.decide_price(item.id, "keep")
         self.assertEqual(self.store.get(item.id).price, 9000, "ha neked így jó, marad az árad")
-        self.fake.chat_script = [extracted(**blazer)]
         step = self.desk.prepare(item.id, self.steps.append)
         self.assertEqual((step.kind, researcher.calls), ("post", 1), "egyszer néz utána, utána nem kérdez újra")
+        self.assertEqual(len(self.fake.chat_bodies()), 1, "az árdöntés után nem olvassa ki újra a leírást")
         self.store.set_pending(item.id, {"kind": "price", "question": "?", "suggested": 4500})
         self.assertEqual(self.desk.decide_price(item.id, "suggested").price, 4500)
         self.assertEqual(self.desk.decide_price(item.id, 6000).price, 6000)
         self.assertIn("price", self.store.get(item.id).edited, "Jarvis később nem írja vissza")
+
+    def test_odd_price_is_asked_back_before_it_is_set(self):
+        item = self.item(["vinted"])
+        self.store.update(item.id, price=9000)
+        self.store.set_pending(item.id, {"kind": "price", "question": "Marad?", "suggested": 4500})
+        item = self.desk.decide_price(item.id, 3)       # a „3 és fél ezer” félrehallva
+        self.assertEqual((item.price, item.pending["kind"], item.pending["confirm"]), (9000, "price", 3))
+        self.assertTrue(item.pending["question"].startswith("3 Ft-ra gondoltál?"), item.pending["question"])
+        self.assertEqual(item.pending["suggested"], 4500, "a javasolt ár megmarad")
+        self.assertEqual(item.status, "árdöntés")
+        item = self.desk.decide_price(item.id, "confirmed")
+        self.assertEqual((item.price, item.pending), (3, {}), "ha igent mond, az számít")
+
+        self.store.update(item.id, user=True, price=9000)
+        self.store.set_pending(item.id, {"kind": "price", "question": "Marad?", "suggested": 4500})
+        self.assertEqual(self.desk.decide_price(item.id, 40000).pending["confirm"], 40000, "háromszorosnál több")
+        self.assertEqual(self.desk.decide_price(item.id, 40000).price, 40000, "ugyanaz az összeg újra: igen")
+        self.store.set_pending(item.id, {"kind": "price", "question": "Marad?", "suggested": 4500})
+        self.assertEqual(self.desk.decide_price(item.id, 2000).price, 2000, "a javasolthoz képest nem furcsa")
+        self.assertEqual(self.desk.decide_price(item.id, "keep").pending, {})
 
     def test_failed_price_check_does_not_block_posting(self):
         class Broken:
@@ -573,6 +695,75 @@ class WorkDeskTests(unittest.TestCase):
         self.store.mark(item.id, "vinted", POSTED)
         self.assertTrue(self.desk.finish_post(item.id, "vinted"))
         self.assertEqual(self.desk.targets_left(item.id), ["vatera"])
+
+    def test_each_site_gets_at_most_its_photo_limit(self):
+        self.assertEqual({key: site.max_photos for key, site in self.desk.platforms.items()},
+                         {"vinted": 20, "jofogas": 10, "vatera": 8, "hardverapro": 10})
+        item = self.item(["vatera", "vinted"])
+        for _ in range(11):
+            self.store.add_photo(item.id, jpeg())
+        item = self.store.reorder_photos(item.id, ["12.jpg"])        # a borítókép az utolsónak feltöltött
+        uploads = []
+
+        class FakeBrowser:
+            host = "www.vatera.hu"
+
+            def current_host(self):
+                return self.host
+
+            def upload_files(self, paths, element=None):
+                uploads.append(paths)
+                return f"Feltöltöttem {len(paths)} fotót."
+
+        browser = FakeBrowser()
+        self.desk.toolbox = mock.Mock(browser=browser)
+        self.desk.current = (item.id, "vatera")
+        self.assertEqual(self.desk.tool_upload_photos(), "Feltöltöttem 8 fotót.")
+        self.assertEqual(Path(uploads[0][0]).name, "12.jpg", "a borítókép az első")
+        self.assertIn("Fotók: 8 db (a(z) Vatera legfeljebb ennyit vesz fel, ezért 12 helyett az első 8;",
+                      self.desk.listing_block(item, "vatera"))
+        self.assertIn("Fotók: 12 db (a browser_upload_photos", self.desk.listing_block(item, "vinted"))
+        self.assertEqual(len(self.desk.photos_for(item, "vinted")), 12)
+        browser.host = "www.jofogas.hu"          # a böngésző más oldalon áll: annak a limitje
+        self.desk.current = None
+        self.desk.tool_upload_photos(item=item.id)
+        self.assertEqual(len(uploads[-1]), 10)
+
+    def test_publish_gap_is_waited_right_before_publishing(self):
+        item = self.item(["vinted", "jofogas"])
+        self.cfg.work.publish_gap_minutes = 2.0
+        clock = FakeClock()
+        with mock.patch("jarvis_core.work.time", clock):
+            self.desk.note_publish("vinted")
+            due = self.desk._next_allowed["vinted"]
+            self.desk._before_publish("Feltöltés", "https://www.vinted.hu/items/new")
+            self.assertEqual(clock.now, 1_000_000.0, "feltöltésen kívül (pl. a Beszélgetésben) nem vár")
+            self.desk.current = (item.id, "vinted")
+            self.desk.begin_trail()
+            self.store.set_busy(item.id, "Feltöltés: Vinted…")
+            self.desk._before_publish("Feltöltés", "https://www.vinted.hu/items/new")
+            self.assertGreaterEqual(clock.now, due, "a közzététel gombja előtt kivárja")
+            self.assertEqual(self.store.get(item.id).busy, "Feltöltés: Vinted…", "a visszaszámlálás után")
+            self.desk._on_browser_action({"do": "click", "risky": True, "el": {}, "url": ""})
+            self.assertGreater(self.desk.gap_remaining("vinted"), 0, "a következő közzététel innen számol")
+            waited = clock.now
+            self.desk._before_publish("Igen, feltöltöm", "https://www.vinted.hu/items/new")
+            self.assertEqual(clock.now, waited, "a megerősítő gombnál ugyanebben a menetben már nem vár")
+            self.desk.current = (item.id, "jofogas")
+            self.desk.begin_trail()
+            self.desk._before_publish("Hirdetés feladása", "https://www.jofogas.hu/")
+            self.assertEqual(clock.now, waited, "másik oldalon nincs szünet")
+
+    def test_a_failed_delist_does_not_reset_the_listing_age(self):
+        item = self.item(["vinted"])
+        self.store.mark(item.id, "vinted", POSTED)
+        self.store.get(item.id).platforms["vinted"]["posted_at"] = time.time() - 20 * 86400
+        self.assertFalse(self.desk.finish_delist(item.id, "vinted", "nem találtam a Törlés gombot."))
+        entry = self.store.get(item.id).platforms["vinted"]
+        self.assertEqual(entry["status"], POSTED)
+        self.assertIn("A levétel nem sikerült", entry["note"])
+        self.assertEqual([i.id for i in self.desk.stale_items(14)], [item.id], "20 napja fent van, nem 0")
+        self.assertEqual(self.store.get(item.id).public()["days_online"], 20)
 
     def test_tools_for_the_work_chat(self):
         self.assertIn("Adás/Vétel fülön", self.box.call("item_list", {}))
@@ -890,9 +1081,12 @@ class SellFlowTests(unittest.TestCase):
         self.assertEqual(self.notices()[-1], question, "a naplóban is kérdez (és felolvassa)")
 
         def upload(body):
-            opened = self.last_tool(body)
-            for expected in ("Tippek (Vinted): Vinted: tippek a teszthez.", "Ár: 500 (forint)",
-                             "Átvétel helye (város): Budapest", "Csomagméret: kicsi", "Márka: Zara"):
+            # az item_post lépést a Jarvis már elvégezte: a modell első üzenetében ott az űrlap és a hirdetés
+            assert [m["role"] for m in body["messages"]] == ["system", "user"], body["messages"]
+            opened = body["messages"][-1]["content"]
+            for expected in ("Az item_post lépést már elvégeztem", "Tippek (Vinted): Vinted: tippek a teszthez.",
+                             "Ár: 500 (forint)", "Átvétel helye (város): Budapest", "Csomagméret: kicsi",
+                             "Márka: Zara", "Új hirdetés"):
                 assert expected in opened, (expected, opened)
             return 200, tool_reply("browser_upload_photos", {})
 
@@ -912,9 +1106,7 @@ class SellFlowTests(unittest.TestCase):
 
         self.fake.chat_script = [
             extracted(**SHIRT),
-            tool_reply("item_post", {"item": item.id, "platform": "vinted"}),
             upload, fill, publish, mark, reply("Fent van a Vinteden."),
-            tool_reply("item_post", {"item": item.id, "platform": "jofogas"}),
             reply("Be kell jelentkezned a Jófogásra, utána az Újra gombbal folytatom."),
         ]
         # a Munka menüben írt (vagy mondott) válasz a függő kérdésre megy
@@ -935,6 +1127,20 @@ class SellFlowTests(unittest.TestCase):
         self.assertEqual(self.ui.of("user")[0][1], "Nagyon jó állapotú, Budapesten lehet átvenni.")
         self.assertEqual(self.app.work.current, None)
 
+        # „Feltöltés a hiányzó helyekre”: nem olvassa ki újra a leírást, és a Jófogásra ugyanaz a cím kerül
+        calls = len(self.fake.chat_bodies())
+
+        def same_title(body):
+            first = body["messages"][1]["content"]
+            assert f"Cím: {item.title}\n" in first, first
+            return 200, tool_reply("item_mark", {"item": item.id, "status": "feltöltve", "platform": "jofogas"})
+
+        self.fake.chat_script = [same_title, reply("Fent van a Jófogáson.")]
+        self.app.run_work({"action": "sell", "ids": [item.id]})
+        bodies = self.fake.chat_bodies()[calls:]
+        self.assertEqual(len(bodies), 2, "se újabb kiolvasás, se külön item_post kör")
+        self.assertEqual((self.store.get(item.id).title, self.store.get(item.id).status), (item.title, "fent"))
+
     def test_price_check_then_your_decision(self):
         item = self.new_item(["vinted"], prompt="Zara blézer, M, nagyon jó, 9000 Ft", research_wanted=True)
         blazer = {**SHIRT, "product": "blézer", "title": "Zara blézer, M", "size": "M", "price": 9000,
@@ -949,14 +1155,61 @@ class SellFlowTests(unittest.TestCase):
         self.assertIn("Maradjon a te árad, vagy legyen 4 500 Ft?", self.notices()[-1])
 
         def check_price(body):
-            assert "Ár: 6000 (forint)" in self.last_tool(body), self.last_tool(body)
+            first = body["messages"][-1]["content"]
+            assert "Ár: 6000 (forint)" in first, first
             return 200, tool_reply("item_mark", {"item": item.id, "status": "feltöltve", "platform": "vinted"})
 
-        self.fake.chat_script = [extracted(**blazer), tool_reply("item_post", {"item": item.id, "platform": "vinted"}),
-                                 check_price, reply("Kész.")]
+        calls = len(self.fake.chat_bodies())
+        self.fake.chat_script = [check_price, reply("Kész.")]
         self.app.respond("Legyen 6000", mode="work")
         item = self.store.get(item.id)
         self.assertEqual((item.price, item.status), (6000, "fent"), "a te döntésed számít")
+        self.assertEqual(self.fake.chat_script, [])
+        bodies = self.fake.chat_bodies()[calls:]
+        self.assertFalse([b for b in bodies if b.get("format")], "az árdöntés után nem olvassa ki újra a leírást")
+
+    def test_the_form_is_filled_during_the_publish_gap(self):
+        item = self.ready_item(["vinted"])
+        work = self.app.work
+        browser = self.app.toolbox.browser
+        clock = FakeClock(time.time())
+        events = []
+        record = browser.on_action
+        browser.on_action = lambda event: events.append((event["do"], clock.now)) or record(event)
+
+        def fill(body):
+            view = body["messages"][-1]["content"]       # az első üzenet: a megnyitott űrlap
+            return 200, tool_reply("browser_fill", {"fields": [
+                {"element": element_number(view, "Cím"), "text": "Zara fekete póló, L"},
+                {"element": element_number(view, "Ár"), "text": "500"}]})
+
+        def publish(body):
+            return 200, tool_reply("browser_click", {"element": element_number(self.last_tool(body), "Feltöltés")})
+
+        mark = tool_reply("item_mark", {"item": item.id, "status": "feltöltve", "platform": "vinted"})
+        self.fake.chat_script = [fill, publish, mark, reply("Fent van.")]
+        self.app.cfg.work.publish_gap_minutes = 2.0
+        with mock.patch("jarvis_core.work.time", clock):
+            work.note_publish("vinted")
+            due = work._next_allowed["vinted"]
+            self.app.run_work({"action": "post", "ids": [item.id], "platform": "vinted"})
+        typed = [at for do, at in events if do == "type"]
+        clicks = [at for do, at in events if do == "click"]
+        self.assertEqual(len(typed), 2)
+        self.assertTrue(all(at < due for at in typed), "a mezőket a szünet alatt tölti ki")
+        self.assertGreaterEqual(clicks[-1], due, "a közzététel a szünet után")
+        self.assertEqual(self.store.get(item.id).platforms["vinted"]["status"], POSTED)
+        self.assertTrue(any("nemrég tettem közzé" in e[1] for e in self.ui.of("info")))
+        self.assertEqual(len(self.ui.of("confirm")), 1)
+
+    def test_a_free_site_goes_first_while_the_other_waits(self):
+        item = self.ready_item(["vinted", "jofogas"])
+        self.app.work._next_allowed["vinted"] = time.time() + 600      # a Vinteden nemrég tett közzé
+        self.fake.chat_script = [extracted(**SHIRT), reply("Be kell jelentkezned a Jófogásra."),
+                                 reply("Be kell jelentkezned a Vintedre.")]
+        self.app.run_work({"action": "sell", "ids": [item.id]})
+        posts = [e[1] for e in self.ui.of("info") if e[1].startswith("Feltöltés:")]
+        self.assertEqual(posts, ["Feltöltés: Zara fekete póló, L → Jófogás", "Feltöltés: Zara fekete póló, L → Vinted"])
         self.assertEqual(self.fake.chat_script, [])
 
     def test_unclear_price_answer_asks_again(self):
@@ -966,12 +1219,26 @@ class SellFlowTests(unittest.TestCase):
         self.assertIn("Maradjon a te árad, vagy legyen a javasolt (4 500 Ft)?", self.notices()[-1])
         self.assertEqual(self.store.get(item.id).pending["kind"], "price")
 
+    def test_odd_price_answer_is_asked_back(self):
+        item = self.ready_item(["vinted"])          # 500 Ft
+        self.store.set_pending(item.id, {"kind": "price", "question": "Marad?", "suggested": 450})
+        self.app.run_work({"action": "reply", "ids": [item.id], "text": "legyen ötven"})
+        self.assertTrue(self.notices()[-1].startswith("50 Ft-ra gondoltál?"), self.notices()[-1])
+        self.assertEqual(self.store.get(item.id).pending["confirm"], 50)
+        self.app.run_work({"action": "reply", "ids": [item.id], "text": "nem"})
+        self.assertEqual(self.notices()[-1], "Akkor mennyi legyen? Maradjon a te árad (500 Ft), vagy legyen a "
+                                             "javasolt (450 Ft)?")
+        pending = self.store.get(item.id).pending
+        self.assertEqual((pending["kind"], "confirm" in pending, self.store.get(item.id).price), ("price", False, 500))
+        self.app.run_work({"action": "price", "ids": [item.id], "choice": "45"})
+        self.assertTrue(self.notices()[-1].startswith("45 Ft-ra gondoltál?"), "a felületről beírt összegnél is")
+        self.assertEqual(self.fake.chat_bodies(), [], "modell nélkül")
+
     def test_retry_one_site_then_everything_is_up(self):
         item = self.ready_item(["vinted", "jofogas"])
         self.store.mark(item.id, "vinted", POSTED)
         self.store.mark(item.id, "jofogas", FAILED, note="Be kell jelentkezni.")
-        self.fake.chat_script = [tool_reply("item_post", {"item": item.id, "platform": "jofogas"}),
-                                 tool_reply("item_mark", {"item": item.id, "status": "feltöltve", "platform": "jofogas",
+        self.fake.chat_script = [tool_reply("item_mark", {"item": item.id, "status": "feltöltve", "platform": "jofogas",
                                                           "url": "https://www.jofogas.hu/x_1.htm"}),
                                  reply("Fent van a Jófogáson.")]
         self.app.run_work({"action": "post", "ids": [item.id], "platform": "jofogas"})
@@ -999,6 +1266,30 @@ class SellFlowTests(unittest.TestCase):
         result = self.app.toolbox.call("item_post", {"item": item.id, "platform": "vinted"})
         self.assertTrue(result.startswith("HIBA"))
         self.assertIn("cím, leírás, ár, fotó", result)
+        # a feltöltés első lépését a Jarvis végzi: ha nem megy, a modell el sem indul, a hiba a kártyára kerül
+        self.app.run_work({"action": "post", "ids": [item.id], "platform": "vinted"})
+        entry = self.store.get(item.id).platforms["vinted"]
+        self.assertEqual(entry["status"], FAILED)
+        self.assertTrue(entry["note"].startswith("A feltöltéshez még hiányzik: cím, leírás, ár, fotó."), entry["note"])
+        self.assertEqual(self.fake.chat_bodies(), [], "egy modellkör sem kellett")
+        self.assertEqual(self.ui.of("assistant_end")[-1][1], entry["note"], "mintha a modell mondta volna")
+
+    def test_delist_starts_on_the_opened_listing(self):
+        item = self.ready_item(["jofogas"])
+        self.store.mark(item.id, "jofogas", POSTED, url=self.pages.url("fooldal.html"))
+
+        def delete(body):
+            assert [m["role"] for m in body["messages"]] == ["system", "user"], body["messages"]
+            first = body["messages"][-1]["content"]
+            assert "Az item_delist lépést már elvégeztem" in first, first
+            assert "Megnyitottam a hirdetést: " + self.pages.url("fooldal.html") in first, first
+            return 200, tool_reply("item_mark", {"item": item.id, "status": "nincs fent", "platform": "jofogas"})
+
+        self.fake.chat_script = [delete, reply("Levettem a Jófogásról.")]
+        self.app.run_work({"action": "delist", "ids": [item.id], "platform": "jofogas"})
+        self.assertEqual(self.fake.chat_script, [])
+        entry = self.store.get(item.id).platforms["jofogas"]
+        self.assertEqual((entry["status"], entry.get("note")), (NOT_POSTED, "Levéve"))
 
     def test_queued_work_shows_on_the_card(self):
         item = self.new_item(["vinted"])
