@@ -951,6 +951,18 @@ class BrowserController:
             return []
         return [str(text) for text in found or [] if text]
 
+    def headline(self) -> tuple[str, str]:
+        """Az aktív lap címe és első látható címsora (pl. „Hirdetésed feltöltve”): a közzététel eredményéhez."""
+        page = self._ensure()
+        try:
+            found = page.evaluate("() => [document.title, ((Array.from(document.querySelectorAll("
+                                  "'h1, h2, [role=heading]')).find((h) => h.offsetParent !== null) || {})"
+                                  ".innerText || '').slice(0, 200)]")
+        except Exception:  # noqa: BLE001 - épp navigál az oldal
+            return "", ""
+        title, heading = (list(found or []) + ["", ""])[:2]
+        return " ".join(str(title or "").split()), " ".join(str(heading or "").split())
+
     def challenged(self) -> bool:
         """Robot-ellenőrzést (captcha) vagy robotvédelmi köztes oldalt mutat-e az aktív lap."""
         page = self._ensure()

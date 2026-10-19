@@ -1492,7 +1492,8 @@ class JarvisApp:
         """A begyakorolt lépések visszajátszása modell nélkül.
 
         Visszaad: True (sikerült), False (nem sikerült, vagy nem engedélyezted), vagy None, ha a
-        közzététel ELŐTT elakadt (akkor a modell csinálja végig, és közben újratanulja)."""
+        közzététel ELŐTT, még az űrlap kitöltése előtt elakadt (akkor a modell csinálja végig, és közben
+        újratanulja). Ha az űrlapot már részben kitöltötte, a modell a nyitott oldalon folytatja."""
         assert self.work is not None and self.work_assistant is not None
         work = self.work
         item = work.store.get(item_id)
@@ -1512,9 +1513,22 @@ class JarvisApp:
         if outcome.status in ("no_plan", "miss"):
             work.current = None
             if outcome.status == "miss":
-                self._dossier(item_id, key, task, outcome.reason, "begyakorolt lépések", url=outcome.url)
+                self._dossier(item_id, key, task, outcome.reason, "begyakorolt lépések", url=outcome.url,
+                              kitoltes=outcome.log)
             self.ui.info(f"A begyakorolt lépések most nem jók ({outcome.reason}), végiggondolom.")
             return None
+        if outcome.status == "partial":
+            # Félúton akadt el (pl. egy elem nincs meg, és a javítás sem sikerült): a fotók és a kész mezők
+            # maradnak, a modell a nyitott űrlapon folytatja, nem kezdi elölről.
+            self._dossier(item_id, key, task, outcome.reason, "begyakorolt lépések", url=outcome.url,
+                          kitoltes=outcome.log)
+            self.ui.info(f"A begyakorolt lépések nem vittek végig ({outcome.reason}); a hiányzót a modell pótolja.")
+            try:
+                page = self.toolbox.browser.snapshot()
+            except BrowserError as exc:
+                page = f"(Az oldalnézet nem készült el: {exc})"
+            return self._model_post(item_id, key, work.continue_request(item, key, outcome, page),
+                                    shown=f"Folytatás: {item.name} → {site.name}")
         if outcome.status == "declined":
             if task == "post":
                 return work.finish_post(item_id, key, "Nem engedélyezted a közzétételt.")
@@ -1531,7 +1545,8 @@ class JarvisApp:
             return ok
         # Bizonytalan: a közzététel (törlés) megtörtént, de nem látszik egyértelműen az eredmény.
         # Újrakezdeni nem szabad (kétszer kerülne fel), ezért a modell megnézi az oldalt.
-        self._dossier(item_id, key, task, outcome.reason, "begyakorolt lépések (bizonytalan)", url=outcome.url)
+        self._dossier(item_id, key, task, outcome.reason, "begyakorolt lépések (bizonytalan)", url=outcome.url,
+                      kitoltes=outcome.log)
         return self._check_after(item_id, key, task, outcome)
 
     def _check_after(self, item_id: str, key: str, task: str, outcome: Any,

@@ -211,8 +211,8 @@ class DossierFlowTests(ReplayHarness, unittest.TestCase):
         self.assertEqual(self.work.dossiers.names(), [], "ami sikerült, arról nem készül csomag")
         self.site.write("urlap.html", form("Hirdetés címe", "cim"))   # megváltozott az oldal
         second = self.item(title="H&M fehér póló, M", price=700, brand="H&M")
-        self.fake.chat_script = [tool_reply("item_post", {"item": second.id, "platform": "vinted"}),
-                                 reply("Most nem sikerült, mert hiányzik egy mező.")]
+        # A javító kérdésre a modell sem tud jobbat (0), ezért a nyitott űrlapon ő folytatja.
+        self.fake.chat_script = [reply('{"choice": 0}'), reply("Most nem sikerült, mert hiányzik egy mező.")]
         self.app.run_work({"action": "post", "ids": [second.id], "platform": "vinted"})
         names = self.work.dossiers.names()
         self.assertEqual(len(names), 2, "egy a begyakorolt lépésekről, egy a modellről")
