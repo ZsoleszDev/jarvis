@@ -224,8 +224,8 @@ stale_days = 14
 # Naponta ennyi fent lévő hirdetésed oldalát nézi meg (csak olvasva, emberi tempóban): elkelt-e vagy
 # eltűnt-e valahol; ha igen, szól, és felajánlja a levételt a többi oldalról (0 = soha)
 listing_checks = 5
-# Ilyen sűrűn (percenként) nézi meg a vevői üzeneteidet a Vinteden, csak olvasva, emberi tempóban; ha új
-# jött, szól. Válaszvázlatot csak kérésre ír, és elküldeni csak a te jóváhagyásoddal küld (0 = soha)
+# Ennyi percenként nézi meg a vevői üzeneteidet a Vinteden, csak olvasva, emberi tempóban; ha új jött,
+# szól. Válaszvázlatot csak kérésre ír, üzenetet csak a te jóváhagyásoddal küld (0 = soha)
 message_minutes = 120
 # Egy körben legfeljebb ennyi olvasatlan beszélgetést nyit meg (a többi a következő körre marad)
 message_reads = 3

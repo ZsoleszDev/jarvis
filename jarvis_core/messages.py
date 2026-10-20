@@ -214,6 +214,9 @@ _BOX_RE = re.compile(r"(uzenet|message|irj|write|reply|valasz|chat|type)")
 _TEXT_KINDS = {"textarea", "textbox", "input:text"}
 # Pénz szava egy tagmondatban (ékezet nélkül): „3000 Ft”, „forint”, „3000-ért”, „ezer”.
 _MONEY_RE = re.compile(r"\d\s*(ft|huf|eur)\b|forint|(-|\d)ert\b|ezer|\bft\b")
+# Elfogadó szavak (ékezet nélkül), és ami egy szám után nem ár: mértékegység vagy más rag (az ár ragjai: -ra, -at…).
+_ACCEPT_RE = re.compile(r"\b(legyen|mehet|rendben|oke|ok|okes|elfogad\w*|jo lesz|megegyez\w*|odaadom|alku|deal)\b")
+_UNIT_AFTER_RE = re.compile(r"\s*-?(?!(?:ra|re|at|et|ert|ig)\b)[a-z]")
 _SEND_RE = re.compile(r"^(kuldes|elkuldes|kuld|elkuld|kuldd el|uzenet kuldese|valasz kuldese|send|send message|"
                       r"send reply)$")
 
@@ -297,9 +300,12 @@ def match_item(items: list[Item], platform: str, links: list[dict[str, Any]], he
 
 
 def minimum_price(item: Item | None) -> int | None:
-    """A legkisebb elfogadható ár: a tárgy min_price mezője, ha megadtad, különben az ára (alku nélkül)."""
+    """A legkisebb elfogadható ár: a tárgy min_price mezője, ha megadtad (legfeljebb az ára), különben az ára (alku
+    nélkül)."""
     if item is None:
         return None
+    if item.min_price and item.price:
+        return min(item.min_price, item.price)
     return item.min_price or item.price
 
 
@@ -328,14 +334,28 @@ def item_facts(item: Item | None, settings: dict[str, Any], platform: str = "") 
     return "\n".join(lines)
 
 
-def below_minimum(reply: str, minimum: int, facts: str = "") -> bool:
-    """Van-e a vázlatban a legkisebb elfogadható árnál kisebb összeg (egy ajánlat vagy elfogadás): egy tagmondatban
-    pénz szava mellett („3000 Ft”, „3000-ért”, „három és fél ezer”). Ami a tárgy adataiban is szerepel (pl. a szállítás
-    díja), a 100 alatti szám, és a pénz nélküli szám (méret, teljesítmény, évszám) nem számít."""
+def _bare_amounts(folded: str) -> list[int]:
+    """A számjegyekkel írt összegek egy (ékezet nélküli) tagmondatban, amik után nem mértékegység vagy más rag jön
+    („3500”, „3 500”, „3500-ra”, „3500-at”; nem: „1000 W”, „38-as”, „2024-ben”)."""
+    return [int(re.sub(r"\D", "", m.group())) for m in re.finditer(r"\d[\d .]*\d|\d", folded)
+            if not _UNIT_AFTER_RE.match(folded, m.end())]
+
+
+def below_minimum(reply: str, minimum: int, facts: str = "", offer: str = "") -> bool:
+    """Van-e a vázlatban a legkisebb elfogadható árnál kisebb összeg (egy ajánlat vagy elfogadás) egy tagmondatban:
+    pénz szava mellett („3000 Ft”, „3000-ért”, „három és fél ezer”), egy elfogadó szó mellett puszta számként
+    („legyen 3500”, „mehet 3500-ra”), vagy a vevő ajánlata (offer: a vevő üzenetei) megismételve. Ami a tárgy adataiban
+    is szerepel (pl. a szállítás díja), a 100 alatti szám, és a pénz nélküli szám (méret, teljesítmény, évszám) nem
+    számít."""
     allowed = set(hu_amounts(facts))
-    for clause in re.split(r"[.;!?\n]+|,\s", reply or ""):
-        if _MONEY_RE.search(fold(clause)) and any(100 <= amount < minimum and amount not in allowed
-                                                  for amount in hu_amounts(clause)):
+    offered = {amount for amount in hu_amounts(offer) if 100 <= amount < minimum} - allowed
+    for clause in re.split(r"(?:(?<!\d)\.|\.(?!\d))+|[;!?\n]+|,\s", reply or ""):
+        folded = fold(clause)
+        low = {amount for amount in hu_amounts(clause) if 100 <= amount < minimum and amount not in allowed}
+        if low and (_MONEY_RE.search(folded) or low & offered):
+            return True
+        if _ACCEPT_RE.search(folded) and any(100 <= amount < minimum and amount not in allowed
+                                             for amount in _bare_amounts(folded)):
             return True
     return False
 
@@ -490,6 +510,9 @@ class MessageStore:
         régebbieket már láthattad az oldalon). Visszaadja a beszélgetést és az új vevői üzeneteket."""
         with self._lock:
             conv = self._get(conv_id)
+            if not messages:      # egy üres olvasás nem törli az eddigieket (lásd mark_retry)
+                return copy.deepcopy(conv), []
+            conv.pop("retry", None)
             old = conv["messages"]
             pool: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for message in old:
@@ -533,13 +556,23 @@ class MessageStore:
             self._commit([conv])
             return copy.deepcopy(conv), copy.deepcopy(fresh)
 
+    def mark_retry(self, conv_id: str) -> None:
+        """Megnyitottuk, de nem találtunk benne üzenetet: a következő körben újra megnézzük, akkor is, ha a lista már
+        olvasottnak mutatja (a megnyitástól az oldal annak jelöli)."""
+        with self._lock:
+            conv = self._get(conv_id)
+            if not conv.get("retry"):
+                conv["retry"] = True
+                self._commit([conv])
+
     def add_sent(self, conv_id: str, text: str, now: float) -> dict[str, Any]:
         """A Jarvis elküldte a válaszodat (és látszik a beszélgetésben): a vázlat helyén most már az üzenet."""
         with self._lock:
             conv = self._get(conv_id)
             conv["messages"] = (conv["messages"] + [{"from": ME, "text": text, "time": "", "at": now,
                                                      "jarvis": True}])[-MAX_MESSAGES:]
-            conv.update(snippet=text[:300], draft="", draft_note="", new=0, updated=now)
+            # a draft_at is változik, hogy a felület ne írja vissza a mezőbe az elküldött szöveget
+            conv.update(snippet=text[:300], draft="", draft_note="", draft_at=now, new=0, updated=now)
             self._commit([conv])
             return copy.deepcopy(conv)
 
@@ -669,8 +702,8 @@ class MessageDesk:
         if not rows:
             return f"{site.name}: nem találtam beszélgetést."
         convs = self.store.merge_list(key, rows, self.clock())
-        unread = [conv for conv in convs if conv["unread"]][:limit]
-        read = fresh_count = 0
+        unread = [conv for conv in convs if conv["unread"] or conv.get("retry")][:limit]
+        read = fresh_count = empty = 0
         for conv in unread:
             check()
             browser.pace.think()      # a következő beszélgetés előtt, ahogy az ember is
@@ -684,7 +717,14 @@ class MessageDesk:
             links = [link for link in data.get("links") or [] if isinstance(link, dict)]
             item = match_item(self.items.all(), key, links, str(data.get("heading") or ""))
             listing = self._listing_link(item, key, links)
-            conv, fresh = self.store.merge_messages(conv["id"], page_messages(data), self.clock(),
+            messages = page_messages(data)
+            if not messages:
+                # nem ismertem fel az üzeneteket: az eddigieket nem írom felül, és a következő körben újra megnézem
+                # (az oldal közben már olvasottnak mutatja)
+                self.store.mark_retry(conv["id"])
+                empty += 1
+                continue
+            conv, fresh = self.store.merge_messages(conv["id"], messages, self.clock(),
                                                     item=item.id if item else "", listing=listing,
                                                     partner=str(data.get("heading") or ""))
             read += 1
@@ -692,7 +732,11 @@ class MessageDesk:
                 fresh_count += len(fresh)
                 self._notify(notify, conv, fresh, site)
         text = f"{site.name}: {len(rows)} beszélgetés, {read} olvasatlant elolvastam"
-        return text + (f", {fresh_count} új üzenet." if fresh_count else ".")
+        if fresh_count:
+            text += f", {fresh_count} új üzenet"
+        if empty:
+            text += f", {empty} beszélgetésben nem találtam üzenetet (legközelebb újra megnézem)"
+        return text + "."
 
     @staticmethod
     def _listing_link(item: Item | None, key: str, links: list[dict[str, Any]]) -> tuple[str, str] | None:
@@ -743,7 +787,8 @@ class MessageDesk:
             raise MessageError("A modell most nem írt vázlatot; próbáld újra.")
         note = ""
         minimum = minimum_price(item)
-        if minimum and below_minimum(reply, minimum, facts):
+        offer = "\n".join(m["text"] for m in conv["messages"][-DRAFT_HISTORY:] if m["from"] == THEM)
+        if minimum and below_minimum(reply, minimum, facts, offer):
             reply = DECLINE.format(price=format_price(minimum))
             note = (f"A modell vázlatában a legkisebb elfogadható áradnál ({format_price(minimum)}) kisebb összeg is "
                     "volt, ezért egy egyszerű, udvarias elutasítást írtam helyette. Küldés előtt nézd át.")

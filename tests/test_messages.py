@@ -96,6 +96,7 @@ class InboxSite:
         self.sent: list[tuple[str, str]] = []
         self.logged_in = True
         self.captcha = False
+        self.hide_messages = False      # a beszélgetés oldalán nincs felismerhető üzenet
         self.convs = conversations()
         self.lock = threading.Lock()
         site = self
@@ -183,7 +184,7 @@ class InboxSite:
                 bubbles = "".join(
                     f'<div class="message message--{"own" if who == ME else "them"}">'
                     f'<p class="message__text">{html.escape(text)}</p><time>{when}</time></div>'
-                    for who, text, when in conv["messages"])
+                    for who, text, when in conv["messages"]) if not self.hide_messages else ""
             link = f'<a class="item-link" href="{conv["item"][0]}">{html.escape(conv["item"][1])}</a>' if conv["item"] else ""
             box = ('<form class="composer" onsubmit="return false"><textarea id="reply" aria-label="Írj üzenetet">'
                    '</textarea> <button type="button" id="send">Küldés</button></form>' if conv["box"] else
@@ -275,6 +276,8 @@ class HelperTests(unittest.TestCase):
             self.assertEqual((item.min_price, minimum_price(item)), (4000, 4000))
             self.assertNotIn("min_price", item.edited)
             self.assertIsNone(minimum_price(None))
+            item = store.update(item.id, user=True, min_price="6 000 Ft")
+            self.assertEqual(minimum_price(item), 5000, "a legkisebb elfogadható ár legfeljebb az ár")
         self.assertTrue(below_minimum("Rendben, 3500 Ft-ért odaadom.", 4000))
         self.assertTrue(below_minimum("Legyen 3 és fél ezer.", 4000))
         self.assertFalse(below_minimum("Sajnos ennyiért nem adom, 4 000 Ft a legkevesebb.", 4000))
@@ -282,6 +285,12 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(below_minimum("A Foxpost 1290 Ft, a 38-as méret pontos.", 4000, "Szállítás: Foxpost 1290 Ft"),
                          "a szállítás díja és a méret nem árajánlat")
         self.assertFalse(below_minimum("Igen, 1000 W-os, és 2024-ben vettem.", 40000), "pénz nélküli számok")
+        for draft in ("Oké, legyen 3500.", "Mehet 3500-ra.", "Elfogadom a 3500-at."):
+            self.assertTrue(below_minimum(draft, 4000), f"puszta szám elfogadó szóval: {draft}")
+        self.assertFalse(below_minimum("Rendben, 2024-ben vettem, és 38-as.", 40000), "évszám és méret")
+        self.assertTrue(below_minimum("Jó, akkor 3500 és viheted.", 4000, offer="Odaadnád 3500-ért?"),
+                        "a vevő ajánlata megismételve")
+        self.assertFalse(below_minimum("Rendben, 4.500 Ft.", 4000), "a pont az ezres tagolás, nem mondatvég")
 
 
 class StoreTests(unittest.TestCase):
@@ -498,6 +507,22 @@ class InboxReadingTests(unittest.TestCase):
         self.assertEqual(self.notices[-1][2].split(": „")[1].split("”")[0], "Na, mi legyen?")
         self.assertEqual(self.desk.store.get(kata["id"])["new"], 2)
         self.assertEqual(self.site.posts(), [])
+
+    def test_a_conversation_without_recognised_messages_keeps_its_history(self):
+        self.desk.run(3, notify=self.notify)
+        kata = next(c for c in self.desk.conversations() if c["partner"] == "kata_88")
+        self.site.write("111111", "Na, mi legyen?")
+        self.site.hide_messages = True
+        result = self.desk.run(3, notify=self.notify)
+        self.assertIn("1 beszélgetésben nem találtam üzenetet", result)
+        self.assertEqual(len(self.desk.store.get(kata["id"])["messages"]), 3, "az eddigieket nem törli")
+        self.assertEqual(len(self.notices), 2)
+        self.site.hide_messages = False
+        self.site.hits.clear()
+        self.desk.run(3, notify=self.notify)
+        self.assertEqual(self.site.opened(), ["/inbox/111111"], "újra megnézi, pedig az oldal már olvasottnak mutatja")
+        self.assertEqual(self.desk.store.get(kata["id"])["messages"][-1]["text"], "Na, mi legyen?")
+        self.assertEqual(len(self.notices), 3)
 
     def test_at_most_n_conversations_per_run(self):
         self.desk.run(1, notify=self.notify)
