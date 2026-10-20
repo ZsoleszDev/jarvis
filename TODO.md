@@ -1,31 +1,51 @@
-# TODO – böngészés/feltöltés gyorsítás (félbemaradt munka)
+# TODO – Adás/Vétel
 
-## Kész (az ágon, összefésülve, tesztelve)
-- vinted.py: Vinted-levétel modell nélkül (VintedDelister), a feltöltés a hirdetés saját címét jegyzi meg.
-- browser.py (oldalnézet): rövidebb nézet (~40%), állandó elemszámok, `*` új elemek, csoportok, állapotok, hibaüzenetek, ár a hirdetéslink mellett, shadow DOM.
-- browser.py (műveletek): MutationObserver-alapú gyors megnyugvás, reklám/analitika nem tartja fel, mezők fajta szerint, `browser_choose`, `browser_do`, fül-takarítás.
-- tools.py / work.py / app.py: az új eszközök regisztrálva, a Munka menü is látja őket; régi scan-számok navigáció után érvénytelenek.
+## Kész (ezen az ágon, összefésülve, tesztelve)
+- Vinted-feltöltés és -levétel modell nélkül; gyorsabb oldalnézet, `browser_choose`, `browser_do`.
+- A négy félbemaradt csomag (loop, replay, flow, trade) összefésülve, a `wip-patches/` mappa törölve.
+- Magyar ár mindenhol („ötezer”, „4,5 ezer”, „3 és fél ezer”), a tárgy szavai a böngészőnek (hosszú listák), elakadásfigyelés, tömörítés az első üzenet oldalnézetére is.
+- Felület: ár- és címelcsúszás, háttérellenőrzés eredménye, „Nem igaz, fent van” (csak ugyanarra a jelre), az árkutatás részletei, „N napja fent”.
+- Értesítésből egy gombnyomásos levétel (asztali Értesítések ablak, Web Push, Android) – mindig a megerősítő ablakon át.
+- Vevői üzenetek: olvasás modell nélkül, válaszvázlat a tárgy adataiból, legkisebb elfogadható ár, küldés csak jóváhagyással.
+- Fotóellenőrzés: homályos, sötét, túl világos, ellenfényes, kicsi, ismétlődő (a tárgyon belül és más tárgynál), borítójavaslat.
 
-## Félbemaradt (a `wip-patches/` mappában, f32b6d7-hez képest; még NINCS összefésülve)
-- loop.patch: gyorsítótár-barát tömörítés, eszközprofilok, num_predict, munka-hőmérséklet, melegítés módonként, elakadásfigyelés, kép a beszélgetésben (kész, saját ágán tesztelve).
-- replay.patch: await_publish, felvétel-normalizálás, lépésjavítás, új értékek választása, űrlapcím megjegyzése (kész, saját ágán tesztelve).
-- flow.patch: extract-once, publish gap a közzététel gomb előtt, fotólimit, posted_at, item_post előre (WIP, magyar árszám-értelmezés hiányzik).
-- trade.patch: árkutatás előszűrés/statisztika, eladott/eltűnt hirdetés háttérellenőrzés, árelcsúszás (WIP, UI-rész félkész).
-- Következő lépés: `git apply --3way wip-patches/loop.patch` (majd replay, flow, trade), ütközések feloldása (app.py, work.py, browser.py), utána `python -m pytest tests -q`.
+## Élesben kipróbálandó
+- A Vinted üzenetoldala: a beszélgetések és üzenetek felismerése általános szabályokkal megy, a valódi oldalon nincs kipróbálva. Ha „nem találtam beszélgetést / üzenetet” jön, egy hibacsomag vagy az oldal HTML-je kell.
+- Az Android-módosítások (értesítés gombja → Eladva ablak) itt nem fordultak le: a GitHub Actions fordítását meg kell nézni.
+- A fotóküszöbök valódi telefonos fotókon (főleg: világos tárgy fehér háttér előtt, gyenge fény).
+
+## Kisebb javítások (ismertek, nem sürgősek)
+### Begyakorolt lépések (replay.py)
+- A FlowRecorder egy kockázatos jelölőnégyzetet (feltételek elfogadása) még közzétételnek vesz; a `check` jelzést a receptbe is át kell vinni.
+- A lista következő szintjének javítására (összevont azonos feliratok) nincs külön teszt.
+- Az OPTION_KINDS bővítése a hiányzó lépés javításának jelöltjeit is bővíti: tesztelni.
+- A `_human_click` saját Escape-jét nem jegyzi fel „press” lépésként.
+### Ár és munka
+- `parse_price`: nagyon hosszú számjegysor OverflowError-t ad ItemError helyett; a „másfél” magában 2 Ft; a tárgyszerkesztőben a furcsa összeg visszakérdezés nélkül mentődik.
+- `WorkDesk.approved`: a feltöltés közbeni bármely jóváhagyás (pl. jelölőnégyzet) beállítja.
+- Elakadásfigyelés: a feladat első üzenetében lévő oldalnézetnek nincs ujjlenyomata, az első hiábavaló lépést nem számolja.
+### Felület és értesítések
+- „Ott is átírtam” gomb az ár- és címelcsúszáshoz (most a jelzés addig marad, amíg vissza nem írod).
+- A „Nem igaz, fent van” után a régi `checked_at` marad; a captcha-értesítés gombja után a „jelentkezz be” üzenet jön, és a főoldal nyílik meg, nem a hirdetés.
+- Az értesítéslista betöltése közben érkező értesítés elveszhet a listából (versenyhelyzet).
+- „N napja fent” 24 órás ablakokkal számol, és nyitva hagyott oldalon nem frissül.
+- Android: a „login” értesítésgomb nincs megjelenítve; a telefonos API-ban nincs hozzá végpont. Az „eltűnt” értesítésnél nincs „Már levettem” gomb.
+### Vevői üzenetek (messages.py)
+- Ha az oldal csak a legutóbbi üzeneteket mutatja, és nincs átfedés a mentettekkel, a régebbiek elvesznek.
+- A máshol (pl. a Vinted appban) már elolvasott beszélgetést nem nyitja meg újra; a lista megváltozott előnézete is jelezhetné.
+- A legkisebb ár alatti vázlat helyett mindig ugyanaz a magyar elutasítás jön, akkor is, ha a vevő nem alkudott, vagy más nyelven írt.
+- A fejléc/lábléc kiszűrése elrejtheti a láblécben lévő válaszmezőt; tesztoldal kell rá.
+- Teszt hiányzik: `confirm_risky = false` ág, Állj a jóváhagyás alatt, a küldés után meg nem jelenő üzenet.
+- A küldés eredménye ugyanolyan fajta értesítés (`message`), mint egy új vevői üzenet.
+- A `min_price` nem látszik és nem állítható a Munka-beszélgetés eszközeiből (item_get, item_update).
+### Fotók (photos.py)
+- Két külön elkészített, nagyon hasonló fotót (kicsit elmozdult kamera) nem ismer fel ismétlődőnek.
+- Egy hibás, de mostani változatú mentett mérés a `report()`-ban hibát dobhat (a `sharp` nem szám).
+- Indításkor a tárgyak közti összevetés O(P²); sok fotónál a háttérszálba kellene tenni, vagy vödrökre bontani.
 
 ## Ismert hibák / átmeneti
-- A teljes tesztcsomag az összefésülés után nem futott; a böngésző-, Vinted-, replay- és Munka-tesztek átmentek.
-- `BrowserController.hints` még nincs beállítva (a flow-nak kellene a tárgy szavaival).
-- README nincs frissítve az új eszközökkel; a wip-patches mappát az összefésülés után törölni kell.
-
-## Tervek (sorrendben)
-1. A négy patch összefésülése és teljes tesztsor.
-2. Magyar ár-értelmezés (számszavak, „4,5 ezer”), árelcsúszás jelzése a felületen.
-3. Eladás-felismerés után egy gombnyomásos levétel a többi oldalról.
-4. Vevői üzenetek olvasása (csak olvasás), válaszvázlat jóváhagyással.
-5. Fotóminőség- és duplikátum-ellenőrzés.
+- `tests.test_creative.test_a_story_from_an_idea` néha elbukik (a régi commiton is), nem a kereskedés része.
 
 ## Döntések
-- Emberi tempó és jóváhagyások érintetlenek; csak a nem emberi várakozást (polling, felesleges nézet) vágtuk.
-- A Vinted 2026 őszétől állítólag szigorúbban tiltja a botokat (nem hivatalos források) – kockázat, alacsony gyakoriság.
-- Munkacsomagok külön ágon készültek; a keretkorlát miatt patchként mentve, mert más ágra nem pusholtunk.
+- Emberi tempó és jóváhagyások érintetlenek; közzététel, törlés és üzenetküldés csak jóváhagyással.
+- A Vinted 2026 őszétől állítólag szigorúbban tiltja a botokat (nem hivatalos források) – kockázat, ezért alacsony gyakoriság (hirdetésellenőrzés naponta, üzenetek kétóránként, csak olvasva).
