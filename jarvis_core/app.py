@@ -1497,6 +1497,8 @@ class JarvisApp:
             return
         if step.text:
             self.ui.notice(step.text)
+        if step.note:      # a fotókról: csak szól, a feltöltés megy tovább
+            self.ui.notice(step.note)
         self._post_all(item_id)
 
     def _reply(self, item_id: str, text: str, via: str) -> None:

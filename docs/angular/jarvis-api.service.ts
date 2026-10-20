@@ -72,6 +72,18 @@ export interface EventsResponse { ok: boolean; events: JarvisEvent[]; last: numb
 
 export interface PlatformState { status: PlatformStatus; at: number; url?: string; note?: string; }
 
+/** A fotóellenőrzés jelzése (modell nélkül, csak jelzés: a feltöltést nem állítja meg). */
+export type PhotoWarningKind =
+  | 'blurry' | 'dark' | 'bright' | 'clipped' | 'small'   // homályos, sötét, túl világos, ellenfényes, kicsi
+  | 'duplicate'                                          // majdnem ugyanaz, mint a tárgy egy másik fotója
+  | 'elsewhere';                                         // ugyanez a fotó egy másik tárgynál is megvan
+export interface PhotoWarning { kind: PhotoWarningKind; text: string; }
+/** A felvételkor mért értékek (a régebbi tárgyaknál indítás után a háttérben készülnek el). */
+export interface PhotoCheck {
+  v: number; w: number; h: number; sharp: number; mean: number; p05: number; p95: number;
+  white: number; black: number; rgb: number[]; hash: string; detail: string;
+}
+
 export interface WorkItem {
   id: string; name: string; status: ItemStatus; created: number; updated: number;
   photos: string[]; targets: string[]; prompt: string; research_wanted: boolean;
@@ -81,6 +93,10 @@ export interface WorkItem {
   edited: string[]; platforms: Record<string, PlatformState>;
   pending: { kind?: 'info' | 'price'; question?: string; suggested?: number };
   research: Record<string, unknown>; verdict: string; sold: boolean; busy: string;
+  photo_checks: Record<string, PhotoCheck>;
+  photo_warnings: Record<string, PhotoWarning[]>;   // fotó → jelzések (csak amelyikkel gond van)
+  photo_cover: string;   // ha az első fotóval gond van: a javasolt borító (reorderPhotos(id, [photo_cover])), különben ''
+  photo_note: string;    // rövid összefoglaló („A 3. fotó homályosnak tűnik; …”), '' ha minden rendben
 }
 
 export interface Platform { key: string; name: string; research: boolean; }

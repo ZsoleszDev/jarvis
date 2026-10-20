@@ -10,7 +10,8 @@ Egy eladás menete (a JarvisApp az ágens-szálon futtatja, lásd app.run_work):
   4. sorban feltölti minden kiválasztott oldalra a saját böngészőjében (ehhez a Munka menü
      saját beszélgetése és eszközei kellenek), a közzététel előtt mindig rákérdez. Ugyanazon az
      oldalon két közzététel között pár perc szünetet tart: ezt a közzététel gombja előtt várja ki,
-     az űrlapot addigra kitölti, és amelyik oldalon épp nem kell várni, az jön előbb.
+     az űrlapot addigra kitölti, és amelyik oldalon épp nem kell várni, az jön előbb. Ha egy fotó
+     homályos, sötét vagy majdnem ugyanaz, mint egy másik (photos.py), az elején szól, de nem áll meg.
 """
 from __future__ import annotations
 
@@ -170,6 +171,7 @@ def interpret_price_reply(text: str, confirming: bool = False) -> str | int | No
 class Step:
     kind: str          # "ask" (visszakérdez), "price" (árdöntésre vár), "post" (mehet a feltöltés)
     text: str = ""
+    note: str = ""     # a fotókról, a feltöltés elején (csak jelzés: a feltöltés ettől megy tovább)
 
 
 class WorkDesk:
@@ -294,7 +296,8 @@ class WorkDesk:
     # --- az eladás lépései (az ágens-szálon) ------------------------------------------------------
 
     def prepare(self, item_id: str, progress: Callable[[str], None]) -> Step:
-        """Adatok a leírásból, hiányzó adatok, árellenőrzés. Megmondja, mi a következő lépés."""
+        """Adatok a leírásból, hiányzó adatok, árellenőrzés. Megmondja, mi a következő lépés (feltöltésnél a
+        fotókról egy rövid jelzéssel, ha valamelyikkel gond van)."""
         item = self.store.get(item_id)
         if not item.targets:
             raise ItemError("Pipáld be, hova töltsem fel.")
@@ -318,16 +321,23 @@ class WorkDesk:
                                                 only=item.targets)
             except ItemError as exc:   # az árkutatás csak ajánlás: ha nem megy, attól még feltöltjük
                 self.store.set_pending(item_id, None)
-                return Step("post", f"Az árkutatás nem sikerült ({exc}), marad az árad.")
+                return Step("post", f"Az árkutatás nem sikerült ({exc}), marad az árad.", self.photo_note(item_id))
             verdict = price_verdict(item)
             if verdict.pause:
                 self.store.set_pending(item_id, {"kind": "price", "question": verdict.text,
                                                  "suggested": verdict.suggested})
                 return Step("price", verdict.text)
             self.store.set_pending(item_id, None)
-            return Step("post", verdict.text)
+            return Step("post", verdict.text, self.photo_note(item_id))
         self.store.set_pending(item_id, None)
-        return Step("post")
+        return Step("post", note=self.photo_note(item_id))
+
+    def photo_note(self, item_id: str) -> str:
+        """A fotókról egy rövid jelzés a feltöltés elejére (homályos, sötét, majdnem ugyanaz, egy másik tárgy
+        fotója), vagy üres, ha mind rendben van. A feltöltést nem állítja meg. Egy régebbi tárgynál előbb megméri
+        a fotókat (az ágens-szálon, csak ennek a tárgynak a fotóit)."""
+        note = self.store.ensure_checks(item_id).photo_report()["photo_note"]
+        return f"{note} Ettől még feltöltöm." if note else ""
 
     def answer(self, item_id: str, text: str) -> Item:
         """A visszakérdezésre adott válasz a leírás mellé kerül; a következő menet már ezzel számol (és a

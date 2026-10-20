@@ -161,6 +161,8 @@ Jarvis egyetlen modellhívással kiolvassa a mondatodból a hirdetés adatait (c
 
 A várost, a szállítást és a Vinted csomagméretét elég egyszer megadni az **Alapadatok és bejelentkezés** résznél; utána Jarvis onnan veszi, és nem kérdez rá. Ha egy hirdetésnél mást írsz (pl. „csak személyes átvétel Debrecenben”), az az erősebb.
 
+**Fotóellenőrzés.** A fotókat Jarvis a felvételkor modell nélkül megnézi: homályos-e, túl sötét, túl világos vagy ellenfényes, kicsi-e (a rövidebb oldala 600 px alatt), van-e két majdnem egyforma a tárgynál, és megvan-e ugyanez a fotó egy másik tárgyadnál is (ez többnyire tévedés). Amelyikkel gond van, annak az előnézetén egy **!** jelzi (az egér alatt kiírja, mi a baj), a kártyán is, a fotók alatt pedig egy rövid összefoglaló áll. Ha a borítóval (az első fotóval) van gond, javasol helyette egy élesebb, rendben lévőt; a **Legyen a 3. a borító** gombbal előre teszi, magától nem cserél. A feltöltés elején is szól („A 3. fotó homályosnak tűnik; a 2. és a 4. majdnem ugyanaz. Ettől még feltöltöm.”), de nem áll meg miatta. A küszöbök óvatosak: egy átlagos telefonos fotónál (sima vagy fehér háttér, sötét ruha, ugyanazon az ágyon lefotózott eleje és háta) nem szól. A korábban felvett tárgyak fotóit indítás után a háttérben nézi meg.
+
 **„Nézz utána, mennyiért adják máshol.”** Ha ezt is bepipálod, feltöltés előtt a kiválasztott oldalak keresőjében megnézi, mennyiért kínálnak hasonlót. Ha az árad jóval drágább (a hasonlók középértékénél 25%-kal többe kerül), megáll, és megkérdezi: „Maradjon a te árad, vagy legyen 4 500 Ft?”. Ez csak ajánlás: a **Marad** gombbal (vagy ha azt mondod, „maradjon”) a te áradon tölti fel; a **Legyen** gombbal, vagy ha egy összeget mondasz („legyen 4000”), azzal. Ha az árad rendben van, vagy olcsóbb, csak szól, és megy tovább.
 
 **A feltöltés.** Jarvis a saját böngészőablakában, a szemed előtt tölti ki a hirdetésfeladást: fotók, cím, leírás, kategória, márka, méret, állapot, ár, helyszín, szállítás (a Vinteden modell nélkül, lásd lent). A **közzététel** gomb előtt oldalanként egyszer rákérdez; a kérdés első sorában látod, melyik oldal, melyik tárgy és mennyiért. A végén szól, hol van fent, és hol nem sikerült. Ami nem sikerült (pl. be kellett volna jelentkezni), azt a kártyán ✕ jelzi; a hirdetés lapján olvasható, miért, és az **Újra** gombbal folytatja. Ha elakadt, az oldal sorában egy **Hibacsomag** gomb is van (lásd lent). Ha a közzétételt jóváhagytad, de a modell a végén nem jelölte meg a hirdetést (pl. félbemaradt a válasza), Jarvis még egyszer megnézeti vele az oldalt, és ha fent van, megjelöli; újra feltölteni ilyenkor nem kezdi, nehogy kétszer kerüljön fel.
@@ -576,6 +578,7 @@ jarvis_core/
   creative_templates.py a kész kalandok és karakterek, angolul és magyarul
   work.py              a Munka menü: az eladás és a levétel lépései, eszközök a Munka menü beszélgetéséhez
   selling.py           tárgyak, fotók, az oldalak és amit kérnek, adatok a leírásból, árkutatás
+  photos.py            fotóellenőrzés modell nélkül: homályos, sötét, kicsi és ismétlődő fotók
   replay.py            begyakorolt lépések: felvétel, recept, visszajátszás modell nélkül
   vinted.py            a Vinted űrlapjának kitöltése (a modell csak a kategóriát választja ki) és a levétel, modell nélkül
   humanize.py          emberi tempó a böngészőben: egérút, gépelési ritmus, szünetek

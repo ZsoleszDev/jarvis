@@ -7,7 +7,8 @@ sok idő lenne). Ha valami hiányzik ahhoz, amit a kiválasztott oldalak kérnek
 különben indulhat a feltöltés. Kérésre előtte megnézi, mennyiért kínálnak hasonlót.
 
 Egy tárgy egy mappa a munka mappában: item.json (az adatok), a fotók (01.jpg, 02.jpg…) és a
-kis előnézetek (thumbs/). A törölt tárgy a _torolt mappába kerül, így vissza lehet hozni.
+kis előnézetek (thumbs/). A törölt tárgy a _torolt mappába kerül, így vissza lehet hozni. A fotókat
+felvételkor modell nélkül megnézi (photos.py: homályos, sötét, kicsi, ismétlődő); ez csak jelzés.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable
 
+from . import photos as photocheck
 from .textutil import fold
 
 ITEM_ID_RE = re.compile(r"^[0-9a-f]{8}$")
@@ -159,6 +161,8 @@ class Item:
     created: float
     updated: float
     photos: list[str] = field(default_factory=list)
+    # fotónként a felvételkor mért élesség, fényesség, méret és hash (photos.py); a jelzés ebből készül
+    photo_checks: dict[str, dict[str, Any]] = field(default_factory=dict)
     targets: list[str] = field(default_factory=list)     # hova töltse fel
     prompt: str = ""                  # a leírásod, és ha visszakérdezett, a válaszaid
     research_wanted: bool = False     # nézzen utána, mennyiért adják máshol (csak ajánlás)
@@ -184,6 +188,11 @@ class Item:
     sold: bool = False
     reminded: float = 0.0             # mikor szólt utoljára, hogy régóta fent van és nem kelt el
     busy: str = ""                    # épp min dolgozik a Jarvis (nem mentjük)
+
+    def __post_init__(self) -> None:
+        # Fotó → [(másik tárgy, annak a fotója)], ahol ugyanez a fotó megvan. Az ItemStore tartja karban; nem
+        # mező, így nem kerül az item.json-ba, és az asdict sem járja be (a két tárgy egymásra mutat).
+        self.twins: dict[str, list[tuple[Item, str]]] = {}
 
     @property
     def name(self) -> str:
@@ -235,7 +244,14 @@ class Item:
         data["days_online"] = int((time.time() - since) // 86400) if since else None   # „12 napja fent”
         data["research_stale"] = bool(self.research.get("at")) and not research_fresh(self)
         data["drift"] = self.drift()
+        data.update(self.photo_report())
         return data
+
+    def photo_report(self) -> dict[str, Any]:
+        """A fotók jelzései (homályos, sötét, majdnem ugyanaz, egy másik tárgy fotója), a javasolt borító, ha az
+        elsővel gond van, és egy rövid összefoglaló (photos.report)."""
+        elsewhere = {name: [other.name for other, _ in twins] for name, twins in self.twins.items() if twins}
+        return photocheck.report(self.photos, self.photo_checks, elsewhere)
 
     def online_since(self) -> float | None:
         """Mióta van fent (a legkorábban felkerült oldalon, ahol most is fent van); None, ha sehol."""
@@ -257,6 +273,10 @@ class Item:
             values["prompt"] = str(data["notes"])
         values["busy"] = ""
         values["photos"] = [p for p in values.get("photos") or [] if isinstance(p, str) and PHOTO_RE.match(p)]
+        checks = values.get("photo_checks")    # a régebbi tárgyaknál nincs: a háttérben elkészül
+        values["photo_checks"] = ({name: check for name, check in checks.items()
+                                   if name in values["photos"] and isinstance(check, dict)}
+                                  if isinstance(checks, dict) else {})
         return cls(**values)
 
 
@@ -368,7 +388,11 @@ class ItemStore:
         self.platform_keys = list(platform_keys or PLATFORMS)
         self._lock = threading.RLock()
         self._items: dict[str, Item] = {}
+        self._check_failed: set[tuple[str, str]] = set()   # (tárgy, fotó): nem sikerült megmérni, nem próbálja újra
+        self._backfilling = False
         self._load()
+        self._relink()
+        self._start_backfill()
 
     def _load(self) -> None:
         for folder in sorted(self.root.iterdir()):
@@ -381,6 +405,7 @@ class ItemStore:
                 continue
             item.id = folder.name
             item.photos = [p for p in item.photos if (folder / p).is_file()]
+            item.photo_checks = {k: v for k, v in item.photo_checks.items() if k in item.photos}
             self._items[item.id] = item
 
     # --- belső -------------------------------------------------------------------------
@@ -401,12 +426,16 @@ class ItemStore:
         item.updated = time.time()
         if save:
             self._save(item)
+        self._announce(item)
+        return item
+
+    def _announce(self, item: Item) -> None:
+        """Szól a felületnek (az `updated` nem változik: pl. a fotójelzés miatt ne ez legyen a legutóbbi kérdés)."""
         if self.on_change is not None:
             try:
                 self.on_change(item.public())
             except Exception:  # noqa: BLE001 - a felület hibája ne rontsa el a mentést
                 pass
-        return item
 
     # --- lekérdezés ------------------------------------------------------------------------
 
@@ -595,11 +624,13 @@ class ItemStore:
     def delete(self, item_id: str) -> None:
         """A tárgy a _torolt mappába kerül (onnan kézzel visszahozható)."""
         with self._lock:
-            self.get(item_id)
+            gone = self.get(item_id)
             trash = self.root / "_torolt"
             trash.mkdir(exist_ok=True)
             shutil.move(str(self.folder(item_id)), str(trash / f"{item_id}-{int(time.time())}"))
             del self._items[item_id]
+            for other in self._relink(gone):     # akiknél ennek a fotója is megvolt
+                self._announce(other)
         if self.on_remove is not None:
             try:
                 self.on_remove(item_id)
@@ -624,6 +655,7 @@ class ItemStore:
 
     def add_photo(self, item_id: str, data: bytes) -> Item:
         full, thumb = process_photo(data)   # a lassabb rész zár nélkül
+        check = self._measure(full)
         with self._lock:
             item = self.get(item_id)
             if len(item.photos) >= self.max_photos:
@@ -635,19 +667,22 @@ class ItemStore:
             (folder / name).write_bytes(full)
             (folder / "thumbs" / name).write_bytes(thumb)
             item.photos.append(name)
-            return self._changed(item)
+            if check is not None:
+                item.photo_checks[name] = check
+            return self._relinked(item)
 
     def remove_photo(self, item_id: str, name: str) -> Item:
         with self._lock:
             path = self.photo_file(item_id, name)
             item = self.get(item_id)
             item.photos.remove(name)
+            item.photo_checks.pop(name, None)
             for file in (path, path.parent / "thumbs" / name):
                 try:
                     file.unlink()
                 except OSError:
                     pass
-            return self._changed(item)
+            return self._relinked(item)
 
     def reorder_photos(self, item_id: str, names: list[str]) -> Item:
         with self._lock:
@@ -656,6 +691,122 @@ class ItemStore:
             rest = [n for n in item.photos if n not in wanted]
             item.photos = list(dict.fromkeys(wanted)) + rest
             return self._changed(item)
+
+    # --- fotóellenőrzés (photos.py) --------------------------------------------------------------
+
+    @staticmethod
+    def _measure(data: bytes) -> dict[str, Any] | None:
+        try:
+            return photocheck.measure(data)
+        except Exception:  # noqa: BLE001 - csak jelzés: ha nem sikerül, a fotó attól még jó
+            return None
+
+    def _relink(self, only: Item | None = None) -> list[Item]:
+        """Megkeresi, melyik fotó van meg egy másik tárgynál is (a tárgyon belüli ismétlést a tárgy maga nézi):
+        mindegyikét (betöltéskor), vagy csak az `only` tárgy fotóiét, ha csak azok változtak (ha már törölve van,
+        eltünteti a rá mutatókat). Visszaadja a tárgyakat, ahol ez megváltozott (róluk szólni kell a felületnek)."""
+        entries = [(item, name, key) for item in self._items.values() for name in item.photos
+                   if (key := photocheck.key(item.photo_checks.get(name))) is not None]
+        if only is None:
+            pairs = [(a, a_name, b, b_name) for index, (a, a_name, a_key) in enumerate(entries)
+                     for b, b_name, b_key in entries[index + 1:] if a is not b and photocheck.same_key(a_key, b_key)]
+        else:
+            # a többiek közti párok maradnak (mindegyik kétszer van meg, egyszer elég), az `only` fotói újak
+            pairs = [(a, a_name, b, b_name) for a in self._items.values() if a is not only
+                     for a_name, twins in a.twins.items() for b, b_name in twins if b is not only and a.id < b.id]
+            pairs += [(only, name, b, b_name) for item, name, key in entries if item is only
+                      for b, b_name, b_key in entries if b is not only and photocheck.same_key(key, b_key)]
+        found: dict[str, dict[str, list[tuple[Item, str]]]] = {item_id: {} for item_id in self._items}
+        for a, a_name, b, b_name in pairs:
+            found[a.id].setdefault(a_name, []).append((b, b_name))
+            found[b.id].setdefault(b_name, []).append((a, a_name))
+        changed = []
+        for item in self._items.values():     # új szótár, nem helyben: a felület közben olvashatja
+            before = {(name, other.id, photo) for name, twins in item.twins.items() for other, photo in twins}
+            item.twins = found[item.id]
+            if before != {(name, other.id, photo) for name, twins in item.twins.items() for other, photo in twins}:
+                changed.append(item)
+        return changed
+
+    def _relinked(self, item: Item) -> Item:
+        """Egy tárgy fotói változtak: elmenti, és szól róla, meg azokról, akiknél emiatt változott a jelzés."""
+        others = [other for other in self._relink(item) if other is not item]
+        self._changed(item)
+        for other in others:
+            self._announce(other)
+        return item
+
+    def _unchecked(self, item: Item) -> list[str]:
+        return [name for name in item.photos if not photocheck.current(item.photo_checks.get(name))
+                and (item.id, name) not in self._check_failed]
+
+    def _check_item(self, item_id: str, relink: bool = True) -> bool:
+        """Megméri a tárgy még mérés nélküli fotóit (a mentett JPEG-ből, zár nélkül). Igaz, ha lett új mérés."""
+        with self._lock:
+            item = self._items.get(item_id)
+            todo = self._unchecked(item) if item is not None else []
+            folder = self.root / item_id
+        if not todo:
+            return False
+        measured: dict[str, dict[str, Any] | None] = {}
+        for name in todo:
+            try:
+                measured[name] = self._measure((folder / name).read_bytes())
+            except OSError:
+                measured[name] = None
+        with self._lock:
+            item = self._items.get(item_id)
+            if item is None:
+                return False
+            for name, check in measured.items():
+                if name not in item.photos:
+                    continue
+                if check is None:
+                    self._check_failed.add((item_id, name))
+                else:
+                    item.photo_checks[name] = check
+            if not any(measured.values()):
+                return False
+            try:
+                self._save(item)
+            except OSError:
+                pass
+            others = [other for other in self._relink(item) if other is not item] if relink else []
+            self._announce(item)
+            for other in others:
+                self._announce(other)
+            return True
+
+    def ensure_checks(self, item_id: str) -> Item:
+        """A tárgy fotóinak hiányzó mértékei most rögtön (pl. a feltöltés elején egy régebbi tárgynál); a többi
+        tárgyé a háttérben készül."""
+        self._check_item(item_id)
+        return self.get(item_id)
+
+    def _start_backfill(self) -> None:
+        """A régebbi (a fotóellenőrzés előtti) tárgyak fotóit a háttérben méri meg, hogy a felület ne várjon."""
+        with self._lock:
+            if self._backfilling or not any(self._unchecked(item) for item in self._items.values()):
+                return
+            self._backfilling = True
+        threading.Thread(target=self._backfill, name="jarvis-fotoellenorzes", daemon=True).start()
+
+    def _backfill(self) -> None:
+        try:
+            while True:
+                with self._lock:
+                    waiting = next((item.id for item in self._items.values() if self._unchecked(item)), None)
+                if waiting is None:
+                    break
+                self._check_item(waiting, relink=False)   # a tárgyak közti összevetés egyszer, a végén
+            with self._lock:
+                for other in self._relink():
+                    self._announce(other)
+        except Exception:  # noqa: BLE001 - pl. közben törölték a mappát: a következő indításkor újra próbálja
+            pass
+        finally:
+            with self._lock:
+                self._backfilling = False
 
 
 # --- az adatok a leírásból ----------------------------------------------------------------
