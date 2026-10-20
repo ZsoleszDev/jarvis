@@ -260,7 +260,11 @@ class DealHunter:
             done += 1
             rows, problems = self._collect(search, sites, check)
             errors += problems
-            for deal in self._candidates(search, rows):
+            candidates = self._candidates(search, rows)
+            if rows and search.get("_few"):
+                errors.append(f"„{search['query']}”: {search['_few']} hasonló hirdetés, ebből nem mondok szokásos árat "
+                              "(adj meg pontosabb vagy gyakoribb terméket)")
+            for deal in candidates:
                 check()
                 if opened < MAX_PAGES and not blocked:
                     opened += 1
@@ -284,7 +288,7 @@ class DealHunter:
             return "Most egyik keresés sem esedékes."
         text = f"{done} keresés: {found} olcsó hirdetés" if found else f"{done} keresés: nincs új olcsó hirdetés"
         if errors:
-            text += f" ({'; '.join(errors[:3])})"
+            text += f" ({'; '.join(errors[:4])})"
         return text + "."
 
     def _collect(self, search: dict[str, Any], sites: list[str],
@@ -302,6 +306,9 @@ class DealHunter:
             except BrowserError as exc:
                 errors.append(f"{site.name}: {str(exc).splitlines()[0][:120]}")
                 continue
+            if not listings:
+                errors.append(f"{site.name}: nem találtam árat a találati oldalon (nincs találat, ellenőrzést kér, "
+                              "vagy megváltozott az oldal)")
             for entry in listings[:MAX_PER_SITE]:
                 if entry.get("auction"):
                     continue          # a licit csak a mostani ajánlat, nem eladási ár
@@ -320,6 +327,7 @@ class DealHunter:
         kept = list(unique.values())
         stats = price_stats([r["price"] for r in kept])
         if not stats or stats["n"] < MIN_PRICES:
+            search["_few"] = len(kept)          # a kör összefoglalójához: kevés hasonló ár (lásd run)
             return []
         median = stats["median"]
         ceiling = median * (100 - int(search.get("discount") or DEFAULT_DISCOUNT)) / 100

@@ -136,8 +136,11 @@ class DealTests(unittest.TestCase):
         other = DealHunter(Path(self.tmp.name) / "keves", PLATFORMS, lambda: self.browser, self.llm)
         other.add_search("RTX 3060 Ti", ["hardverapro"], discount=20)
         other.set_enabled(True)
-        other.run(notify=self.notify)
+        result = other.run(notify=self.notify)
         self.assertEqual(self.notices, [], "kevés hasonló árból nem mond szokásos árat")
+        self.assertIn("„RTX 3060 Ti”: 4 hasonló hirdetés, ebből nem mondok szokásos árat", result, "és meg is mondja")
+        self.browser.results = []
+        self.assertIn("Hardverapró: nem találtam árat a találati oldalon", other.run(notify=self.notify, force=True))
 
     def test_searches_validate_and_a_broken_site_does_not_stop_the_rest(self):
         with self.assertRaises(DealError):
