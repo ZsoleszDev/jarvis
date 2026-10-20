@@ -73,6 +73,16 @@ SITE = {
 <body><p>Elküldve.</p></body></html>""",
     "lapok.html": """<!doctype html><html><head><meta charset="utf-8"><title>Lapok</title></head>
 <body><a href="/lapok.html" target="_blank">Következő lap</a></body></html>""",
+    # A Vinted hirdetésoldala: reklám és láthatatlan reCAPTCHA-keretek (rejtve, a jelvényben); ez nem captcha.
+    "hirdetes.html": """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Sinsay sárga trikó M</title></head>
+<body><h1>Sinsay sárga trikó M</h1><iframe src="/hirdetes-reklam" width="728" height="200" title="Hirdetés"></iframe>
+<iframe src="/recaptcha/enterprise/anchor?k=x&amp;size=invisible" width="256" height="60"></iframe>
+<iframe src="/recaptcha/api2/bframe?k=x" width="400" height="580" style="visibility: hidden"></iframe>
+<div class="grecaptcha-badge"><iframe src="/recaptcha/api2/anchor?k=x" width="256" height="60"></iframe></div>
+<iframe src="/captcha/check" width="0" height="0" style="display: none"></iframe>
+<p>695 Ft</p><button>Delete</button></body></html>""",
+    "captcha.html": """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Vinted</title></head>
+<body><h1>Sinsay sárga trikó M</h1><iframe src="/captcha/check" width="320" height="400"></iframe></body></html>""",
     # Kockázatos jelölőnégyzet (a feltételek elfogadása) a közzététel előtt, és egy csak Esc-re bezáródó lista.
     "feltetelek.html": """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Feltételek</title></head>
 <body><label><input type="checkbox" id="elfogad"> Megerősítem, hogy elfogadom a feltételeket</label>
@@ -1029,6 +1039,12 @@ class FormKindTests(unittest.TestCase):
         self.assertEqual([events[i] for i in presses], [{"do": "press", "key": "Escape"}],
                          "a nyitva maradt listát Esc-cel zárta be, és ez is a lépések között van")
         self.assertEqual(events[presses[0] - 1]["el"]["label"], "Kék")
+
+    def test_only_a_visible_captcha_counts(self):
+        self.browser.open(self.site.url("hirdetes.html"))
+        self.assertFalse(self.browser.challenged(), "reklám és láthatatlan reCAPTCHA: nem kér semmit")
+        self.browser.open(self.site.url("captcha.html"))
+        self.assertTrue(self.browser.challenged(), "egy látható captcha-keret igen")
 
     def test_a_risky_checkbox_clicked_directly_is_not_a_publish_either(self):
         events: list[dict] = []

@@ -44,6 +44,16 @@ _CHALLENGE_RE = re.compile(
     r"are you a robot|captcha|cf-chl|egy pillanat|ellenőrizzük, hogy|nem vagy robot|access denied",
     re.IGNORECASE)
 CHALLENGE_WAIT = 12.0      # ennyit vár, hogy a köztes oldal magától továbbengedjen
+# Egy captcha, amit tényleg meg kell oldani: látható, kattintható méretű captcha-keret. Sok oldal (a Vinted is)
+# láthatatlan reCAPTCHA-t vagy robotvédelmi keretet tölt be minden oldalon (rejtve, 0 vagy kis méretben, a sarokban
+# lévő jelvényben); az nem kér semmit, ezért az nem számít.
+CAPTCHA_FRAME_JS = r"""[...document.querySelectorAll('iframe')].some((f) => {
+    const src = f.getAttribute('src') || '';
+    if (!/captcha/i.test(src) || /size=invisible/i.test(src) || f.closest('.grecaptcha-badge')) return false;
+    const r = f.getBoundingClientRect(), s = getComputedStyle(f);
+    return r.width >= 150 && r.height >= 60 && s.visibility !== 'hidden' && s.display !== 'none'
+      && Number(s.opacity || 1) > 0.1 && r.right > 0 && r.bottom > 0 && r.left < innerWidth;
+  })"""
 RESTARTED_NOTE = ("A böngésző közben bezárult vagy összeomlott (pl. elfogyott a gép memóriája); újraindítottam, "
                   "az előző oldal már nincs nyitva.")
 # Ennél régebben indult, be nem fejezett adatkérésre nem várunk (pl. egy hosszan nyitva tartott kapcsolat,
@@ -745,7 +755,7 @@ LISTING_PAGE_JS = r"""
     if (labels.length >= 150) break;
   }
   return {title: document.title, url: location.href, text: parts.join(' ').slice(0, 4000), short, labels,
-          captcha: !!document.querySelector('iframe[src*="captcha" i]')};
+          captcha: """ + CAPTCHA_FRAME_JS + r"""};
 }
 """
 
@@ -1877,7 +1887,7 @@ class BrowserController:
         """Robot-ellenőrzést (captcha) vagy robotvédelmi köztes oldalt mutat-e az aktív lap."""
         page = self._ensure()
         try:
-            if page.evaluate("() => !!document.querySelector('iframe[src*=\"captcha\" i]')"):
+            if page.evaluate(f"() => {CAPTCHA_FRAME_JS}"):
                 return True
         except Exception:  # noqa: BLE001 - épp továbbirányít
             return False

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import web
-from .browser import DECLINED, BrowserError, is_risky, is_search_field
+from .browser import CAPTCHA_FRAME_JS, DECLINED, BrowserError, is_risky, is_search_field
 from .listings import _LOGIN_RE
 from .replay import norm_text
 from .selling import ON_SITE, POSTED, Item, ItemError, ItemStore, Platform, format_price, listing_key
@@ -104,7 +104,7 @@ INBOX_JS = r"""
     if (labels.length >= 150) break;
   }
   return {title: document.title, url: location.href, conversations: rows, labels,
-          captcha: !!document.querySelector('iframe[src*="captcha" i]')};
+          captcha: """ + CAPTCHA_FRAME_JS + r"""};
 }
 """
 
@@ -181,7 +181,7 @@ CONVERSATION_JS = r"""
   }
   const heading = root.querySelector('h1, h2, [role=heading]');
   return {title: document.title, url: location.href, heading: heading ? clean(heading.innerText).slice(0, 120) : '',
-          messages, links, typed, labels, captcha: !!document.querySelector('iframe[src*="captcha" i]')};
+          messages, links, typed, labels, captcha: """ + CAPTCHA_FRAME_JS + r"""};
 }
 """
 
