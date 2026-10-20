@@ -185,6 +185,12 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(again.tick(), "watches")
         self.assertTrue(self.make().status()["jobs"][0]["on"])
 
+    def test_a_job_can_say_what_it_is_doing(self):
+        scheduler = self.make(Job("deals", "Automata kereskedés", lambda: 1.0, self.job, note=lambda: "Pihen 14:05-ig"))
+        self.assertEqual(scheduler.status()["jobs"][0]["note"], "Pihen 14:05-ig")
+        broken = self.make(Job("deals", "Automata kereskedés", lambda: 1.0, self.job, note=lambda: 1 / 0))
+        self.assertEqual(broken.status()["jobs"][0]["note"], "", "a felirat hibája miatt nem áll le")
+
     def test_active_hours(self):
         def at(hour: int) -> float:
             return dt.datetime(2026, 10, 15, hour, 30).timestamp()

@@ -429,6 +429,8 @@
   let editingSearch = null;   // a keresés, amit az űrlapon szerkesztesz (Mentés: módosítás, nem új)
   let lookupQuery = "";       // Mennyit ér? (az árbázisban)
   let lookupResults = null;   // az utolsó keresés eredménye (null: még nem kerestél)
+  let journalDay = "";        // a napló melyik napja látszik ("" = ma)
+  let journalEntries = null;  // egy korábbi nap bejegyzései (null: a mai, a deals.journal-ból)
 
   // Egy keresés állapota: a szokásos ár (jóváhagyva, javaslat, kevés hasonló, felmérés a következő körben).
   function searchState(s) {
@@ -519,6 +521,14 @@
           ${esc(price(r.reference.p25))}–${esc(price(r.reference.p75))})` : `még nincs szokásos ár (${r.samples} ár, vagy nagyon szórnak)`}</small>
         ${r.speed_text ? `<small class="muted">${esc(r.speed_text)}</small>` : ""}</span></li>`).join("") || '<li class="muted">Ilyet még nem láttam.</li>'}</ul>`;
     const day = deals.day || [7, 23];
+    const b = deals.browse || { on: false, sites: [], min_profit: 5000, status: "" };
+    const laneRows = (deals.lanes || []).map((l) => `<li><span><b>${esc(l.name)}</b>${l.kind === "tanult" ? ' <small class="warn">tanult</small>' : ""}
+        <small class="muted">${l.pages} oldal · ${l.candidates} jelölt · ${l.deals} jó találat${l.bought ? ` · ${l.bought} megvett` : ""}</small></span></li>`).join("");
+    const hhmm = (t) => new Date(t * 1000).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit" });
+    const entries = (journalDay ? journalEntries : deals.journal) || [];
+    const journalRows = entries.map((e) => `<li><span><small class="muted">${esc(hhmm(e.at))}</small> ${esc(e.text)}</span></li>`).join("")
+      || '<li class="muted">Erre a napra még nincs bejegyzés.</li>';
+    const dayOptions = (deals.journal_days || []).map((d) => `<option value="${esc(d)}"${d === journalDay ? " selected" : ""}>${esc(d)}</option>`).join("");
     const edit = deals.searches.find((s) => s.id === editingSearch);
     const v = (key, fallback = "") => esc(edit && edit[key] != null ? edit[key] : fallback);
     const checked = (key) => !edit || (edit.sites || []).includes(key) ? "checked" : "";
@@ -528,6 +538,19 @@
         <input id="d-day-start" type="number" min="0" max="23" value="${esc(day[0])}" style="width: 3.5em"> órától
         <input id="d-day-end" type="number" min="1" max="24" value="${esc(day[1])}" style="width: 3.5em"> óráig megy</label>
         <button type="button" class="small" id="d-day">Mentés</button></div>
+      <h3 class="section-title">Böngészés napközben</h3>
+      <label class="check"><input type="checkbox" id="d-browse" ${b.on ? "checked" : ""}> <b>Napközben böngésszen</b> (a fenti órákban)</label>
+      <p class="muted">Ahogy egy ember: kb. 20 percig nézelődik egy oldalon (1–2 percenként egy oldal, néha megnyit egy
+        hirdetést), aztán pihen, és a következő oldal jön. A Vinteden a kezdőoldallal kezd, a Hardveraprón a felkapott
+        kategóriákat nézi (videókártya, memória, SSD, processzor, alaplap). A Vintedet legfeljebb kétóránként nézi, és ha egy
+        oldal robot-ellenőrzést kér, aznap már nem. A modellt csak kötegben kérdezi (energiatakarékos), és amint talál
+        valamit, amiből haszon lehet, szól. Tanul is: amelyik oldal többet hoz, azt gyakrabban nézi, a gyorsan kelő
+        termékeket külön figyeli, és amit kétszer elrejtesz, arról egy hónapig nem szól.</p>
+      <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-bsite" value="${esc(s.key)}" ${(b.sites || []).includes(s.key) ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>
+      <div class="row"><label>Legalább <input id="d-bprofit" type="number" min="0" value="${esc(b.min_profit)}" style="width: 6em"> Ft haszon</label>
+        <button type="button" class="small" id="d-bsave">Mentés</button></div>
+      ${b.on && b.status ? `<p><small>${esc(b.status)}</small></p>` : ""}
+      <details class="setup"><summary>Indulóoldalak, és mit hoztak eddig</summary><ul class="dealist">${laneRows}</ul></details>
       <p class="muted">Egy új keresésnél először felmérem, mennyiért adják most (egy modellhívás), és ha jóváhagyod, ahhoz
         az árhoz mérem a legújabb hirdetéseket, modell nélkül. Ami jóval olcsóbb, annak az oldalát is átnézem (elkelt-e,
         hibás-e, gyanús-e), és csak utána kérdezem meg a modellt. Csak olvasok: semmit nem veszek meg, és nem írok senkinek.
@@ -584,8 +607,28 @@
       </form>
       ${lookupRows}
       <h3 class="section-title">Olcsó hirdetések</h3>
-      <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>`;
+      <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>
+      <h3 class="section-title">Napló</h3>
+      <div class="row"><label>Nap <select id="d-jday"><option value="">Ma</option>${dayOptions}</select></label></div>
+      <ul class="dealist">${journalRows}</ul>`;
     $("d-enabled").addEventListener("change", (e) => dealAction({ action: "enable", on: e.target.checked }));
+    $("d-browse").addEventListener("change", async (e) => {
+      if (await dealAction({ action: "browse", on: e.target.checked }))
+        J.toast(e.target.checked ? "Rendben: napközben böngészem az oldalakat, és szólok, ha találok valamit." : "Kikapcsoltam a böngészést.");
+    });
+    $("d-bsave").addEventListener("click", async () => {
+      const sites = [...box.querySelectorAll('input[name="d-bsite"]:checked')].map((i) => i.value);
+      if (await dealAction({ action: "browse", sites, min_profit: $("d-bprofit").value })) J.toast("Mentve.");
+    });
+    $("d-jday").addEventListener("change", async (e) => {
+      journalDay = e.target.value;
+      journalEntries = null;
+      if (journalDay) {
+        const result = await J.postJson("/api/work/deals", { action: "journal", day: journalDay });
+        journalEntries = result.ok ? result.entries : [];
+      }
+      renderDeals();
+    });
     $("d-day").addEventListener("click", async () => {
       if (await dealAction({ action: "day", start: $("d-day-start").value, end: $("d-day-end").value }))
         J.toast("Rendben: az éjjel záruló licitekről még este szólok.");

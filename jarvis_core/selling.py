@@ -46,9 +46,17 @@ LISTING_FIELDS = ("product", "title", "description", "category", "gender", "bran
 # Kinek szól a ruha (a Vinted kategóriafájának első szintje): a kategóriaút első szava ehhez igazodik.
 GENDERS = {"női": "Nők", "férfi": "Férfiak", "gyerek": "Gyerekek"}
 GENDER_LEVELS = {"no", "nok", "noi", "ferfi", "ferfiak", "gyerek", "gyerekek", "gyermek", "women", "men", "kids"}
-# A leírás vége (a te nevedben): ezt a Jarvis teszi hozzá, nem a modell írja.
-DESCRIPTION_FOOTER = ("Ha kell pontos méret vagy több kép, írj nyugodtan! A profilomon még sok {what} találsz: "
-                      "ha többet rendelsz egyben, a csomag-összeállítással olcsóbban kapod meg.")
+# A leírás vége (a te nevedben): ezt a Jarvis teszi hozzá, nem a modell írja. Több változat, hogy ne minden hirdetésed
+# vége legyen szóról szóra ugyanaz (a tárgy szerint mindig ugyanazt kapja).
+DESCRIPTION_FOOTERS = (
+    "Ha kell pontos méret vagy több kép, írj nyugodtan! A profilomon még sok {what} találsz: ha többet rendelsz "
+    "egyben, a csomag-összeállítással olcsóbban kapod meg.",
+    "Kérdés esetén vagy ha több képet szeretnél, írj bátran! Nézz körül a profilomon is, van még sok {what}; több "
+    "darab egyben, csomagban olcsóbban jön ki.",
+    "Pontos méretet vagy további fotót szívesen küldök, csak írj! A profilomon találsz még sok {what}, és ha "
+    "többet viszel egyben, csomagban olcsóbb.",
+)
+DESCRIPTION_FOOTER = DESCRIPTION_FOOTERS[0]
 TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200, "brand": 80,
                "size": 40, "gender": 20, "condition": 40, "color": 60, "material": 120, "location": 80,
                "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20, "source": 300}
@@ -872,7 +880,9 @@ EXTRACT_SYSTEM = (
     "Ne találgass, és ne a fotók alapján gondolkodj, azokat nem látod.\n"
     "- product: röviden, mi ez (pl. „fekete póló”, „RTX 3060 Ti videókártya”).\n"
     "- kind: ezek egyike: " + ", ".join(KINDS) + " (a táska, öv, sapka, ékszer: kiegészítő).\n"
-    "- title: legfeljebb 60 karakter, amit a vevő keres: márka, típus, fontos tulajdonság, méret.\n"
+    "- title: rövid, természetes cím, ahogy egy ember írná: a márka és hogy mi ez (pl. „Sinsay trikó”, „Zara "
+    "farmerdzseki”, „Nike Air Max 90”, „RTX 3060 Ti videókártya”), legfeljebb 40 karakter. A szín, a méret és az "
+    "állapot ne legyen benne (azok külön mezőben látszanak), és ne írd nagybetűvel a köznevet.\n"
     "- description: az eladó nevében, egyes szám első személyben (pl. „Egyszer hordtam.”), soha nem harmadik "
     "személyben („az eladó szerint”). A tárgy adatait (márka, méret, szín, állapot) ne ismételd, azok külön "
     "látszanak; csak ha a leírás hibát vagy fontos részletet említ (folt, kopás, hiányzó tartozék), azt írd meg "
@@ -912,7 +922,7 @@ EXTRACT_SCHEMA: dict[str, Any] = {
 
 
 # Ha az EXTRACT_SYSTEM vagy a séma érdemben változik, emeld: a régi kiolvasások egyszer újra lefutnak.
-EXTRACT_VERSION = "2"
+EXTRACT_VERSION = "3"
 # Ha a hirdetés már fent van valahol, ezeket Jarvis magától nem írja át (a többi oldalon is ugyanaz a
 # hirdetés legyen, és a begyakorolt lépések kulcsa se változzon); kézzel persze átírhatod.
 FROZEN_WHEN_POSTED = ("title", "description", "category", "product", "kind")
@@ -973,7 +983,11 @@ class ListingExtractor:
             values["price"] = None
         kind = (values.get("kind") if not only or "kind" in only else "") or item.kind
         if not only or "description" in only:
-            values["description"] = compose_description(values["description"], str(data.get("keywords") or ""), kind)
+            values["description"] = compose_description(values["description"], str(data.get("keywords") or ""), kind,
+                                                        seed=item.id)
+        if values.get("title") and (not only or "title" in only):
+            values["title"] = tidy_title(values["title"], values.get("brand") or item.brand, kind,
+                                         values.get("size") or item.size, values.get("color") or item.color)
         values = {k: v for k, v in values.items() if v not in ("", None)}   # amit nem mondott, nem törli
         gender = (values.get("gender") if not only or "gender" in only else "") or item.gender
         category = (values.get("category") if not only or "category" in only else "") or item.category
@@ -990,20 +1004,77 @@ class ListingExtractor:
         return self.store.update(item_id, **values, extracted_sig=extract_signature(item.prompt))
 
 
-def compose_description(text: str, keywords: str, kind: str) -> str:
-    """A hirdetés leírása: a modell rövid (első személyű) megjegyzése, ha van, a zárószöveg, és a kulcsszavak
-    a Vinted keresőjének (#zara #póló …)."""
+def compose_description(text: str, keywords: str, kind: str, seed: str = "") -> str:
+    """A hirdetés leírása: a modell rövid (első személyű) megjegyzése, ha van, a zárószöveg (a tárgy szerint az egyik
+    változat, seed), és a kulcsszavak a Vinted keresőjének (#zara #póló …, legfeljebb hat)."""
     parts = [text.strip()] if text.strip() else []
     if "profilomon" not in fold(text):   # ha a modell mégis beleírta, nem kétszer
-        parts.append(DESCRIPTION_FOOTER.format(what="ruhát" if kind in CLOTHING else "holmit"))
+        footer = DESCRIPTION_FOOTERS[int(hashlib.sha1(seed.encode("utf-8")).hexdigest(), 16) % len(DESCRIPTION_FOOTERS)]
+        parts.append(footer.format(what="ruhát" if kind in CLOTHING else "holmit"))
     tags = []
     for word in re.split(r"[,;\n]+", keywords):
         tag = re.sub(r"[^\w-]", "", word.strip().lower().replace(" ", ""))
         if tag and f"#{tag}" not in tags:
             tags.append(f"#{tag}")
     if tags:
-        parts.append(" ".join(tags[:8]))
+        parts.append(" ".join(tags[:6]))
     return "\n\n".join(p for p in parts if p)
+
+
+# Színek és állapotszavak (ékezet nélkül): a címben nem kellenek, külön mezőben látszanak.
+_COLORS = ("fekete", "feher", "szurke", "kek", "vilagoskek", "sotetkek", "piros", "voros", "bordo", "zold", "sotetzold",
+           "sarga", "narancs", "narancssarga", "lila", "rozsaszin", "pink", "barna", "bezs", "drapp", "krem", "arany",
+           "ezust", "khaki", "menta", "turkiz", "mustar", "tarka", "mintas", "csikos", "kockas", "farmerkek",
+           "black", "white", "grey", "gray", "blue", "red", "green", "yellow", "orange", "purple", "brown", "beige")
+_CONDITION_WORDS = ("uj", "ujszeru", "hasznalt", "cimkes", "cimkevel", "hibatlan", "alig hordott", "alig hasznalt",
+                    "egyszer hordott", "nagyon jo allapotu", "jo allapotu", "szep allapotu")
+# Ruhaméret a címben: S, M-es, XL, 2XL, 38-as, EU 40, 42 2/3, W32 (a 16–56 közti szám: a 90-es Air Max nem méret).
+_SIZE_RE = re.compile(r"(?<![\w.'’&+-])(?:(?:[2-5]?x{0,3}[sml]|xxs|one size|onesize)(?:-?[ea]s|-?os)?|"
+                      r"(?:eu |us |uk )?(?:1[6-9]|[2-5]\d)(?:[.,]5)?(?: ?[0-9]/[0-9])?(?:-?[ea]s|-?os|-?ös)?|[wl]\d{2})"
+                      r"(?: ?(?:méret\w*|meret\w*|size))?(?![\w.'’&+-])", re.I)
+
+
+def _drop_phrases(words: list[str], phrases: tuple[str, ...]) -> list[str]:
+    """A szavak, a kifejezések nélkül (ékezettől és kisbetűtől függetlenül; pl. „Újszerű”, „alig hordott”)."""
+    folded = [fold(w).strip(".,;:!–()") for w in words]
+    out, index = [], 0
+    while index < len(words):
+        for phrase in phrases:
+            parts = phrase.split()
+            if folded[index:index + len(parts)] == parts:
+                index += len(parts)
+                break
+        else:
+            out.append(words[index])
+            index += 1
+    return out
+
+
+def tidy_title(title: str, brand: str = "", kind: str = "", size: str = "", color: str = "") -> str:
+    """Természetesebb cím: a márka és hogy mi ez („Sinsay trikó”), szín, méret és állapot nélkül (azok külön mezőben
+    látszanak, és a hosszú, mindent felsoroló cím robotikus). Ruhánál a méretet és a színt is kiveszi; elektronikánál a
+    típusjel (pl. a memória) marad. Ha a márka nincs benne, elé teszi. Ha nem maradna értelmes cím, az eredetit adja."""
+    original = " ".join(str(title or "").split())
+    words = original.split(" ")
+    clothing = kind in CLOTHING
+    colors = set(_COLORS) | ({fold(w) for w in re.split(r"[\s,/]+", color) if w} if color else set())
+    kept: list[str] = []
+    for word in _drop_phrases(words, _CONDITION_WORDS):
+        bare = fold(word).strip(".,;:!-–()")
+        if clothing and (bare in colors or re.sub(r"(es|as|os|u)$", "", bare) in colors):
+            continue
+        kept.append(word)
+    text = " ".join(kept)
+    if clothing:
+        text = _SIZE_RE.sub(" ", text)
+        if size.strip():
+            text = re.sub(rf"(?i)(?<![\w-]){re.escape(size.strip())}(?:-?[ea]s|-?os)?(?![\w-])", " ", text)
+    text = re.sub(r"\s*[,;/|–-]\s*(?=[,;/|–-]|$)", "", " ".join(text.split())).strip(" ,;/|–-")
+    if brand.strip() and fold(brand.strip()) not in fold(text):
+        text = f"{brand.strip()} {text}".strip()
+    if len(text) < 3 or not re.search(r"[^\W\d_]{2,}", text):
+        return original
+    return text if brand.strip() and text.startswith(brand.strip()) else text[0].upper() + text[1:]
 
 
 def gendered_category(category: str, gender: str) -> str:

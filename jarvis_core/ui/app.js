@@ -415,7 +415,7 @@ function watchState(watch) {
 function jobState(job) {
   if (!job.every_minutes) return "a config.toml-ban ki van kapcsolva";
   if (!job.on) return "kikapcsolva: magától nem nézi meg";
-  const parts = [everyText(job.every_minutes)];
+  const parts = [job.note || everyText(job.every_minutes)];
   if (job.last_run) parts.push("utoljára " + shortDate(job.last_run));
   if (!job.available) parts.push("most nincs mit néznie");
   return parts.join(" · ");

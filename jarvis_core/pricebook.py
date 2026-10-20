@@ -112,15 +112,16 @@ def usable(text: str) -> bool:
     return not any(_FOR_IT.match(w) for w in _words(text))
 
 
-def product_key(text: str) -> tuple[str, str] | None:
+def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> tuple[str, str] | None:
     """A termékkulcs egy hirdetés címéből: (kulcs, név). A kulcs a rendezett szavak (így a sorrend nem számít), a név
     ahogy a címben jönnek. Benne van a termékcsalád (vagy, ha nincs, a márka), a típusjel (szám vagy számot tartalmazó
     szó), a típus jelzői (Ti, Pro, OLED…) és a fajtája (kontroller, játék). None, ha a címből nem derül ki biztosan a
-    termék (pl. nincs benne típusjel)."""
+    termék (pl. nincs benne típusjel). brands: a tanult márkák (a BRANDS mellé)."""
     words = _words(text)
     picked: list[str] = []
+    known = BRANDS | brands if brands else BRANDS
     families = [w for w in words if w in FAMILIES]
-    brand = next((w for w in words if w in BRANDS), "") if not families else ""
+    brand = next((w for w in words if w in known), "") if not families else ""
     model = qualified = False
     for index, word in enumerate(words):
         before = words[index - 1] if index else ""
@@ -144,9 +145,9 @@ def product_key(text: str) -> tuple[str, str] | None:
             # rövid szám csak a család, a márka, egy jelző vagy egy sorozatnév után típusjel („iPhone 13”, „Air Max 90”,
             # „Note 10”), különben inkább méret vagy darabszám; a márka utáni 30–56 is inkább méret („Nike 42”)
             if word.isdigit() and len(word) <= 2:
-                if not (before in FAMILIES or before in BRANDS or before in MODIFIERS or before in SERIES):
+                if not (before in FAMILIES or before in known or before in MODIFIERS or before in SERIES):
                     continue
-                if before in BRANDS and before not in FAMILIES and 30 <= int(word) <= 56:
+                if before in known and before not in FAMILIES and 30 <= int(word) <= 56:
                     continue
             term, model = word, True
         else:
@@ -158,6 +159,13 @@ def product_key(text: str) -> tuple[str, str] | None:
     if len(picked) == 1 and not (model and len(picked[0]) >= 5 and not picked[0].isdigit()):
         return None
     return " ".join(sorted(picked)), " ".join(picked)
+
+
+# Ezek a szavak a modell által adott név elején sem márkák (nem tanulja meg őket).
+_NOT_BRANDS = {"elado", "uj", "hasznalt", "eredeti", "gyari", "noi", "ferfi", "gyerek", "fekete", "feher", "vezetek",
+               "nelkuli", "okos", "mini", "gamer", "gaming", "retro", "vintage", "profi", "digitalis", "elektromos",
+               "akkus", "vezeteknelkuli", "bluetooth", "wifi", "usb", "led", "smart", "the", "set", "szett"}
+LEARN_AFTER = 3            # ennyiszer kell egy ismeretlen márkának előfordulnia a modell elnevezéseiben
 
 
 def fake_prone(key: str) -> bool:
@@ -177,9 +185,14 @@ class PriceBook:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             data = {}
-        keys = data.get("keys") if isinstance(data, dict) else None
+        data = data if isinstance(data, dict) else {}
+        keys = data.get("keys")
         self._keys: dict[str, dict[str, Any]] = {k: v for k, v in (keys or {}).items()
                                                  if isinstance(v, dict) and isinstance(v.get("samples"), list)}
+        # tanult márkák (a modell elnevezéseiből) és a még nem elég gyakori jelöltek
+        self.brands: set[str] = {str(b) for b in data.get("brands") or [] if isinstance(b, str)}
+        self._brand_counts: dict[str, int] = {str(k): int(v) for k, v in (data.get("brand_counts") or {}).items()
+                                              if isinstance(v, int)}
 
     def save(self) -> None:
         with self._lock:
@@ -187,21 +200,47 @@ class PriceBook:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"keys": self._keys}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+            tmp.write_text(json.dumps({"keys": self._keys, "brands": sorted(self.brands),
+                                       "brand_counts": self._brand_counts}, ensure_ascii=False, separators=(",", ":")),
+                           encoding="utf-8")
             os.replace(tmp, self.path)
             self._dirty = False
+
+    def key(self, text: str) -> tuple[str, str] | None:
+        """A termékkulcs a tanult márkákkal együtt (lásd product_key)."""
+        return product_key(text, frozenset(self.brands))
+
+    def learn_name(self, name: str) -> str:
+        """Öntanulás: ha a modell egy terméket olyan márkával nevez meg, amit a kulcsfelismerés nem ismer (és emiatt
+        nem kap kulcsot, pl. „Anker PowerCore 20000”), feljegyzi; LEARN_AFTER előfordulás után megtanulja, és onnantól
+        modell nélkül is felismeri. Visszaadja a most megtanult márkát (különben üres)."""
+        words = _words(name)
+        first = words[0] if words else ""
+        if (len(first) < 3 or not first.isalpha() or first in BRANDS or first in self.brands or first in FAMILIES
+                or first in MODIFIERS or first in SERIES or first in TYPE_WORDS or first in _NOISE
+                or first in _NOT_BRANDS or self.key(name) is not None
+                or product_key(name, frozenset(self.brands | {first})) is None):
+            return ""
+        with self._lock:
+            self._brand_counts[first] = self._brand_counts.get(first, 0) + 1
+            self._dirty = True
+            if self._brand_counts[first] < LEARN_AFTER:
+                return ""
+            self._brand_counts.pop(first, None)
+            self.brands.add(first)
+        return first
 
     def add(self, rows: list[dict[str, Any]], name: str = "") -> int:
         """A hirdetések árai a termékükhöz (a cím szerint, vagy ha megadod, a name szerint: pl. ahogy a modell nevezte
         meg). A licit nem ár (csak a mostani ajánlat). Visszaadja, hányat tett be."""
         now, added = self.clock(), 0
-        named = product_key(name) if name else None
+        named = self.key(name) if name else None
         with self._lock:
             for row in rows:
                 text, url, price = str(row.get("text") or ""), str(row.get("url") or ""), int(row.get("price") or 0)
                 if row.get("auction") or not url or price <= 0 or not usable(text):
                     continue
-                found = named or product_key(text)
+                found = named or self.key(text)
                 if found is None:
                     continue
                 key, label = found
@@ -288,7 +327,7 @@ class PriceBook:
     def lookup(self, text: str, limit: int = 6) -> list[dict[str, Any]]:
         """Mennyit ér? A beírt termék (pl. „RTX 3060”) kulcsa, és azok a termékek, amelyeknek ez a része (pl. „RTX
         3060 Ti”): a szokásos ár (ha van), hány ár alapján, és az eladási sebesség."""
-        found = product_key(text) or (" ".join(sorted(set(_words(text)) - _NOISE)), text)
+        found = self.key(text) or (" ".join(sorted(set(_words(text)) - _NOISE)), text)
         wanted = set(found[0].split())
         with self._lock:
             keys = [k for k in self._keys if wanted <= set(k.split())]
@@ -300,6 +339,30 @@ class PriceBook:
             out.append({"key": key, "name": names[key], "samples": counts[key], "reference": self.reference(key),
                         "speed": self.speed(key)})
         return out
+
+    def name(self, key: str) -> str:
+        with self._lock:
+            return str((self._keys.get(key) or {}).get("name") or key)
+
+    def home_site(self, key: str) -> str:
+        """Melyik oldalon láttuk a legtöbbször (ott érdemes figyelni)."""
+        with self._lock:
+            sites = [str(s.get("site") or "") for s in (self._keys.get(key) or {}).get("samples") or []]
+        sites = [site for site in sites if site]
+        return max(set(sites), key=sites.count) if sites else ""
+
+    def fast(self, limit: int = 10) -> list[tuple[str, dict[str, Any]]]:
+        """Öntanulás: a gyorsan kelő termékek (legalább két újranézett hirdetésük eltűnt, átlagosan egy héten belül),
+        amelyeknek van szokásos áruk; a legtöbbször elkeltek elöl."""
+        with self._lock:
+            keys = list(self._keys)
+        out = []
+        for key in keys:
+            speed = self.speed(key)
+            if speed["sold"] >= 2 and (speed["days"] if speed["days"] is not None else 99) <= 7 and self.reference(key):
+                out.append((key, speed))
+        out.sort(key=lambda kv: (-kv[1]["sold"], kv[1]["days"]))
+        return out[:limit]
 
     def stats(self) -> dict[str, int]:
         with self._lock:

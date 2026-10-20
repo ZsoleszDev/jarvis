@@ -34,6 +34,7 @@ import json
 import math
 import os
 import queue
+import random
 import re
 import secrets
 import threading
@@ -46,9 +47,10 @@ from typing import Any, Callable
 
 from .browser import DECLINED, LISTING_PAGE_JS, BrowserError, is_risky
 from .listings import BLOCKED, GONE, SOLD, classify
-from .pricebook import PriceBook, fake_prone, product_key, speed_text, usable
+from .journal import Journal, day_of
+from .pricebook import PriceBook, fake_prone, speed_text, usable
 from .replay import norm_text
-from .selling import (_PARTS_RE, Item, ItemError, Platform, _shared, _tokens, format_price, listing_key,
+from .selling import (_PARTS_RE, ON_SITE, Item, ItemError, Platform, _shared, _tokens, format_price, listing_key,
                       parse_price, prefilter, price_stats, round_price)
 from .textutil import fold
 from .vinted import BUTTON_KINDS, consent_button, elem_key, logged_out, new_elements
@@ -104,6 +106,42 @@ EXPLORE_CUT = 0.15
 FAKE_RATIO = 0.6
 SPEED_CHECKS = 2           # egy körben ennyi régebben látott hirdetést néz meg újra (elkelt-e; a Vintedet nem)
 DEFAULT_DAY = (7, 23)      # a gép általában ekkor megy (óra): a licitekről még az esti leállás előtt szól
+# Böngészés napközben: a gép üzemidejében (DEFAULT_DAY) munkamenetekben dolgozik, ahogy egy ember: egy oldalon kb.
+# BROWSE_WORK percig nézelődik (két oldalbetöltés között BROWSE_STEP másodperc), aztán BROWSE_REST perc pihenő, és a
+# következő oldal jön (BROWSE_ORDER). Egy munkamenetben legfeljebb BROWSE_PAGES oldalt tölt be; a Vintedre két
+# munkamenet között legalább SITE_GAP percet vár. Ha egy oldal robot-ellenőrzést kér, aznap már nem nézi.
+BROWSE_WORK = 20
+BROWSE_REST = 15
+BROWSE_STEP = (60, 150)
+BROWSE_PAGES = {"vinted": 8}
+BROWSE_MAX_PAGES = 15
+SITE_GAP = {"vinted": 120}
+OPEN_CHANCE = 0.35         # egy találati oldal után ekkora eséllyel megnyit egy hirdetést (a Vinted kezdőoldalán mindig)
+# A modellre váró ismeretlenek: EXPLORE_ROWS-onként egy hívás; a munkamenet végén csak legalább MIN_FLUSH (vagy egy
+# licit) miatt tölti be a modellt, a maradék a következő munkamenetre vár (legfeljebb MAX_PENDING).
+MIN_FLUSH = 8
+MAX_PENDING = 60
+BROWSE_ORDER = ("hardverapro", "jofogas", "vinted", "vatera")
+# Indulóoldalak: (név, keresőszó vagy teljes cím; üres = a kezdőoldal). A Hardverapró kategóriáit a címükkel.
+_HA = "https://hardverapro.hu/aprok/hardver/"
+BROWSE_LANES: dict[str, list[tuple[str, str]]] = {
+    "vinted": [("Kezdőoldal", ""), ("Nike", "nike"), ("Adidas", "adidas"), ("The North Face", "the north face"),
+               ("Ralph Lauren", "ralph lauren"), ("Carhartt", "carhartt"), ("Lego", "lego"), ("AirPods", "airpods")],
+    "hardverapro": [("Videókártyák", _HA + "videokartya/index.html"), ("Memóriák", _HA + "memoria/index.html"),
+                    ("SSD-k", _HA + "merevlemez_ssd/ssd/index.html"), ("Processzorok", _HA + "processzor/index.html"),
+                    ("Alaplapok", _HA + "alaplap/index.html")],
+    "jofogas": [("iPhone", "iphone"), ("PlayStation", "playstation"), ("Nintendo Switch", "nintendo switch"),
+                ("Lego", "lego"), ("AirPods", "airpods"), ("Dyson", "dyson"), ("Makita", "makita")],
+    "vatera": [("iPhone", "iphone"), ("Lego", "lego"), ("PlayStation", "playstation"), ("Nintendo", "nintendo"),
+               ("Fényképezőgép", "fényképezőgép")],
+}
+# Öntanulás: a gyorsan kelő (vagy már többször jó találatot hozó) termékekből saját indulóoldal lesz (legfeljebb
+# MAX_LEARNED); ami LEARN_IDLE betöltés után sem hozott semmit, kimarad. Amit MUTE_AFTER-szer elrejtettél (és egyszer
+# sem vettél meg), arról MUTE_DAYS napig nem szól.
+MAX_LEARNED = 6
+LEARN_IDLE = 15
+MUTE_AFTER = 2
+MUTE_DAYS = 30
 _OFFER_OPEN_RE = re.compile(r"^(ajanlattetel|ajanlat tetele|ajanlatot teszek|ajanlat|make an offer|make offer|offer)$")
 _OFFER_SEND_RE = re.compile(r"^(ajanlat kuldese|ajanlat elkuldese|ajanlatot kuld\w*|ajanlatot teszek|ajanlattetel|"
                             r"ajanlat tetele|kuldes|elkuldes|send offer|send|make offer|offer|ajanlok)$")
@@ -331,6 +369,10 @@ class _Round:
         self.work: deque[Callable[[], None]] = deque()
         self.pages, self.checks, self.resale, self.blocked = MAX_PAGES, MAX_CHECKS, EXPLORE_PICKS, False
         self.found = self.done = 0
+        self.loaded = self.named = 0          # betöltött oldalak, a modell által megnevezett hirdetések
+        self.captcha = ""                     # ezen az oldalon kért robot-ellenőrzést
+        self.closing = False                  # böngészés: a munkamenet a kör végén lezárul
+        self.hits: list[str] = []             # a jó találatok röviden (a naplóba)
         self.notes: list[str] = []
         self.errors: list[str] = []
 
@@ -453,7 +495,8 @@ class DealHunter:
     """A keresések, a kapcsoló és a talált olcsó hirdetések (munka/kereskedes.json)."""
 
     def __init__(self, root: Path, platforms: dict[str, Platform], browser: Callable[[], Any] | None,
-                 llm: Any = None, clock: Callable[[], float] = time.time, default_every: float = DEFAULT_EVERY):
+                 llm: Any = None, clock: Callable[[], float] = time.time, default_every: float = DEFAULT_EVERY,
+                 rng: random.Random | None = None):
         self.path = Path(root) / "kereskedes.json"
         self.platforms = {k: p for k, p in platforms.items() if k in DEAL_SITES and p.search_url}
         self.browser = browser
@@ -462,6 +505,9 @@ class DealHunter:
         self.default_every = default_every    # az új keresések gyakorisága ([scheduler] deal_minutes)
         self.offering = ""                    # ajánlattétel közben a jóváhagyó ablak első sora (WorkDesk.confirm_context)
         self.book = PriceBook(Path(root), clock)   # árbázis: minden látott hirdetés ára, termékenként
+        self.journal = Journal(Path(root) / "kereskedes-naplo.json", clock)   # mit csinált a nap folyamán
+        self.rng = rng or random.Random()
+        self._pending: list[dict[str, Any]] = []   # böngészés: a modellre váró ismeretlen hirdetések (kötegben)
         self._lock = threading.RLock()
         self._data = self._load()
 
@@ -479,7 +525,17 @@ class DealHunter:
         day = data.get("day")
         if not (isinstance(day, list) and len(day) == 2 and all(isinstance(h, int) for h in day) and day[0] < day[1]):
             day = list(DEFAULT_DAY)
+        browse = data.get("browse") if isinstance(data.get("browse"), dict) else {}
+        dicts = lambda key: {str(k): v for k, v in (data.get(key) or {}).items() if isinstance(v, dict)}  # noqa: E731
         return {"enabled": bool(data.get("enabled")), "day": day,
+                "browse": {"on": bool(browse.get("on")),
+                           "sites": [s for s in browse.get("sites") or BROWSE_ORDER if s in BROWSE_ORDER],
+                           "min_profit": int(browse.get("min_profit") or WATCH_PROFIT)},
+                "lanes": dicts("lanes"),          # indulóoldal → mit hozott (és a tanultak címe)
+                "session": data.get("session") if isinstance(data.get("session"), dict) else {},
+                "sites_state": {"ended": {}, "blocked": {}, "learned": "",
+                                **(data.get("sites_state") if isinstance(data.get("sites_state"), dict) else {})},
+                "feedback": dicts("feedback"),    # termék → elrejtve / megvetted (öntanulás)
                 "searches": [s for s in data.get("searches") or [] if isinstance(s, dict) and s.get("query")],
                 "watches": [w for w in data.get("watches") or [] if isinstance(w, dict) and w.get("url")],
                 "deals": [d for d in data.get("deals") or [] if isinstance(d, dict) and d.get("url")],
@@ -503,12 +559,65 @@ class DealHunter:
                     "deals": sorted((dict(d) for d in deals), key=lambda d: -float(d.get("at") or 0)),
                     "sites": [{"key": k, "name": p.name} for k, p in self.platforms.items()],
                     "browser": self.browser is not None, "sale_ratio": SALE_RATIO, "shipping": SHIPPING,
-                    "day": list(self._data["day"]), "book": self.book.stats()}
+                    "day": list(self._data["day"]), "book": self.book.stats(),
+                    "browse": {**json.loads(json.dumps(self._data["browse"])),
+                               "status": self._browse_status(self.clock())},
+                    "lanes": self._lane_list(), "journal": self.journal.entries(), "journal_days": self.journal.days()}
 
     def available(self) -> bool:
+        """Van-e most dolga: egy esedékes keresés, figyelt oldal, vagy a böngészés következő lépése. Az ütemező csak
+        ekkor indítja (így nem fut feleslegesen, és a felület sem jelez minden percben munkát)."""
+        if self.browser is None:
+            return False
+        now = self.clock()
         with self._lock:
-            return (self._data["enabled"] and bool(self._data["searches"] or self._data["watches"])
-                    and self.browser is not None)
+            if not self._data["enabled"]:
+                return False
+            for search in self._data["searches"]:
+                if not self._search_waits(search, now) and any(
+                        self._due(search, key, now) for key in search.get("sites") or list(self.platforms)
+                        if key in self.platforms):
+                    return True
+            for watch in self._data["watches"]:
+                platform = watch.get("platform") or "vatera"
+                if platform in self.platforms and self._due(watch, platform, now):
+                    return True
+            return self._browse_due(now)
+
+    @staticmethod
+    def _search_waits(search: dict[str, Any], now: float) -> bool:
+        """A keresés most nem fut: a szokásos ár jóváhagyásra vár, vagy kevés volt a hasonló (egy nap múlva újra)."""
+        status, proposal = search_status(search), search.get("proposal") or {}
+        return status == "javaslat" or (status == "kevés" and now - float(proposal.get("at") or 0) < CALIBRATE_RETRY)
+
+    def note(self) -> str:
+        """Az Automatikus munkák ablakának: mit csinál most a böngészés (üres, ha nincs bekapcsolva)."""
+        with self._lock:
+            return self._browse_status(self.clock()) if self._data["enabled"] else ""
+
+    def set_browse(self, on: Any = None, sites: Any = None, min_profit: Any = None) -> dict[str, Any]:
+        """Böngészés napközben: be/ki, melyik oldalakon, és legalább mennyi haszonnal szóljon."""
+        profit = self._amount(min_profit, "A legkisebb haszon") if min_profit not in (None, "") else None
+        with self._lock:
+            browse = self._data["browse"]
+            if on is not None:
+                browse["on"] = bool(on)
+                if not browse["on"]:
+                    self._data["session"] = {}
+            if sites is not None:
+                chosen = [k for k in BROWSE_ORDER if k in (sites if isinstance(sites, (list, tuple)) else [])]
+                if not chosen:
+                    raise DealError("Legalább egy oldalt jelölj be.")
+                browse["sites"] = chosen
+            if profit:
+                browse["min_profit"] = profit
+            self._save()
+        if on is not None:
+            self.journal.add("Bekapcsoltad a napközbeni böngészést." if on else "Kikapcsoltad a napközbeni böngészést.")
+        return self.state()
+
+    def journal_entries(self, day: str = "") -> list[dict[str, Any]]:
+        return self.journal.entries(day if re.match(r"^\d{4}-\d{2}-\d{2}$", day or "") else "")
 
     def set_enabled(self, on: bool) -> dict[str, Any]:
         with self._lock:
@@ -736,21 +845,62 @@ class DealHunter:
         raise DealError("Ez a találat már nincs meg.")
 
     def mark_bought(self, deal_id: str, item_id: str) -> dict[str, Any]:
-        """Megvetted: a találatból eladási tárgy lett (item_id); a listában jelölve marad."""
+        """Megvetted: a találatból eladási tárgy lett (item_id); a listában jelölve marad. Öntanulás: az indulóoldala
+        és a termék jó pontot kap (ha elrejtetted volna, újra szól róla)."""
+        found = None
         with self._lock:
             for deal in self._data["deals"]:
                 if deal.get("id") == deal_id:
                     deal["bought"] = item_id
+                    found = deal
+            if found is not None:
+                if found.get("product_key"):
+                    feedback = self._data["feedback"].setdefault(found["product_key"], {})
+                    feedback["bought"] = int(feedback.get("bought") or 0) + 1
+                    feedback.pop("muted", None)
+                self._lane_count(found.get("lane"), "bought")
             self._save()
+        if found is not None:
+            self.journal.add(f"Megvetted: „{found['text'][:60]}” ({format_price(found['price'])}).")
         return self.state()
 
     def dismiss(self, deal_id: str) -> dict[str, Any]:
+        """Elrejtés. Öntanulás: amit MUTE_AFTER-szer elrejtettél (és nem vettél meg), arról MUTE_DAYS napig nem szól."""
+        muted = ""
         with self._lock:
             for deal in self._data["deals"]:
-                if deal.get("id") == deal_id:
-                    deal["dismissed"] = True
+                if deal.get("id") != deal_id or deal.get("dismissed"):
+                    continue
+                deal["dismissed"] = True
+                self._lane_count(deal.get("lane"), "dismissed")
+                key = deal.get("product_key")
+                if key:
+                    feedback = self._data["feedback"].setdefault(key, {})
+                    feedback["dismissed"] = int(feedback.get("dismissed") or 0) + 1
+                    if feedback["dismissed"] >= MUTE_AFTER and not feedback.get("bought") and not feedback.get("muted"):
+                        feedback["muted"] = self.clock()
+                        muted = self.book.name(key)
             self._save()
+        if muted:
+            self.journal.add(f"Az ilyen találatokat („{muted}”) {MUTE_AFTER}-szer elrejtetted: {MUTE_DAYS} napig nem "
+                             "szólok róluk.")
         return self.state()
+
+    def _muted(self, key: str | None, now: float) -> bool:
+        if not key:
+            return False
+        with self._lock:
+            since = float((self._data["feedback"].get(key) or {}).get("muted") or 0)
+        return bool(since) and now - since < MUTE_DAYS * 86400
+
+    def _lane_count(self, lane_id: str | None, field: str, amount: int = 1) -> None:
+        """Egy indulóoldal eredménye (oldalak, hirdetések, jelöltek, jó találatok, megvett, elrejtett): ebből tanul,
+        melyiket nézze gyakrabban. A mentést a hívó végzi."""
+        if not lane_id:
+            return
+        with self._lock:
+            stats = self._data["lanes"].setdefault(lane_id, {})
+            stats[field] = int(stats.get(field) or 0) + amount
 
     # --- a keresés (háttérmunka) ---
 
@@ -759,9 +909,10 @@ class DealHunter:
         with self._lock:
             jobs = [int(s.get("every") or DEFAULT_EVERY) for s in self._data["searches"]]
             jobs += [int(w.get("every") or WATCH_EVERY) for w in self._data["watches"]]
-            if not self._data["enabled"] or not jobs:
+            if not self._data["enabled"] or not (jobs or self._data["browse"]["on"]):
                 return 0.0
-            return float(min(jobs))
+            # böngészés közben percenként megnézi, van-e dolga (csak akkor fut, ha van: lásd available)
+            return 1.0 if self._data["browse"]["on"] else float(min(jobs))
 
     def _due(self, search: dict[str, Any], key: str, now: float) -> bool:
         every = max(int(search.get("every") or DEFAULT_EVERY), SITE_MIN_MINUTES.get(key, 0))
@@ -774,7 +925,8 @@ class DealHunter:
         nélkül. Ha egy keresésnek még nincs szokásos ára, felméri (egy modellhívás), különben ahhoz méri a
         hirdetéseket. A Vatera-licitfigyelők a hamarosan záruló liciteket nézik. A jelöltek oldalát megnyitja (csak
         olvasva), és a megmaradtakra egy rövid modellkérdés. A modellhívások a modell-sorban mennek (ModelLane),
-        egyenként, miközben a böngésző a következő oldalt tölti. Visszaadja, mit talált."""
+        egyenként, miközben a böngésző a következő oldalt tölti. Ha egyik sem esedékes, és be van kapcsolva a
+        napközbeni böngészés, annak egy lépése jön (_step_browse). Visszaadja, mit talált (és a naplóba is beírja)."""
         with self._lock:
             if not self._data["enabled"]:
                 return "Az automata kereskedés ki van kapcsolva."
@@ -784,6 +936,7 @@ class DealHunter:
             return "Az automata kereskedéshez Jarvis saját böngészője kell."
         now = self.clock()
         game = _Round(check, notify, ModelLane() if self.llm is not None else None)
+        names: list[str] = []
         for search in searches:
             sites = [key for key in search.get("sites") or list(self.platforms) if key in self.platforms
                      and (force or self._due(search, key, now))]
@@ -798,21 +951,31 @@ class DealHunter:
                 game.notes.append(f"„{search['query']}”: kevés hasonló hirdetés volt, add meg kézzel a szokásos árat")
                 continue
             game.done += 1
+            names.append(f"„{search['query']}”")
             game.work.append(partial(self._step_search, game, search, sites, status))
         running = [s for s in searches if search_status(s) == "fut"]
         for watch in watches:
             platform = watch.get("platform") or "vatera"
             if platform in self.platforms and (force or self._due(watch, platform, now)):
                 game.done += 1
+                names.append(watch["name"])
                 game.work.append(partial(self._step_watch, game, watch, platform, running))
+        browse = False
         if game.done:
             game.work.append(partial(self._step_revisit, game))
+        elif not force:
+            with self._lock:
+                browse = self._browse_due(now)
+            if browse:
+                game.work.append(partial(self._step_browse, game, running))
         try:
             game.loop()
         finally:
             if game.lane is not None:
                 game.lane.close()
             self.book.save()
+        if browse:
+            return self._after_browse(game)
         extra = [n for n in game.notes if n] + game.errors
         if not game.done:
             return "Most egyik keresés sem esedékes" + (f" ({'; '.join(extra[:4])})" if extra else "") + "."
@@ -820,6 +983,8 @@ class DealHunter:
                 else f"{game.done} keresés: nincs új olcsó hirdetés")
         if extra:
             text += f" ({'; '.join(extra[:4])})"
+        self.journal.add(f"{', '.join(names)[:200]}: " + (f"{game.found} olcsó hirdetés" if game.found
+                                                          else "nincs új olcsó hirdetés") + ".")
         return text + "."
 
     def _step_search(self, game: _Round, search: dict[str, Any], sites: list[str], status: str) -> None:
@@ -843,7 +1008,8 @@ class DealHunter:
         warn = "".join(f" Figyelj: {w}." for w in deal.get("warnings") or [])
         if deal.get("speed"):
             warn = f" Eladási sebesség: {deal['speed']}.{warn}"
-        origin = f"Figyelt oldal: {deal['explore']}." if deal.get("explore") else f"Keresés: „{search['query']}”."
+        origin = (f"Böngészés közben ({deal['explore']})." if deal.get("lane") else
+                  f"Figyelt oldal: {deal['explore']}." if deal.get("explore") else f"Keresés: „{search['query']}”.")
         title = f"„{deal['text'][:80]}”"
         if deal.get("auction"):
             bids = f", {deal['bids']} licit" if deal.get("bids") is not None else ""
@@ -915,8 +1081,10 @@ class DealHunter:
                 "median": reference, "margin": reference - row["price"],
                 "profit": expected_profit(reference, row["price"]), "at": self.clock(),
                 **{k: v for k, v in extra.items() if v is not None and v is not False}}
-        found = product_key(str(extra.get("product") or "")) or product_key(row["text"]) or product_key(search["query"])
+        found = self.book.key(str(extra.get("product") or "")) or self.book.key(row["text"]) or \
+            self.book.key(search["query"])
         if found:
+            deal["product_key"] = found[0]
             deal["speed"] = speed_text(self.book.speed(found[0])) or None
             if not deal["speed"]:
                 deal.pop("speed")
@@ -1038,16 +1206,21 @@ class DealHunter:
             market["noted"] = now
         self._set(search["id"], market=market)
 
-    def _candidate(self, game: _Round, search: dict[str, Any], deal: dict[str, Any]) -> None:
-        """Egy jelölt: a hirdetés oldala (modell nélkül, a böngésző szálán), majd egy rövid modellkérdés a modell-sorban.
-        Ha a kör keretébe már nem fér bele, nem jegyzi látottnak: a következő körben újra jelölt."""
-        if game.blocked:
+    def _candidate(self, game: _Round, search: dict[str, Any], deal: dict[str, Any],
+                   page: dict[str, Any] | None = None) -> None:
+        """Egy jelölt: a hirdetés oldala (modell nélkül, a böngésző szálán; ha már megnyitottuk, page), majd egy rövid
+        modellkérdés a modell-sorban. Ha a kör keretébe már nem fér bele, nem jegyzi látottnak: a következő körben
+        újra jelölt."""
+        self._lane_count(deal.get("lane"), "candidates")
+        if game.blocked and page is None:
             deal.setdefault("warnings", []).append("a hirdetés oldalát nem néztem meg (robot-ellenőrzés)")
         else:
-            if game.pages <= 0:
-                return
-            game.pages -= 1
-            verdict = self._inspect(deal)
+            if page is None:
+                if game.pages <= 0:
+                    return
+                game.pages -= 1
+                game.loaded += 1
+            verdict = self._inspect(deal, page)
             if verdict == "captcha":
                 game.blocked = True            # ebben a körben több hirdetést nem nyit meg
             elif verdict:
@@ -1062,12 +1235,23 @@ class DealHunter:
         game.ask(partial(self._confirm, search, deal), partial(self._conclude, game, search, deal))
 
     def _conclude(self, game: _Round, search: dict[str, Any], deal: dict[str, Any], ok: bool | None) -> None:
-        """A modell válasza után (a böngésző szálán): ha nem mondott nemet, szól róla."""
+        """A modell válasza után (a böngésző szálán): ha nem mondott nemet, szól róla (kivéve, ha az ilyen terméket
+        többször elrejtetted: arról egy ideig nem szól). A naplóba is beírja."""
         self._mark(deal)
         if ok is False:
             return
+        if self._muted(deal.get("product_key"), self.clock()):
+            game.notes.append(f"„{deal['text'][:40]}”: az ilyet elrejtetted, nem szóltam")
+            return
         game.found += 1
+        self._lane_count(deal.get("lane"), "deals")
         self._remember(deal)
+        hit = (f"„{deal['text'][:60]}” {format_price(deal['price'])} ({deal['site']}"
+               + (f", licit, legfeljebb {format_price(deal['max_bid'])}" if deal.get("auction") else
+                  f", kb. {format_price(deal['profit'])} haszon") + ")")
+        game.hits.append(hit)
+        self.journal.add(f"Jó találat: {hit}" + (f" – {deal['explore']}" if deal.get("explore") else
+                                                f" – keresés: {search['query']}"))
         actions = [DEALS_ACTION]
         if deal.get("offer"):
             actions = [{"action": "offer", "deal": deal["id"], "label": f"Ajánlatot teszek ({format_price(deal['offer'])})"},
@@ -1078,25 +1262,46 @@ class DealHunter:
     # --- Felfedező: figyelt oldalak, keresőszó nélkül (és a Vatera-licitek) ---
 
     def _step_watch(self, game: _Round, watch: dict[str, Any], platform: str, running: list[dict[str, Any]]) -> None:
-        """Egy figyelt oldal friss hirdetései. A fix árasak árai az árbázisba kerülnek. Ami egy felmért keresésedre
-        illik, azt modell nélkül annak a szokásos árához méri; ami az árbázisból felismerhető, azt az árbázishoz; a
-        többiből a modell egy hívásban megnevezi a termékeket, és kiválasztja, ami megérhet (_explore). A licitek közül
-        csak a hamarosan záruló (a gép esti leállása előttiek is) számít."""
+        """Egy figyelt oldal friss hirdetései (_page_rows, _triage); az ismeretlenekből a modell egy hívásban megnevezi a
+        termékeket, és kiválasztja, ami megérhet (_explore)."""
         game.check()
-        site = self.platforms[platform]
         with self._lock:
             self._data["last"][f"{watch['id']}:{platform}"] = self.clock()
+        rows = self._page_rows(game, watch["url"], platform, watch)
+        if not rows:
+            return
+        # a licitek elöl (azoknál sürget az idő), aztán a fix árasak, ahogy az oldalon jönnek (a legújabb elöl)
+        batch = sorted(self._triage(game, watch, rows, running), key=lambda r: not r.get("auction"))[:EXPLORE_ROWS]
+        if batch:
+            game.ask(partial(self._explore, batch), partial(self._explored, game, watch, batch))
+
+    def _page_rows(self, game: _Round, url: str, platform: str, source: dict[str, Any],
+                   extra: dict[str, Any] | None = None) -> list[dict[str, Any]] | None:
+        """Egy találati oldal hirdetései (modell nélkül, csak olvasva). A fix árasak árai az árbázisba kerülnek; a
+        licitek közül csak a hamarosan záruló (a gép esti leállása előttiek is) marad. None, ha nem sikerült (ha
+        robot-ellenőrzést kér, game.captcha jelzi)."""
+        site = self.platforms[platform]
+        browser = self.browser()
         try:
-            listings = self.browser().extract_listings(watch["url"])
+            listings = browser.extract_listings(url)
         except BrowserError as exc:
             game.errors.append(f"{site.name}: {str(exc).splitlines()[0][:120]}")
-            return
+            return None
+        game.loaded += 1
         if not listings:
-            label = watch["name"] if watch["name"].startswith(site.name) else f"{site.name} ({watch['name']})"
+            try:
+                blocked = bool(getattr(browser, "challenged", lambda: False)())
+            except BrowserError:
+                blocked = False
+            if blocked:
+                game.captcha = platform
+                game.errors.append(f"{site.name}: robot-ellenőrzést kér")
+                return None
+            label = source["name"] if source["name"].startswith(site.name) else f"{site.name} ({source['name']})"
             game.errors.append(f"{label}: nem találtam hirdetést az oldalon (ellenőrzést kér, vagy megváltozott)")
-            return
+            return None
         now = self.clock()
-        window = int(watch.get("hours") or WATCH_HOURS) * 3600
+        window = int(source.get("hours") or WATCH_HOURS) * 3600
         with self._lock:
             day = tuple(self._data["day"])
         rows: list[dict[str, Any]] = []
@@ -1104,7 +1309,7 @@ class DealHunter:
             if not entry.get("url"):
                 continue
             row = {"site": site.name, "platform": platform, "text": str(entry.get("text") or "")[:180],
-                   "price": int(entry["price"]), "url": str(entry["url"])}
+                   "price": int(entry["price"]), "url": str(entry["url"]), **(extra or {})}
             if entry.get("auction"):
                 info = parse_auction(row["text"])
                 if info["left"] is not None and last_chance(now + info["left"], day) - now > window:
@@ -1112,6 +1317,14 @@ class DealHunter:
                 row.update(auction=True, **info)
             rows.append(row)
         self.book.add(rows)                    # a licitet kihagyja (az nem eladási ár)
+        return rows
+
+    def _triage(self, game: _Round, source: dict[str, Any], rows: list[dict[str, Any]],
+                running: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Modell nélkül: ami egy felmért keresésedre illik, azt annak a szokásos árához méri; ami az árbázisból
+        felismerhető, azt az árbázishoz. A jelöltek (_candidate) rögtön jönnek; visszaadja az ismeretleneket (ezeket a
+        modell nevezheti meg). A már látottak (ha nem árazták le) és a nem eladási árak (kereső, csomag, alkatrész…)
+        kimaradnak."""
         unknown, found, skip = [], [], []
         with self._lock:
             seen, prices, deals = dict(self._data["seen"]), dict(self._data["prices"]), self._deal_keys()
@@ -1126,33 +1339,31 @@ class DealHunter:
                 continue
             search = next((s for s in running if matches_query(s["query"], row["text"])
                            and not excluded(s.get("exclude") or [], row["text"])), None)
+            label = row.get("lane_name") or source["name"]
             if search is not None:             # egy keresésedre illik: annak a szokásos ára dönt
                 reference = int(search["reference"])
                 top = highest_ok(search, reference)
                 if row.get("auction") and top and row["price"] < top:
-                    found.append((search, self._deal(search, row, reference, max_bid=top, explore=watch["name"])))
+                    found.append((search, self._deal(search, row, reference, max_bid=top, explore=label)))
                 elif not row.get("auction") and pays(search, row["price"], reference):
-                    found.append((search, self._deal(search, row, reference, explore=watch["name"],
+                    found.append((search, self._deal(search, row, reference, explore=label,
                                                      drop=old if drop else None)))
                 else:
                     skip.append(row)
                 continue
-            product = product_key(row["text"])
+            product = self.book.key(row["text"])
             reference = self.book.reference(product[0], exclude=row["url"]) if product else None
             if reference is None:
                 unknown.append(row)
                 continue
-            deal = self._explore_deal(watch, row, reference, drop=old if drop else None)
+            deal = self._explore_deal(source, row, reference, drop=old if drop else None)
             if deal is None:
                 skip.append(row)
             else:
-                found.append(({"id": watch["id"], "query": reference["name"]}, deal))
+                found.append(({"id": source["id"], "query": reference["name"]}, deal))
         self._mark(*skip)
         game.next([partial(self._candidate, game, search, deal) for search, deal in found])
-        # a licitek elöl (azoknál sürget az idő), aztán a fix árasak, ahogy az oldalon jönnek (a legújabb elöl)
-        batch = sorted(unknown, key=lambda r: not r.get("auction"))[:EXPLORE_ROWS]
-        if batch:
-            game.ask(partial(self._explore, batch), partial(self._explored, game, watch, batch))
+        return unknown
 
     def _explore_deal(self, watch: dict[str, Any], row: dict[str, Any], reference: dict[str, Any],
                       **extra: Any) -> dict[str, Any] | None:
@@ -1162,7 +1373,8 @@ class DealHunter:
         price, usual = int(row["price"]), int(reference["price"])
         top = explore_top(usual, int(watch.get("min_profit") or WATCH_PROFIT))
         probe = {"id": watch["id"], "query": reference.get("name") or row["text"][:60]}
-        info = {"explore": watch["name"], "similar": reference.get("n"), "product": reference.get("name"), **extra}
+        info = {"explore": row.get("lane_name") or watch["name"], "similar": reference.get("n"),
+                "product": reference.get("name"), **extra}
         if row.get("auction"):
             return self._deal(probe, row, usual, max_bid=top, **info) if 0 < top and price < top else None
         if price < usual * FLOOR or top <= 0:
@@ -1209,13 +1421,18 @@ class DealHunter:
         megérőnek tart, annak máshol nézi meg az árát (_resale, körönként legfeljebb EXPLORE_PICKS)."""
         if items is None:
             return                             # a modell nem válaszolt: a következő körben újra jönnek
+        game.named += len(items)
         for row, query, _buy in items:
             self.book.add([row], name=query)
+            brand = self.book.learn_name(query)
+            if brand:
+                self.journal.add(f"Tanultam egy új márkát: {brand.capitalize()} (a modell többször így nevezte meg a "
+                                 "terméket); mostantól modell nélkül is felismerem.")
         named = {id(row) for row, _q, _b in items}
         skip = [row for row in batch if id(row) not in named]   # egy hirdetést egyszer néz meg
         steps = []
         for row, query, buy in items:
-            product = product_key(query)
+            product = self.book.key(query)
             reference = self.book.reference(product[0], exclude=row["url"]) if product else None
             if reference is not None:
                 deal = self._explore_deal(watch, row, {**reference, "name": query})
@@ -1262,6 +1479,334 @@ class DealHunter:
                 game.blocked = True
                 return
             self.book.revisited(key, url, state in (SOLD, GONE))
+
+    # --- böngészés napközben (munkamenetek, pihenők, oldalváltás) ---
+
+    def _day_ok(self, now: float) -> bool:
+        start, end = self._data["day"]
+        local = time.localtime(now)
+        return start <= local.tm_hour + local.tm_min / 60 < end
+
+    def _budget(self, site: str) -> int:
+        return BROWSE_PAGES.get(site, BROWSE_MAX_PAGES)
+
+    def _browse_source(self) -> dict[str, Any]:
+        """A böngészés találatainak forrása (a legkisebb haszon, a licitek ablaka) a _triage és az _explored számára."""
+        return {"id": "bongeszes", "name": "Böngészés", "hours": WATCH_HOURS,
+                "min_profit": int(self._data["browse"].get("min_profit") or WATCH_PROFIT)}
+
+    def _lanes(self, site: str) -> list[dict[str, Any]]:
+        """Egy oldal indulóoldalai: a beépítettek (BROWSE_LANES) és a tanultak (_learn)."""
+        platform = self.platforms.get(site)
+        if platform is None:
+            return []
+        out = []
+        for name, target in BROWSE_LANES.get(site, ()):
+            if not target:
+                url, kind = platform.home, "feed"
+            elif re.match(r"https?://", target):
+                host = (urllib.parse.urlsplit(target).hostname or "").removeprefix("www.")
+                ours = any(host == d or host.endswith("." + d) for d in platform.domains)
+                url = target if ours else platform.search_url.format(q=urllib.parse.quote(name))
+                kind = "page"
+            else:
+                url, kind = platform.search_url.format(q=urllib.parse.quote(target)) + NEWEST.get(site, ""), "page"
+            ident = f"{site}:" + re.sub(r"[^a-z0-9]+", "_", fold(name)).strip("_")
+            out.append({"id": ident, "site": site, "name": f"{platform.name}: {name}", "url": url, "kind": kind})
+        for ident, lane in self._data["lanes"].items():
+            if lane.get("kind") == "tanult" and lane.get("site") == site and lane.get("url") and not lane.get("off"):
+                out.append({"id": ident, "site": site, "name": str(lane.get("name") or ident), "url": lane["url"],
+                            "kind": "tanult"})
+        return out
+
+    def _lane_weight(self, lane_id: str) -> float:
+        """Öntanulás: amelyik indulóoldal több jelöltet és jó találatot hozott (és amit meg is vettél), azt gyakrabban
+        nézi; ami sokszor semmit, azt ritkábban (de nem hagyja el teljesen)."""
+        stats = self._data["lanes"].get(lane_id) or {}
+        good = (3 * int(stats.get("deals") or 0) + int(stats.get("candidates") or 0) + 5 * int(stats.get("bought") or 0)
+                - 2 * int(stats.get("dismissed") or 0))
+        return max(0.2, (1 + good) / (1 + 0.1 * int(stats.get("pages") or 0)))
+
+    def _pick_lane(self, site: str, used: list[str], first: bool) -> dict[str, Any] | None:
+        lanes = self._lanes(site)
+        if not lanes:
+            return None
+        if first:
+            feed = [lane for lane in lanes if lane["kind"] == "feed"]
+            if feed:
+                return feed[0]                 # a Vinteden a kezdőoldallal kezd, ahogy egy ember
+        fresh = [lane for lane in lanes if lane["name"] not in used] or lanes
+        with self._lock:
+            weights = [self._lane_weight(lane["id"]) for lane in fresh]
+        return self.rng.choices(fresh, weights)[0]
+
+    def _lane_list(self) -> list[dict[str, Any]]:
+        """A felületnek: az indulóoldalak, és mit hoztak eddig."""
+        out = []
+        for site in BROWSE_ORDER:
+            for lane in self._lanes(site):
+                stats = self._data["lanes"].get(lane["id"]) or {}
+                out.append({**lane, **{k: int(stats.get(k) or 0) for k in
+                                       ("pages", "rows", "candidates", "deals", "bought", "dismissed")}})
+        return out
+
+    def _next_site(self, now: float) -> str | None:
+        """A következő oldal a sorban (BROWSE_ORDER), ami be van jelölve, ma nem kért robot-ellenőrzést, és az utolsó
+        munkamenete óta eltelt legalább SITE_GAP perc."""
+        state, today = self._data["sites_state"], day_of(now)
+        order = [k for k in BROWSE_ORDER if k in self._data["browse"]["sites"] and k in self.platforms and self._lanes(k)]
+        if not order:
+            return None
+        last = self._data["session"].get("site")
+        start = order.index(last) + 1 if last in order else 0
+        for index in range(len(order)):
+            site = order[(start + index) % len(order)]
+            if state["blocked"].get(site) == today:
+                continue
+            if now - float(state["ended"].get(site) or 0) < SITE_GAP.get(site, 0) * 60:
+                continue
+            return site
+        return None
+
+    def _browse_due(self, now: float) -> bool:
+        """Esedékes-e a böngészés következő lépése (a zár a hívónál)."""
+        if not (self._data["enabled"] and self._data["browse"]["on"]) or self.browser is None:
+            return False
+        session = self._data["session"]
+        if session.get("phase") == "work":
+            return (now >= float(session.get("next") or 0) or now >= float(session.get("until") or 0)
+                    or not self._day_ok(now))
+        if not self._day_ok(now):
+            return False
+        if session.get("phase") == "rest" and now < float(session.get("until") or 0):
+            return False
+        return self._next_site(now) is not None
+
+    def _browse_status(self, now: float) -> str:
+        """Egy mondat a böngészés mostani állapotáról (a felületnek)."""
+        if not self._data["browse"]["on"]:
+            return ""
+        session, start, end = self._data["session"], *self._data["day"]
+        clock = lambda t: time.strftime("%H:%M", time.localtime(t))  # noqa: E731
+        name = lambda key: self.platforms[key].name if key in self.platforms else key  # noqa: E731
+        if session.get("phase") == "work" and now < float(session.get("until") or 0):
+            return f"Most: {name(session['site'])} ({clock(float(session['start']))} óta), utána pihenő."
+        if not self._day_ok(now):
+            return f"Napközben böngészik ({start}–{end} óra); most nem dolgozik."
+        upcoming = self._next_site(max(now, float(session.get("until") or 0)))
+        if session.get("phase") == "rest" and now < float(session.get("until") or 0):
+            return f"Pihen {clock(float(session['until']))}-ig" + (f", utána: {name(upcoming)}." if upcoming else ".")
+        return f"Hamarosan kezd: {name(upcoming)}." if upcoming else "Most egyik oldal sem esedékes."
+
+    def _step_browse(self, game: _Round, running: list[dict[str, Any]]) -> None:
+        """Egy lépés a napközbeni böngészésből: ha kell, új munkamenetet kezd a következő oldalon, vagy lezárja a
+        mostanit (pihenő); különben betölt egy indulóoldalt, átnézi (modell nélkül, _triage), és néha megnyit egy
+        hirdetést is, ahogy egy ember (_open_random). Az ismeretleneket gyűjti, és csak kötegben kérdezi a modellt."""
+        now = self.clock()
+        with self._lock:
+            session = self._data["session"]
+            if session.get("phase") == "work" and (now >= float(session.get("until") or 0) or not self._day_ok(now)
+                                                   or int(session.get("pages") or 0) >= self._budget(session["site"])
+                                                   or session["site"] not in self._data["browse"]["sites"]
+                                                   or not self._lanes(session["site"])):
+                self._close_session(game)
+                return
+            if session.get("phase") != "work":
+                site = self._next_site(now)
+                if site is None or not self._day_ok(now):
+                    return
+                self._learn(now)              # naponta egyszer, a nap első munkamenete előtt
+                session = {"phase": "work", "site": site, "start": now, "next": now, "pages": 0, "rows": 0, "named": 0,
+                           "until": now + BROWSE_WORK * 60 * self.rng.uniform(0.75, 1.25), "hits": [], "lanes": []}
+                self._data["session"] = session
+                self._save()
+            site, used = session["site"], list(session["lanes"])
+        lane = self._pick_lane(site, used, not used)
+        if lane is None:
+            return
+        game.check()
+        source = self._browse_source()
+        rows = self._page_rows(game, lane["url"], site, source, extra={"lane": lane["id"], "lane_name": lane["name"]})
+        self._lane_count(lane["id"], "pages")
+        if game.captcha:
+            self._site_blocked(game, game.captcha)
+            return
+        unknown = self._triage(game, source, rows or [], running)
+        if rows and (lane["kind"] == "feed" or self.rng.random() < OPEN_CHANCE):
+            self._open_random(game, source, rows, unknown)
+        if game.captcha:
+            self._site_blocked(game, game.captcha)
+            return
+        known = {r["url"] for r in self._pending}
+        self._pending = (self._pending + [r for r in unknown if r["url"] not in known])[-MAX_PENDING:]
+        if len(self._pending) >= EXPLORE_ROWS:
+            self._flush(game)
+        with self._lock:
+            self._lane_count(lane["id"], "rows", len(rows or []))
+            session["lanes"].append(lane["name"])
+            session["rows"] = int(session.get("rows") or 0) + len(rows or [])
+            session["next"] = self.clock() + self.rng.uniform(*BROWSE_STEP)
+            self._save()
+        game.notes.append(f"{lane['name']}: {len(rows or [])} hirdetés")
+
+    def _open_random(self, game: _Round, source: dict[str, Any], rows: list[dict[str, Any]],
+                     unknown: list[dict[str, Any]]) -> None:
+        """Ahogy egy ember: megnyit egy hirdetést a találatok közül (inkább egy ismeretlent), és elolvassa. A hirdetés
+        címéből gyakran kiderül, mi ez (a kártyán sokszor csak a márka és a méret látszik); ha így ismert a szokásos ára,
+        modell nélkül eldönti, megéri-e; különben a címével együtt kerül a modell elé."""
+        with self._lock:
+            seen = set(self._data["seen"])
+        pool = [r for r in unknown if not r.get("auction")] or \
+            [r for r in rows if not r.get("auction") and listing_key(r["url"]) not in seen]
+        if not pool:
+            return
+        row = self.rng.choice(pool)
+        game.check()
+        try:
+            page = self.browser().look(row["url"])
+        except BrowserError:
+            return
+        game.loaded += 1
+        if page.get("captcha"):
+            game.captcha = row["platform"]
+            return
+        state, _detail = classify(page, row["url"], "", row.get("platform", ""))
+        if state in (SOLD, GONE):
+            self._mark(row)
+            if row in unknown:
+                unknown.remove(row)
+            return
+        title = " ".join(str(page.get("title") or "").split())[:120]
+        better = {**row, "text": f"{title} – {row['text']}"[:180] if title and fold(title) not in fold(row["text"])
+                  else row["text"]}
+        product = self.book.key(better["text"])
+        reference = self.book.reference(product[0], exclude=row["url"]) if product else None
+        if reference is None:
+            if row in unknown:
+                unknown[unknown.index(row)] = better
+            return
+        if row in unknown:
+            unknown.remove(row)
+        deal = self._explore_deal(source, better, reference)
+        if deal is None:
+            self._mark(row)
+        else:
+            game.next([partial(self._candidate, game, {"id": source["id"], "query": reference["name"]}, deal, page)])
+
+    def _flush(self, game: _Round) -> None:
+        """A gyűjtött ismeretlenek egy modellhívásban (energiatakarékos: nem oldalanként)."""
+        batch, self._pending = self._pending[:EXPLORE_ROWS], self._pending[EXPLORE_ROWS:]
+        if batch:
+            batch.sort(key=lambda r: not r.get("auction"))
+            game.ask(partial(self._explore, batch), partial(self._explored, game, self._browse_source(), batch))
+
+    def _close_session(self, game: _Round) -> None:
+        """A munkamenet vége: a maradék ismeretlenek a modellnek (ha legalább MIN_FLUSH, vagy licit is van köztük; ha
+        kevesebb, a következő munkamenetre várnak, hogy pár hirdetésért ne töltse be a modellt), néhány régi hirdetés
+        újranézése (eladási sebesség); a naplóbejegyzés és a pihenő a kör végén jön (_finish_session), amikor már minden
+        eredmény megvan."""
+        if len(self._pending) >= MIN_FLUSH or any(r.get("auction") for r in self._pending):
+            self._flush(game)
+        game.closing = True
+        game.work.append(partial(self._step_revisit, game))
+
+    def _site_blocked(self, game: _Round, site: str) -> None:
+        """Robot-ellenőrzés: aznap ezt az oldalt már nem nézi (nem próbálja megkerülni), és egyszer szól."""
+        now = self.clock()
+        name = self.platforms[site].name if site in self.platforms else site
+        with self._lock:
+            self._data["sites_state"]["blocked"][site] = day_of(now)
+            self._save()
+        self.journal.add(f"{name}: robot-ellenőrzést kért, ma már nem nézem (nem próbálom megkerülni).")
+        game.notify("deal", f"{name}: robot-ellenőrzés",
+                    f"A {name} robot-ellenőrzést kért böngészés közben. Ma már nem nézem; ha szeretnéd, oldd meg a "
+                    "böngészőablakomban, és holnap folytatom.", actions=[DEALS_ACTION])
+        self._close_session(game)
+
+    def _finish_session(self, game: _Round) -> str:
+        """A munkamenet lezárása a kör végén: egy naplóbejegyzés (mikor, hol, hány oldal és hirdetés, mit talált), és
+        pihenő BROWSE_REST percig (±30%)."""
+        now = self.clock()
+        with self._lock:
+            session = self._data["session"]
+            if session.get("phase") != "work":
+                return ""
+            site, start = session["site"], float(session["start"])
+            end = min(now, max(float(session.get("until") or now), start))
+            name = self.platforms[site].name if site in self.platforms else site
+            lanes = list(dict.fromkeys(lane.split(": ", 1)[-1] for lane in session.get("lanes") or []))
+            clock = lambda t: time.strftime("%H:%M", time.localtime(t))  # noqa: E731
+            text = (f"{clock(start)}–{clock(end)} {name}: {session.get('pages', 0)} oldal"
+                    + (f" ({', '.join(lanes[:6])})" if lanes else "") + f", {session.get('rows', 0)} hirdetés")
+            if session.get("named"):
+                text += f", a modell {session['named']} hirdetést nevezett meg"
+            hits = session.get("hits") or []
+            text += f"; jó találat: {'; '.join(hits[:3])}." if hits else "; nem volt jó találat."
+            rest = BROWSE_REST * 60 * self.rng.uniform(0.7, 1.3)
+            if self._day_ok(now):
+                text += f" Pihenő {clock(now + rest)}-ig."
+            self._data["sites_state"]["ended"][site] = now
+            self._data["session"] = {"phase": "rest", "site": site, "until": now + rest}
+            self._save()
+        self.journal.add(text, at=end)
+        return text
+
+    def _after_browse(self, game: _Round) -> str:
+        """A böngészési kör után: a munkamenet számlálói, és ha véget ért, a lezárása. Visszaadja a rövid eredményt."""
+        with self._lock:
+            session = self._data["session"]
+            if session.get("phase") == "work":
+                session["pages"] = int(session.get("pages") or 0) + game.loaded
+                session["named"] = int(session.get("named") or 0) + game.named
+                session["hits"] = (session.get("hits") or []) + game.hits
+                self._save()
+        if getattr(game, "closing", False):
+            return self._finish_session(game) or "Böngészés: pihenő."
+        notes = [n for n in game.notes if n] + game.errors
+        return "Böngészés: " + ("; ".join(notes[:3]) if notes else "nincs mit nézni") + "."
+
+    def _learn(self, now: float) -> None:
+        """Öntanulás (naponta egyszer): a gyorsan kelő termékekből (az árbázis eladási sebessége szerint) és amiből már
+        többször volt jó találat, saját indulóoldal lesz (egy keresés a legújabb elöl, azon az oldalon, ahol a
+        legtöbbször láttuk); ami LEARN_IDLE betöltés után sem hozott semmit, kimarad. A naplóba írja, mit tanult."""
+        state = self._data["sites_state"]
+        today = day_of(now)
+        if state.get("learned") == today:
+            return
+        state["learned"] = today
+        lanes, notes = self._data["lanes"], []
+        for ident, lane in list(lanes.items()):
+            if lane.get("kind") != "tanult":
+                continue
+            if lane.get("off"):
+                if now - float(lane["off"]) > MUTE_DAYS * 86400:
+                    lanes.pop(ident)           # egy hónap múlva újra megtanulhatja
+            elif int(lane.get("pages") or 0) >= LEARN_IDLE and not lane.get("deals") and not lane.get("candidates"):
+                lane["off"] = now
+                notes.append(f"leállítottam a(z) {lane.get('name')} figyelését (nem hozott semmit)")
+        learned = [lane for lane in lanes.values() if lane.get("kind") == "tanult" and not lane.get("off")]
+        have = {lane.get("key") for lane in lanes.values() if lane.get("kind") == "tanult"}
+        recent = Counter(d["product_key"] for d in self._data["deals"] if d.get("product_key")
+                         and not d.get("dismissed") and now - float(d.get("at") or 0) < 14 * 86400)
+        bought = {d.get("product_key") for d in self._data["deals"] if d.get("bought")}
+        picks = [(key, "többször volt belőle jó találat") for key, n in recent.most_common() if n >= 2 or key in bought]
+        picks += [(key, speed_text(speed)) for key, speed in self.book.fast()]
+        for key, why in picks:
+            if len(learned) >= MAX_LEARNED:
+                break
+            site = self.book.home_site(key)
+            if key in have or self._muted(key, now) or site not in self.platforms \
+                    or site not in self._data["browse"]["sites"]:
+                continue
+            platform, name = self.platforms[site], self.book.name(key)
+            ident = f"tanult:{key}"
+            lanes[ident] = {"kind": "tanult", "site": site, "key": key, "at": now, "name": f"{platform.name}: {name}",
+                            "url": platform.search_url.format(q=urllib.parse.quote(name)) + NEWEST.get(site, "")}
+            learned.append(lanes[ident])
+            have.add(key)
+            notes.append(f"mostantól figyelem: {name} ({ON_SITE.get(site, platform.name)}; {why})")
+        if notes:
+            self.journal.add("Tanultam: " + "; ".join(notes) + ".", at=now)
 
     # --- Vinted-ajánlat (csak a jóváhagyásod után) ---
 
@@ -1387,15 +1932,16 @@ class DealHunter:
         for key in [k for k in prices if k not in seen][:max(0, len(prices) - MAX_SEEN)]:
             prices.pop(key, None)
 
-    def _inspect(self, deal: dict[str, Any]) -> str:
-        """A jelölt hirdetés oldala, modell nélkül, csak olvasva. Visszaadja, miért esik ki („” = maradhat, „captcha”:
-        robot-ellenőrzés, ilyenkor maradhat, de nem néztük meg). A figyelmeztetéseket és a leírás elejét a jelölthöz
-        teszi (a modellkérdéshez)."""
-        try:
-            page = self.browser().look(deal["url"])
-        except BrowserError:
-            deal.setdefault("warnings", []).append("a hirdetés oldalát nem tudtam megnyitni")
-            return ""
+    def _inspect(self, deal: dict[str, Any], page: dict[str, Any] | None = None) -> str:
+        """A jelölt hirdetés oldala (ha még nincs meg, megnyitja), modell nélkül, csak olvasva. Visszaadja, miért esik
+        ki („” = maradhat, „captcha”: robot-ellenőrzés, ilyenkor maradhat, de nem néztük meg). A figyelmeztetéseket és a
+        leírás elejét a jelölthöz teszi (a modellkérdéshez)."""
+        if page is None:
+            try:
+                page = self.browser().look(deal["url"])
+            except BrowserError:
+                deal.setdefault("warnings", []).append("a hirdetés oldalát nem tudtam megnyitni")
+                return ""
         state, _detail = classify(page, deal["url"], deal["text"], deal.get("platform", ""))
         if page.get("captcha"):
             deal.setdefault("warnings", []).append("a hirdetés oldalát nem néztem meg (robot-ellenőrzés)")

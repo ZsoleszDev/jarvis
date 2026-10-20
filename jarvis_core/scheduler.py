@@ -53,6 +53,7 @@ class Job:
     available: Callable[[], bool] = lambda: True
     needs_models: bool = True                   # kell-e hozzá a nyelvi modell (készenlétben nem fut)
     needs_browser: bool = False                 # kell-e hozzá a böngésző (készenlétben az sincs: nem fut)
+    note: Callable[[], str] = lambda: ""        # a felületnek: mit csinál most (pl. „Pihen 14:05-ig”)
 
 
 @dataclass
@@ -289,8 +290,12 @@ class Scheduler:
             every = float(job.every_minutes() or 0)
             last = float(state.get("last_run") or 0)
             on = not state.get("off")
+            try:
+                note = str(job.note() or "")
+            except Exception:  # noqa: BLE001 - a felirat miatt ne álljon le az állapot
+                note = ""
             jobs.append({
-                "key": job.key, "title": job.title, "every_minutes": every,
+                "key": job.key, "title": job.title, "every_minutes": every, "note": note,
                 "enabled": every > 0 and on and job.available(), "on": on, "available": bool(job.available()),
                 "last_run": last or None,
                 "next_run": (last + every * 60) if every > 0 and on and last else None,

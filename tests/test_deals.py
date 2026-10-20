@@ -2,12 +2,14 @@
 keresés ehhez az árhoz mérve, és csak a jelöltekre egy rövid modellkérdés."""
 from __future__ import annotations
 
+import random
 import re
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from test_web_browser import HAS_CHROMIUM  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
 from jarvis_core.deals import (DealError, DealHunter, ModelLane, expected_profit, explore_top, highest_ok,  # noqa: E402
                                last_chance, left_text, offer_price, parse_auction)
+from jarvis_core.journal import Journal  # noqa: E402
 from jarvis_core.pricebook import PriceBook, product_key, usable  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
@@ -76,12 +79,20 @@ class FakeBrowser:
         self.pages: dict[str, object] = {}
         self.by_url: list[tuple[str, list[dict]]] = []
         self.threads: set[str] = set()
+        self.challenge: set[str] = set()      # ezeken a címeken robot-ellenőrzést kér
+        self._challenged = False
+
+    def challenged(self) -> bool:
+        return self._challenged
 
     def extract_listings(self, url: str) -> list[dict]:
         self.urls.append(url)
         self.threads.add(threading.current_thread().name)
         if any(f in url for f in self.fail):
             raise BrowserError("nem nyílt meg")
+        self._challenged = any(c in url for c in self.challenge)
+        if self._challenged:
+            return []
         for word, results in self.by_url:
             if word in url:
                 return [dict(r) for r in results]
@@ -647,6 +658,16 @@ class PriceBookTests(unittest.TestCase):
                       "3 db RTX 3060 csomagban", "2x RTX 3060"):
             self.assertFalse(usable(title), title)
 
+    def test_brands_learned_from_the_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PriceBook(Path(tmp), Clock())
+            self.assertIsNone(book.key("Anker PowerCore 20000 powerbank"))
+            self.assertEqual([book.learn_name("Anker PowerCore 20000") for _ in range(3)], ["", "", "anker"])
+            self.assertEqual(book.key("Anker PowerCore 20000 powerbank")[0], "20000 anker", "most már modell nélkül")
+            self.assertEqual(book.learn_name("Eladó PowerCore 20000"), "", "az „eladó” nem márka")
+            book.save()
+            self.assertEqual(PriceBook(Path(tmp), Clock()).brands, {"anker"})
+
     def test_the_usual_price_needs_enough_close_prices(self):
         clock = Clock()
         with tempfile.TemporaryDirectory() as tmp:
@@ -668,6 +689,200 @@ class PriceBookTests(unittest.TestCase):
             again = PriceBook(Path(tmp), clock)
             self.assertEqual(again.stats()["prices"], 10)
             self.assertIsNone(again.reference("3060 rtx ti"), "a régi árak már nem számítanak")
+
+
+class BrowseTests(HunterCase):
+    """Böngészés napközben: munkamenetek egy-egy oldalon, pihenők, oldalváltás, a modell kötegben, öntanulás, napló."""
+
+    def setUp(self):
+        super().setUp()
+        self.hunter.rng = random.Random(3)
+        self.hunter.book.add([{**r, "platform": "hardverapro"} for r in NORMAL])   # az árbázis ismeri az RTX-et
+        self.browser.results = PAGE
+        self.hunter.set_enabled(True)
+
+    def explored(self) -> list[str]:
+        return [m[1]["content"] for m in self.llm.calls if "Friss hirdetések" in m[1]["content"]]
+
+    def journal(self) -> list[str]:
+        return [e["text"] for e in self.hunter.journal.entries()]
+
+    def test_sessions_rests_and_the_journal(self):
+        self.assertFalse(self.hunter.available(), "a böngészés még nincs bekapcsolva")
+        self.hunter.set_browse(on=True, sites=["hardverapro", "vinted"])
+        self.assertEqual(self.hunter.every_minutes(), 1.0)
+        self.assertTrue(self.hunter.available())
+        text = self.hunter.run(notify=self.notify)
+        self.assertTrue(text.startswith("Böngészés: Hardverapró: "), text)
+        self.assertIn("hardverapro.hu/aprok/hardver/", self.browser.urls[0], "a felkapott kategóriák egyike")
+        self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"])
+        self.assertIn("Böngészés közben (Hardverapró: ", self.notices[0][2])
+        self.assertEqual(self.explored(), [], "a modellt kötegben kérdezi, nem oldalanként")
+        self.assertFalse(self.hunter.available(), "két oldal között nézelődik, ahogy egy ember")
+        self.assertIn("Most: Hardverapró", self.hunter.note())
+        self.clock.now += 151
+        self.assertTrue(self.hunter.available())
+        self.hunter.run(notify=self.notify)
+        self.clock.now += 26 * 60
+        summary = self.hunter.run(notify=self.notify)
+        self.assertRegex(summary, r"^\d\d:\d\d–\d\d:\d\d Hardverapró: \d+ oldal \(.+\), \d+ hirdetés; jó találat: "
+                                  r"„Gigabyte RTX 3060 Ti Gaming OC” 70 000 Ft \(Hardverapró, kb\. 17 600 Ft haszon\)\. "
+                                  r"Pihenő \d\d:\d\d-ig\.$")
+        self.assertEqual(self.explored(), [], "két ismeretlenért nem tölti be a modellt: a következő munkamenetre várnak")
+        self.assertEqual(len(self.hunter._pending), 2)
+        self.assertEqual(self.journal()[0], summary)
+        self.assertTrue(self.journal()[1].startswith("Jó találat: „Gigabyte RTX 3060 Ti Gaming OC”"))
+        self.assertFalse(self.hunter.available(), "pihenő")
+        self.assertRegex(self.hunter.note(), r"^Pihen \d\d:\d\d-ig, utána: Vinted\.$")
+        # a következő oldal: a Vinteden a kezdőoldallal kezd, és megnyit egy hirdetést
+        feed = [listing(40, "Nike pulóver", 8000, "www.vinted.hu"), listing(41, "Zara kabát", 12000, "www.vinted.hu")]
+        self.browser.by_url = [("vinted.hu", feed)]
+        self.clock.now += 31 * 60
+        self.assertTrue(self.hunter.available())
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(self.browser.urls[-1], "https://www.vinted.hu/")
+        self.assertIn(self.browser.looked[-1], {r["url"] for r in feed})
+        self.assertEqual(len(self.hunter._pending), 4, "az ismeretlenek a következő kötegre várnak")
+        self.assertTrue(any(r["text"].startswith("Hirdetés – ") for r in self.hunter._pending),
+                        "a megnyitott hirdetés címével együtt")
+
+    def test_unknown_listings_go_to_the_model_in_batches(self):
+        many = [listing(200 + n, f"Eladó holmi {n}", 5000 + n, "hardverapro.hu") for n in range(25)]
+        self.browser.results = many
+        self.hunter.set_browse(on=True, sites=["hardverapro"])
+        self.hunter.run(notify=self.notify)
+        lines = lambda text: [line for line in text.splitlines() if re.match(r"\d+\. ", line)]  # noqa: E731
+        self.assertEqual([len(lines(b)) for b in self.explored()], [20])
+        self.clock.now += 151
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(len(self.explored()), 1, "a már elküldöttek nem jönnek újra, a maradék még kevés")
+        self.clock.now += 26 * 60
+        self.hunter.run(notify=self.notify)
+        self.assertEqual([len(lines(b)) for b in self.explored()], [20], "5 ismeretlenért nem tölti be a modellt")
+        # egy licit nem várhat: a munkamenet végén akkor is a modellhez megy
+        self.hunter._pending.append({**listing(300, "Canon EOS 600D · Hátralévő idő: 3 óra", 1, "www.vatera.hu"),
+                                     "site": "Vatera", "platform": "vatera", "auction": True, "left": 10800})
+        self.clock.now += 40 * 60
+        self.hunter.run(notify=self.notify)
+        self.clock.now += 26 * 60
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(len(self.explored()), 2)
+        self.assertIn("Canon EOS 600D", self.explored()[-1])
+
+    def test_a_captcha_stops_that_site_for_the_day(self):
+        self.browser.challenge = {"vinted.hu"}
+        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.run(notify=self.notify)
+        self.assertEqual([t for _k, t, _x, _e in self.notices], ["Vinted: robot-ellenőrzés"])
+        self.assertIn("Vinted: robot-ellenőrzést kért, ma már nem nézem (nem próbálom megkerülni).", self.journal())
+        self.assertEqual(self.browser.looked, [], "a captchát nem próbálja megoldani, és nem nyit meg több oldalt")
+        self.clock.now += 3 * 3600
+        self.assertFalse(self.hunter.available())
+        self.clock.now += 86400
+        self.browser.challenge = set()
+        self.assertTrue(self.hunter.available(), "másnap újra")
+
+    def test_vinted_at_most_every_two_hours(self):
+        self.browser.by_url = [("vinted.hu", [])]
+        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.run(notify=self.notify)
+        self.clock.now += 26 * 60
+        self.hunter.run(notify=self.notify)             # a munkamenet vége
+        self.clock.now += 40 * 60
+        self.assertFalse(self.hunter.available(), "a pihenő után sem: a Vintedre két óra")
+        self.assertEqual(self.hunter.note(), "Most egyik oldal sem esedékes.")
+        self.clock.now += 81 * 60
+        self.assertTrue(self.hunter.available(), "két órával az előző Vinted-munkamenet vége után")
+
+    def test_only_while_the_computer_is_on(self):
+        at = lambda d, h, m=0: time.mktime((2027, 1, d, h, m, 0, 0, 0, -1))  # noqa: E731
+        self.hunter.set_day(8, 22)
+        self.hunter.set_browse(on=True, sites=["hardverapro"])
+        self.clock.now = at(15, 23)
+        self.assertFalse(self.hunter.available())
+        self.assertEqual(self.hunter.note(), "Napközben böngészik (8–22 óra); most nem dolgozik.")
+        self.clock.now = at(15, 21, 50)
+        self.hunter.run(notify=self.notify)
+        self.clock.now = at(15, 22, 1)
+        self.assertTrue(self.hunter.available(), "este lezárja a munkamenetet")
+        summary = self.hunter.run(notify=self.notify)
+        self.assertNotIn("Pihenő", summary)
+        self.assertFalse(self.hunter.available())
+        self.clock.now = at(16, 8, 5)
+        self.assertTrue(self.hunter.available(), "reggel folytatja")
+
+    def test_it_learns_which_pages_pay_and_what_sells_fast(self):
+        hunter = self.hunter
+        hunter.set_browse(on=True, sites=["hardverapro"])
+        with hunter._lock:
+            hunter._data["lanes"]["hardverapro:videokartyak"] = {"pages": 10, "candidates": 3, "deals": 2}
+            hunter._data["lanes"]["hardverapro:alaplapok"] = {"pages": 10}
+        picks = Counter(hunter._pick_lane("hardverapro", [], False)["name"] for _ in range(300))
+        self.assertGreater(picks["Hardverapró: Videókártyák"], 3 * picks["Hardverapró: Alaplapok"],
+                           "amelyik többet hozott, azt gyakrabban nézi")
+        self.assertGreater(picks["Hardverapró: Alaplapok"], 0, "a többit sem hagyja el")
+        # a gyorsan kelő termékből saját indulóoldal lesz (naponta egyszer, az első munkamenet előtt)
+        self.clock.now += 3 * 86400
+        for row in NORMAL[:2]:
+            hunter.book.revisited("3060 rtx ti", row["url"], gone=True)
+        hunter.run(notify=self.notify)
+        [lane] = [lane for lane in hunter.state()["lanes"] if lane["kind"] == "tanult"]
+        self.assertEqual((lane["name"], lane["site"]), ("Hardverapró: rtx 3060 ti", "hardverapro"))
+        self.assertIn("hardverapro.hu/aprok/keres.php?stext=rtx%203060%20ti", lane["url"])
+        learned = [t for t in self.journal() if t.startswith("Tanultam:")]
+        self.assertEqual(learned, ["Tanultam: mostantól figyelem: rtx 3060 ti (a Hardveraprón; gyorsan kel: 2/2 "
+                                   "újranézett hirdetés eltűnt, kb. 3 nap alatt)."])
+        # ami sokáig semmit nem hozott, kimarad (és nem tanulja újra rögtön)
+        with hunter._lock:
+            hunter._data["lanes"][lane["id"]]["pages"] = 20
+            hunter._data["session"] = {}
+        self.clock.now += 86400
+        hunter.run(notify=self.notify)
+        self.assertEqual([lane for lane in hunter.state()["lanes"] if lane["kind"] == "tanult"], [])
+        self.assertIn("leállítottam", " ".join(self.journal()))
+
+    def test_hidden_twice_is_not_reported_for_a_while(self):
+        for n in range(2):
+            self.hunter._remember({"id": f"d{n}", "url": f"https://hardverapro.hu/apro/{900 + n}.html",
+                                   "text": "RTX 3060 Ti", "price": 70000, "site": "Hardverapró",
+                                   "product_key": "3060 rtx ti"})
+            self.hunter.dismiss(f"d{n}")
+        self.assertIn("Az ilyen találatokat („rtx 3060 ti”) 2-szer elrejtetted: 30 napig nem szólok róluk.",
+                      self.journal())
+        self.hunter.set_browse(on=True, sites=["hardverapro"])
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(self.notices, [], "az RTX-ről most nem szól")
+        self.hunter._remember({"id": "b1", "url": "https://hardverapro.hu/apro/999.html", "text": "RTX 3060 Ti",
+                               "price": 70000, "site": "Hardverapró", "product_key": "3060 rtx ti"})
+        self.hunter.mark_bought("b1", "item1")
+        self.assertFalse(self.hunter._muted("3060 rtx ti", self.clock()), "amit megvettél, arról újra szól")
+
+    def test_a_search_waiting_for_approval_does_not_wake_the_job(self):
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"])
+        self.browser.results = RESULTS
+        self.assertTrue(self.hunter.available(), "a felmérés esedékes")
+        self.hunter.run(notify=self.notify)
+        self.clock.now += 4 * 3600
+        self.assertFalse(self.hunter.available(), "jóváhagyásig nincs dolga (a felület se jelezzen munkát)")
+
+
+class JournalTests(unittest.TestCase):
+    def test_days_newest_first_and_two_weeks_kept(self):
+        clock = Clock()
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Journal(Path(tmp) / "naplo.json", clock)
+            journal.add("Reggel: Hardverapró")
+            clock.now += 3600
+            journal.add("Délben: Vinted")
+            self.assertEqual([e["text"] for e in journal.entries()], ["Délben: Vinted", "Reggel: Hardverapró"])
+            first = journal.days()[0]
+            for _ in range(20):
+                clock.now += 86400
+                journal.add("egy nap")
+            again = Journal(Path(tmp) / "naplo.json", clock)
+            self.assertEqual(len(again.days()), 14)
+            self.assertNotIn(first, again.days())
+            self.assertEqual(again.entries(first), [])
 
 
 class LaneTests(unittest.TestCase):

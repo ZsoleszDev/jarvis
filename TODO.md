@@ -8,13 +8,15 @@
 - Értesítésből egy gombnyomásos levétel (asztali Értesítések ablak, Web Push, Android) – mindig a megerősítő ablakon át.
 - Vevői üzenetek: olvasás modell nélkül, válaszvázlat a tárgy adataiból, legkisebb elfogadható ár, küldés csak jóváhagyással.
 - Fotóellenőrzés: homályos, sötét, túl világos, ellenfényes, kicsi, ismétlődő (a tárgyon belül és más tárgynál), borítójavaslat.
-- Automata kereskedés: keresések szokásos árral, Vinted-ajánlat, Vatera-licitek, haszonkövetés; Felfedező (figyelt oldalak keresőszó nélkül), árbázis termékkulccsal, „Mennyit ér?”, eladási sebesség, esti leállás a liciteknél.
+- Automata kereskedés: keresések szokásos árral, Vinted-ajánlat, Vatera-licitek, haszonkövetés; Felfedező (figyelt oldalak keresőszó nélkül), árbázis termékkulccsal, „Mennyit ér?”, eladási sebesség, esti leállás a liciteknél; böngészés napközben (munkamenetek, pihenők), öntanulás, napló.
+- Természetesebb hirdetéscím (márka + termék, szín és méret nélkül) és változatos zárómondat.
 
 ## Élesben kipróbálandó
 - A Vinted üzenetoldala: a beszélgetések és üzenetek felismerése általános szabályokkal megy, a valódi oldalon nincs kipróbálva. Ha „nem találtam beszélgetést / üzenetet” jön, egy hibacsomag vagy az oldal HTML-je kell.
 - Az Android-módosítások (értesítés gombja → Eladva ablak) itt nem fordultak le: a GitHub Actions fordítását meg kell nézni.
 - A fotóküszöbök valódi telefonos fotókon (főleg: világos tárgy fehér háttér előtt, gyenge fény).
 - Automata kereskedés a valódi oldalakon: a kategóriaoldalak (Vinted catalog, Jófogás, Hardverapró, Vatera „hamarosan lejár”) hirdetéskártyáinak kiolvasása, a Vatera-kártyák hátralévő ideje, a Vinted ajánlattétel-ablaka, az újranézett hirdetés „elkelt / eltűnt” felismerése.
+- A böngészés a valódi oldalakon: a Vinted kezdőoldalának kártyái (a kártyán sokszor csak a márka és a méret látszik), a Jófogás és a Vatera keresőjének rendezése (a legújabb elöl-e), a Hardverapró-kategóriák címe (2026 októberében ellenőrizve).
 - A termékkulcs valódi címeken: ha egy gyakori termék nem kap kulcsot, vagy két különböző termék egy kulcsra esik, a `pricebook.py` BRANDS / FAMILIES / MODIFIERS / TYPE_WORDS listáját kell bővíteni.
 
 ## Kisebb javítások (ismertek, nem sürgősek)
@@ -46,6 +48,9 @@
 - A lezárult Vatera-licitek végső ára valódi eladási ár lenne az árbázisba; most kimarad.
 - Az eladási sebességhez a Vinted-hirdetéseket nem nézi újra (robot-ellenőrzés); a ruháknál ezért nincs sebesség.
 - Reggel csak a figyelt oldalak első oldalát nézi: ami éjjel jött, és azóta lecsúszott, kimarad.
+- A böngészés indulóoldalai (BROWSE_LANES) a kódban vannak; a felületen nem lehet sajátot hozzáadni vagy kikapcsolni (a figyelt oldalak külön mennek).
+- A böngészés a modellre váró ismeretleneket csak a memóriában gyűjti: újraindításkor elvesznek (a következő munkamenetben újra jöhetnek).
+- Az indulóoldalak súlya csak nő vagy csökken; ha egy oldal hetekig nem hoz semmit, a régi sikerei miatt még sokáig előre kerül.
 - Ami csak a termékcsaládot nevezi meg típus nélkül („PS5 konzol”, „Nintendo Switch”), nem kap kulcsot (a játékkal, kiegészítővel keveredne): ezeket csak a modell nevezi meg, vagy egy keresés méri.
 
 ### Fotók (photos.py)

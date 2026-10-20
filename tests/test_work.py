@@ -39,10 +39,10 @@ from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError, is_risky, navigates  # noqa: E402
 from jarvis_core.config import load_config  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, parse_json_object  # noqa: E402
-from jarvis_core.selling import (FAILED, NOT_POSTED, POSTED, Item, ItemError, ItemStore,  # noqa: E402
-                                 ListingExtractor,
-                                 Platform, PriceResearcher, missing_needs, needs_for, parse_price,
-                                 price_verdict, question_for, round_price)
+from jarvis_core.selling import (DESCRIPTION_FOOTERS, FAILED, NOT_POSTED, POSTED, Item, ItemError,  # noqa: E402
+                                 ItemStore, ListingExtractor,
+                                 Platform, PriceResearcher, compose_description, missing_needs, needs_for,
+                                 parse_price, price_verdict, question_for, round_price, tidy_title)
 from jarvis_core.textutil import clean_for_speech, hu_amounts, parse_hu_amount  # noqa: E402
 from jarvis_core.tools import Toolbox  # noqa: E402
 from jarvis_core.work import WorkDesk, interpret_price_reply, research_summary  # noqa: E402
@@ -410,12 +410,30 @@ class ExtractionTests(unittest.TestCase):
                                            price=695)]
         item = self.extractor.extract(item.id)
         self.assertNotIn("eladó", item.description)
-        self.assertIn("Ha kell pontos méret vagy több kép, írj nyugodtan! A profilomon még sok ruhát találsz", item.description)
+        # a zárómondat a tárgy szerint az egyik változat (nem minden hirdetésé szóról szóra ugyanaz)
+        footer = next(f.format(what="ruhát") for f in DESCRIPTION_FOOTERS if f.format(what="ruhát") in item.description)
+        self.assertIn("A profilomon", footer)
+        self.assertEqual(compose_description("", "x", "ruha", seed=item.id).split("\n\n")[0], footer, "mindig ugyanaz")
+        self.assertGreater(len({compose_description("", "", "ruha", seed=str(n)) for n in range(12)}), 1)
         self.assertTrue(item.description.endswith("#sinsay #trikó #sárga #nyári"))
+        self.assertEqual(item.title, "Sinsay trikó", "a cím márka és termék, szín és méret nélkül")
         self.assertEqual((item.gender, item.category), ("", "Nők > Ruhák > Trikók"))
         system = self.fake.chat_bodies()[0]["messages"][0]["content"]
         self.assertIn("első személyben", system)
         self.assertIn("csak akkor, ha a gender kiderül", system)
+
+    def test_titles_are_short_and_natural(self):
+        cases = [(("Sinsay Sárga trikó M-es", "Sinsay", "ruha", "M", "sárga"), "Sinsay trikó"),
+                 (("Zara póló, L", "Zara", "ruha", "L", ""), "Zara póló"),
+                 (("Nike Air Max 90 42-es fehér", "Nike", "cipő", "42", ""), "Nike Air Max 90"),
+                 (("Újszerű fekete Zara blézer 38-as", "Zara", "ruha", "38", "fekete"), "Zara blézer"),
+                 (("H&M kötött pulóver S méret", "H&M", "ruha", "S", ""), "H&M kötött pulóver"),
+                 (("s.Oliver ing M", "s.Oliver", "ruha", "M", ""), "s.Oliver ing"),
+                 (("trikó", "Sinsay", "ruha", "", ""), "Sinsay trikó"),
+                 (("RTX 3060 Ti videókártya 8GB újszerű", "", "elektronika", "", ""), "RTX 3060 Ti videókártya 8GB"),
+                 (("M", "", "ruha", "M", ""), "M")]
+        for args, title in cases:
+            self.assertEqual(tidy_title(*args), title, args)
 
     def test_the_answer_women_or_men_sets_the_first_category_level(self):
         item = self.store.create(targets=["vinted"], prompt="Sinsay sárga trikó M, 695 Ft")
@@ -789,7 +807,8 @@ class WorkDeskTests(unittest.TestCase):
         self.assertEqual(sorted(self.fake.chat_bodies()[0]["format"]["properties"]),
                          sorted([*selling.LISTING_FIELDS, "keywords", "kind", "price"]))
         item = self.store.get(item.id)
-        self.assertEqual((item.condition, item.location, item.title), ("Nagyon jó", "Budapest", SHIRT["title"]))
+        # a cím természetesebb lesz: a szín és a méret külön mezőben van (tidy_title)
+        self.assertEqual((item.condition, item.location, item.title), ("Nagyon jó", "Budapest", "Zara póló"))
         self.assertEqual(self.desk.prepare(item.id, self.steps.append).kind, "post")
         self.assertEqual(len(self.fake.chat_bodies()), 2, "ugyanabból a leírásból nem olvassa ki újra")
 
@@ -1413,10 +1432,10 @@ class SellFlowTests(unittest.TestCase):
         self.assertTrue(item.prompt.endswith("\nNagyon jó állapotú, Budapesten lehet átvenni."))
         confirms = [e[1] for e in self.ui.of("confirm")]
         self.assertEqual(len(confirms), 1, "oldalanként egy jóváhagyás: a közzététel")
-        self.assertTrue(confirms[0].startswith("Vinted: Zara fekete póló, L – 500 Ft\n\n"), confirms[0])
+        self.assertTrue(confirms[0].startswith("Vinted: Zara póló – 500 Ft\n\n"), confirms[0])
         self.assertIn("Fent van: Vinted. Nem sikerült: Jófogás.", self.notices()[-1])
         infos = [e[1] for e in self.ui.of("info")]
-        self.assertIn("Feltöltés: Zara fekete póló, L → Vinted", infos)
+        self.assertIn("Feltöltés: Zara póló → Vinted", infos)
         self.assertEqual(self.ui.of("user")[0][1], "Nagyon jó állapotú, Budapesten lehet átvenni.")
         self.assertEqual(self.app.work.current, None)
 
@@ -1502,7 +1521,7 @@ class SellFlowTests(unittest.TestCase):
                                  reply("Be kell jelentkezned a Vintedre.")]
         self.app.run_work({"action": "sell", "ids": [item.id]})
         posts = [e[1] for e in self.ui.of("info") if e[1].startswith("Feltöltés:")]
-        self.assertEqual(posts, ["Feltöltés: Zara fekete póló, L → Jófogás", "Feltöltés: Zara fekete póló, L → Vinted"])
+        self.assertEqual(posts, ["Feltöltés: Zara póló → Jófogás", "Feltöltés: Zara póló → Vinted"])
         self.assertEqual(self.fake.chat_script, [])
 
     def test_unclear_price_answer_asks_again(self):

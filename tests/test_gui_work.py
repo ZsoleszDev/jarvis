@@ -146,6 +146,16 @@ class WorkSecurityTests(unittest.TestCase):
         for w in data["watches"]:
             status, data = self.post("/api/work/deals", {"action": "watch_remove", "id": w["id"]})
         self.assertEqual((status, data["watches"]), (200, []))
+        status, data = self.post("/api/work/deals", {"action": "browse", "on": True, "sites": ["hardverapro", "vinted"],
+                                                     "min_profit": "8 000"})
+        self.assertEqual((status, data["browse"]["on"], data["browse"]["sites"], data["browse"]["min_profit"]),
+                         (200, True, ["hardverapro", "vinted"], 8000))
+        self.assertEqual(data["journal"][0]["text"], "Bekapcsoltad a napközbeni böngészést.")
+        self.assertTrue(any(lane["name"] == "Vinted: Kezdőoldal" for lane in data["lanes"]))
+        self.assertEqual(self.post("/api/work/deals", {"action": "browse", "sites": []})[0], 400, "legalább egy oldal")
+        status, data = self.post("/api/work/deals", {"action": "journal", "day": data["journal_days"][0]})
+        self.assertEqual((status, data["entries"][0]["text"]), (200, "Bekapcsoltad a napközbeni böngészést."))
+        self.post("/api/work/deals", {"action": "browse", "on": False})
         status, data = self.post("/api/work/deals", {"action": "day", "start": "8", "end": "22"})
         self.assertEqual((status, data["day"]), (200, [8, 22]))
         self.assertEqual(self.post("/api/work/deals", {"action": "day", "start": "22", "end": "8"})[0], 400)

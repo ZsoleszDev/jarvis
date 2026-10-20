@@ -517,7 +517,8 @@ class JarvisApp:
                                         lambda: deals.every_minutes() if float(self.cfg.scheduler.deal_minutes or 0) > 0
                                         else 0.0,
                                         lambda ctx: deals.run(check=ctx.check, notify=ctx.notify, force=ctx.forced),
-                                        available=deals.available, needs_models=False, needs_browser=True))
+                                        available=deals.available, needs_models=False, needs_browser=True,
+                                        note=deals.note))
 
     def _register_watch_tools(self) -> None:
         box, watches = self.toolbox, self.watches
