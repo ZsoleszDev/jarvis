@@ -783,6 +783,10 @@ class _Handler(BaseHTTPRequestHandler):
             if action == "watch_add":
                 return self._json(200, {"ok": True, **deals.add_watch(str(body.get("target") or ""), body.get("min_profit"),
                                                                      body.get("hours"), body.get("every"))})
+            if action == "day":         # mikor megy általában a gép (a licitekről még az esti leállás előtt szól)
+                return self._json(200, {"ok": True, **deals.set_day(body.get("start"), body.get("end"))})
+            if action == "lookup":      # Mennyit ér? az árbázisból, modell és oldalbetöltés nélkül
+                return self._json(200, {"ok": True, "results": deals.lookup(str(body.get("query") or ""))})
             if action == "watch_remove":
                 return self._json(200, {"ok": True, **deals.remove_watch(str(body.get("id") or ""))})
             if action == "remove":

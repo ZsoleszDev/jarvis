@@ -427,6 +427,8 @@
   }
   let editingRef = null;      // a keresés, aminél épp kézzel írod a szokásos árat
   let editingSearch = null;   // a keresés, amit az űrlapon szerkesztesz (Mentés: módosítás, nem új)
+  let lookupQuery = "";       // Mennyit ér? (az árbázisban)
+  let lookupResults = null;   // az utolsó keresés eredménye (null: még nem kerestél)
 
   // Egy keresés állapota: a szokásos ár (jóváhagyva, javaslat, kevés hasonló, felmérés a következő körben).
   function searchState(s) {
@@ -505,16 +507,27 @@
         ${d.auction ? "máshol" : "szokásos ár"} ${esc(price(d.median))}${d.auction ? ` · ${esc(leftText(d))} · legfeljebb <b>${esc(price(d.max_bid))}</b>-ig érdemes licitálni`
           : d.offer ? ` · ajánlattal (${esc(price(d.offer))}) kb. <b>${esc(price(d.profit))}</b> haszon`
           : d.profit !== undefined ? ` · várható haszon kb. <b>${esc(price(d.profit))}</b>` : ` (kb. ${esc(price(d.margin))}-tal olcsóbb)`}
-        ${d.calibration ? " · a felmérés közben" : ""}${d.note ? " · " + esc(d.note) : ""}</small>
+        ${d.calibration ? " · a felmérés közben" : ""}${d.explore ? " · " + esc(d.explore) : ""}${d.note ? " · " + esc(d.note) : ""}</small>
+        ${d.speed ? `<small class="muted">Eladási sebesség: ${esc(d.speed)}</small>` : ""}
         ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}
         ${offerBox(d)}</span>
         <span class="row">${buyButton(d)}
         <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></span></li>`).join("");
+    const book = deals.book || { products: 0, prices: 0, ready: 0 };
+    const lookupRows = lookupResults === null ? "" : `<ul class="dealist">${lookupResults.map((r) => `<li><span><b>${esc(r.name)}</b>
+        <small class="muted">${r.reference ? `kb. <b>${esc(price(r.reference.price))}</b> (${r.reference.n} ár, a többség
+          ${esc(price(r.reference.p25))}–${esc(price(r.reference.p75))})` : `még nincs szokásos ár (${r.samples} ár, vagy nagyon szórnak)`}</small>
+        ${r.speed_text ? `<small class="muted">${esc(r.speed_text)}</small>` : ""}</span></li>`).join("") || '<li class="muted">Ilyet még nem láttam.</li>'}</ul>`;
+    const day = deals.day || [7, 23];
     const edit = deals.searches.find((s) => s.id === editingSearch);
     const v = (key, fallback = "") => esc(edit && edit[key] != null ? edit[key] : fallback);
     const checked = (key) => !edit || (edit.sites || []).includes(key) ? "checked" : "";
     box.innerHTML = `
       <label class="check"><input type="checkbox" id="d-enabled" ${deals.enabled ? "checked" : ""}> <b>Bekapcsolva</b></label>
+      <div class="row"><label>A gép általában
+        <input id="d-day-start" type="number" min="0" max="23" value="${esc(day[0])}" style="width: 3.5em"> órától
+        <input id="d-day-end" type="number" min="1" max="24" value="${esc(day[1])}" style="width: 3.5em"> óráig megy</label>
+        <button type="button" class="small" id="d-day">Mentés</button></div>
       <p class="muted">Egy új keresésnél először felmérem, mennyiért adják most (egy modellhívás), és ha jóváhagyod, ahhoz
         az árhoz mérem a legújabb hirdetéseket, modell nélkül. Ami jóval olcsóbb, annak az oldalát is átnézem (elkelt-e,
         hibás-e, gyanús-e), és csak utána kérdezem meg a modellt. Csak olvasok: semmit nem veszek meg, és nem írok senkinek.
@@ -543,27 +556,48 @@
         <div class="row"><button type="submit" class="primary">${edit ? "Mentés" : "Hozzáadás"}</button>
           ${edit ? '<button type="button" id="d-cancel">Mégse</button>' : '<button type="button" id="d-run">Keresés most</button>'}</div>
       </form>
-      <h3 class="section-title">Vatera-licitek</h3>
-      <p class="muted">Itt nem kell megadnod, mit keresel: a hamarosan záruló licitekből a modell választ, és megnézem,
-        máshol mennyiért adják. A Vaterán állítsd be a kategóriát és a „hamarosan lejár” rendezést, és másold be az oldal
-        címét (vagy írj egy keresőszót). Ami illik egy fenti keresésedre, azt a szokásos árához mérem. Licitálni nem
-        fogok helyetted: megmondom, meddig érdemes.</p>
+      <h3 class="section-title">Figyelt oldalak (bármi, ami megéri)</h3>
+      <p class="muted">Itt nem kell megadnod, mit keresel. A böngészőben nyiss meg egy kategóriát (pl. Hardverapró ›
+        Videókártyák, Jófogás › Konzolok, Vinted › Férfi cipők) a legújabb elöl, a Vaterán a „hamarosan lejár”
+        rendezéssel, és másold be az oldal címét. A hirdetéseket az árbázishoz mérem (modell nélkül); amit nem ismerek
+        fel, azt a modell nevezi meg, és ami megérhet, annak máshol is megnézem az árát. Licitálni és venni nem fogok
+        helyetted: megmondom, meddig érdemes.</p>
       <ul class="dealist">${(deals.watches || []).map((w) => `<li><span><b>${esc(w.name)}</b>
-          <small class="muted">legalább ${esc(price(w.min_profit))} haszon · a zárás előtt legfeljebb ${w.hours} órával · ${esc(every(w.every))}</small>
+          <small class="muted">legalább ${esc(price(w.min_profit))} haszon${(w.platform || "vatera") === "vatera" ? ` · licitnél a zárás előtt legfeljebb ${w.hours} órával` : ""} · ${esc(every(w.every))}</small>
           <small><a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small></span>
-          <button type="button" class="small quiet" data-watch-remove="${esc(w.id)}">Törlés</button></li>`).join("") || '<li class="muted">Még nincs licitfigyelő.</li>'}</ul>
+          <button type="button" class="small quiet" data-watch-remove="${esc(w.id)}">Törlés</button></li>`).join("") || '<li class="muted">Még nincs figyelt oldal.</li>'}</ul>
       <form id="d-watch" class="compose" autocomplete="off">
-        <input id="dw-target" placeholder="Vatera-oldal címe vagy keresőszó">
+        <input id="dw-target" placeholder="Egy találati oldal címe (Vinted, Jófogás, Vatera, Hardverapró), vagy Vatera-keresőszó">
         <div class="row">
-          <label>Legalább <input id="dw-profit" type="number" min="0" value="3000" style="width: 6em"> Ft haszon,</label>
-          <label>a zárás előtt legfeljebb <input id="dw-hours" type="number" min="1" max="72" value="6" style="width: 4em"> órával</label>
+          <label>Legalább <input id="dw-profit" type="number" min="0" value="5000" style="width: 6em"> Ft haszon,</label>
+          <label>licitnél a zárás előtt legfeljebb <input id="dw-hours" type="number" min="1" max="72" value="6" style="width: 4em"> órával</label>
         </div>
         <div class="row"><label>Nézze <select id="dw-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === 60 ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label></div>
-        <div class="row"><button type="submit" class="primary">Licitfigyelő hozzáadása</button></div>
+        <div class="row"><button type="submit" class="primary">Oldal hozzáadása</button></div>
       </form>
+      <h3 class="section-title">Mennyit ér?</h3>
+      <p class="muted">Árbázis: ${book.products} termék, ${book.prices} ár (${book.ready} termékre már van szokásos ár).
+        Minden hirdetés ára bekerül, amit látok; modell és oldalbetöltés nélkül megmondja, mennyiért adják.</p>
+      <form id="d-lookup" class="compose" autocomplete="off">
+        <div class="row"><input id="dl-query" placeholder="Pl. RTX 3060 Ti, iPhone 13, Makita DHP482" value="${esc(lookupQuery)}">
+          <button type="submit">Megnézem</button></div>
+      </form>
+      ${lookupRows}
       <h3 class="section-title">Olcsó hirdetések</h3>
       <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>`;
     $("d-enabled").addEventListener("change", (e) => dealAction({ action: "enable", on: e.target.checked }));
+    $("d-day").addEventListener("click", async () => {
+      if (await dealAction({ action: "day", start: $("d-day-start").value, end: $("d-day-end").value }))
+        J.toast("Rendben: az éjjel záruló licitekről még este szólok.");
+    });
+    $("d-lookup").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      lookupQuery = $("dl-query").value;
+      const result = await J.postJson("/api/work/deals", { action: "lookup", query: lookupQuery });
+      if (!result.ok) { J.toast(result.error || "Nem sikerült."); return; }
+      lookupResults = result.results;
+      renderDeals();
+    });
     $("d-add").addEventListener("submit", async (e) => {
       e.preventDefault();
       const sites = [...box.querySelectorAll('input[name="d-site"]:checked')].map((i) => i.value);
@@ -596,7 +630,7 @@
     $("d-watch").addEventListener("submit", async (e) => {
       e.preventDefault();
       if (await dealAction({ action: "watch_add", target: $("dw-target").value, min_profit: $("dw-profit").value,
-                             hours: $("dw-hours").value, every: $("dw-every").value })) J.toast("Rendben, figyelem a liciteket.");
+                             hours: $("dw-hours").value, every: $("dw-every").value })) J.toast("Rendben, figyelem az oldalt.");
     });
     for (const b of box.querySelectorAll("[data-watch-remove]")) b.addEventListener("click", () => dealAction({ action: "watch_remove", id: b.dataset.watchRemove }));
     for (const b of box.querySelectorAll("[data-offer]")) b.addEventListener("click", () => makeOffer(b.dataset.offer, $(`d-offer-${b.dataset.offer}`).value));

@@ -137,9 +137,22 @@ class WorkSecurityTests(unittest.TestCase):
         [watch] = data["watches"]
         self.assertEqual((watch["name"], watch["min_profit"], watch["hours"], watch["every"]), ("PS5", 4000, 4, 60))
         status, data = self.post("/api/work/deals", {"action": "watch_add", "target": "https://example.com/x"})
-        self.assertEqual(status, 400, "csak Vatera-oldal")
-        status, data = self.post("/api/work/deals", {"action": "watch_remove", "id": watch["id"]})
+        self.assertEqual(status, 400, "csak az ismert oldalak")
+        # egy figyelt oldal (itt a helyi „Vinted” katalógusa): a legújabb elöl
+        status, data = self.post("/api/work/deals", {"action": "watch_add", "target": "http://127.0.0.1:9/katalogus.html?q=konzol"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["watches"][-1]["name"], "Vinted: konzol")
+        self.assertTrue(data["watches"][-1]["url"].endswith("?q=konzol&order=newest_first"))
+        for w in data["watches"]:
+            status, data = self.post("/api/work/deals", {"action": "watch_remove", "id": w["id"]})
         self.assertEqual((status, data["watches"]), (200, []))
+        status, data = self.post("/api/work/deals", {"action": "day", "start": "8", "end": "22"})
+        self.assertEqual((status, data["day"]), (200, [8, 22]))
+        self.assertEqual(self.post("/api/work/deals", {"action": "day", "start": "22", "end": "8"})[0], 400)
+        self.h.app.work.deals.book.add([{"text": f"RTX 3060 Ti videókártya {n}", "price": 100000 + n * 1000,
+                                         "url": f"https://hardverapro.hu/apro/{100000 + n}.html"} for n in range(5)])
+        status, data = self.post("/api/work/deals", {"action": "lookup", "query": "rtx 3060 ti"})
+        self.assertEqual((status, data["results"][0]["reference"]["price"]), (200, 102000))
         status, data = self.post("/api/work/deals", {"action": "offer", "id": "nincs-ilyen"})
         self.assertEqual(status, 400)
         self.h.app.work.deals._remember({"id": "o1", "url": "https://www.jofogas.hu/1", "text": "PS5 kontroller",
