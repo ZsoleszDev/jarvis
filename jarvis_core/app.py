@@ -98,7 +98,8 @@ TOOL_ACTIVITY = {
     "browser_upload_photos": "Feltöltöm a fotókat", "item_mark": "Megjelölöm",
     "item_delist": "Leveszem a hirdetést", "web_research": "Több oldalt olvasok",
     "watch_add": "Figyelőt állítok", "watch_list": "Átnézem a figyelőket", "watch_remove": "Törlöm a figyelőt",
-    "watch_check": "Megnézem a figyelőket",
+    "watch_check": "Megnézem a figyelőket", "messages_list": "Átnézem az üzeneteket",
+    "message_draft": "Válaszvázlatot írok",
 }
 EXAMPLES = ["Milyen idő lesz holnap?", "Mi ez a hibaüzenet a képernyőn?",
             "Keress a Vinteden fekete L-es pólót 2500 forintig"]
@@ -503,6 +504,11 @@ class JarvisApp:
                                         lambda: 24 * 60.0 if int(self.cfg.scheduler.listing_checks) > 0 else 0,
                                         self._listings_job, available=lambda: bool(checker.due()),
                                         needs_models=False, needs_browser=True))
+        messages = self.work.messages if self.work is not None else None
+        if messages is not None and messages.platforms and messages.browser is not None:
+            # A vevői üzenetek olvasása: modell nélkül, csak olvasva, de a böngésző kell hozzá (készenlétben nem fut).
+            self.scheduler.register(Job("messages", "Vevői üzenetek", self._message_minutes, self._messages_job,
+                                        available=messages.available, needs_models=False, needs_browser=True))
 
     def _register_watch_tools(self) -> None:
         box, watches = self.toolbox, self.watches
@@ -584,6 +590,16 @@ class JarvisApp:
         assert self.work is not None and self.work.checker is not None
         return self.work.checker.run(int(self.cfg.scheduler.listing_checks), check=ctx.check, notify=ctx.notify)
 
+    def _message_minutes(self) -> float:
+        if int(self.cfg.scheduler.message_reads) <= 0:
+            return 0.0
+        return float(self.cfg.scheduler.message_minutes or 0)
+
+    def _messages_job(self, ctx: Any) -> str:
+        """Időnként: a vevői üzenetek (csak olvasva, modell nélkül); ha új jött, szól."""
+        assert self.work is not None
+        return self.work.messages.run(int(self.cfg.scheduler.message_reads), check=ctx.check, notify=ctx.notify)
+
     def _tell(self, kind: str, title: str, text: str, **extra: Any) -> None:
         """Értesítés a telefonra is (a naplóba nem kerül újra): pl. hogy egy feltöltés kész, vagy hogy Jarvis
         kérdez valamit egy tárgyról. Ha a feladatot a telefonról adtad, így ott is megtudod."""
@@ -622,7 +638,8 @@ class JarvisApp:
             self.work = WorkDesk(self.cfg, self.llm, self.toolbox,
                                  on_change=getattr(self.ui, "work_item", None),
                                  on_remove=getattr(self.ui, "work_removed", None),
-                                 confirm=self.confirm, check_stop=self._check_stop)
+                                 confirm=self.confirm, check_stop=self._check_stop,
+                                 on_message=getattr(self.ui, "work_message", None))
             self.work.gap_waiter = self._respect_gap   # a közzététel előtti szünet a naplóban és az állapotsorban
         except Exception as exc:  # noqa: BLE001 - a Beszélgetés menü enélkül is működjön
             self.ui.warn(f"A Munka menü nem indult el ({exc}).")
@@ -1260,7 +1277,7 @@ class JarvisApp:
         if context:   # feltöltés közben: melyik oldal, melyik tárgy, mennyiért
             prompt = f"{context}\n\n{prompt}"
         approved = self.ui.confirm(prompt, self.stop_event)
-        if approved and context:
+        if approved and context and self.work.current is not None:
             self.work.approved = True
         return approved
 
@@ -1441,6 +1458,10 @@ class JarvisApp:
                     self._delist(item_id, platforms or None, confirmed=True)
                 elif action == "sold":
                     self._sold(item_id, str(payload.get("where") or ""), bool(payload.get("delist")))
+                elif action == "message_draft":
+                    self._message_draft(str(payload.get("conversation") or ""))
+                elif action == "message_send":
+                    self._message_send(str(payload.get("conversation") or ""), str(payload.get("text") or ""))
                 else:
                     self.ui.error(f"Ismeretlen feladat: {action}")
             except ItemError as exc:
@@ -1984,6 +2005,28 @@ class JarvisApp:
         self._dossier(item_id, key, "delist", outcome.reason, f"{mode} (bizonytalan)", url=outcome.url,
                       kitoltes=outcome.log)
         return self._check_after(item_id, key, "delist", outcome, how="modell nélkül")
+
+    def _message_draft(self, conv_id: str) -> None:
+        """Válaszvázlat egy vevő üzenetére (a felület Válaszvázlat gombja). Csak vázlat: elküldeni a Küldés gombbal lehet."""
+        assert self.work is not None
+        self._set_phase("working", "Válaszvázlatot írok")
+        conv = self.work.messages.draft(conv_id)
+        text = f"Válaszvázlat ({conv['partner'] or 'vevő'}): „{conv['draft']}”"
+        if conv["draft_note"]:
+            text += " " + conv["draft_note"]
+        self.ui.notice(text + " Az Üzenetek résznél átírhatod, és a Küldés gombbal küldheted el.")
+        self.say("Elkészült a válaszvázlat. Átírhatod, és a Küldés gombbal küldheted el.")
+
+    def _message_send(self, conv_id: str, text: str) -> None:
+        """A felület Küldés gombja: beírja a választ a beszélgetésbe, és a küldés gombja előtt jóváhagyást kér (a
+        kérdésben pontosan az a szöveg áll, ami elmegy)."""
+        assert self.work is not None
+        messages = self.work.messages
+        partner = messages.store.get(conv_id)["partner"] or "vevő"
+        result = messages.send(conv_id, text, progress=lambda detail: self._set_phase("working", f"Üzenet: {detail}"))
+        self.ui.notice(result)
+        self.say(result)
+        self._tell("message", f"Üzenet: {partner}", result, conversation=conv_id)
 
     def _research(self, item_id: str) -> None:
         """Árkutatás külön kérésre (csak ajánlás, nem állítja meg az eladást)."""

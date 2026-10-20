@@ -78,6 +78,7 @@ class Platform:
     hints: str             # tippek a Jarvisnak a kitöltéshez
     delist_hints: str = DEFAULT_DELIST_HINTS  # tippek a levételhez (eladás után)
     max_photos: int = 10   # ennyi fotót vesz fel egy hirdetéshez (a borítókép az első); a többit nem töltjük fel
+    inbox: str = ""        # a vevői üzenetek (lásd messages.py); üres = itt nem olvassuk őket
 
 
 PLATFORMS: dict[str, Platform] = {
@@ -95,7 +96,7 @@ PLATFORMS: dict[str, Platform] = {
         "kicsi, Medium = közepes, Large = nagy. Ami egy oldalon egymás után jön (pl. állapot, szín, csomagméret), "
         "az egy browser_do lépésben is mehet. 9. Végül a „Feltöltés” (Upload) gomb; ha utána azt írja, hogy "
         "valamit ki kell tölteni (Fill in …), pótold, és kattints újra.",
-        max_photos=20),
+        max_photos=20, inbox="https://www.vinted.hu/inbox"),
     "jofogas": Platform(
         "jofogas", "Jófogás", "https://www.jofogas.hu/", "https://www.jofogas.hu/",
         "https://www.jofogas.hu/magyarorszag?q={q}", ("jofogas.hu",),
@@ -176,6 +177,7 @@ class Item:
     color: str = ""
     material: str = ""
     price: int | None = None          # forint
+    min_price: int | None = None      # alkunál ennél kevesebbet nem fogad el (üres: az ár; lásd messages.py)
     location: str = ""                # ha eltér az Alapadatoktól
     shipping: str = ""
     search_query: str = ""
@@ -458,7 +460,7 @@ class ItemStore:
     def _apply(self, item: Item, values: dict[str, Any]) -> list[str]:
         changed = []
         for key, value in values.items():
-            if key == "price":
+            if key in ("price", "min_price"):
                 value = parse_price(value)
             elif key == "condition":
                 value = closest_condition(str(value or "")) if value else ""

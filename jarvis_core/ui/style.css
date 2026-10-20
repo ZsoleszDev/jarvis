@@ -382,6 +382,28 @@ fieldset.sites legend { padding: 0; margin-bottom: 8px; font-size: 13.5px; color
 .danger .delete { margin-left: auto; color: var(--ash); border-color: transparent; }
 .danger .delete:hover { color: var(--white); border-color: var(--white); }
 
+/* vevői üzenetek: a beszélgetések (az újak elöl), egy beszélgetés buborékokkal, alatta a válasz */
+.msgs-head { justify-content: space-between; }
+.convs { display: grid; gap: 8px; }
+.conv { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 10px 12px; text-align: left;
+        border: 1px solid var(--rule); border-radius: 8px; background: var(--graphite); color: inherit; }
+.conv:hover { border-color: var(--steel); }
+.conv.fresh { border-color: rgba(255, 255, 255, 0.6); }
+.conv .who { font-weight: 600; overflow-wrap: anywhere; }
+.conv .where { grid-column: 1; font-size: 12.5px; color: var(--ash); }
+.conv .chip { grid-column: 2; grid-row: 1; }
+.conv .snippet { grid-column: 1 / -1; font-size: 13.5px; color: var(--ash); overflow: hidden; text-overflow: ellipsis;
+                 white-space: nowrap; }
+.bubbles { display: grid; gap: 8px; }
+.bubble { max-width: 78%; padding: 7px 11px 8px; border: 1px solid var(--rule); border-radius: 10px;
+          background: var(--graphite); }
+.bubble.me { justify-self: end; border-color: var(--steel); background: var(--graphite-hi); }
+.bubble.them { justify-self: start; }
+.bubble p { margin: 0; font: 15px/1.45 var(--voice); overflow-wrap: anywhere; white-space: pre-wrap; }
+.bubble .when { display: block; margin-top: 2px; font-size: 11.5px; color: var(--steel); }
+.msgs .reply .pnote { margin: 0; font-size: 13px; color: var(--white); }
+#m-draft { width: 100%; }
+
 /* a Munka menü naplója: széles ablakban oldalsáv, keskenyben alul, összecsukható */
 .worklog { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--rule); }
 .logtoggle { align-self: stretch; padding: 8px 22px; border: 0; border-radius: 0; text-align: left;
