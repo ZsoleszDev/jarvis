@@ -2967,12 +2967,16 @@ class BrowserController:
             raise BrowserError(f"Nem tudom beolvasni a találatokat ({_short(exc)}).") from None
         return [entry for entry in found or [] if isinstance(entry, dict) and entry.get("price")]
 
-    @_restarts_after_crash
     def look_listing(self, url: str) -> dict[str, Any]:
-        """Egy hirdetés oldala a háttérellenőrzéshez (listings.py), csak olvasva: megnyitja az aktív lapon,
-        emberi tempóban átfutja (egy pillantás, egy kis görgetés, olvasás), és visszaadja a lap adatait
-        (LISTING_PAGE_JS) a captcha jelzéssel. Egy magától átengedő robotvédelmi köztes oldalt kivár
-        (CHALLENGE_WAIT), de a captchát nem próbálja megoldani. Semmire nem kattint."""
+        """Egy hirdetés oldala a háttérellenőrzéshez (listings.py), csak olvasva (lásd look)."""
+        return self.look(url, LISTING_PAGE_JS)
+
+    @_restarts_after_crash
+    def look(self, url: str, script: str = LISTING_PAGE_JS) -> dict[str, Any]:
+        """Egy oldal csak olvasva (pl. egy hirdetés a háttérellenőrzéshez, vagy a vevői üzenetek): megnyitja az
+        aktív lapon, emberi tempóban átfutja (egy pillantás, egy kis görgetés, olvasás), és visszaadja a lap adatait
+        (a `script` szerint, pl. LISTING_PAGE_JS) a captcha jelzéssel. Egy magától átengedő robotvédelmi köztes
+        oldalt kivár (CHALLENGE_WAIT), de a captchát nem próbálja megoldani. Semmire nem kattint."""
         try:
             url = web.normalize_url(url, allow_local=self.allow_local)
         except web.WebError as exc:
@@ -2986,8 +2990,17 @@ class BrowserController:
         self._glance(page)   # modell nélküli olvasás: egy ember is átfutja az oldalt
         self.pace.read()
         self.elements = {}   # a korábbi oldalnézet számai itt már nem érvényesek
+        return self._page_data(page, script)
+
+    @_restarts_after_crash
+    def page_data(self, script: str) -> dict[str, Any]:
+        """Az aktív lap adatai egy olvasó szkripttel (pl. a beszélgetés üzenetei a küldés után), navigálás, görgetés
+        és kattintás nélkül; a letapogatás (scan) számai érvényben maradnak."""
+        return self._page_data(self._ensure(), script)
+
+    def _page_data(self, page: Any, script: str) -> dict[str, Any]:
         try:
-            data = page.evaluate(LISTING_PAGE_JS)
+            data = page.evaluate(script)
         except Exception as exc:  # noqa: BLE001
             raise BrowserError(f"Nem tudom beolvasni az oldalt ({_short(exc)}).") from None
         data = data if isinstance(data, dict) else {}

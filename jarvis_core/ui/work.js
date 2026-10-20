@@ -20,6 +20,11 @@
   let openId = null;
   let composePhotos = [];               // a még fel nem küldött hirdetés fotói (File)
   let pickFor = null;                   // a fájlválasztó kinek választ: "compose" vagy egy tárgy
+  // Vevői üzenetek: a beszélgetések (Jarvis olvassa el őket), a nyitott beszélgetés, és van-e saját böngésző.
+  const convs = new Map();
+  let messagesOn = false;
+  let msgBrowser = false;
+  let convOpen = null;
   const area = $("w-area");
 
   const POSTED = "feltöltve";
@@ -40,6 +45,7 @@
   const siteState = (item, key) => (item.platforms[key] || {}).status || "";
   const store = (key, value) => { try { localStorage.setItem(key, value); } catch { /* nem baj */ } };
   const recall = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
+  const isNew = (conv) => !!(conv.new || conv.unread);
 
   function matches(item) {
     if (filter === "sold") return item.sold;
@@ -69,10 +75,25 @@
       browserOn = !!data.browser;
       conditions = data.conditions || [];
       maxPhotos = data.max_photos || 20;
+      messagesOn = !!data.messages;
+      if (!messagesOn && filter === "msgs") filter = "all";
       renderCompose();
       renderSetup();
       render();
+      if (messagesOn) loadMessages();
     } catch { /* a Jarvis még indul: a következő "hello" újra betölti */ }
+  }
+
+  async function loadMessages() {
+    try {
+      const response = await fetch("/api/work/messages?t=" + encodeURIComponent(token));
+      if (!response.ok) return;
+      const data = await response.json();
+      convs.clear();
+      for (const conv of data.conversations || []) convs.set(conv.id, conv);
+      msgBrowser = !!data.browser;
+      render();
+    } catch { /* később újra betölti */ }
   }
 
   function remember(result, fallback) {
@@ -322,6 +343,15 @@
 
   function render() {
     renderFilters();
+    $("w-msgs").hidden = filter !== "msgs";
+    if (filter === "msgs") {
+      openId = null;
+      $("w-list-view").hidden = true;
+      $("w-detail").hidden = true;
+      if (convOpen && !convs.has(convOpen)) convOpen = null;
+      keepTyping($("w-msgs"), renderMessages);
+      return;
+    }
     if (openId && items.has(openId)) {
       $("w-list-view").hidden = true;
       $("w-detail").hidden = false;
@@ -344,7 +374,9 @@
     }
     $("w-filters").innerHTML = FILTERS.map(([key, label]) =>
       `<button type="button" data-filter="${key}" aria-pressed="${filter === key}">${label}` +
-      `<span class="count">${counts[key]}</span></button>`).join("");
+      `<span class="count">${counts[key]}</span></button>`).join("") + (messagesOn
+      ? `<button type="button" data-filter="msgs" aria-pressed="${filter === "msgs"}">Üzenetek` +
+        `<span class="count">${[...convs.values()].filter(isNew).length}</span></button>` : "");
   }
 
   function renderList() {
@@ -508,6 +540,8 @@
           <div class="field wide"><label for="f-description">Leírás</label>
             <textarea id="f-description" data-field="description" data-keep="f-description" rows="4">${esc(item.description)}</textarea></div>
           ${field("price", "Ár (Ft)", item.price ?? "", 'inputmode="numeric"')}
+          ${messagesOn ? field("min_price", "Alkunál legalább (Ft)", item.min_price ?? "",
+            `inputmode="numeric" placeholder="${esc(price(item.price) || "az ár")}"`) : ""}
           ${conditionField(item.condition)}
           ${field("brand", "Márka", item.brand)}
           ${field("size", "Méret", item.size)}
@@ -523,6 +557,100 @@
         <button type="button" data-action="sold">${item.sold ? "Mégsem kelt el" : "Eladva"}</button>
         <button type="button" class="delete" data-action="delete">Törlés</button>
       </div>`;
+  }
+
+  // --- vevői üzenetek ---------------------------------------------------------------------------
+
+  function renderMessages() {
+    const conv = convOpen && convs.get(convOpen);
+    $("w-msgs").innerHTML = conv ? conversation(conv) : conversationList();
+  }
+
+  function conversationList() {
+    const list = [...convs.values()].sort((a, b) => (isNew(b) - isNew(a)) || (b.updated - a.updated));
+    return `<div class="row msgs-head"><h2 class="section-title">Vevői üzenetek</h2>
+        ${msgBrowser ? '<button type="button" class="small" data-msg="check">Frissítés most</button>' : ""}</div>
+      <p class="muted">Jarvis időnként elolvassa az új üzeneteidet (csak olvas, semmit nem küld). Válaszvázlatot
+        kérésre ír; elküldeni csak te tudod, a Küldés gombbal, és a küldés előtt még egyszer rákérdez.</p>
+      ${list.length ? `<div class="convs">${list.map(conversationRow).join("")}</div>`
+        : '<p class="muted">Még nincs elolvasott beszélgetés.</p>'}`;
+  }
+
+  function conversationRow(conv) {
+    const fresh = conv.new ? `${conv.new} új` : conv.unread ? "olvasatlan" : "";
+    return `<button type="button" class="conv${isNew(conv) ? " fresh" : ""}" data-conv="${esc(conv.id)}">
+      <span class="who">${esc(conv.partner || "Vevő")}</span>
+      ${fresh ? `<span class="chip kerdes">${esc(fresh)}</span>` : ""}
+      <span class="where">${esc(conv.site)}${conv.item_name ? " · " + esc(conv.item_name) : ""}</span>
+      <span class="snippet">${esc(conv.snippet)}</span></button>`;
+  }
+
+  function conversation(conv) {
+    const bubbles = (conv.messages || []).map((m) =>
+      `<div class="bubble ${m.from === "me" ? "me" : "them"}"><p>${esc(m.text)}</p>` +
+      (m.time ? `<span class="when">${esc(m.time)}</span>` : "") + "</div>").join("");
+    const fromBuyer = (conv.messages || []).some((m) => m.from !== "me");
+    return `<header>
+        <button type="button" class="quiet small" data-msg="back">← Üzenetek</button>
+        <h2>${esc(conv.partner || "Vevő")}</h2>
+        <span class="chip">${esc(conv.site)}</span>
+        ${conv.item ? `<button type="button" class="small" data-msg="item">Tárgy: ${esc(conv.item_name)}</button>`
+          : '<span class="muted">Nem tudom, melyik tárgyadról szól.</span>'}
+        ${safeUrl(conv.url) ? `<a class="button small" href="${esc(conv.url)}" target="_blank" rel="noopener noreferrer">Megnyitás</a>` : ""}
+      </header>
+      <div class="bubbles">${bubbles || '<p class="muted">Ezt a beszélgetést még nem olvastam el.</p>'}</div>
+      <section class="reply" aria-labelledby="h-reply">
+        <h3 id="h-reply">Válasz</h3>
+        ${conv.minimum ? `<p class="muted">Alkunál legalább ${esc(price(conv.minimum))}: ennél kevesebbet a vázlat nem fogad el
+          (a tárgy lapján átírhatod).</p>` : ""}
+        ${conv.draft_note ? `<p class="pnote">${esc(conv.draft_note)}</p>` : ""}
+        <textarea id="m-draft" data-keep="draft-${esc(conv.id)}-${conv.draft_at || 0}" rows="4" aria-label="Válasz a vevőnek"
+          placeholder="Írd ide a választ, vagy kérj vázlatot">${esc(conv.draft)}</textarea>
+        <div class="row">
+          <button type="button" data-msg="draft"${fromBuyer ? "" : " disabled"}>Válaszvázlat</button>
+          <button type="button" class="primary" data-msg="send"${msgBrowser ? "" : " disabled"}>Küldés</button>
+        </div>
+        <p class="muted">A Küldésre Jarvis beírja a választ a beszélgetésbe, és a küldés előtt még egyszer rákérdez,
+          pontosan ezzel a szöveggel.</p>
+      </section>`;
+  }
+
+  function openConversation(id) {
+    convOpen = id;
+    const conv = convs.get(id);
+    if (conv && conv.new) {   // megnézted: nincs benne új
+      J.postJson("/api/work/messages/seen", { id }).then((result) => {
+        if (result.ok) { convs.set(id, result.conversation); render(); }
+      });
+    }
+    render();
+    area.scrollTop = 0;
+  }
+
+  async function messageAction(name) {
+    const conv = convs.get(convOpen);
+    if (name === "back") { convOpen = null; render(); return; }
+    if (name === "check") {
+      const result = await J.postJson("/api/work/messages/check", {});
+      J.toast(result.ok ? "Megnézem az üzeneteidet." : result.error || "Nem sikerült elindítani.");
+      return;
+    }
+    if (!conv) return;
+    if (name === "item") {
+      filter = "all";
+      openId = conv.item;
+      convOpen = null;
+      render();
+      area.scrollTop = 0;
+    } else if (name === "draft") {
+      const result = await J.postJson("/api/work/messages/draft", { id: conv.id });
+      J.toast(result.ok ? "Jarvis vázlatot ír…" : result.error || "Nem sikerült elindítani.");
+    } else if (name === "send") {
+      const text = $("m-draft").value.trim();
+      if (!text) { J.toast("Írd be a választ, vagy kérj vázlatot."); return; }
+      const result = await J.postJson("/api/work/messages/send", { id: conv.id, text });
+      J.toast(result.ok ? "Jarvis beírja, és a küldés előtt rákérdez." : result.error || "Nem sikerült elindítani.");
+    }
   }
 
   // --- műveletek -------------------------------------------------------------------------
@@ -674,7 +802,21 @@
     if (!button) return;
     filter = button.dataset.filter;
     openId = null;
+    convOpen = null;
     render();
+  });
+
+  $("w-msgs").addEventListener("click", (event) => {
+    const row = event.target.closest("[data-conv]");
+    if (row) { openConversation(row.dataset.conv); return; }
+    const button = event.target.closest("button[data-msg]");
+    if (button) messageAction(button.dataset.msg);
+  });
+  // a kézzel átírt vázlat megmarad (a telefonon is ez látszik)
+  $("w-msgs").addEventListener("change", async (event) => {
+    if (event.target.id !== "m-draft" || !convOpen) return;
+    const result = await J.postJson("/api/work/messages/save", { id: convOpen, draft: event.target.value });
+    if (result.ok) convs.set(result.conversation.id, result.conversation);
   });
 
   async function onCardsClick(event) {
@@ -801,6 +943,13 @@
     items.delete(event.id);
     if (openId === event.id) openId = null;
     scheduleRender(event.id);
+  });
+  J.on("work_message", (event) => {
+    const conv = event.conversation;
+    convs.set(conv.id, conv);
+    if (filter === "msgs" && convOpen === conv.id && conv.new) openConversation(conv.id);
+    else if (filter === "msgs") render();
+    else renderFilters();
   });
   J.onHello((event) => { if (event.work) load(); });
 })();

@@ -32,6 +32,7 @@ from .config import GuiCfg, app_data
 from .creative import MAX_TEXT, StoryError
 from .dossier import open_folder
 from .gpu import GpuMonitor
+from .messages import CONV_ID_RE, MAX_TEXT as MAX_MESSAGE
 from .selling import MAX_PHOTO_BYTES, ItemError
 from .tools import summarize_result
 from .watches import WatchError
@@ -45,7 +46,7 @@ PHOTO_POST_RE = re.compile(r"^/api/work/items/([0-9a-f]{8})/photo$")
 MAX_VOICE_BYTES = 15 * 1024 * 1024    # a telefon vagy a laptop mikrofonjával felvett kérdés (távoli ablak)
 # Amit a felületről át lehet írni egy tárgyon, és amit el lehet indítani.
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
-            "size", "condition", "color", "material", "price", "location", "shipping"}
+            "size", "condition", "color", "material", "price", "min_price", "location", "shipping"}
 ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold"}
 IS_WINDOWS = sys.platform == "win32"
 CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
@@ -263,6 +264,10 @@ class GuiUI:
     def work_removed(self, item_id: str) -> None:
         self.bus.publish({"type": "work_removed", "id": item_id}, record=False)
 
+    def work_message(self, conversation: dict[str, Any]) -> None:
+        """Egy vevői beszélgetés megváltozott (új üzenet, vázlat, elküldve): a felület frissíti."""
+        self.bus.publish({"type": "work_message", "conversation": conversation}, record=False)
+
     def creative_event(self, event: dict[str, Any]) -> None:
         """A Kreatív menü eseménye (élő írás, egy történet változása); visszajátszani nem kell, a felület
         újracsatlakozáskor lekéri a történetet."""
@@ -452,6 +457,9 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/work/items":
             return self._json(200, {"ok": True, "items": [i.public() for i in work.store.all()],
                                     **work.describe()})
+        if path == "/api/work/messages":
+            return self._json(200, {"ok": True, "conversations": work.messages.conversations(),
+                                    "unread": work.messages.unread_count(), "browser": work.messages.browser is not None})
         match = PHOTO_GET_RE.match(path)
         if match:
             try:
@@ -625,6 +633,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(503, {"ok": False, "error": "A Munka menü még indul."})
         item_id = str(body.get("id") or "")
         try:
+            if path.startswith("/api/work/messages/"):
+                return self._messages_post(path, body, remote)
             if path == "/api/work/new":
                 values = {"targets": body.get("targets") or [], "prompt": str(body.get("prompt") or ""),
                           "research_wanted": bool(body.get("research_wanted"))}
@@ -698,6 +708,39 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(400, {"ok": False, "error": str(exc)})
         except OSError as exc:
             return self._json(500, {"ok": False, "error": f"Nem sikerült: {exc}"})
+        self._json(404, {"ok": False})
+
+    def _messages_post(self, path: str, body: dict[str, Any], remote: bool = False) -> None:
+        """A vevői üzenetek gombjai: vázlat kérése, a vázlat mentése, megnézve, küldés (jóváhagyással), frissítés."""
+        app = self.gui.app
+        desk = self._work().messages
+        silent = {"silent": True} if remote else {}   # aki távolról indította, nincs a gép előtt
+        if path == "/api/work/messages/check":
+            if app.scheduler is None or "messages" not in app.scheduler.jobs:
+                return self._json(409, {"ok": False, "error": "Az üzenetek olvasásához Jarvis saját böngészője kell."})
+            app.run_job_now("messages")
+            return self._json(202, {"ok": True})
+        conv_id = str(body.get("id") or "")
+        if not CONV_ID_RE.match(conv_id):
+            return self._json(400, {"ok": False, "error": "Melyik beszélgetés?"})
+        conv = desk.store.get(conv_id)     # MessageError (ItemError), ha nincs ilyen
+        if path == "/api/work/messages/seen":
+            return self._json(200, {"ok": True, "conversation": desk.public(desk.store.seen(conv_id))})
+        if path == "/api/work/messages/save":
+            draft = desk.store.set_draft(conv_id, str(body.get("draft") or "")[:MAX_MESSAGE])
+            return self._json(200, {"ok": True, "conversation": desk.public(draft)})
+        if path == "/api/work/messages/draft":
+            app.submit_work("message_draft", conversation=conv_id, **silent)
+            return self._json(202, {"ok": True})
+        if path == "/api/work/messages/send":
+            text = str(body.get("text") or "").strip()[:MAX_MESSAGE]
+            if not text:
+                return self._json(400, {"ok": False, "error": "Üres üzenetet nem küldök."})
+            if conv["platform"] not in desk.platforms or desk.browser is None:
+                return self._json(409, {"ok": False, "error": "Ezt az üzenetet most nem tudom elküldeni (nincs böngésző, "
+                                                              "vagy ennek az oldalnak az üzeneteit nem kezelem)."})
+            app.submit_work("message_send", conversation=conv_id, text=text, **silent)
+            return self._json(202, {"ok": True})
         self._json(404, {"ok": False})
 
 

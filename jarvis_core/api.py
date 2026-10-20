@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import remote
 from .config import ApiCfg
+from .messages import MAX_TEXT
 from .selling import FAILED, MAX_PHOTO_BYTES, NOT_POSTED, POSTED, ItemError
 from .watches import WatchError
 from .webpush import INSTALL_HINT, PushError, WebPush, available as push_available
@@ -45,7 +46,7 @@ CODE_TRIES = 5
 LOG_LIMIT = 800
 LOG_SKIP = {"delta", "level", "segment_end"}       # ezek túl sűrűk; a végleges szöveg "assistant" eseményként jön
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
-            "size", "condition", "color", "material", "price", "location", "shipping"}
+            "size", "condition", "color", "material", "price", "min_price", "location", "shipping"}
 AGENT_ACTIONS = {"sell", "reply", "price", "post", "research", "delist"}
 
 
@@ -737,6 +738,49 @@ class _ApiHandler(BaseHTTPRequestHandler):
         work.acknowledge(str(self._body().get("platform") or ""))
         self._json(200, {"ok": True, "acknowledged": work.settings.get("acknowledged", [])})
 
+    # --- vevői üzenetek ---------------------------------------------------------------------------
+
+    def r_messages(self, query: dict[str, list[str]]) -> None:
+        desk = self._work().messages
+        self._json(200, {"ok": True, "conversations": desk.conversations(), "unread": desk.unread_count(),
+                         "browser": desk.browser is not None})
+
+    def r_message_get(self, conv_id: str, query: dict[str, list[str]]) -> None:
+        desk = self._work().messages
+        self._json(200, {"ok": True, "conversation": desk.public(desk.store.get(conv_id))})
+
+    def r_message_save(self, conv_id: str, query: dict[str, list[str]]) -> None:
+        desk = self._work().messages
+        draft = str(self._body().get("draft") or "")[:MAX_TEXT]
+        self._json(200, {"ok": True, "conversation": desk.public(desk.store.set_draft(conv_id, draft))})
+
+    def r_message_action(self, conv_id: str, action: str, query: dict[str, list[str]]) -> None:
+        """Vázlat kérése, megnézve, vagy küldés (a küldés gombja előtt jóváhagyást kér: POST /confirm)."""
+        desk = self._work().messages
+        body = self._body()
+        conv = desk.store.get(conv_id)
+        if action == "seen":
+            return self._json(200, {"ok": True, "conversation": desk.public(desk.store.seen(conv_id))})
+        extra: dict[str, Any] = {}
+        if action == "send":
+            extra["text"] = str(body.get("text") or "").strip()[:MAX_TEXT]
+            if not extra["text"]:
+                raise ApiError(400, "bad_request", "Üres üzenet (text).")
+            if conv["platform"] not in desk.platforms or desk.browser is None:
+                raise ApiError(409, "no_browser", "Ezt az üzenetet most nem tudom elküldeni (nincs böngésző, vagy ennek "
+                               "az oldalnak az üzeneteit nem kezelem).")
+        self._ready_for_agent(body.get("resume"))
+        self.api.app.submit_work(f"message_{action}", conversation=conv_id, **extra)
+        self._json(202, {"ok": True})
+
+    def r_messages_check(self, query: dict[str, list[str]]) -> None:
+        scheduler = self._scheduler()
+        if "messages" not in scheduler.jobs:
+            raise ApiError(409, "no_browser", "Az üzenetek olvasásához Jarvis saját böngészője kell.")
+        self._ready_for_agent(self._flag(query, "resume"))
+        self.api.app.run_job_now("messages")
+        self._json(202, {"ok": True})
+
     # --- háttérmunka, figyelők, értesítések --------------------------------------------------------
 
     def _scheduler(self) -> Any:
@@ -804,6 +848,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
 
 
 _ID = r"([0-9a-f]{8})"
+_CONV = r"([0-9a-f]{10})"
 ROUTES: list[tuple[str, re.Pattern[str], str]] = [(m, re.compile(p), n) for m, p, n in (
     ("GET", r"/status", "r_status"),
     ("POST", r"/chat", "r_chat"),
@@ -828,6 +873,11 @@ ROUTES: list[tuple[str, re.Pattern[str], str]] = [(m, re.compile(p), n) for m, p
     ("POST", rf"/work/items/{_ID}/(sell|reply|price|cancel|post|research|sold|delist|mark)", "r_item_action"),
     ("PUT", r"/work/settings", "r_settings"),
     ("POST", r"/work/ack", "r_ack"),
+    ("GET", r"/work/messages", "r_messages"),
+    ("POST", r"/work/messages/check", "r_messages_check"),
+    ("GET", rf"/work/messages/{_CONV}", "r_message_get"),
+    ("PUT", rf"/work/messages/{_CONV}/draft", "r_message_save"),
+    ("POST", rf"/work/messages/{_CONV}/(draft|seen|send)", "r_message_action"),
     ("GET", r"/jobs", "r_jobs"),
     ("POST", r"/jobs/snooze", "r_snooze"),
     ("POST", r"/jobs/([a-z_]+)/run", "r_job_run"),

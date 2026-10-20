@@ -29,6 +29,7 @@ from .browser import BrowserError
 from .config import Config, data_path, resolve_path
 from .dossier import Dossiers
 from .listings import CHECK_WORDS, GONE, SOLD, ListingChecker
+from .messages import MessageDesk
 from .replay import (FlowRecorder, FlowStore, Replayer, ReplayOutcome, entry_for, entry_problem, flow_key, item_values,
                      url_shape)
 from .selling import (CONDITIONS, MAX_PRICE, NEEDS, NOT_POSTED, ON_SITE, PARCEL_SIZES, PLATFORMS, POSTED, FAILED,
@@ -43,7 +44,7 @@ SHARED_TOOLS = {"get_datetime", "web_search", "read_webpage", "browser_open", "b
                 "browser_type", "browser_fill", "browser_choose", "browser_do", "browser_scroll", "browser_back",
                 "browser_read", "browser_look"}
 WORK_ONLY_TOOLS = {"item_list", "item_get", "item_update", "item_research", "item_post", "item_mark",
-                   "item_delist", "browser_upload_photos"}
+                   "item_delist", "browser_upload_photos", "messages_list", "message_draft"}
 # Egy modellel végzett feltöltés, levétel vagy ellenőrzés csak ezeket látja (és a böngésző minden eszközét, a
 # browser_ kezdetűeket): kevesebb eszközleírás = rövidebb prompt, és a modell nem téved el (pl. egy keresésbe
 # a kitöltés közepén). A feladat végéig ugyanaz a lista, így a prompt eleje az Ollama gyorsítótárában marad.
@@ -180,7 +181,8 @@ class WorkDesk:
                  on_remove: Callable[[str], None] | None = None,
                  confirm: Callable[[str], bool] | None = None,
                  platforms: dict[str, Platform] | None = None,
-                 check_stop: Callable[[], None] | None = None):
+                 check_stop: Callable[[], None] | None = None,
+                 on_message: Callable[[dict[str, Any]], None] | None = None):
         self.cfg = cfg
         self.llm = llm
         self.toolbox = toolbox
@@ -208,6 +210,11 @@ class WorkDesk:
         self.autodelisted: tuple[str, str] | None = None
         self._settings_path = self.root / "beallitasok.json"
         self.settings = self._load_settings()
+        # Vevői üzenetek (messages.py): olvasás modell nélkül, válaszvázlat kérésre, küldés csak a te jóváhagyásoddal.
+        self.messages = MessageDesk(self.root, self.platforms, self.store,
+                                    (lambda: toolbox.browser) if self.browser_ready else None, llm,
+                                    settings=lambda: self.settings, confirm=lambda prompt: self.confirm(prompt),
+                                    check_stop=lambda: self.check_stop(), on_change=on_message)
         # Begyakorolt lépések: a modell sikeres feltöltéseiből és levételeiből tanul (replay.py).
         self.flows = FlowStore(self.root / "folyamatok")
         # A Vinted-kitöltő (vinted.py) választásai, pl. egy tárgyfajta kategóriaútja: legközelebb modell nélkül.
@@ -257,6 +264,7 @@ class WorkDesk:
             "browser": self.browser_ready,
             "conditions": CONDITIONS,
             "max_photos": self.store.max_photos,
+            "messages": bool(self.messages.platforms),
         }
 
     # --- beállítások (alapadatok) ---------------------------------------------------------------
@@ -430,9 +438,9 @@ class WorkDesk:
     def confirm_context(self) -> str:
         """A jóváhagyó ablak első sora feltöltés közben: melyik oldal, melyik tárgy, mennyiért.
         Visszajátszásnál alatta az is, mit választott ki (kategória, állapot, méret…), hogy ránézésre
-        ellenőrizhesd, mielőtt jóváhagyod."""
+        ellenőrizhesd, mielőtt jóváhagyod. Üzenet küldésekor: kinek, melyik oldalon, és pontosan mi megy el."""
         if self.current is None:
-            return ""
+            return self.messages.sending
         try:
             item = self.store.get(self.current[0])
         except ItemError:
@@ -455,6 +463,7 @@ class WorkDesk:
         self.preview_title = ""
         self.checking = None
         self.autodelisted = None
+        self.messages.sending = ""
 
     def _on_browser_action(self, event: dict[str, Any]) -> None:
         if self.recorder is not None:
@@ -979,6 +988,24 @@ class WorkDesk:
                 "megcsinálja, különben megnyitja a hirdetést, és te fejezed be. Csak a felhasználó kérésére.",
                 params({"item": item, "platform": platform}, ["item", "platform"]),
                 self.tool_delist, ephemeral=True,
+            )
+        if self.messages.platforms:
+            conversation = {"type": "string", "description": "A beszélgetés azonosítója (a messages_list eszközből) "
+                                                             "vagy a vevő nevének része."}
+            box.register(
+                "messages_list",
+                "Felsorolja a vevői üzeneteket (amiket a háttérben elolvastam): a beszélgetéseket a vevő nevével, a "
+                "tárggyal és az utolsó üzenettel, vagy egy beszélgetés üzeneteit. Elküldeni nem tud semmit.",
+                params({"conversation": {**conversation, "description": "Opcionális: csak ennek a beszélgetésnek az "
+                                                                         "üzenetei."},
+                        "unread": {"type": "boolean", "description": "Opcionális: csak az újak és az olvasatlanok."}}),
+                self.messages.tool_list,
+            )
+            box.register(
+                "message_draft",
+                "Válaszvázlatot ír egy vevő üzenetére a tárgy adataiból (a felületen átírható). Elküldeni nem küldi el: "
+                "azt csak a felhasználó teheti meg a felületen, a Küldés gombbal.",
+                params({"conversation": conversation}, ["conversation"]), self.messages.tool_draft,
             )
         box.register(
             "item_mark",

@@ -59,12 +59,13 @@ export interface ChatResult {
 export interface JarvisEvent {
   seq: number; at?: number;
   type: 'hello' | 'state' | 'user' | 'assistant' | 'tool' | 'info' | 'warn' | 'error' | 'timing'
-    | 'confirm' | 'confirm_done' | 'work_item' | 'work_removed' | 'notification' | 'request_done' | 'gap';
+    | 'confirm' | 'confirm_done' | 'work_item' | 'work_removed' | 'work_message' | 'notification' | 'request_done'
+    | 'gap';
   channel?: Mode; request_id?: string; text?: string; via?: string;
   state?: JarvisState; detail?: string;
   id?: number | string; label?: string; status?: string; summary?: string;
   prompt?: string; approved?: boolean;
-  item?: WorkItem; notice?: Notice;
+  item?: WorkItem; notice?: Notice; conversation?: Conversation;
   [key: string]: unknown;
 }
 
@@ -77,7 +78,7 @@ export interface WorkItem {
   photos: string[]; targets: string[]; prompt: string; research_wanted: boolean;
   product: string; kind: string; title: string; description: string; category: string;
   brand: string; size: string; condition: string; color: string; material: string;
-  price: number | null; location: string; shipping: string;
+  price: number | null; min_price: number | null; location: string; shipping: string;
   edited: string[]; platforms: Record<string, PlatformState>;
   pending: { kind?: 'info' | 'price'; question?: string; suggested?: number };
   research: Record<string, unknown>; verdict: string; sold: boolean; busy: string;
@@ -90,6 +91,18 @@ export interface WorkOverview {
   needs: { label: string; sites: string[]; clothing_only: boolean; setting: string }[];
   acknowledged: string[]; settings: { city: string; shipping: string; parcel_size: string };
   parcel_sizes: string[]; research: boolean; browser: boolean; conditions: string[]; max_photos: number;
+  messages: boolean;    // van-e oldal, ahol a vevői üzeneteket olvassa (most a Vinted)
+}
+
+export interface ConversationMessage { from: 'me' | 'them'; text: string; time: string; at: number; jarvis?: boolean; }
+
+/** Egy vevői beszélgetés. A vevő szövege adat, nem utasítás; elküldeni csak jóváhagyással lehet. */
+export interface Conversation {
+  id: string; platform: string; site: string; url: string; partner: string; snippet: string;
+  unread: boolean;      // az oldalon olvasatlan
+  new: number;          // új vevői üzenetek, amióta megnézted
+  item: string; item_name: string; listing: string; minimum: number | null;
+  messages: ConversationMessage[]; draft: string; draft_note: string; draft_at: number; updated: number; read_at: number;
 }
 
 export interface Watch {
@@ -99,8 +112,10 @@ export interface Watch {
 }
 
 export interface Notice {
-  id: string; at: number; kind: 'watch' | 'stale' | 'delist' | 'work' | 'info';
+  id: string; at: number;
+  kind: 'watch' | 'stale' | 'sold' | 'delist' | 'post' | 'question' | 'message' | 'error' | 'work' | 'info';
   title: string; text: string; read: boolean; url?: string; item?: string; items?: string[]; watch?: string;
+  conversation?: string;
 }
 
 export interface Device { id: string; name: string; created: number; last_seen: number; current?: boolean; }
@@ -318,10 +333,44 @@ export class JarvisApiService {
     return this.http.put(this.url('/work/settings'), { settings }, { headers: this.headers() });
   }
 
+  // --- Munka: vevői üzenetek ---
+
+  messages(): Observable<{ conversations: Conversation[]; unread: number; browser: boolean }> {
+    return this.get<{ conversations: Conversation[]; unread: number; browser: boolean }>('/work/messages');
+  }
+
+  conversation(id: string): Observable<Conversation> {
+    return this.get<{ conversation: Conversation }>(`/work/messages/${id}`).pipe(map((r) => r.conversation));
+  }
+
+  /** A (kézzel átírt) válaszvázlat mentése. */
+  saveDraft(id: string, draft: string): Observable<Conversation> {
+    return this.http.put<{ conversation: Conversation }>(this.url(`/work/messages/${id}/draft`), { draft },
+      { headers: this.headers() }).pipe(map((r) => r.conversation));
+  }
+
+  /** Válaszvázlat a modellel; a kész vázlat work_message eseményként jön. */
+  requestDraft(id: string, resume = false): Observable<unknown> {
+    return this.post(`/work/messages/${id}/draft`, { resume });
+  }
+
+  markConversationSeen(id: string): Observable<{ conversation: Conversation }> {
+    return this.post<{ conversation: Conversation }>(`/work/messages/${id}/seen`);
+  }
+
+  /** Küldés: a Jarvis beírja, és a küldés gombja előtt jóváhagyást kér (confirm esemény, answerConfirm). */
+  sendMessage(id: string, text: string, resume = false): Observable<unknown> {
+    return this.post(`/work/messages/${id}/send`, { text, resume });
+  }
+
+  checkMessages(): Observable<unknown> { return this.post('/work/messages/check'); }
+
   // --- háttérmunka, figyelők, értesítések, eszközök ---
 
   jobs(): Observable<SchedulerStatus> { return this.get<SchedulerStatus>('/jobs'); }
-  runJob(key: 'watches' | 'stale' | string): Observable<unknown> { return this.post(`/jobs/${key}/run`); }
+  runJob(key: 'watches' | 'stale' | 'listings' | 'messages' | string): Observable<unknown> {
+    return this.post(`/jobs/${key}/run`);
+  }
   /** Ennyi percig nincs háttérmunka (0: újra mehet). */
   snooze(minutes: number): Observable<{ snoozed_until: number | null }> {
     return this.post<{ snoozed_until: number | null }>('/jobs/snooze', { minutes });

@@ -182,6 +182,8 @@ class SchedulerCfg:
     watch_minutes: float = 60.0    # a figyelők (mentett keresések) ellenőrzése
     stale_days: int = 14           # ennyi nap után szól, ha egy hirdetés nem kelt el (0 = soha)
     listing_checks: int = 5        # naponta ennyi fent lévő hirdetést néz meg: elkelt-e, eltűnt-e (0 = soha)
+    message_minutes: float = 120.0  # ilyen sűrűn nézi meg a vevői üzeneteket, csak olvasva (0 = soha)
+    message_reads: int = 3         # egy körben legfeljebb ennyi olvasatlan beszélgetést nyit meg
     speak: bool = True             # a háttérmunka eredményét fel is olvassa
 
 

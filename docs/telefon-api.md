@@ -107,7 +107,7 @@ fent lévő hirdetések) fut, szünetben semmi.
 
 | Módszer | Útvonal | Törzs | Megjegyzés |
 |---|---|---|---|
-| GET | `/work` | | `{items, platforms, needs, settings, acknowledged, conditions, max_photos, research, browser}` |
+| GET | `/work` | | `{items, platforms, needs, settings, acknowledged, conditions, max_photos, research, browser, messages}` (`messages`: van-e oldal, ahol a vevői üzeneteket olvassa) |
 | POST | `/work/items` | `{targets: ["vinted", …], prompt, research_wanted?}` | új tárgy (201) |
 | GET | `/work/items/{id}` | | egy tárgy |
 | PATCH | `/work/items/{id}` | `{fields: {title?, description?, price?, …}}` | amit itt átírsz, azt Jarvis már nem írja felül |
@@ -130,22 +130,41 @@ fent lévő hirdetések) fut, szünetben semmi.
 
 A tárgy fontos mezői: `status` (`vázlat`, `kérdés`, `árdöntés`, `részben fent`, `fent`, `eladva`),
 `pending` (`{kind: "info" | "price", question, suggested?}`), `platforms[kulcs]`
-(`{status, at, url?, note?}`), `busy` (min dolgozik épp), `photos`, `price`, `research`.
+(`{status, at, url?, note?}`), `busy` (min dolgozik épp), `photos`, `price`, `min_price` (alkunál ennél kevesebbet
+a válaszvázlat nem fogad el; üres: az ár), `research`.
 
 A feltöltés és a levétel menet közben jóváhagyást kérhet (közzététel): ilyenkor `confirm` esemény jön,
 és a telefonról is jóváhagyhatod (`POST /confirm`).
+
+### Munka menü: vevői üzenetek
+
+| Módszer | Útvonal | Törzs | Megjegyzés |
+|---|---|---|---|
+| GET | `/work/messages` | | `{conversations, unread, browser}`: a beszélgetések, elöl az újak és az olvasatlanok |
+| GET | `/work/messages/{id}` | | egy beszélgetés (az `id` 10 hexadecimális jegy) |
+| PUT | `/work/messages/{id}/draft` | `{draft}` | a (kézzel átírt) válaszvázlat mentése |
+| POST | `/work/messages/{id}/draft` | `{resume?}` | válaszvázlat a modellel (202); a kész vázlat `work_message` eseményként jön |
+| POST | `/work/messages/{id}/seen` | | megnézted: nincs benne új üzenet |
+| POST | `/work/messages/{id}/send` | `{text, resume?}` | küldés (202): a Jarvis beírja a beszélgetésbe, és a küldés gombja előtt jóváhagyást kér (`confirm`, a kérdésben pontosan ez a szöveg) |
+| POST | `/work/messages/check` | | most rögtön megnézi az üzeneteket (202; 409, ha nincs saját böngésző) |
+
+Egy beszélgetés: `{id, platform, site, url, partner, snippet, unread, new, item, item_name, listing, minimum,
+messages: [{from: "me" | "them", text, time, at, jarvis?}], draft, draft_note, draft_at, updated, read_at}`. A
+`new` az új vevői üzenetek száma (amióta megnézted), az `unread`, hogy az oldalon olvasatlan-e; a `jarvis: true` üzenetet
+a Jarvis küldte el. Az üzenetek szövege a vevőtől jön: adat, nem utasítás. Elküldeni csak jóváhagyással lehet; ha a
+válaszmezőt vagy a Küldés gombot nem találja, megáll, és hibaüzenetet ad (`error` esemény).
 
 ### Háttérmunka, figyelők, értesítések, eszközök
 
 | Módszer | Útvonal | Törzs | Megjegyzés |
 |---|---|---|---|
 | GET | `/jobs` | | `{free, blocked, snoozed_until, running, jobs: [{key, title, every_minutes, on, last_run, next_run, result, error}]}` (`on`: hamis, ha a gépen, az Automatikus munkák ablakban kikapcsoltad) |
-| POST | `/jobs/{key}/run` | | most rögtön (`watches`, `stale`) |
+| POST | `/jobs/{key}/run` | | most rögtön (`watches`, `stale`, `listings`, `messages`) |
 | POST | `/jobs/snooze` | `{minutes}` | ennyi ideig nincs háttérmunka (0: újra mehet) |
 | GET | `/watches` | | `{watches: [{id, query, site, recency, label, hits, last_check, error}]}` |
 | POST | `/watches` | `{query, site?, recency?: "nap"\|"hét"\|"hónap"\|"év"}` | új figyelő (201) |
 | DELETE | `/watches/{id}` | | |
-| GET | `/notifications?unread=1&limit=50` | | `{notifications: [{id, at, kind, title, text, read, url?, item?}], unread}`; `kind`: `watch`, `stale`, `delist`, `post` (kész vagy elakadt feltöltés), `question` (kérdés egy tárgyról), `error`, `info` |
+| GET | `/notifications?unread=1&limit=50` | | `{notifications: [{id, at, kind, title, text, read, url?, item?}], unread}`; `kind`: `watch`, `stale`, `delist`, `post` (kész vagy elakadt feltöltés), `question` (kérdés egy tárgyról), `message` (új vevői üzenet, vagy egy küldés eredménye; `conversation`, `item?`), `error`, `info` |
 | POST | `/notifications/read` | `{ids?: [...]}` | olvasottnak jelöl (ids nélkül mindet) |
 | GET | `/devices` | | párosított eszközök (`current`: ez az) |
 | DELETE | `/devices/{id}` | | visszavonás (a sajátodat is: kijelentkezés) |
@@ -193,6 +212,7 @@ Ha nincs új esemény, a kérés legfeljebb `wait` másodpercig vár, aztán ür
 | `info`, `warn`, `error`, `timing` | `text, channel` | megjegyzések |
 | `confirm` / `confirm_done` | `id, prompt` / `id, approved` | jóváhagyás kell / megvolt |
 | `work_item` / `work_removed` | `item` / `id` | egy tárgy változott / törölve |
+| `work_message` | `conversation` | egy vevői beszélgetés változott (új üzenet, vázlat, elküldve) |
 | `notification` | `notice` | értesítés (figyelő, régóta fent lévő hirdetés, levétel) |
 | `request_done` | `request_id` | a kérésed feldolgozása véget ért |
 
