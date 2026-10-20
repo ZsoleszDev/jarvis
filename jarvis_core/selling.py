@@ -698,7 +698,7 @@ class ItemStore:
             (folder / "thumbs" / name).write_bytes(thumb)
             item.photos.append(name)
             if check is not None:
-                item.photo_checks[name] = check
+                item.photo_checks = {**item.photo_checks, name: check}   # új szótár: a felület közben olvashatja
             return self._relinked(item)
 
     def remove_photo(self, item_id: str, name: str) -> Item:
@@ -706,7 +706,7 @@ class ItemStore:
             path = self.photo_file(item_id, name)
             item = self.get(item_id)
             item.photos.remove(name)
-            item.photo_checks.pop(name, None)
+            item.photo_checks = {k: v for k, v in item.photo_checks.items() if k != name}
             for file in (path, path.parent / "thumbs" / name):
                 try:
                     file.unlink()
@@ -794,7 +794,7 @@ class ItemStore:
                 if check is None:
                     self._check_failed.add((item_id, name))
                 else:
-                    item.photo_checks[name] = check
+                    item.photo_checks = {**item.photo_checks, name: check}   # új szótár: a felület közben olvashatja
             if not any(measured.values()):
                 return False
             try:

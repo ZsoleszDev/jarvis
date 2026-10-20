@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 # Ha a mértékek számítása érdemben változik, emeld: a régi fotók mértékei a háttérben újra elkészülnek.
-CHECK_VERSION = 1
+CHECK_VERSION = 2
 # Az elemzés ekkora képen fut (a hosszabb oldal): egy hirdetésfotóból a telefon képernyőjén nagyjából ennyi
 # részlet látszik, a szenzorzaj és a JPEG apró hibái eltűnnek, és egy fotó pár ezredmásodperc.
 ANALYSIS_SIDE = 512
@@ -34,12 +34,16 @@ BLURRY_BELOW = 12.0
 # szinte csak gyenge fénynél vagy alulexponálva jön ki.
 DARK_MEAN = 50
 DARK_PEAK = 120
-# Túl világos (kiégett): a kép legalább 40%-a tiszta fehér (250 fölött), és a legsötétebb 5% is világosszürke
-# (110 fölött). Így a fehér háttér előtti (vagy háttércserélt) termékfotó nem számít túl világosnak, mert maga
-# a tárgy sötétebb; a fehér ruha fehér lepedőn sem, mert normál expozíciónál nem ég ki.
+# Túl világos (kiégett): a kép legalább 40%-a tiszta fehér (250 fölött), a legsötétebb 5% is világosszürke
+# (110 fölött), és a 240 alatti rész (többnyire a tárgy; a háttér fehérbe hajló átmenete nélkül) középértéke is
+# 220 fölött van. Így a fehér háttér előtti (vagy háttércserélt) termékfotó nem számít túl világosnak, akkor sem,
+# ha a tárgy is világos (próbaképeken egy bézs pulóver, egy szürke ing, egy fehér póló háttércserével 195–212,
+# a túlexponált fehér póló 229); a fehér ruha fehér lepedőn sem, mert normál expozíciónál nem ég ki.
 BRIGHT_CLIPPED = 0.40
 BRIGHT_FLOOR = 110
-# Ellenfény: egyszerre nagy kiégett (250 fölött) és nagy beforrt (6 alatt) terület, pl. ablak előtt fotózva.
+BODY_BELOW = 240
+BRIGHT_BODY = 220
+# Ellenfény: egyszerre nagy kiégett (250 fölött) és nagy, teljesen sötét (6 alatt) terület, pl. ablak előtt fotózva.
 # A fekete ruha egy telefonos fotón 15–40 körül van, nem tiszta fekete, ezért az önmagában nem számít.
 CLIP_WHITE = 250
 CLIP_BLACK = 6
@@ -67,7 +71,7 @@ TIPS = {
     "blurry": "Homályosnak tűnik.",
     "dark": "Túl sötét.",
     "bright": "Túl világos, a részletek kiégtek.",
-    "clipped": "Ellenfényes: egy része kiégett, más része beforrt.",
+    "clipped": "Ellenfényes: egy része kiégett, más része teljesen sötét.",
     "small": "Kicsi a felbontása ({w}×{h} px), nagyítva homályos lesz.",
 }
 # Az összefoglalóban, a fotók sorszáma után („a 3. fotó homályosnak tűnik”).
@@ -92,7 +96,7 @@ def _hash(gray: Any, size: int) -> str:
 
 
 def measure(data: bytes) -> dict[str, Any]:
-    """Egy (mentett) JPEG mértékei: méret, élesség, fényesség, kiégett és beforrt arány, átlagszín, két hash."""
+    """Egy (mentett) JPEG mértékei: méret, élesség, fényesség, kiégett és teljesen sötét arány, átlagszín, két hash."""
     from PIL import Image
 
     image = Image.open(io.BytesIO(data))
@@ -113,11 +117,13 @@ def measure(data: bytes) -> dict[str, Any]:
     best = tiles[-max(1, len(tiles) // 4):]
     sharp = sum(best) / len(best) if tiles else 0.0   # egyszínű kép: nincs rajta semmi éles
     p05, p95 = np.percentile(gray, (5, 95))
+    unclipped = gray[gray < BODY_BELOW]
+    body = float(np.median(unclipped)) if unclipped.size else 255.0   # a nem kiégett rész (többnyire a tárgy)
     rgb = np.asarray(image, dtype=np.float32).reshape(-1, 3).mean(axis=0)
     return {
         "v": CHECK_VERSION, "w": width, "h": height,
         "sharp": round(sharp, 1), "mean": round(float(gray.mean()), 1),
-        "p05": int(p05), "p95": int(p95),
+        "p05": int(p05), "p95": int(p95), "body": int(body),
         "white": round(float((gray >= CLIP_WHITE).mean()), 3), "black": round(float((gray <= CLIP_BLACK).mean()), 3),
         "rgb": [int(round(float(c))) for c in rgb],
         "hash": _hash(gray_image, 8), "detail": _hash(gray_image, 16),
@@ -137,7 +143,8 @@ def problems(check: Any) -> list[str]:
         return []
     try:
         dark = check["mean"] < DARK_MEAN and check["p95"] < DARK_PEAK
-        bright = check["white"] >= BRIGHT_CLIPPED and check["p05"] >= BRIGHT_FLOOR
+        bright = (check["white"] >= BRIGHT_CLIPPED and check["p05"] >= BRIGHT_FLOOR
+                  and check.get("body", 255) >= BRIGHT_BODY)
         clipped = not (dark or bright) and check["white"] >= CLIPPED_SHARE and check["black"] >= CLIPPED_SHARE
         # sötét vagy kiégett képen a részletek amúgy is eltűnnek: ott az élesség nem mond semmit
         blurry = check["sharp"] < BLURRY_BELOW and not (dark or bright)

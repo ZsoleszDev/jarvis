@@ -85,7 +85,7 @@ def scaled(image: Image.Image, factor: float) -> Image.Image:
 
 
 def backlit() -> Image.Image:
-    """Ablak előtt fotózva: a felső harmad kiégett, a sötét tárgy beforrt."""
+    """Ablak előtt fotózva: a felső harmad kiégett, a sötét tárgy teljesen sötét."""
     image = np.asarray(scene(7, color=(30, 30, 35)), np.float32).copy()
     image[: image.shape[0] * 35 // 100] = 255
     image = np.where(image < 60, image * 0.05, image)
@@ -136,6 +136,9 @@ class MeasureTests(unittest.TestCase):
             "fekete póló világos háttér előtt": scene(1),
             "enyhén puha (2 px)": scene(1).filter(ImageFilter.GaussianBlur(2)),
             "fehér háttér (háttércsere)": scene(2, bg=300),
+            "világos pulóver fehér háttér előtt": scene(2, color=(205, 200, 190), bg=300),
+            "szürke ing háttércserével": scene(4, color=(215, 215, 218), bg=300),
+            "fehér póló háttércserével": scene(4, color=(232, 232, 230), bg=300),
             "fehér póló fehér lepedőn": scene(3, color=(232, 232, 230), bg=235),
             "bézs a bézsen": scene(5, color=(190, 175, 150), bg=200),
             "kicsit sötétebb szoba": scaled(scene(1), 0.5),
