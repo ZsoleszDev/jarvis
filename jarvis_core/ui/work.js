@@ -415,21 +415,24 @@
   $("job-sales").addEventListener("click", () => setJob("sales"));
   $("job-deals").addEventListener("click", () => setJob("deals"));
 
+  const every = (m) => (m >= 60 ? `${m / 60} óránként` : `${m} percenként`);
   function renderDeals() {
     const box = $("w-deals");
     const siteName = (key) => (deals.sites.find((s) => s.key === key) || { name: key }).name;
     const searches = deals.searches.map((s) => `<li><span><b>${esc(s.query)}</b>
-        <small class="muted">${esc(s.sites.map(siteName).join(", "))} · ${s.discount}%-kal olcsóbb
+        <small class="muted">${esc(s.sites.map(siteName).join(", "))} · ${s.discount}%-kal olcsóbb · ${esc(every(s.every))}
         ${s.max_price ? " · legfeljebb " + esc(price(s.max_price)) : ""}</small></span>
         <button type="button" class="small quiet" data-deal-remove="${esc(s.id)}">Törlés</button></li>`).join("");
     const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.text)}</a>
         <small class="muted">${esc(d.site)} · <b>${esc(price(d.price))}</b>, szokásos ár ${esc(price(d.median))}
-        (kb. ${esc(price(d.margin))}-tal olcsóbb)${d.note ? " · " + esc(d.note) : ""}</small></span>
+        (kb. ${esc(price(d.margin))}-tal olcsóbb)${d.note ? " · " + esc(d.note) : ""}</small>
+        ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}</span>
         <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></li>`).join("");
     box.innerHTML = `
       <label class="check"><input type="checkbox" id="d-enabled" ${deals.enabled ? "checked" : ""}> <b>Bekapcsolva</b></label>
-      <p class="muted">Időnként megnézi a keresések találatait, és szól, ha valami jóval olcsóbb a szokásos áránál. Csak
-        olvas: semmit nem vesz meg, és nem ír senkinek. Modellt csak a kevés olcsó jelöltre használ.
+      <p class="muted">A legújabb hirdetéseket nézi, és szól, ha valami jóval olcsóbb a szokásos áránál. A jelölt hirdetés
+        oldalát is átnézi (elkelt-e, hibás-e, gyanús-e), és csak utána kérdezi meg a modellt. Csak olvas: semmit nem vesz
+        meg, és nem ír senkinek. A Vintedet legfeljebb kétóránként nézi.
         ${deals.browser ? "" : "<b>Ehhez Jarvis saját böngészője kell.</b>"}</p>
       <h3 class="section-title">Keresések</h3>
       <ul class="dealist">${searches || '<li class="muted">Még nincs keresés.</li>'}</ul>
@@ -439,6 +442,7 @@
         <div class="row">
           <label>Legalább <input id="d-discount" type="number" min="10" max="80" value="30" style="width: 4em">%-kal olcsóbb</label>
           <label>Legfeljebb <input id="d-max" type="number" min="0" placeholder="bármennyi" style="width: 7em"> Ft</label>
+          <label>Nézze <select id="d-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === 180 ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label>
         </div>
         <div class="row"><button type="submit" class="primary">Hozzáadás</button>
           <button type="button" id="d-run">Keresés most</button></div>
@@ -450,7 +454,7 @@
       e.preventDefault();
       const sites = [...box.querySelectorAll('input[name="d-site"]:checked')].map((i) => i.value);
       await dealAction({ action: "add", query: $("d-query").value, sites, discount: $("d-discount").value,
-                         max_price: $("d-max").value });
+                         max_price: $("d-max").value, every: $("d-every").value });
     });
     $("d-run").addEventListener("click", async () => {
       const result = await J.postJson("/api/work/deals", { action: "run" });

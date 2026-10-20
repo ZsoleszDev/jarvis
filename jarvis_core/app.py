@@ -512,8 +512,11 @@ class JarvisApp:
         deals = self.work.deals if self.work is not None else None
         if deals is not None and deals.browser is not None:
             # Olcsó hirdetések keresése: modell nélkül (csak a kevés jelöltre egy rövid kérdés), a böngésző kell hozzá.
-            self.scheduler.register(Job("deals", "Automata kereskedés", lambda: float(self.cfg.scheduler.deal_minutes or 0),
-                                        lambda ctx: deals.run(check=ctx.check, notify=ctx.notify),
+            # Keresésenként más gyakoriság lehet: a munka a leggyakoribbhoz igazodik, és csak az esedékeseket nézi meg.
+            self.scheduler.register(Job("deals", "Automata kereskedés",
+                                        lambda: deals.every_minutes() if float(self.cfg.scheduler.deal_minutes or 0) > 0
+                                        else 0.0,
+                                        lambda ctx: deals.run(check=ctx.check, notify=ctx.notify, force=ctx.forced),
                                         available=deals.available, needs_models=False, needs_browser=True))
 
     def _register_watch_tools(self) -> None:

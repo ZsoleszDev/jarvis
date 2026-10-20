@@ -231,8 +231,9 @@ listing_checks = 5
 # Ennyi percenként nézi meg a vevői üzeneteidet a Vinteden, csak olvasva, emberi tempóban; ha új jött,
 # szól. Válaszvázlatot csak kérésre ír, üzenetet csak a te jóváhagyásoddal küld (0 = soha)
 message_minutes = 120
-# Automata kereskedés (Munka › Automata kereskedés): ennyi percenként keresi az olcsó hirdetéseket, ha ott
-# bekapcsoltad (csak olvas, semmit nem vesz és nem ír senkinek; 0 = soha)
+# Automata kereskedés (Munka › Automata kereskedés): az új keresések gyakorisága percben (keresésenként a fülön
+# átállíthatod: 30, 60, 180 vagy 360; a Vintedet legfeljebb kétóránként nézi). Csak olvas, semmit nem vesz és
+# nem ír senkinek; 0 = a háttérben soha nem keres
 deal_minutes = 180
 # Egy körben legfeljebb ennyi olvasatlan beszélgetést nyit meg (a többi a következő körre marad)
 message_reads = 3

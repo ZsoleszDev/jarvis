@@ -28,14 +28,35 @@ RESULTS = [listing(n, f"RTX 3060 Ti videókártya {n}", p) for n, p in
 
 
 class FakeBrowser:
+    """A keresők találatai, és egy-egy hirdetés oldala (pages: webcím → a lap szövege, vagy a lap adatai)."""
+
     def __init__(self, results=None, fail=()):
-        self.results, self.fail, self.urls = results or RESULTS, set(fail), []
+        self.results, self.fail, self.urls, self.looked = results or RESULTS, set(fail), [], []
+        self.pages: dict[str, object] = {}
 
     def extract_listings(self, url: str) -> list[dict]:
         self.urls.append(url)
         if any(f in url for f in self.fail):
             raise BrowserError("nem nyílt meg")
         return [dict(r) for r in self.results]
+
+    def look(self, url: str) -> dict:
+        self.looked.append(url)
+        page = self.pages.get(url, "Gigabyte RTX 3060 Ti Gaming OC. Hibátlan, dobozában. Eladó: Peti (12 értékelés)")
+        if isinstance(page, dict):
+            return {"url": url, "title": "", "short": [], "labels": [], "captcha": False, "text": "", **page}
+        return {"url": url, "title": "Hirdetés", "text": page, "short": [], "labels": [], "captcha": False}
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1_800_000_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+CHEAP = "https://hardverapro.hu/apro/100010.html"
 
 
 class FakeLlm:
@@ -53,13 +74,14 @@ class DealTests(unittest.TestCase):
         self.browser = FakeBrowser()
         self.llm = FakeLlm()
         self.notices: list[tuple] = []
+        self.clock = Clock()
         self.hunter = self.make()
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def make(self) -> DealHunter:
-        return DealHunter(Path(self.tmp.name), PLATFORMS, lambda: self.browser, self.llm)
+        return DealHunter(Path(self.tmp.name), PLATFORMS, lambda: self.browser, self.llm, clock=self.clock)
 
     def notify(self, kind, title, text, **extra):
         self.notices.append((kind, title, text, extra))
@@ -86,8 +108,10 @@ class DealTests(unittest.TestCase):
         self.assertEqual((deal["price"], deal["median"], deal["margin"]), (55000, 100000, 45000))
         self.assertTrue(deal["checked"])
         self.assertEqual(self.make().state()["deals"][0]["id"], deal["id"], "a gépen megmarad")
+        self.assertEqual(self.browser.looked, [CHEAP], "csak a jelölt oldalát nyitotta meg")
+        self.assertIn("Hibátlan, dobozában", self.llm.calls[0][1]["content"], "a modell a hirdetés leírását is látja")
         self.notices.clear()
-        self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: nincs új olcsó hirdetés.")
+        self.assertEqual(self.hunter.run(notify=self.notify, force=True), "1 keresés: nincs új olcsó hirdetés.")
         self.assertEqual((self.notices, len(self.llm.calls)), ([], 1), "egy hirdetésről egyszer szól")
 
     def test_the_model_can_say_no_and_without_a_model_it_still_tells(self):
@@ -126,9 +150,71 @@ class DealTests(unittest.TestCase):
         self.hunter.set_enabled(True)
         self.browser.fail = {"vinted"}
         result = self.hunter.run(notify=self.notify)
+        self.assertIn("order=newest_first", self.browser.urls[0], "a Vinteden a legújabb elöl")
         self.assertIn("Vinted: nem nyílt meg", result)
         self.assertEqual(len(self.browser.urls), 3, "a többi oldalt is megnézte")
         self.assertEqual(len(self.notices), 1, "ugyanaz a hirdetés több oldalon is: egyszer")
+
+
+    def test_each_search_runs_at_its_own_pace_and_vinted_at_most_every_two_hours(self):
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], every=30)
+        self.hunter.add_search("Nike Air Max 42", ["vinted"], every=30)
+        self.hunter.add_search("PS5 kontroller", ["jofogas"], every=360)
+        self.assertEqual(self.hunter.every_minutes(), 0.0, "kikapcsolva nem fut")
+        self.hunter.set_enabled(True)
+        self.assertEqual(self.hunter.every_minutes(), 30.0, "a leggyakoribb keresés szerint")
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(len(self.browser.urls), 3)
+        self.assertEqual(self.hunter.run(notify=self.notify), "Most egyik keresés sem esedékes.")
+        self.clock.now += 31 * 60
+        self.browser.urls.clear()
+        self.hunter.run(notify=self.notify)
+        self.assertEqual([u.split("/")[2] for u in self.browser.urls], ["hardverapro.hu"],
+                         "fél óra múlva csak a Hardverapró (a Vinted kétóránként, a harmadik hatóránként)")
+        self.clock.now += 90 * 60
+        self.browser.urls.clear()
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(sorted(u.split("/")[2] for u in self.browser.urls), ["hardverapro.hu", "www.vinted.hu"])
+        self.browser.urls.clear()
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual(len(self.browser.urls), 3, "Keresés most: mind")
+
+    def test_the_listing_page_is_checked_before_the_model(self):
+        cases = {
+            "Csak előre utalással, külföldön vagyok, postázom.": None,
+            "A kártya működik, de a hűtő ventilátora repedt.": None,
+            "Szia, írj WhatsAppon: +36 30 123 4567": "az oldalon kívüli elérhetőséget ad meg",
+            "Hibátlan. Az eladónak még nincs értékelése.": "az eladónak még nincs értékelése",
+        }
+        for n, (page, warning) in enumerate(cases.items()):
+            with self.subTest(page=page):
+                self.notices.clear()
+                self.llm.calls.clear()
+                self.browser.pages = {CHEAP: page}
+                hunter = DealHunter(Path(self.tmp.name) / str(n), PLATFORMS, lambda: self.browser, self.llm)
+                hunter.add_search("RTX 3060 Ti", ["hardverapro"])
+                hunter.set_enabled(True)
+                hunter.run(notify=self.notify)
+                if warning is None:
+                    self.assertEqual((self.notices, self.llm.calls), ([], []), "gyanús vagy hibás: modell sem kell")
+                else:
+                    [notice] = self.notices
+                    self.assertIn(f"Figyelj: {warning}.", notice[2])
+                    self.assertEqual(hunter.state()["deals"][0]["warnings"], [warning])
+
+    def test_sold_listing_is_skipped_and_a_captcha_stops_the_page_reads(self):
+        self.browser.pages = {CHEAP: {"short": ["Eladva"], "text": "Gigabyte RTX 3060 Ti"}}
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"])
+        self.hunter.set_enabled(True)
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(self.notices, [], "már elkelt")
+        self.browser.pages = {CHEAP: {"captcha": True}}
+        other = DealHunter(Path(self.tmp.name) / "c", PLATFORMS, lambda: self.browser, self.llm)
+        other.add_search("RTX 3060 Ti", ["hardverapro"])
+        other.set_enabled(True)
+        other.run(notify=self.notify)
+        [notice] = self.notices
+        self.assertIn("nem néztem meg (robot-ellenőrzés)", notice[2], "captchánál szól, de jelzi, hogy nem nézte meg")
 
 
 if __name__ == "__main__":

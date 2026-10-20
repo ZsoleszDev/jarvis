@@ -225,7 +225,7 @@ class WorkDesk:
                                     check_stop=lambda: self.check_stop(), on_change=on_message)
         # Automata kereskedés (deals.py): alulárazott hirdetések keresése, modell nélkül (csak a jelöltekre egy kérdés).
         self.deals = DealHunter(self.root, self.platforms, (lambda: toolbox.browser) if self.browser_ready else None,
-                                llm)
+                                llm, default_every=float(cfg.scheduler.deal_minutes or 180))
         # Begyakorolt lépések: a modell sikeres feltöltéseiből és levételeiből tanul (replay.py).
         self.flows = FlowStore(self.root / "folyamatok")
         # A Vinted-kitöltő (vinted.py) választásai, pl. egy tárgyfajta kategóriaútja: legközelebb modell nélkül.

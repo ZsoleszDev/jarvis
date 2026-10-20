@@ -765,7 +765,8 @@ class _Handler(BaseHTTPRequestHandler):
             if action == "add":
                 sites = body.get("sites") if isinstance(body.get("sites"), list) else None
                 return self._json(200, {"ok": True, **deals.add_search(str(body.get("query") or ""), sites,
-                                                                      body.get("max_price"), body.get("discount"))})
+                                                                      body.get("max_price"), body.get("discount"),
+                                                                      body.get("every"))})
             if action == "remove":
                 return self._json(200, {"ok": True, **deals.remove_search(str(body.get("id") or ""))})
             if action == "dismiss":
