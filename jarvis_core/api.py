@@ -785,7 +785,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
         if "messages" not in scheduler.jobs:
             raise ApiError(409, "no_browser", "Az üzenetek olvasásához Jarvis saját böngészője kell.")
         self._ready_for_agent(self._flag(query, "resume"))
-        self.api.app.run_job_now("messages")
+        self.api.app.run_job_now("messages", silent=True)    # a telefonról: a gép ne beszéljen
         self._json(202, {"ok": True})
 
     # --- háttérmunka, figyelők, értesítések --------------------------------------------------------
@@ -804,7 +804,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
         if key not in scheduler.jobs:
             raise ApiError(404, "not_found", "Nincs ilyen háttérmunka.")
         self._ready_for_agent(self._flag(query, "resume"))
-        self.api.app.run_job_now(key)
+        self.api.app.run_job_now(key, silent=True)
         self._json(202, {"ok": True})
 
     def r_snooze(self, query: dict[str, list[str]]) -> None:

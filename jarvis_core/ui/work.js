@@ -1206,5 +1206,9 @@
     else if (filter === "msgs") render();
     else renderFilters();
   });
+  // Új olcsó hirdetés (a háttérben, vagy a Keresés most után): a nyitott lista frissül.
+  window.addEventListener("jarvis-notice", (event) => {
+    if (event.detail && event.detail.kind === "deal") loadDeals();
+  });
   J.onHello((event) => { if (event.work) load(); });
 })();

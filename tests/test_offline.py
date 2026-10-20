@@ -239,6 +239,14 @@ class ConfigTests(unittest.TestCase):
                 app.requests.put(("quit", None))
                 agent.join(5)
 
+    def test_a_job_started_from_the_phone_is_silent_on_the_pc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = JarvisApp(make_cfg(Path(tmp)), mock.Mock(), use_voice=False, use_speech=False, use_wake_word=False)
+            app.run_job_now("deals", silent=True)
+            app.run_job_now("deals")
+            payloads = [app.requests.get_nowait()[1] for _ in range(2)]
+        self.assertEqual([p["silent"] for p in payloads], [True, False])
+
     def test_unknown_keys_produce_warnings(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "c.toml"

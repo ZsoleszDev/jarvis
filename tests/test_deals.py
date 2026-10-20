@@ -222,6 +222,34 @@ class DealTests(unittest.TestCase):
 
 
 
+class MatchTests(unittest.TestCase):
+    def test_every_word_of_the_search_and_no_accessories(self):
+        from jarvis_core.deals import matches_query
+        cases = {
+            "Sony DualSense PS5 kontroller fehér": True,
+            "PlayStation 5 DualSense controller": True,
+            "PS5 FIFA 24 játék": False,
+            "PS4 kontroller": False,
+            "PS5 kontroller töltő állomás": False,
+            "PS5 kontrollerhez szilikon tok": False,
+        }
+        for text, expected in cases.items():
+            self.assertEqual(matches_query("Ps5 kontroller", text), expected, text)
+        self.assertFalse(matches_query("RTX 3060 Ti", "RTX 3060 12GB"))
+
+    def test_a_game_in_the_results_is_not_a_cheap_controller(self):
+        controllers = [listing(n, f"PS5 DualSense kontroller {n}", p, "www.vinted.hu") for n, p in
+                       enumerate((14000, 13500, 15000, 13800, 14500, 13000))]
+        games = [listing(20 + n, f"PS5 játék {name}", 5000, "www.vinted.hu") for n, name in enumerate(("FIFA", "GTA"))]
+        browser = FakeBrowser(controllers + games)
+        with tempfile.TemporaryDirectory() as tmp:
+            hunter = DealHunter(Path(tmp), PLATFORMS, lambda: browser, FakeLlm())
+            hunter.add_search("Ps5 kontroller", ["vinted"])
+            hunter.set_enabled(True)
+            self.assertEqual(hunter.run(), "1 keresés: nincs új olcsó hirdetés.")
+            self.assertEqual(browser.looked, [], "a játékok nem jelöltek, az oldalukat sem nyitja meg")
+
+
 class ProfitTests(unittest.TestCase):
     def test_profit_month_total_days_and_money_still_in_items(self):
         from jarvis_core.deals import profit_report

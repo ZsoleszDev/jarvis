@@ -674,7 +674,7 @@ class _Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/work/messages/"):
                 return self._messages_post(path, body, remote)
             if path == "/api/work/deals":
-                return self._deals_post(body)
+                return self._deals_post(body, remote)
             if path == "/api/work/new":
                 values = {"targets": body.get("targets") or [], "prompt": str(body.get("prompt") or ""),
                           "research_wanted": bool(body.get("research_wanted"))}
@@ -756,7 +756,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(500, {"ok": False, "error": f"Nem sikerült: {exc}"})
         self._json(404, {"ok": False})
 
-    def _deals_post(self, body: dict[str, Any]) -> None:
+    def _deals_post(self, body: dict[str, Any], remote: bool = False) -> None:
         """Az Automata kereskedés gombjai: be/ki, keresés hozzáadása és törlése, egy találat elrejtése, keresés most."""
         app, deals = self.gui.app, self._work().deals
         action = str(body.get("action") or "")
@@ -784,7 +784,7 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(409, {"ok": False, "error": "A kereséshez Jarvis saját böngészője kell."})
                 if not deals.available():
                     return self._json(409, {"ok": False, "error": "Kapcsold be, és adj meg legalább egy keresést."})
-                app.run_job_now("deals")
+                app.run_job_now("deals", silent=remote)    # a telefonról indítva a gép ne beszéljen
                 return self._json(202, {"ok": True})
         except (DealError, ItemError) as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
@@ -798,7 +798,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/work/messages/check":
             if app.scheduler is None or "messages" not in app.scheduler.jobs:
                 return self._json(409, {"ok": False, "error": "Az üzenetek olvasásához Jarvis saját böngészője kell."})
-            app.run_job_now("messages")
+            app.run_job_now("messages", silent=remote)
             return self._json(202, {"ok": True})
         conv_id = str(body.get("id") or "")
         if not CONV_ID_RE.match(conv_id):

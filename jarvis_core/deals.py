@@ -29,7 +29,8 @@ from typing import Any, Callable
 
 from .browser import BrowserError
 from .listings import GONE, SOLD, classify
-from .selling import (_PARTS_RE, Item, Platform, format_price, listing_key, prefilter, price_stats)
+from .selling import (_PARTS_RE, Item, Platform, _shared, _tokens, format_price, listing_key, prefilter,
+                      price_stats)
 from .textutil import fold
 from .web import UNTRUSTED_NOTE
 
@@ -58,6 +59,19 @@ _OFFSITE_RE = re.compile(r"\b(whatsapp\w*|telegram\w*|viber\w*)\b|[\w.+-]+@[\w-]
 # Hibára utaló szó a leírásban (a „nem hibás”, „nem törött” nem számít).
 _DEFECT_RE = re.compile(r"(?<!nem )\b(repedt|repedes\w*|beegett|beeges|nem kapcsol be|nem indul|javitasra szorul|"
                         r"hianyos|lyukas|szakadt|foltos)\b")
+# Ugyanannak a dolognak más szavai (ékezet nélkül): a keresés minden szavának meg kell lennie a hirdetésben, de
+# „kontroller” helyett „DualSense”, „videókártya” helyett „VGA” is jó.
+SYNONYMS = {
+    "kontroller": ("controller", "kontroler", "dualsense", "dualshock", "joystick", "gamepad"),
+    "controller": ("kontroller", "kontroler", "dualsense", "dualshock", "joystick", "gamepad"),
+    "videokartya": ("vga", "gpu", "grafikus"), "vga": ("videokartya", "gpu"),
+    "ps5": ("playstation",), "ps4": ("playstation",), "laptop": ("notebook",), "notebook": ("laptop",),
+    "telefon": ("mobil", "mobiltelefon", "okostelefon"), "fulhallgato": ("headset", "fejhallgato"),
+    "fejhallgato": ("headset", "fulhallgato"),
+}
+# Kiegészítő a keresett dologhoz (töltő, tok, kábel…), vagy „-hoz/-hez” alak („kontrollerhez”): nem maga a termék.
+_ACCESSORY_RE = re.compile(r"\b(tolto\w*|dokkolo\w*|tok|tokja|vedotok\w*|borito\w*|skin|matrica\w*|kabel\w*|"
+                           r"allvany\w*|tarto|szilikon\w*|grip\w*|csere ?gomb\w*|ujjvedo\w*)\b")
 _NO_REVIEWS_RE = re.compile(r"nincs(enek)? (meg )?ertekeles\w*|meg nincs ertekeles\w*|no reviews yet|\b0 ertekeles")
 
 CHECK_SYSTEM = (
@@ -74,6 +88,22 @@ CHECK_SCHEMA: dict[str, Any] = {
 
 class DealError(Exception):
     pass
+
+
+def matches_query(query: str, text: str) -> bool:
+    """A hirdetés tényleg a keresett dolog-e: a keresés minden szava (vagy a rokon szava, SYNONYMS) benne van; négy
+    szónál hosszabb keresésnél egy hiányozhat. Így a „PS5 kontroller” keresésre a PS5-játék nem jelölt."""
+    wanted = _tokens(query)
+    have = _tokens(text)
+    if not wanted:
+        return True
+    hits = sum(1 for word in wanted if _shared({word, *SYNONYMS.get(word, ())}, have))
+    if hits < (len(wanted) if len(wanted) <= 4 else len(wanted) - 1):
+        return False
+    folded = fold(query)
+    accessory = [m.group(0) for m in _ACCESSORY_RE.finditer(fold(text)) if m.group(0) not in folded]
+    for_it = [w for w in have if w.endswith(("hoz", "hez")) and any(w.startswith(q) and w != q for q in wanted)]
+    return not accessory and not for_it
 
 
 def profit_report(items: list[Item], now: float | None = None) -> dict[str, Any]:
@@ -281,7 +311,7 @@ class DealHunter:
                 self._remember(deal)
                 warn = "".join(f" Figyelj: {w}." for w in deal.get("warnings") or [])
                 notify("deal", f"Olcsó: {deal['text'][:60]}",
-                       f"{deal['site']}: {format_price(deal['price'])}, a hasonlók szokásos ára "
+                       f"{deal['site']}: „{deal['text'][:80]}” {format_price(deal['price'])}, a hasonlók szokásos ára "
                        f"{format_price(deal['median'])} (kb. {format_price(deal['margin'])}-tal olcsóbb). "
                        f"Keresés: „{search['query']}”.{warn}", url=deal["url"])
         if not done:
@@ -324,7 +354,7 @@ class DealHunter:
         unique: dict[str, dict[str, Any]] = {}
         for row in kept:
             unique.setdefault(listing_key(row["url"]) if row["url"] else row["text"], row)
-        kept = list(unique.values())
+        kept = [row for row in unique.values() if matches_query(search["query"], row["text"])]
         stats = price_stats([r["price"] for r in kept])
         if not stats or stats["n"] < MIN_PRICES:
             search["_few"] = len(kept)          # a kör összefoglalójához: kevés hasonló ár (lásd run)

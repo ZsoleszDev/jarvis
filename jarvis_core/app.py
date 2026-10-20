@@ -951,9 +951,10 @@ class JarvisApp:
         """Háttérmunka (az ütemező hívja, ha Jarvis ráér)."""
         self._submit(("job", {"key": key, "forced": False}))
 
-    def run_job_now(self, key: str) -> None:
-        """Háttérmunka azonnal (a telefonról vagy a felületről kérve), a csendes időszakot nem várja meg."""
-        self._submit(("job", {"key": key, "forced": True}))
+    def run_job_now(self, key: str, silent: bool = False) -> None:
+        """Háttérmunka azonnal (a telefonról vagy a felületről kérve), a csendes időszakot nem várja meg. silent: a
+        telefonról kérted, a gép ne olvassa fel az eredményét (az értesítés megy a telefonra)."""
+        self._submit(("job", {"key": key, "forced": True, "silent": silent}))
 
     def submit_pause(self) -> None:
         """Szünet: abbahagy mindent, és leállít minden modellt, hogy a videókártya, a memória és a

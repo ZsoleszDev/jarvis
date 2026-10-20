@@ -515,6 +515,7 @@ async function loadNotices() {
 
 function addNotice(notice) {
   if (!notice.id || noticeList.some((n) => n.id === notice.id)) return;
+  window.dispatchEvent(new CustomEvent("jarvis-notice", { detail: notice }));   // pl. a Munka menü frissíti a listáját
   noticeList = [notice, ...noticeList].slice(0, 50);
   setNoticesUnread(noticesUnread + 1);
   if ($("notices-dialog").open) renderNotices();
