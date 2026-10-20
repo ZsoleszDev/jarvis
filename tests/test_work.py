@@ -206,6 +206,22 @@ class ItemStoreTests(unittest.TestCase):
         self.assertEqual(selling.format_price(12990), "12 990 Ft")
         self.assertEqual(clean_for_speech("Javasolt ár: 4 500 Ft."), "Javasolt ár: 4500 forint.")
 
+    def test_hungarian_prices(self):
+        for text, value in (("ötezer", 5000), ("4,5 ezer", 4500), ("3 és fél ezer", 3500), ("4.5k", 4500),
+                            ("5 ezer Ft", 5000), ("legyen ötezer forint", 5000), ("másfélezer", 1500),
+                            ("négyezer-ötszáz", 4500)):
+            self.assertEqual(parse_price(text), value, text)
+        for text in ("hát", "egy", "hét", "fel", "piros, 38-as", "4500 vagy 5000", "nagyon olcsó", "húszmillió",
+                     "inf", True):
+            with self.assertRaises(ItemError, msg=str(text)):
+                parse_price(text)
+        item = self.store.create(targets=["vinted"], price="négyezer-ötszáz")
+        self.assertEqual(item.price, 4500)
+        self.assertEqual(self.store.update(item.id, user=True, price="5 ezer Ft").price, 5000)
+        with self.assertRaises(ItemError):
+            self.store.update(item.id, user=True, price="hát")
+        self.assertEqual(self.store.get(item.id).price, 5000, "a nem összeg nem írja át az árat")
+
     def test_posted_price_and_drift(self):
         item = self.store.create(targets=["vinted", "jofogas"], title="Levi's farmer", price=9000)
         url = "https://www.vinted.hu/items/1234567-levis-farmer"
@@ -375,6 +391,11 @@ class ExtractionTests(unittest.TestCase):
         item = self.extractor.extract(item.id)
         self.assertEqual((item.title, item.size, item.brand, item.price, item.condition),
                          ("Saját cím", "M", "Zara", None, "Nagyon jó"))
+
+    def test_a_price_in_words_is_read_too(self):
+        item = self.store.create(prompt="Zara póló, négy és fél ezer")
+        self.fake.chat_script = [extracted(product="póló", title="Zara póló", price="4,5 ezer")]
+        self.assertEqual(self.extractor.extract(item.id).price, 4500)
 
     def test_needs_a_description(self):
         item = self.store.create()
@@ -671,6 +692,29 @@ class WorkDeskTests(unittest.TestCase):
         self.assertFalse(browser.recording, "visszajátszásnál és modell nélküli kitöltésnél nem")
         self.assertFalse(browser.running, "a böngészőt ettől nem indítja el")
 
+    def test_the_browser_sees_the_item_words_only_during_a_task(self):
+        self.cfg.browser.enabled = True
+        desk = WorkDesk(self.cfg, None, Toolbox(self.cfg))
+        browser = desk.toolbox.browser
+        desk.save_settings({"city": "Szeged"})
+        item = desk.store.create(targets=["vinted"], title="Nike futócipő", description="Alig hordott.", price=9000,
+                                 category="Férfi > Cipők", brand="Nike", size="42", condition="Nagyon jó", color="fekete")
+        desk.store.add_photo(item.id, jpeg())
+        words = ["Férfi > Cipők", "Nike", "42", "Nagyon jó", "fekete", "Szeged"]
+        opened = []
+        with mock.patch.object(browser, "open", side_effect=lambda url: opened.append(list(browser.hints)) or ""):
+            desk.tool_post(item.id, "vinted")
+        self.assertEqual(opened, [words], "már az űrlap első oldalnézete a tárgy szavaival rendezi a listákat")
+        desk.finish_post(item.id, "vinted")
+        self.assertEqual(browser.hints, [], "a feladat után (pl. a Beszélgetés böngészésénél) már nem")
+        desk.begin_delist(item.id, "vinted")
+        self.assertEqual(browser.hints, words)
+        desk.end_request()
+        self.assertEqual(browser.hints, [])
+        desk.current = ("nincs-ilyen", "vinted")
+        self.assertEqual(browser.hints, [])
+        self.assertFalse(browser.running, "a böngészőt ettől nem indítja el")
+
     def test_describe_for_the_interface(self):
         info = self.desk.describe()
         self.assertEqual([p["name"] for p in info["platforms"]], ["Vinted", "Jófogás", "Vatera", "Hardverapró"])
@@ -892,8 +936,14 @@ class WorkDeskTests(unittest.TestCase):
             self.desk._before_publish("Feltöltés", "https://www.vinted.hu/items/new")
             self.assertGreaterEqual(clock.now, due, "a közzététel gombja előtt kivárja")
             self.assertEqual(self.store.get(item.id).busy, "Feltöltés: Vinted…", "a visszaszámlálás után")
+            terms = {"do": "click", "risky": True, "check": True, "url": "",
+                     "el": {"kind": "input:checkbox", "label": "Megerősítem, hogy elfogadom a feltételeket"}}
+            self.desk._on_browser_action(terms)
+            self.assertEqual((self.desk.gap_remaining("vinted"), self.desk.published_in), (0.0, None),
+                             "a feltételek elfogadása (kockázatos jelölőnégyzet) még nem a közzététel")
             self.desk._on_browser_action({"do": "click", "risky": True, "el": {}, "url": ""})
             self.assertGreater(self.desk.gap_remaining("vinted"), 0, "a következő közzététel innen számol")
+            self.assertEqual(self.desk.published_in, (item.id, "vinted"))
             waited = clock.now
             self.desk._before_publish("Igen, feltöltöm", "https://www.vinted.hu/items/new")
             self.assertEqual(clock.now, waited, "a megerősítő gombnál ugyanebben a menetben már nem vár")
@@ -1140,6 +1190,12 @@ class BrowserWorkTests(unittest.TestCase):
         self.assertNotIn("9 000", found[3]["text"], "a modell sem látja a régi árat")
         self.assertEqual([bool(r.get("auction")) for r in found], [False] * 6 + [True],
                          "csak a villámár nélküli licites kártya jelzett")
+
+    def test_the_page_view_shows_the_actual_card_price(self):
+        view = self.browser.open(self.pages.url("katalogus.html"))
+        for label, price in (("Levi's farmer", "6 500 Ft"), ("Mango szoknya", "1 800 Ft"), ("Régi érme", "5 000 Ft"),
+                             ("Zara kabát", "12 990 Ft"), ("Régi bélyeg", "300 Ft")):
+            self.assertIn(f'link "{label} · {price}"', view, "az áthúzott régi ár helyett a mostani, mint az árkutatásnál")
 
     def test_upload_with_the_photo_button(self):
         view = self.browser.open(self.pages.url("feladas.html"))
@@ -1417,6 +1473,8 @@ class SellFlowTests(unittest.TestCase):
         self.assertEqual((pending["kind"], "confirm" in pending, self.store.get(item.id).price), ("price", False, 500))
         self.app.run_work({"action": "price", "ids": [item.id], "choice": "45"})
         self.assertTrue(self.notices()[-1].startswith("45 Ft-ra gondoltál?"), "a felületről beírt összegnél is")
+        self.app.run_work({"action": "price", "ids": [item.id], "choice": "négy és fél ezer"})
+        self.assertTrue(self.notices()[-1].startswith("4 500 Ft-ra gondoltál?"), "szóval beírva is összeg")
         self.assertEqual(self.fake.chat_bodies(), [], "modell nélkül")
 
     def test_retry_one_site_then_everything_is_up(self):

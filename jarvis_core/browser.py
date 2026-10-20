@@ -467,21 +467,31 @@ SNAPSHOT_JS = r"""
     return clean(copy.textContent);
   };
   // Hirdetéskártya ára a hirdetés linkje mellé (ha a link felirata nem mondja): a kártya első, nem profil-linkje
-  // kapja, az eladó profiljára mutató link nem.
+  // kapja, az eladó profiljára mutató link nem. Mint az árkutatásnál (LISTINGS_JS): az áthúzott (régi) ár nem
+  // számít, és ha a kártyán villámár vagy fix ár is van, az az ár.
   const PRICE = /(\d{1,3}(?:[ \u00a0\u202f.]\d{3})+|\d+)(?:,\d{1,2})?\s?(?:Ft|HUF)(?![a-zá-ű])/i;
   const PRICE_FIRST = /(?:Ft|HUF)\s?\d[\d \u00a0\u202f.]*\d/;
+  const FIXED = new RegExp('(?:villámár|fix ?ár|azonnal megvehető|buy it now)\\D{0,4}(' + PRICE.source + ')', 'i');
   const PROFILE = /\/(member|members|user|users|profil|profile|seller|felhasznalo)(\/|$|\?)/i;
   const CARD = 'li, article, [class*=card i], [class*=item i], [class*=product i]';
+  const struck = (el) => el.matches('s, del, strike') ||
+                         (getComputedStyle(el).textDecorationLine || '').includes('line-through');
   const priceOf = (el, name) => {
     if (PRICE.test(name) || PRICE_FIRST.test(name)) return '';
     const card = el.parentElement && el.parentElement.closest(CARD);
     if (!card) return '';
-    const text = clean(card.innerText);
-    const m = text.length <= 400 ? (text.match(PRICE) || text.match(PRICE_FIRST)) : null;
-    if (!m) return '';
+    let text = clean(card.innerText);
+    if (text.length > 400 || !(PRICE.test(text) || PRICE_FIRST.test(text))) return '';
     const links = Array.from(card.querySelectorAll('a[href]'));
     const first = links.find((a) => !PROFILE.test(a.getAttribute('href') || ''));
-    return first === el ? clean(m[0]) : '';
+    if (first !== el) return '';
+    for (const node of card.querySelectorAll('*')) {
+      const old = struck(node) ? clean(node.innerText) : '';
+      if (old) text = text.replace(old, ' ');
+    }
+    const fixed = text.match(FIXED);
+    const m = fixed ? [fixed[1]] : (text.match(PRICE) || text.match(PRICE_FIRST));
+    return m ? clean(m[0]) : '';
   };
 
   const noValue = ['password', 'checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file'];
@@ -1154,16 +1164,17 @@ def wanted_state(text: str, label: str) -> bool | None:
     return None
 
 
-# browser_choose: ami egy kinyitott listában választható (az onclick-es div, li is), és a lista vezérlőgombjai.
-_OPTION_KINDS = {"button", "radio", "input:radio", "checkbox", "input:checkbox", "option", "menuitem",
-                 "menuitemradio", "menuitemcheckbox", "switch", "link", "input:button", "div", "li", "span",
-                 "label", "td", "p", "treeitem", "gridcell"}
+# browser_choose: ami egy kinyitott listában választható (az onclick-es div, li is), és a lista vezérlőgombjai. A
+# begyakorolt lépések (replay.is_choice_option) ugyanezeket fogadják el.
+OPTION_KINDS = {"button", "radio", "input:radio", "checkbox", "input:checkbox", "option", "menuitem",
+                "menuitemradio", "menuitemcheckbox", "switch", "link", "input:button", "div", "li", "span",
+                "label", "td", "p", "treeitem", "gridcell"}
 _FINAL_KINDS = {"radio", "input:radio", "checkbox", "input:checkbox", "option", "menuitemradio",
                 "menuitemcheckbox"}
 _TEXT_KINDS = {"input:text", "input:search", "searchbox", "textbox", "combobox", "textarea"}
-_CONTROL_RE = re.compile(r"^(vissza|back|bezar|bezaras|close|megse|cancel|torles|clear|clear all|kesz|done|ok|"
-                         r"rendben|alkalmaz|apply|mentes|save|tovabb|next|elozo|previous|kereses|search|"
-                         r"(back to|vissza a|vissza az) .*)$")
+CONTROL_RE = re.compile(r"^(vissza|back|bezar|bezaras|close|megse|cancel|torles|clear|clear all|kesz|done|ok|"
+                        r"rendben|alkalmaz|apply|mentes|save|tovabb|next|elozo|previous|kereses|search|"
+                        r"(back to|vissza a|vissza az) .*)$")
 _DONE_RE = re.compile(r"^(kesz|done|ok|rendben|alkalmaz|apply|bezar|bezaras|close)$")
 
 
@@ -1184,12 +1195,26 @@ def _appeared(before: Counter, elements: list[dict[str, Any]]) -> list[dict[str,
     return fresh
 
 
+def distinct_options(found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ha egy felirat kétszer is szerepel (pl. a lista sora és a benne lévő gomb), csak egyszer, a pontosabbal: a
+    választógomb, jelölőnégyzet, opció előbb, aztán a gomb, végül a többi (div, li…). A sorrend marad."""
+    def rank(item: dict[str, Any]) -> int:
+        return 0 if item.get("kind") in _FINAL_KINDS else 1 if item.get("kind") in ("button", "option") else 2
+
+    best: dict[str, dict[str, Any]] = {}
+    for item in found:
+        key = _norm(item.get("label", ""))
+        if key not in best or rank(item) < rank(best[key]):
+            best[key] = item
+    return [item for item in found if best.get(_norm(item.get("label", ""))) is item]
+
+
 def _is_option(el: dict[str, Any]) -> bool:
     """Választható lehetőség-e egy kinyitott listában (a mező, a vezérlőgomb és a fejléc nem)."""
-    if el.get("chrome") or el.get("disabled") or el.get("kind", "") not in _OPTION_KINDS:
+    if el.get("chrome") or el.get("disabled") or el.get("kind", "") not in OPTION_KINDS:
         return False
     label = _norm(el.get("label", ""))
-    return bool(label) and not _CONTROL_RE.match(label)
+    return bool(label) and not CONTROL_RE.match(label)
 
 
 def _short(exc: BaseException | None) -> str:
@@ -1242,6 +1267,8 @@ def short_href(el: dict[str, Any], page_url: str = "") -> str:
 
 
 _STATE_NAMES = (("required", "kötelező"), ("invalid", "hibás"), ("disabled", "tiltva"))
+# Az új elemek csillagának magyarázata az oldalnézet fejlécében (lásd _mark).
+NEW_LEGEND = "; *: új az előző nézet óta"
 
 
 def _states(el: dict[str, Any], skip: frozenset[str] = frozenset()) -> str:
@@ -1348,7 +1375,7 @@ def format_snapshot(data: dict[str, Any], note: str = "") -> str:
     elements = data.get("elements") or []
     below = data.get("below") or []
     # A csillag magyarázata egyszer, az első fejlécben.
-    legend = "; *: új az előző nézet óta" if any(el.get("new") for el in elements + below) else ""
+    legend = NEW_LEGEND if any(el.get("new") for el in elements + below) else ""
     if elements:
         lines.append(f"Kezelhető elemek (a számukkal hivatkozz rájuk{legend}):")
         legend = ""
@@ -1813,7 +1840,8 @@ class BrowserController:
 
     @_restarts_after_crash
     def press(self, key: str = "Escape") -> None:
-        """Egy billentyű (pl. Esc: bezárja a nyitva maradt listát), ahogy az ember is megnyomná."""
+        """Egy billentyű (pl. Esc: bezárja a nyitva maradt listát), ahogy az ember is megnyomná. A felvétel is
+        látja: egy kinyitott, de választás nélkül bezárt lista így kimarad a receptből (FlowRecorder.normalized)."""
         page = self._ensure()
         self.pace.wait(0.15, 0.4)
         try:
@@ -1821,6 +1849,7 @@ class BrowserController:
             page.wait_for_timeout(250)
         except Exception as exc:  # noqa: BLE001
             raise BrowserError(f"Nem sikerült megnyomni: {key} ({_short(exc)}).") from None
+        self._emit({"do": "press", "key": key})
 
     def form_errors(self) -> list[str]:
         """Az űrlap látható hibaüzenetei (pl. egy kötelező, de üres mezőnél), legfeljebb hat."""
@@ -2081,13 +2110,16 @@ class BrowserController:
 
     def _record_write(self, el: dict[str, Any], ordinal: int, text: str, written: _Written, url_before: str,
                       submit: bool) -> None:
-        """A felvételnek: a beírás és a kiválasztás gépelésként, a jelölőnégyzet kattintásként (ha rákattintott)."""
+        """A felvételnek: a beírás és a kiválasztás gépelésként, a jelölőnégyzet kattintásként (ha rákattintott). A
+        jelölőnégyzetnél a `check` jelzi, hogy ez nem gomb: egy kockázatos (pl. a feltételek elfogadása) sem maga a
+        közzététel."""
         if written.kind != "check":
             self._emit({"do": "type", "el": self.describe(el, ordinal), "text": text, "submit": bool(submit),
                         "search": is_search_field(el)})
         elif written.clicked:
             self._emit({"do": "click", "el": self.describe(el, ordinal), "url": url_before, "url_after": self.url,
-                        "risky": bool(self.cfg.confirm_risky and is_risky(el.get("label", ""))), "chooser": False})
+                        "risky": bool(self.cfg.confirm_risky and is_risky(el.get("label", ""))), "chooser": False,
+                        "check": True})
 
     @staticmethod
     def _written_note(el: dict[str, Any], text: str, written: _Written, submit: bool = False) -> str:
@@ -2406,17 +2438,7 @@ class BrowserController:
         found = found or usable(fresh)
         search = next((e for e in fresh if e.get("kind") in _TEXT_KINDS and not e.get("readonly")
                        and not e.get("chrome") and not e.get("disabled")), None)
-
-        def rank(item: dict[str, Any]) -> int:
-            return 0 if item.get("kind") in _FINAL_KINDS else 1 if item.get("kind") in ("button", "option") else 2
-
-        best: dict[str, dict[str, Any]] = {}
-        for item in found:
-            key = _norm(item.get("label", ""))
-            if key not in best or rank(item) < rank(best[key]):
-                best[key] = item
-        options = [item for item in found if best.get(_norm(item.get("label", ""))) is item]
-        return options, search, Counter(_elem_key(e) for e in elements)
+        return distinct_options(found), search, Counter(_elem_key(e) for e in elements)
 
     def _pick_option(self, page: Any, options: list[dict[str, Any]], search: dict[str, Any] | None, wanted: str,
                      base: Counter, handle: Any, el: dict[str, Any], chosen: list[str],

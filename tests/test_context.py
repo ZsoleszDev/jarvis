@@ -210,6 +210,33 @@ class CacheFriendlyCompactionTests(unittest.TestCase):
         assistant._fit_context()          # a már tömörítetthez többé nem nyúl
         self.assertTrue(assistant.history[1]["content"].endswith("vinted.hu/items/new]"))
 
+    def test_the_view_in_the_first_message_of_a_task_is_compacted_too(self):
+        # Egy munka első üzenetében (pl. a Jarvis már megnyitotta a hirdetésfeladást) is oldalnézet van: az első
+        # lépés után az is egy tájékozódó sor lesz, a kérés és a hirdetés adatai maradnak.
+        assistant = Assistant(self.cfg, self.llm, self.box, "Rendszerprompt. " * 200)
+        assistant.context_tokens = 16384
+        first = page_view(0, note="Megnyitottam a hirdetésfeladást.", url="https://www.vinted.hu/items/new")
+        task = "Töltsd fel a pulóvert.\n\nA hirdetés adatai:\nCím: Kék pulóver"
+        self.fake.chat_script = [tool_reply("browser_click", {"element": 3}) for _ in range(3)]
+        self.fake.chat_script.append(reply("Kész."))
+        self.assertEqual(assistant.ask(task + KEEP_ABOVE + first), "Kész.")
+        bodies = self.fake.chat_bodies()
+        self.assertEqual(bodies[0]["messages"][1]["content"], task + KEEP_ABOVE + first, "az első körben még teljes")
+        for earlier, later in zip(bodies, bodies[1:]):
+            before, after = earlier["messages"], later["messages"]
+            self.assertGreaterEqual(first_difference(before, after), len(before) - 1,
+                                    "csak az előző kérés utolsó üzenete (a régi oldalnézet) változhat")
+            views = [m for m in after if m["role"] in ("user", "tool") and "Kezelhető elemek" in m["content"]]
+            self.assertEqual(len(views), 1, "mindig csak a legfrissebb oldalnézet teljes")
+        self.assertEqual(assistant.history[0]["content"],
+                         task + "\n[Korábbi oldalnézet: Megnyitottam a hirdetésfeladást. Oldal: Lista 0 – "
+                         "vinted.hu/items/new]")
+        # a felhasználó saját üzenetéhez (KEEP_ABOVE nélkül) soha nem nyúl, akkor sem, ha oldalnézetnek látszik
+        assistant.history = [{"role": "user", "content": page_view(5)},
+                             {"role": "tool", "tool_name": "browser_click", "content": page_view(6)}]
+        assistant._fit_context()
+        self.assertEqual(assistant.history[0]["content"], page_view(5))
+
     def test_orientation_line(self):
         self.assertEqual(page_orientation(page_view(2)), "[Korábbi oldalnézet: Oldal: Lista 2 – bolt.hu/lista/2]")
         self.assertTrue(page_orientation("Találatok erre: póló").startswith("[Korábbi, már elavult"))
@@ -253,6 +280,26 @@ class StallTests(unittest.TestCase):
         self.assertFalse(results[1].endswith(STALL_NOTE), "az első üres lépés lehet még jogos (pl. lassú oldal)")
         self.assertTrue(all(r.endswith(STALL_NOTE) for r in results[2:]), "az ismétlésnél jelzést kap")
         self.assertEqual(assistant.history[-1]["content"], answer)
+
+    def test_the_new_element_marks_do_not_hide_a_stall(self):
+        # A változó lépés után az új elemeken csillag van („*[4]”, és a magyarázata), a következő, hatástalan lépés
+        # után már nincs: az oldal ettől még ugyanaz, az elakadás innen számol (nem egy körrel később).
+        def view(new: bool) -> str:
+            items = [{"id": i, "kind": "button", "label": f"Gomb {i}", "new": new and i > 3} for i in range(1, 8)]
+            data = {"title": "Űrlap", "url": "https://bolt.hu/urlap", "text": "Kitöltés", "elements": items}
+            return format_snapshot(data, 'Rákattintottam: "Tovább".')
+
+        self.assertIn("*[4]", view(True))
+        views = iter([view(True)] + [view(False)] * 10)
+        self.box.register("browser_click", "teszt", params({"element": {"type": "integer"}}, ["element"]),
+                          lambda element: next(views), ephemeral=True)
+        assistant = Assistant(self.cfg, self.llm, self.box, "rendszer")
+        self.fake.chat_script = [tool_reply("browser_click", {"element": 5}) for _ in range(10)]
+        self.assertEqual(assistant.ask("kattints a Tovább gombra"), STALL_REPLY.format(name="browser_click"))
+        self.assertEqual(len(self.fake.chat_bodies()), 5, "ugyanannyi kör, mint csillag nélkül")
+        results = [body["messages"][-1]["content"] for body in self.fake.chat_bodies()[1:]]
+        self.assertFalse(results[1].endswith(STALL_NOTE), "az első üres lépés lehet még jogos")
+        self.assertTrue(results[2].endswith(STALL_NOTE), "a második ismétlésnél már jelzést kap")
 
     def test_the_same_failing_step_counts_too(self):
         # Ugyanaz a sikertelen lépés (HIBA), közben az oldal nem változik: ez is elakadás.

@@ -27,7 +27,8 @@ from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Any, Callable
 
-from .browser import BrowserError, is_risky, navigates
+from .browser import (CONTROL_RE, OPTION_KINDS as CHOOSE_KINDS, BrowserError, distinct_options, is_risky,
+                      match_option, navigates)
 from .llm import OllamaError
 from .textutil import fold
 
@@ -705,10 +706,10 @@ MAX_ASK_OPTIONS = 40       # egy új érték kiválasztásánál legfeljebb enny
 MAX_LEVELS = 6             # egy választás (pl. méretrendszer, aztán méret) legfeljebb ennyi szint
 TEXT_KINDS = {"input:text", "input:search", "searchbox", "textbox", "input:email", "input:tel", "input:number",
               "input:url", "textarea", "combobox", "select"}
-OPTION_KINDS = CHOICE_KINDS | {"button", "input:button", "link", "menuitemcheckbox", "tab", "summary"}
+# Ami egy kinyitott listában választható: ugyanaz, mint a browser_choose-nál (az onclick-es div, li is), és a
+# lista vezérlőgombjai (vissza, kész, keresés…) sem lehetőségek (browser.CONTROL_RE).
+OPTION_KINDS = CHOICE_KINDS | CHOOSE_KINDS | {"tab", "summary"}
 FINAL_KINDS = {"radio", "input:radio", "checkbox", "input:checkbox", "option", "menuitemradio", "menuitemcheckbox"}
-CONTROL_RE = re.compile(r"^(vissza|back|bezar|bezaras|close|megse|cancel|torles|clear|clear all|kesz|done|ok|"
-                        r"rendben|alkalmaz|apply|tovabb|next)$")
 # Fizetős lehetőség (kiemelés, előresorolás…): a javítás és az új érték kiválasztása sosem kattint rá.
 PAID_RE = re.compile(r"(fizet|vasarl|megrendel|checkout|penztar|kiemel|elore ?sorol|elorehoz|elofizet|premium)")
 
@@ -969,13 +970,15 @@ class Replayer:
         self.filled.append(f"{label.lower()}: {value or '–'}")
 
     def _decide(self, name: str, value: str, labels: list[str], path: list[str] | None = None) -> int | None:
-        """Melyik lehetőség az érték: a felirat alapján (lásd pick_label; egy kategóriaútnál bármelyik szintje), és
-        csak ha így nem egyértelmű, egy rövid, számozott kérdéssel a modell."""
+        """Melyik lehetőség az érték: a felirat alapján (lásd pick_label; egy kategóriaútnál bármelyik szintje), ha
+        így nincs meg, ahogy a browser_choose is választana (match_option), és csak ha így sem egyértelmű, egy
+        rövid, számozott kérdéssel a modell."""
         parts = [p.strip() for p in value.split(">") if p.strip()] if ">" in value else []
-        for part in [value, *reversed(parts)]:
-            index = pick_label(labels, part)
-            if index is not None:
-                return index
+        for pick in (pick_label, lambda texts, part: match_option(texts, part)[0]):
+            for part in [value, *reversed(parts)]:
+                index = pick(labels, part)
+                if index is not None:
+                    return index
         shown = labels[:MAX_ASK_OPTIONS]
         label = FIELD_LABELS.get(name, name)
         question = (f"Mező: {label}" + (f" (eddig kiválasztva: {' > '.join(path)})" if path else "")
@@ -1017,7 +1020,7 @@ class Replayer:
             for _level in range(MAX_LEVELS):
                 self.check()
                 elements = self.browser.scan()
-                options = [e for e in elements if elem_id(e) not in base and is_choice_option(e)]
+                options = distinct_options([e for e in elements if elem_id(e) not in base and is_choice_option(e)])
                 if not options:
                     break
                 index = self._decide(name, value, [o.get("label", "") for o in options], picked)
@@ -1036,8 +1039,8 @@ class Replayer:
                 raise ReplayMiss(f"{label}: nem nyílt ki a lista")
         elif sample.get("do") == "click" and el:
             elements = self.browser.scan()
-            options = [e for e in elements if e.get("kind") == el.get("kind") and is_choice_option(e)
-                       and (not el.get("field") or e.get("field") == el.get("field"))]
+            options = distinct_options([e for e in elements if e.get("kind") == el.get("kind") and is_choice_option(e)
+                                        and (not el.get("field") or e.get("field") == el.get("field"))])
             index = self._decide(name, value, [o.get("label", "") for o in options])
             if index is None:
                 raise ReplayMiss(unknown)

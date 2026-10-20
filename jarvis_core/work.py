@@ -59,6 +59,8 @@ FIELD_NAMES = {"product": "mi ez", "title": "cím", "description": "leírás", "
                "brand": "márka", "size": "méret", "condition": "állapot", "color": "szín",
                "material": "anyag", "price": "ár", "location": "átvétel helye", "shipping": "szállítás"}
 SETTINGS = {"city": 80, "shipping": 300, "parcel_size": 20}
+# A tárgy adatai, amelyek szavaival a böngésző egy hosszú lenyíló listából elöl mutatja az egyezőket (hints).
+HINT_FIELDS = ("category", "product", "brand", "size", "condition", "color", "material", "kind", "location")
 
 DEFAULT_WORK_PROMPT = (
     "Te {name} vagy, és most a Munka menüben a felhasználó holmijainak eladásában segítesz: "
@@ -199,7 +201,7 @@ class WorkDesk:
         # A fent lévő hirdetések háttérellenőrzése (elkelt-e, eltűnt-e): modell nélkül, csak olvasva.
         self.checker = (ListingChecker(self.store, self.platforms, lambda: toolbox.browser)
                         if self.browser_ready else None)
-        self.current: tuple[str, str] | None = None   # (tárgy, oldal), amit épp feltölt
+        self._current: tuple[str, str] | None = None   # (tárgy, oldal), amit épp feltölt vagy levesz (current)
         self._answered: dict[str, list[str]] = {}     # tárgy → amire a legutóbb visszakérdezett és válaszoltál
         self.approved = False    # feltöltés közben jóváhagytál-e egy kattintást (pl. a közzétételt)
         # (tárgy, oldal), amiről a modell épp megnézi, fent van-e: ilyenkor újra feltölteni nem szabad.
@@ -455,6 +457,8 @@ class WorkDesk:
         self.preview_title = ""
         self.checking = None
         self.autodelisted = None
+        if self.browser_ready:
+            self.toolbox.browser.hints = []     # a tárgy szavai csak a feladat alatt (lásd current)
 
     def _on_browser_action(self, event: dict[str, Any]) -> None:
         if self.recorder is not None:
@@ -462,7 +466,9 @@ class WorkDesk:
         if self.current is not None:
             self.trail.append(dict(event))
             del self.trail[:-200]
-            if event.get("do") == "click" and event.get("risky"):
+            # Közzététel (vagy törlés): egy kockázatos gomb. Egy kockázatos jelölőnégyzet (pl. a feltételek
+            # elfogadása, check) nem az: utána még jön a közzététel gombja, és az előtt kell a szünet.
+            if event.get("do") == "click" and event.get("risky") and not event.get("check"):
                 self.note_publish(self.current[1])
                 self.published_in = self.current
 
@@ -530,6 +536,28 @@ class WorkDesk:
             self.wait_gap(item_id, key)
         if busy:
             self.store.set_busy(item_id, busy)    # a visszaszámlálás helyett újra az, amin dolgozik
+
+    @property
+    def current(self) -> tuple[str, str] | None:
+        """(tárgy, oldal), amit épp feltölt vagy levesz."""
+        return self._current
+
+    @current.setter
+    def current(self, value: tuple[str, str] | None) -> None:
+        # Amíg egy feltöltés vagy levétel tart, az oldalnézet a hosszú lenyíló listákból elöl a tárgy szavaival
+        # egyező lehetőségeket mutatja (BrowserController.hints); utána, pl. a Beszélgetés böngészésénél, már nem.
+        self._current = value
+        if self.browser_ready:
+            self.toolbox.browser.hints = self.item_hints(value[0]) if value else []
+
+    def item_hints(self, item_id: str) -> list[str]:
+        """A tárgy szavai a böngészőnek: kategória, mi ez, márka, méret, állapot, szín, anyag, fajta, település."""
+        try:
+            item = self.store.get(item_id)
+        except ItemError:
+            return []
+        values = item_values(item, self.settings)
+        return [values[name] for name in HINT_FIELDS if values.get(name)]
 
     @property
     def recorder(self) -> FlowRecorder | None:
@@ -1204,16 +1232,16 @@ class WorkDesk:
         self.store.set_busy(found.id, f"Levétel: {site.name}…")
         prefix, clicked = "", False
         if auto and self.can_autodelist(found.id, platform) and self.autodelisted != (found.id, platform):
-            auto = self.autodelist(found.id, platform)
-            answer = self._after_autodelist(found, platform, auto)
+            delisted = self.autodelist(found.id, platform)
+            answer = self._after_autodelist(found, platform, delisted)
             if answer is not None:
                 return answer
             found = self.store.get(found.id)
             entry = found.platforms.get(platform) or {}
-            clicked = auto.status == "uncertain"     # a Törlésre már rákattintott: csak meg kell nézni
-            prefix = (f"A Törlésre rákattintottam, de nem biztos, hogy sikerült ({auto.reason}). Nézd meg az "
+            clicked = delisted.status == "uncertain"     # a Törlésre már rákattintott: csak meg kell nézni
+            prefix = (f"A Törlésre rákattintottam, de nem biztos, hogy sikerült ({delisted.reason}). Nézd meg az "
                       "oldalt: ha a hirdetés már nincs fent, csak jelöld meg; ha még fent van, fejezd be.\n" if clicked
-                      else f"A modell nélküli levétel nem ment végig ({auto.reason}); folytasd te.\n")
+                      else f"A modell nélküli levétel nem ment végig ({delisted.reason}); folytasd te.\n")
         if auto and not clicked and self.can_replay(found.id, platform, "delist"):
             outcome = self.replay(found.id, platform, "delist")
             if outcome.status == "done":

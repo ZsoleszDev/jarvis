@@ -58,6 +58,9 @@ STEPS = [
      "url": "https://www.vinted.hu/items/new", "url_after": "https://www.vinted.hu/items/123"},
     {"do": "declined", "el": {"kind": "button", "label": "Feltöltés"}},
     {"do": "back"},
+    {"do": "click", "el": {"kind": "input:checkbox", "label": "Elfogadom a feltételeket"}, "risky": True,
+     "check": True},
+    {"do": "press", "key": "Escape"},
 ]
 
 
@@ -157,7 +160,9 @@ class DossierUnitTests(unittest.TestCase):
                          "  3. gépelés: input:text „Cím” (mező: title) ← „Zara póló”",
                          "  4. gépelés: input:search „Márka” ← „Zara” + Enter",
                          "  5. kattintás: button „Feltöltés” [közzététel/törlés] → https://www.vinted.hu/items/123",
-                         "  6. NEM ENGEDÉLYEZTED: button „Feltöltés”", "  7. vissza az előző oldalra"):
+                         "  6. NEM ENGEDÉLYEZTED: button „Feltöltés”", "  7. vissza az előző oldalra",
+                         "  8. kattintás: input:checkbox „Elfogadom a feltételeket” [jóváhagyással]",
+                         "  9. billentyű: Escape"):
             self.assertIn(expected, steps)
         self.assertEqual(format_steps([]), "(nincs feljegyzett lépés)")
         long_view = "Oldal: x\n" + "y" * 5000

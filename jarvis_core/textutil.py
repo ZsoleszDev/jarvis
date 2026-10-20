@@ -199,12 +199,9 @@ def _amount_value(parts: list[float]) -> float:
     return total + current
 
 
-def hu_amounts(text: str) -> list[int]:
-    """Az összegek egy írt vagy mondott válaszban, sorrendben: számjegyek („3 500”, „4,5 ezer”, „4.5k”, „5e”) és
-    számszavak („ötezer”, „négyezer-ötszáz”, „másfél ezer”, „3 és fél ezer”, „félmillió”).
-
-    Egy számszó csak akkor összeg, ha szorzó van benne (száz, ezer, millió), ha Ft követi, vagy ha egymagában ez
-    a válasz („legyen negyven”). Így az „egy kicsit olcsóbb” nem 1 Ft, és a „hát legyen” sem 6 Ft."""
+def _amount_phrases(text: str) -> tuple[list[str], list[dict]]:
+    """A válasz szavai és a benne talált összegek, sorrendben (lásd hu_amounts): mindegyiknek a részei, és hogy
+    hányadik szótól hányadikig tart."""
     folded = re.sub(r"(?<=[a-z])-(?=[a-z])", "", fold(text or ""))
     tokens = _AMOUNT_TOKEN_RE.findall(folded)
     phrases: list[dict] = []        # egy-egy összeg: részei, és mely szavak tartoznak hozzá
@@ -234,7 +231,7 @@ def hu_amounts(text: str) -> list[int]:
         else:
             current = {"parts": parts, "digits": False, "start": i, "end": i + 1, "words": [token]}
             phrases.append(current)
-    amounts = []
+    kept = []
     for phrase in phrases:
         after = tokens[phrase["end"]] if phrase["end"] < len(tokens) else ""
         if not (phrase["digits"] or _MULTIPLIERS & set(phrase["parts"]) or after in _CURRENCY_WORDS):
@@ -242,8 +239,30 @@ def hu_amounts(text: str) -> list[int]:
             alone = len(phrases) == 1 and all(t in _FILLER_WORDS for t in rest)
             if not alone or phrase["words"] in ([w] for w in _AMBIGUOUS_WORDS):
                 continue
-        amounts.append(int(round(_amount_value(phrase["parts"]))))
-    return amounts
+        kept.append(phrase)
+    return tokens, kept
+
+
+def hu_amounts(text: str) -> list[int]:
+    """Az összegek egy írt vagy mondott válaszban, sorrendben: számjegyek („3 500”, „4,5 ezer”, „4.5k”, „5e”) és
+    számszavak („ötezer”, „négyezer-ötszáz”, „másfél ezer”, „3 és fél ezer”, „félmillió”).
+
+    Egy számszó csak akkor összeg, ha szorzó van benne (száz, ezer, millió), ha Ft követi, vagy ha egymagában ez
+    a válasz („legyen negyven”). Így az „egy kicsit olcsóbb” nem 1 Ft, és a „hát legyen” sem 6 Ft."""
+    return [int(round(_amount_value(phrase["parts"]))) for phrase in _amount_phrases(text)[1]]
+
+
+def only_hu_amount(text: str) -> int | None:
+    """Ha a szöveg egyetlen összeg (mellette legfeljebb pénznem vagy töltelékszó: „5 ezer Ft”, „legyen ötezer”), az
+    összeg; különben None. Az ármezőhöz: a „hát”, a „38-as, piros” vagy a „4500 vagy 5000” nem egy ár."""
+    tokens, phrases = _amount_phrases(text)
+    if len(phrases) != 1:
+        return None
+    phrase = phrases[0]
+    rest = [t for j, t in enumerate(tokens) if t.isalnum() and not phrase["start"] <= j < phrase["end"]]
+    if any(t not in _CURRENCY_WORDS and t not in _FILLER_WORDS for t in rest):
+        return None
+    return int(round(_amount_value(phrase["parts"])))
 
 
 def parse_hu_amount(text: str) -> int | None:

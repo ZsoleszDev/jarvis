@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable
 
-from .textutil import fold
+from .textutil import fold, only_hu_amount
 
 ITEM_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 PHOTO_RE = re.compile(r"^\d{2}\.jpg$")
@@ -48,7 +48,7 @@ MULTILINE = {"description", "prompt"}
 POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
 # Egy fent lévő hirdetés újbóli megjelölésekor (ugyanaz a hirdetés) ezek maradnak: mióta van fent, a feltöltéskori ár és cím,
 # és a háttérellenőrzés eredménye (lásd listings.py).
-REMARK_KEEPS = ("posted_at", "posted_price", "posted_title", "checked_at", "check", "check_note")
+REMARK_KEEPS = ("posted_at", "posted_price", "posted_title", "checked_at", "check", "check_note", "check_error")
 
 
 class ItemError(Exception):
@@ -85,13 +85,15 @@ PLATFORMS: dict[str, Platform] = {
         "https://www.vinted.hu/catalog?search_text={q}", ("vinted.hu",),
         "1. Fotók: browser_upload_photos (elem nélkül, vagy a fotófeltöltő gomb számával). "
         "2. Cím (Title), leírás (Description) és ár (Price) egy browser_fill lépésben. 3. Kategória (Category): "
-        "a mezőre kattintva lista nyílik; szintenként válassz (pl. Women, Clothing, Jeans), az utolsó szint "
-        "egy választógomb. 4. A kategória után jelenik meg a márka, a méret, az állapot és a szín. Márka: a "
-        "„Search brands” mezőbe írd be, és válaszd ki a listából. 5. Méret a listából (ha előbb a méretrendszert "
-        "kéri, pl. EU, azt is). 6. Állapot: New with tags = Új, címkével; New without tags = Új; Very good = "
-        "Nagyon jó; Good = Jó; Satisfactory = Elfogadható vagy Hibás. 7. Szín (Colours, legfeljebb kettő), utána "
-        "zárd be a listát. 8. Csomagméret: Small = kicsi, Medium = közepes, Large = nagy. 9. Végül a „Feltöltés” "
-        "(Upload) gomb; ha utána azt írja, hogy valamit ki kell tölteni (Fill in …), pótold, és kattints újra.",
+        "browser_choose a mező számával és a teljes úttal, pl. „Women > Clothing > Jeans” (szintenként nyílik, az "
+        "utolsó szint egy választógomb). 4. A kategória után jelenik meg a márka, a méret, az állapot és a szín; "
+        "ezekhez is browser_choose kell. Márka: a neve (ha nincs a listában, a „Search brands” keresőbe maga "
+        "beírja). 5. Méret: ha előbb a méretrendszert kéri, az úttal (pl. „EU > EU 40”). 6. Állapot: New with "
+        "tags = Új, címkével; New without tags = Új; Very good = Nagyon jó; Good = Jó; Satisfactory = Elfogadható "
+        "vagy Hibás. 7. Szín (Colours, legfeljebb kettő): színenként egy browser_choose. 8. Csomagméret: Small = "
+        "kicsi, Medium = közepes, Large = nagy. Ami egy oldalon egymás után jön (pl. állapot, szín, csomagméret), "
+        "az egy browser_do lépésben is mehet. 9. Végül a „Feltöltés” (Upload) gomb; ha utána azt írja, hogy "
+        "valamit ki kell tölteni (Fill in …), pótold, és kattints újra.",
         max_photos=20),
     "jofogas": Platform(
         "jofogas", "Jófogás", "https://www.jofogas.hu/", "https://www.jofogas.hu/",
@@ -267,6 +269,8 @@ def format_price(value: int | float | None) -> str:
 
 
 def parse_price(value: Any) -> int | None:
+    """Ár forintban: számjegyekkel („4 500 Ft”, „4.500”) vagy magyarul („ötezer”, „4,5 ezer”, „3 és fél ezer”,
+    „4.5k”). Ha a szöveg nem egyetlen összeg (pl. „hát”), ItemError."""
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     if isinstance(value, bool):
@@ -274,8 +278,10 @@ def parse_price(value: Any) -> int | None:
     text = re.sub(r"(?i)\s|ft|huf|forint|\.(?=\d{3}\b)", "", str(value)).replace(",", ".")
     try:
         price = int(round(float(text)))
-    except ValueError:
-        raise ItemError("Az ár egy szám legyen, forintban (pl. 4500).") from None
+    except (ValueError, OverflowError):
+        price = only_hu_amount(str(value))
+        if price is None:
+            raise ItemError("Az ár egy szám legyen, forintban (pl. 4500 vagy „4,5 ezer”).") from None
     if not 0 <= price <= MAX_PRICE:
         raise ItemError("Az ár 0 és 10 millió forint között legyen.")
     return price
@@ -570,8 +576,9 @@ class ItemStore:
             return self._changed(item)
 
     def set_check(self, item_id: str, platform: str, state: str, when: float | None = None,
-                  detail: str = "") -> Item:
-        """A háttérben megnézett hirdetés állapota (fent van, elkelt, eltűnt): mikor, mit láttunk és miből."""
+                  detail: str = "", error: str = "") -> Item:
+        """A háttérben megnézett hirdetés állapota (fent van, elkelt, eltűnt): mikor, mit láttunk és miből.
+        `error`: a hirdetés most nem nyílt meg; az előző eredmény megjegyzése marad, a hiba külön (check_error)."""
         with self._lock:
             item = self.get(item_id)
             entry = item.platforms.get(platform)
@@ -579,6 +586,10 @@ class ItemStore:
                 return item
             entry["checked_at"] = time.time() if when is None else float(when)
             entry["check"] = state
+            if error:
+                entry["check_error"] = error[:200]
+                return self._changed(item)
+            entry.pop("check_error", None)
             if detail:
                 entry["check_note"] = detail[:200]
             else:

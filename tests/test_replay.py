@@ -31,6 +31,7 @@ from test_work import SHIRT, _QuietHandler, element_number, jpeg  # noqa: E402
 
 from jarvis_core import replay, selling  # noqa: E402
 from jarvis_core.app import JarvisApp  # noqa: E402
+from jarvis_core.browser import distinct_options  # noqa: E402
 from jarvis_core.replay import FlowRecorder, Replayer, field_for, match_field, url_shape  # noqa: E402
 from jarvis_core.selling import NOT_POSTED, POSTED, Platform  # noqa: E402
 
@@ -279,6 +280,9 @@ class RecorderTests(unittest.TestCase):
         escaped = [*self.CLEAN[:1], {"do": "click", "el": el("button", "Méret")}, {"do": "press", "key": "Escape"},
                    *self.CLEAN[1:]]
         self.assertEqual(self.recorder(escaped).build(VALUES)[0]["steps"], clean["steps"])
+        # A browser_choose a választás után Esc-cel zárja be a nyitva maradt listát: az nem változtat a recepten.
+        closed = [*self.CLEAN[:3], {"do": "press", "key": "Escape"}, *self.CLEAN[3:]]
+        self.assertEqual(self.recorder(closed).build(VALUES)[0], {**clean, "recorded_at": mock.ANY})
 
     def test_the_step_limit_counts_after_cleaning(self):
         retyped = [{"do": "type", "el": el("textarea", "Leírás", "description"), "text": f"vázlat {n}"}
@@ -626,6 +630,25 @@ class StepRepairTests(unittest.TestCase):
                       {"do": "type", "el": el("input:text", "Cím", "title"), "text": VALUES["title"]}):
             rec.add(event)
         self.assertEqual(rec.entry_url(), "https://www.jofogas.hu/uj-hirdetes")
+
+    def test_new_values_are_picked_like_browser_choose_would(self):
+        # A browser_choose a kattintható (onclick-es) li, div, span lehetőségeket is elfogadja, és a lista
+        # vezérlőgombjait (Keresés, Mentés…) kihagyja; a visszajátszás egy új értéknél ugyanígy választ.
+        page = [el("li", "Új"), el("li", "Nagyon jó"), el("li", "Jó"), el("li", "Keresés"), el("button", "Feltöltés")]
+        for value, picked in (("Jó", "Jó"), ("Nagyon jó állapotú", "Nagyon jó")):
+            memory = {"condition": {"uj": [{"do": "click", "el": el("li", "Új")}]}}
+            llm = StubLLM(answer=1)
+            replayer, outcome, browser = self.replay([{"do": "choice", "field": "condition", "opener": None}, PUBLISH],
+                                                     page, llm, memory, {**VALUES, "condition": value})
+            self.assertEqual(outcome.status, "done", value)
+            self.assertEqual(browser.done[1], ("click", picked), value)
+            self.assertEqual(llm.calls, [], "a felirat alapján, modell nélkül (mint a browser_choose)")
+        self.assertTrue(replay.is_choice_option(el("div", "Piros")))
+        for control in (el("li", "Keresés"), el("button", "Mentés"), el("span", "Vissza a kategóriákhoz")):
+            self.assertFalse(replay.is_choice_option(control), control["label"])
+        twice = [el("li", "Jó"), el("input:radio", "Jó"), el("li", "Új")]
+        self.assertEqual([o["kind"] for o in distinct_options(twice)], ["input:radio", "li"],
+                         "egy felirat egyszer, a pontosabb elemmel")
 
     def test_pick_label(self):
         labels = ["Új", "Nagyon jó állapotú", "Jó állapotú", "Elfogadható"]
