@@ -156,6 +156,15 @@ A tárgy fontos mezői:
 a régi, Jarvis ezt mondja róla, pl. „Csak itt írtam át; a Vinteden még 9 000 Ft. A fent lévő hirdetést magamtól nem
 szerkesztem: ott kézzel kell átírni (vagy levenni, és újra feltölteni).”; különben üres. Az app írja ki.
 
+A fotóellenőrzés (modell nélkül, csak jelzés: a feltöltést nem állítja meg): `photo_warnings`
+(`{"03.jpg": [{kind, text}]}`, csak a fotók, amelyekkel gond van; `kind`: `blurry` homályos, `dark` túl sötét,
+`bright` túl világos, `clipped` ellenfényes, `small` kicsi, `duplicate` majdnem ugyanaz, mint egy másik fotója,
+`elsewhere` ugyanez a fotó egy másik tárgynál is megvan), `photo_note` (rövid összefoglaló, pl. „A 3. fotó
+homályosnak tűnik; a 2. és a 4. majdnem ugyanaz.”; üres, ha minden rendben), `photo_cover` (ha az első fotóval
+gond van, a javasolt borító; előre a `/photos/order` végponttal teheted: `{order: [photo_cover]}`; magától nem
+cseréli) és `photo_checks` (a mért értékek fotónként: `w`, `h`, `sharp`, `mean`, `p05`, `p95`, `white`, `black`,
+`rgb`, `hash`, `detail`). A régebbi tárgyak fotóit indítás után a háttérben méri meg; addig nincs jelzés.
+
 A feltöltés és a levétel menet közben jóváhagyást kérhet (közzététel): ilyenkor `confirm` esemény jön,
 és a telefonról is jóváhagyhatod (`POST /confirm`).
 

@@ -48,6 +48,10 @@
   const photoUrl = (id, name, thumb) =>
     `/api/work/photo/${id}/${name}?t=${encodeURIComponent(token)}${thumb ? "&thumb=1" : ""}`;
   const safeUrl = (url) => (/^https?:\/\//i.test(url || "") ? url : "");
+  const az = (n) => (n === 1 || /^5\d{0,2}$/.test(String(n)) ? "az" : "a");    // „az 1.”, „az 5.”, „a 3.”
+  // A fotóellenőrzés jelzése (homályos, sötét, ismétlődő…): „!” a kép sarkában, a részletek az egér alatt.
+  const photoBadge = (text) => (text
+    ? `<span class="warn" role="img" title="${esc(text)}" aria-label="${esc(text)}">!</span>` : "");
   const siteName = (key) => (platforms.find((p) => p.key === key) || { name: key }).name;
   const siteState = (item, key) => (item.platforms[key] || {}).status || "";
   const store = (key, value) => { try { localStorage.setItem(key, value); } catch { /* nem baj */ } };
@@ -451,13 +455,14 @@
 
   function card(item) {
     const thumb = item.photos.length
-      ? `<img class="thumb" src="${photoUrl(item.id, esc(item.photos[0]), true)}" alt="">`
+      ? `<img class="thumb" src="${photoUrl(item.id, esc(item.photos[0]), true)}" alt="">${photoBadge(item.photo_note)}`
       : '<span class="nothumb">nincs fotó</span>';
     const busy = uploading.get(item.id) || item.busy;
     const marks = flags(item);
     const facts = [price(item.price), online(item)].filter(Boolean).join(" · ");
+    const label = item.name + " részletei" + (item.photo_note ? ". " + item.photo_note : "");
     return `<div class="card${item.sold ? " sold" : ""}" data-id="${item.id}">
-      <button type="button" class="cardthumb" data-open="${item.id}" aria-label="${esc(item.name)} részletei">${thumb}</button>
+      <button type="button" class="cardthumb" data-open="${item.id}" aria-label="${esc(label)}">${thumb}</button>
       <div class="body">
         <div class="row tight"><span class="chip ${STATUS_CLASS[item.status] || ""}">${esc(item.status)}</span>
           <span class="facts">${esc(facts)}</span></div>
@@ -483,9 +488,11 @@
   }
 
   function photo(item, name, index) {
+    const warnings = ((item.photo_warnings || {})[name] || []).map((w) => w.text).join(" ");
     return `<div class="photo${index === 0 ? " first" : ""}">
       <img src="${photoUrl(item.id, esc(name), true)}" alt="${index + 1}. fotó">
       ${index === 0 ? '<span class="tag">borító</span>' : ""}
+      ${photoBadge(warnings)}
       <div class="tools">
         ${index > 0 ? `<button type="button" data-action="cover" data-name="${esc(name)}" title="Legyen ez az első kép">Borító</button>` : "<span></span>"}
         <button type="button" data-action="removephoto" data-name="${esc(name)}" aria-label="${index + 1}. fotó törlése">✕</button>
@@ -497,6 +504,15 @@
     return Object.entries(r.dropped || {}).filter(([, n]) => n > 0).map(([why, n]) =>
       why === "kevésbé illő" && r.kept ? `${n} kevésbé illő (a ${r.kept} legjobban illő maradt)`
         : `${n} ${DROPPED[why] || why}`).join(", ");
+  }
+
+  // Az összefoglaló a fotók alatt; ha a borítóval gond van, a gombbal a javasolt kerül előre (csak kérésre).
+  function photoNote(item) {
+    if (!item.photo_note) return "";
+    const cover = item.photos.indexOf(item.photo_cover) + 1;
+    const button = cover > 1 ? ` <button type="button" class="small" data-action="cover" data-name="${esc(item.photo_cover)}">` +
+      `Legyen ${az(cover)} ${cover}. a borító</button>` : "";
+    return `<p class="photonote">${esc(item.photo_note)}${button}</p>`;
   }
 
   function researchBlock(item) {
@@ -606,6 +622,7 @@
           ${item.photos.length < maxPhotos ? `<button type="button" class="addphoto" data-action="pickphotos">
             + Fotó<br>vagy húzd ide</button>` : ""}
         </div>
+        ${photoNote(item)}
       </section>
       <section aria-labelledby="h-listing">
         <h3 id="h-listing">A hirdetés</h3>
