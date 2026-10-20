@@ -417,13 +417,57 @@
   $("job-deals").addEventListener("click", () => setJob("deals"));
 
   const every = (m) => (m >= 60 ? `${m / 60} óránként` : `${m} percenként`);
+  let editingRef = null;      // a keresés, aminél épp kézzel írod a szokásos árat
+  let editingSearch = null;   // a keresés, amit az űrlapon szerkesztesz (Mentés: módosítás, nem új)
+
+  // Egy keresés állapota: a szokásos ár (jóváhagyva, javaslat, kevés hasonló, felmérés a következő körben).
+  function searchState(s) {
+    const refForm = editingRef === s.id
+      ? `<span class="row"><input id="d-ref" type="number" min="1" value="${esc(s.reference || (s.proposal && s.proposal.price) || "")}"
+           style="width: 7em" aria-label="Szokásos ár (Ft)"> Ft <button type="button" class="small primary" data-ref-save="${esc(s.id)}">Mentés</button></span>`
+      : "";
+    if (s.status === "fut") {
+      const basis = s.basis && s.basis.n ? `felmérve ${s.basis.n} hirdetésből` : "kézzel";
+      const market = s.market && s.market.since
+        ? `<small class="warn">A hirdetésekben most inkább ${esc(price(s.market.median))} körül van.</small>` : "";
+      return `<small>Szokásos ár: <b>${esc(price(s.reference))}</b> (${basis})</small>${market}
+        <span class="row">${refForm || `<button type="button" class="small" data-ref-edit="${esc(s.id)}">Átírom</button>`}
+        <button type="button" class="small quiet" data-recalibrate="${esc(s.id)}">Újra felmérem</button></span>`;
+    }
+    if (s.status === "javaslat") {
+      const p = s.proposal;
+      const rows = (p.rows || []).map((r) => `<li><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.text)}</a>
+        <small class="muted">${esc(r.site)} · ${esc(price(r.price))}</small></li>`).join("");
+      return `<small class="warn">Javaslat: <b>${esc(price(p.price))}</b> (${p.n} hasonló hirdetés, a többség
+          ${esc(price(p.p25))}–${esc(price(p.p75))}). Jóváhagyásig ezzel nem keresek.</small>
+        <details><summary class="muted">Miből számoltam</summary><ul class="dealrows">${rows}</ul></details>
+        <span class="row">${refForm || `<button type="button" class="small primary" data-accept="${esc(s.id)}">Elfogadom</button>
+          <button type="button" class="small" data-ref-edit="${esc(s.id)}">Átírom</button>`}</span>`;
+    }
+    if (s.status === "kevés") {
+      return `<small class="warn">Kevés hasonló hirdetést találtam (${s.proposal.n}): add meg kézzel a szokásos árat.</small>
+        <span class="row">${refForm || `<button type="button" class="small primary" data-ref-edit="${esc(s.id)}">Megadom</button>`}</span>`;
+    }
+    return `<small class="muted">A szokásos árat a következő keresésnél mérem fel (egy modellhívás), és jóváhagyásra elküldöm.</small>
+      <span class="row">${refForm || `<button type="button" class="small" data-ref-edit="${esc(s.id)}">Inkább megadom</button>`}</span>`;
+  }
+
+  function searchRules(s, siteName) {
+    const parts = [s.sites.map(siteName).join(", "), `${s.discount}%-kal olcsóbb${s.min_profit ? ` vagy legalább ${price(s.min_profit)} haszon` : ""}`];
+    if (s.min_price || s.max_price) parts.push(`${s.min_price ? price(s.min_price) : "0"}–${s.max_price ? price(s.max_price) : "bármennyi"}`);
+    if ((s.exclude || []).length) parts.push(`kivéve: ${s.exclude.join(", ")}`);
+    parts.push(every(s.every));
+    return parts.join(" · ");
+  }
+
   function renderDeals() {
     const box = $("w-deals");
     const siteName = (key) => (deals.sites.find((s) => s.key === key) || { name: key }).name;
     const searches = deals.searches.map((s) => `<li><span><b>${esc(s.query)}</b>
-        <small class="muted">${esc(s.sites.map(siteName).join(", "))} · ${s.discount}%-kal olcsóbb · ${esc(every(s.every))}
-        ${s.max_price ? " · legfeljebb " + esc(price(s.max_price)) : ""}</small></span>
-        <button type="button" class="small quiet" data-deal-remove="${esc(s.id)}">Törlés</button></li>`).join("");
+        <small class="muted">${esc(searchRules(s, siteName))}</small>
+        ${searchState(s)}</span>
+        <span class="row"><button type="button" class="small quiet" data-deal-edit="${esc(s.id)}">Szerkesztés</button>
+        <button type="button" class="small quiet" data-deal-remove="${esc(s.id)}">Törlés</button></span></li>`).join("");
     const p = deals.profit;
     const profitBox = p && (p.rows.length) ? `
       <h3 class="section-title">Haszon</h3>
@@ -439,30 +483,44 @@
           <button type="button" class="small primary" data-deal-paid="${esc(d.id)}">Mentés</button></span>`
       : `<button type="button" class="small" data-deal-buy="${esc(d.id)}">Megvettem</button>`;
     const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.text)}</a>
-        <small class="muted">${esc(d.site)} · <b>${esc(price(d.price))}</b>, szokásos ár ${esc(price(d.median))}
-        (kb. ${esc(price(d.margin))}-tal olcsóbb)${d.note ? " · " + esc(d.note) : ""}</small>
+        <small class="muted">${esc(d.site)} · <b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))})` : ""},
+        szokásos ár ${esc(price(d.median))}${d.profit !== undefined ? ` · várható haszon kb. <b>${esc(price(d.profit))}</b>` : ` (kb. ${esc(price(d.margin))}-tal olcsóbb)`}
+        ${d.calibration ? " · a felmérés közben" : ""}${d.note ? " · " + esc(d.note) : ""}</small>
         ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}</span>
         <span class="row">${buyButton(d)}
         <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></span></li>`).join("");
+    const edit = deals.searches.find((s) => s.id === editingSearch);
+    const v = (key, fallback = "") => esc(edit && edit[key] != null ? edit[key] : fallback);
+    const checked = (key) => !edit || (edit.sites || []).includes(key) ? "checked" : "";
     box.innerHTML = `
       <label class="check"><input type="checkbox" id="d-enabled" ${deals.enabled ? "checked" : ""}> <b>Bekapcsolva</b></label>
-      <p class="muted">A legújabb hirdetéseket nézi, és szól, ha valami jóval olcsóbb a szokásos áránál. A jelölt hirdetés
-        oldalát is átnézi (elkelt-e, hibás-e, gyanús-e), és csak utána kérdezi meg a modellt. Csak olvas: semmit nem vesz
-        meg, és nem ír senkinek. A Vintedet legfeljebb kétóránként nézi.
+      <p class="muted">Egy új keresésnél először felmérem, mennyiért adják most (egy modellhívás), és ha jóváhagyod, ahhoz
+        az árhoz mérem a legújabb hirdetéseket, modell nélkül. Ami jóval olcsóbb, annak az oldalát is átnézem (elkelt-e,
+        hibás-e, gyanús-e), és csak utána kérdezem meg a modellt. Csak olvasok: semmit nem veszek meg, és nem írok senkinek.
+        A Vintedet legfeljebb kétóránként nézem.
         ${deals.browser ? "" : "<b>Ehhez Jarvis saját böngészője kell.</b>"}</p>
       ${profitBox}
       <h3 class="section-title">Keresések</h3>
       <ul class="dealist">${searches || '<li class="muted">Még nincs keresés.</li>'}</ul>
       <form id="d-add" class="compose" autocomplete="off">
-        <input id="d-query" placeholder="Mit keressek? Pl. RTX 3060 Ti, Nike Air Max 42">
-        <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-site" value="${esc(s.key)}" checked> ${esc(s.name)}</label>`).join("")}</div>
+        ${edit ? `<p><b>Szerkesztés: ${esc(edit.query)}</b></p>` : ""}
+        <input id="d-query" placeholder="Mit keressek? Pl. RTX 3060 Ti, PS5 kontroller" value="${v("query")}">
+        <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-site" value="${esc(s.key)}" ${checked(s.key)}> ${esc(s.name)}</label>`).join("")}</div>
         <div class="row">
-          <label>Legalább <input id="d-discount" type="number" min="10" max="80" value="30" style="width: 4em">%-kal olcsóbb</label>
-          <label>Legfeljebb <input id="d-max" type="number" min="0" placeholder="bármennyi" style="width: 7em"> Ft</label>
-          <label>Nézze <select id="d-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === 180 ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label>
+          <label>Legalább <input id="d-discount" type="number" min="10" max="80" value="${v("discount", 30)}" style="width: 4em">%-kal olcsóbb,</label>
+          <label>vagy legalább <input id="d-profit" type="number" min="0" placeholder="–" value="${v("min_profit")}" style="width: 6em"> Ft haszon</label>
         </div>
-        <div class="row"><button type="submit" class="primary">Hozzáadás</button>
-          <button type="button" id="d-run">Keresés most</button></div>
+        <div class="row">
+          <label>Ár: legalább <input id="d-min" type="number" min="0" placeholder="0" value="${v("min_price")}" style="width: 6em"> Ft</label>
+          <label>legfeljebb <input id="d-max" type="number" min="0" placeholder="bármennyi" value="${v("max_price")}" style="width: 7em"> Ft</label>
+        </div>
+        <label class="field-label">Kizáró szavak <input id="d-exclude" placeholder="pl. tok, töltő, játék, doboz" value="${esc(edit ? (edit.exclude || []).join(", ") : "")}"></label>
+        ${edit ? "" : `<label class="field-label">Szokásos ár, ha tudod <input id="d-ref-new" type="number" min="1" placeholder="üresen felmérem" style="width: 9em"> Ft</label>`}
+        <div class="row">
+          <label>Nézze <select id="d-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === Number(v("every", 180)) ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label>
+        </div>
+        <div class="row"><button type="submit" class="primary">${edit ? "Mentés" : "Hozzáadás"}</button>
+          ${edit ? '<button type="button" id="d-cancel">Mégse</button>' : '<button type="button" id="d-run">Keresés most</button>'}</div>
       </form>
       <h3 class="section-title">Olcsó hirdetések</h3>
       <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>`;
@@ -470,12 +528,30 @@
     $("d-add").addEventListener("submit", async (e) => {
       e.preventDefault();
       const sites = [...box.querySelectorAll('input[name="d-site"]:checked')].map((i) => i.value);
-      await dealAction({ action: "add", query: $("d-query").value, sites, discount: $("d-discount").value,
-                         max_price: $("d-max").value, every: $("d-every").value });
+      const fields = { query: $("d-query").value, sites, discount: $("d-discount").value, min_profit: $("d-profit").value,
+                       min_price: $("d-min").value, max_price: $("d-max").value, exclude: $("d-exclude").value,
+                       every: $("d-every").value };
+      const result = edit ? await dealAction({ action: "update", id: edit.id, ...fields })
+        : await dealAction({ action: "add", ...fields, reference: $("d-ref-new").value });
+      if (result) { editingSearch = null; renderDeals(); }
     });
-    $("d-run").addEventListener("click", async () => {
+    if ($("d-cancel")) $("d-cancel").addEventListener("click", () => { editingSearch = null; renderDeals(); });
+    if ($("d-run")) $("d-run").addEventListener("click", async () => {
       const result = await J.postJson("/api/work/deals", { action: "run" });
       J.toast(result.ok ? "Keresem; ha találok valamit, szólok." : (result.error || "Nem sikerült."));
+    });
+    for (const b of box.querySelectorAll("[data-deal-edit]")) b.addEventListener("click", () => {
+      editingSearch = b.dataset.dealEdit; renderDeals(); $("d-add").scrollIntoView({ block: "start" });
+    });
+    for (const b of box.querySelectorAll("[data-ref-edit]")) b.addEventListener("click", () => { editingRef = b.dataset.refEdit; renderDeals(); $("d-ref").focus(); });
+    for (const b of box.querySelectorAll("[data-ref-save]")) b.addEventListener("click", async () => {
+      if (await dealAction({ action: "accept", id: b.dataset.refSave, price: $("d-ref").value })) { editingRef = null; renderDeals(); }
+    });
+    for (const b of box.querySelectorAll("[data-accept]")) b.addEventListener("click", async () => {
+      if (await dealAction({ action: "accept", id: b.dataset.accept })) J.toast("Rendben: ehhez az árhoz mérem a hirdetéseket.");
+    });
+    for (const b of box.querySelectorAll("[data-recalibrate]")) b.addEventListener("click", async () => {
+      if (await dealAction({ action: "recalibrate", id: b.dataset.recalibrate })) J.toast("A következő keresésnél újra felmérem.");
     });
     for (const b of box.querySelectorAll("[data-deal-remove]")) b.addEventListener("click", () => dealAction({ action: "remove", id: b.dataset.dealRemove }));
     for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
@@ -1001,6 +1077,7 @@
   window.addEventListener("jarvis-notice-action", async (event) => {
     const wanted = event.detail || {};
     await loaded;
+    if (wanted.action === "deals") { setJob("deals"); return; }   // pl. a szokásos ár jóváhagyása
     if (wanted.action === "login") {
       if (!platforms.some((p) => p.key === wanted.platform)) return;
       if (await action("login", null, { platform: wanted.platform })) {

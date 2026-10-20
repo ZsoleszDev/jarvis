@@ -113,6 +113,23 @@ class WorkSecurityTests(unittest.TestCase):
                     "/api/work/photo/../../01.jpg"):
             self.assertEqual(request(self.port, "GET", f"{bad}?t={self.h.server.token}", host)[0], 404, bad)
 
+    def test_deal_searches_from_the_window(self):
+        status, data = self.post("/api/work/deals", {"action": "add", "query": "PS5 kontroller", "sites": ["vinted"],
+                                                     "min_price": "8000", "exclude": "tok, töltő", "min_profit": "3000"})
+        self.assertEqual(status, 200, data)
+        search = data["searches"][-1]
+        self.assertEqual((search["status"], search["min_price"], search["exclude"], search["min_profit"]),
+                         ("felmérés", 8000, ["tok", "töltő"], 3000))
+        status, data = self.post("/api/work/deals", {"action": "accept", "id": search["id"]})
+        self.assertEqual(status, 400, "még nincs javaslat")
+        status, data = self.post("/api/work/deals", {"action": "accept", "id": search["id"], "price": "14000"})
+        self.assertEqual((status, data["searches"][-1]["status"], data["searches"][-1]["reference"]), (200, "fut", 14000))
+        status, data = self.post("/api/work/deals", {"action": "update", "id": search["id"], "max_price": "20000"})
+        self.assertEqual((status, data["searches"][-1]["max_price"]), (200, 20000))
+        status, data = self.post("/api/work/deals", {"action": "recalibrate", "id": search["id"]})
+        self.assertEqual((status, data["searches"][-1]["status"]), (200, "felmérés"))
+        self.post("/api/work/deals", {"action": "remove", "id": search["id"]})
+
     def test_bought_deal_becomes_an_item_and_profit_is_tracked(self):
         deals = self.h.app.work.deals
         deals._remember({"id": "d1", "url": "https://hardverapro.hu/apro/1.html", "text": "RTX 3060 Ti", "site": "Hardverapró",

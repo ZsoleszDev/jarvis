@@ -46,6 +46,8 @@ STATIC = {"style.css": "text/css; charset=utf-8", "app.js": "text/javascript; ch
 PHOTO_GET_RE = re.compile(r"^/api/work/photo/([0-9a-f]{8})/(\d{2}\.jpg)$")
 PHOTO_POST_RE = re.compile(r"^/api/work/items/([0-9a-f]{8})/photo$")
 MAX_VOICE_BYTES = 15 * 1024 * 1024    # a telefon vagy a laptop mikrofonjával felvett kérdés (távoli ablak)
+# Az Automata kereskedés egy keresésének beállításai (deals.DealHunter.add_search, update_search).
+DEAL_FIELDS = ("query", "sites", "max_price", "min_price", "discount", "min_profit", "every", "exclude", "reference")
 # Amit a felületről át lehet írni egy tárgyon, és amit el lehet indítani.
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
             "size", "condition", "color", "material", "price", "min_price", "location", "shipping", "bought_price",
@@ -763,11 +765,15 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if action == "enable":
                 return self._json(200, {"ok": True, **deals.set_enabled(bool(body.get("on")))})
+            fields = {k: body.get(k) for k in DEAL_FIELDS if k in body}
             if action == "add":
-                sites = body.get("sites") if isinstance(body.get("sites"), list) else None
-                return self._json(200, {"ok": True, **deals.add_search(str(body.get("query") or ""), sites,
-                                                                      body.get("max_price"), body.get("discount"),
-                                                                      body.get("every"))})
+                return self._json(200, {"ok": True, **deals.add_search(**{"query": "", **fields})})
+            if action == "update":
+                return self._json(200, {"ok": True, **deals.update_search(str(body.get("id") or ""), **fields)})
+            if action == "accept":      # a javasolt szokásos ár elfogadása, vagy (price) kézzel megadva
+                return self._json(200, {"ok": True, **deals.accept(str(body.get("id") or ""), body.get("price"))})
+            if action == "recalibrate":
+                return self._json(200, {"ok": True, **deals.recalibrate(str(body.get("id") or ""))})
             if action == "remove":
                 return self._json(200, {"ok": True, **deals.remove_search(str(body.get("id") or ""))})
             if action == "dismiss":

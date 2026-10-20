@@ -495,7 +495,7 @@ $("jobs-body").addEventListener("change", async (event) => {
 
 let noticeList = [];
 let noticesUnread = 0;
-const NOTICE_ACTIONS = ["sold", "login", "captcha"];
+const NOTICE_ACTIONS = ["sold", "login", "captcha", "deals"];
 
 function setNoticesUnread(count) {
   noticesUnread = Math.max(0, count);
