@@ -342,10 +342,14 @@ class NeedsTests(unittest.TestCase):
     def test_vinted_needs_brand_size_and_colour_only_for_clothes(self):
         base = dict(product="póló", price=500, condition="Jó")
         self.assertEqual(self.missing(self.item(["vinted"], kind="ruha", **base)),
-                         [("brand", ["Vinted"]), ("size", ["Vinted"]), ("color", ["Vinted"])])
+                         [("gender", ["Vinted"]), ("brand", ["Vinted"]), ("size", ["Vinted"]), ("color", ["Vinted"])])
         self.assertEqual(self.missing(self.item(["vinted"], kind="cipő", brand="Nike", size="42", color="fehér",
-                                                **base)), [])
-        self.assertEqual(self.missing(self.item(["vinted"], kind="ruha", brand="NoName", size="40", **base)),
+                                                gender="férfi", **base)), [])
+        self.assertEqual(self.missing(self.item(["vinted"], kind="ruha", category="Nők > Ruhák", brand="Zara",
+                                                size="M", color="kék", **base)), [],
+                         "a régebbi tárgynál a kategóriaút első szintjéből tudja, kinek szól")
+        self.assertEqual(self.missing(self.item(["vinted"], kind="ruha", brand="NoName", size="40", gender="női",
+                                                **base)),
                          [("color", ["Vinted"])], "a Vinted a színt is kötelezően kéri, ne a modell találja ki")
         self.assertEqual(self.missing(self.item(["vinted"], kind="elektronika", **base)), [],
                          "egy videókártyának nincs mérete")
@@ -362,7 +366,8 @@ class NeedsTests(unittest.TestCase):
     def test_question_says_what_is_missing_and_where(self):
         item = self.item(["vinted", "jofogas"], product="fekete póló", kind="ruha", price=500)
         text = question_for(item, missing_needs(item, {}))
-        self.assertTrue(text.startswith("A(z) „fekete póló” feltöltéséhez még kell: állapot; márka, méret, szín "
+        self.assertTrue(text.startswith("A(z) „fekete póló” feltöltéséhez még kell: állapot; kinek szól (női, "
+                                        "férfi, gyerek), márka, méret, szín "
                                         "(Vinted); átvétel helye (Jófogás)."), text)
         self.assertIn("Alapadatok", text)
         self.assertTrue(text.endswith("Írd meg, és folytatom."))
@@ -397,6 +402,30 @@ class ExtractionTests(unittest.TestCase):
         self.assertFalse(body["stream"])
         self.assertTrue(all("images" not in m for m in body["messages"]), "a fotókat nem nézi (gyorsabb)")
         self.assertIn("Zara L-es méretű pólót", body["messages"][1]["content"])
+
+    def test_description_in_your_name_with_the_footer_and_keywords(self):
+        item = self.store.create(targets=["vinted"], prompt="Sinsay sárga trikó M, nagyon jó állapot, 695 Ft")
+        self.fake.chat_script = [extracted(product="trikó", kind="ruha", title="Sinsay sárga trikó M",
+                                           description="", category="Nők > Ruhák > Trikók", keywords="Sinsay, trikó, sárga, nyári",
+                                           price=695)]
+        item = self.extractor.extract(item.id)
+        self.assertNotIn("eladó", item.description)
+        self.assertIn("Ha kell pontos méret vagy több kép, írj nyugodtan! A profilomon még sok ruhát találsz", item.description)
+        self.assertTrue(item.description.endswith("#sinsay #trikó #sárga #nyári"))
+        self.assertEqual((item.gender, item.category), ("", "Nők > Ruhák > Trikók"))
+        system = self.fake.chat_bodies()[0]["messages"][0]["content"]
+        self.assertIn("első személyben", system)
+        self.assertIn("csak akkor, ha a gender kiderül", system)
+
+    def test_the_answer_women_or_men_sets_the_first_category_level(self):
+        item = self.store.create(targets=["vinted"], prompt="Sinsay sárga trikó M, 695 Ft")
+        self.fake.chat_script = [extracted(product="trikó", kind="ruha", category="Ruhák > Trikók", price=695)]
+        item = self.extractor.extract(item.id)
+        self.assertEqual(item.category, "Ruhák > Trikók", "nem találgat: kinek szól, azt megkérdezi")
+        self.store.update(item.id, user=True, prompt=item.prompt + "\nférfi")
+        self.fake.chat_script = [extracted(gender="férfi")]
+        item = self.extractor.extract(item.id, only=["gender"])
+        self.assertEqual((item.gender, item.category), ("férfi", "Férfiak > Ruhák > Trikók"))
 
     def test_keeps_what_the_model_left_empty_and_what_you_edited(self):
         item = self.store.create(prompt="Zara póló, 500 Ft")
@@ -758,7 +787,7 @@ class WorkDeskTests(unittest.TestCase):
         targeted = self.fake.chat_bodies()[-1]["format"]
         self.assertEqual(sorted(targeted["properties"]), ["condition", "location"], "csak amire rákérdezett")
         self.assertEqual(sorted(self.fake.chat_bodies()[0]["format"]["properties"]),
-                         sorted([*selling.LISTING_FIELDS, "kind", "price"]))
+                         sorted([*selling.LISTING_FIELDS, "keywords", "kind", "price"]))
         item = self.store.get(item.id)
         self.assertEqual((item.condition, item.location, item.title), ("Nagyon jó", "Budapest", SHIRT["title"]))
         self.assertEqual(self.desk.prepare(item.id, self.steps.append).kind, "post")
@@ -771,7 +800,7 @@ class WorkDeskTests(unittest.TestCase):
         self.assertEqual(self.desk.prepare(item.id, self.steps.append).kind, "post")
         self.assertEqual((len(self.fake.chat_bodies()), self.steps), (1, ["a leírásod értelmezése"]))
         self.store.mark(item.id, "vinted", POSTED)
-        title = self.store.get(item.id).title
+        title, description = self.store.get(item.id).title, self.store.get(item.id).description
         # a leírást átírod: újra kiolvassa, de a már fent lévő hirdetés szövege nem változik magától
         self.store.update(item.id, user=True, prompt="Zara L-es fekete póló, egyszer hordtam, 600 Ft")
         self.fake.chat_script = [extracted(**{**SHIRT, "title": "Más cím", "description": "Más szöveg.",
@@ -780,7 +809,7 @@ class WorkDeskTests(unittest.TestCase):
         item = self.store.get(item.id)
         self.assertEqual(len(self.fake.chat_bodies()), 2)
         self.assertEqual((item.title, item.description, item.category, item.price),
-                         (title, SHIRT["description"], SHIRT["category"], 600), "az ár viszont frissül")
+                         (title, description, SHIRT["category"], 600), "az ár viszont frissül")
         self.store.update(item.id, user=True, title="Saját cím")
         self.assertEqual(self.store.get(item.id).title, "Saját cím", "a kézi átírás számít")
         self.store.update(item.id, extracted_sig="régi")         # pl. új kiolvasó-változat után

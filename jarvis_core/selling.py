@@ -41,10 +41,16 @@ PHOTO_MAX_SIDE = 1600
 THUMB_SIDE = 360
 MAX_PRICE = 10_000_000
 
-LISTING_FIELDS = ("product", "title", "description", "category", "brand", "size", "condition",
+LISTING_FIELDS = ("product", "title", "description", "category", "gender", "brand", "size", "condition",
                   "color", "material", "location", "shipping", "search_query")
+# Kinek szól a ruha (a Vinted kategóriafájának első szintje): a kategóriaút első szava ehhez igazodik.
+GENDERS = {"női": "Nők", "férfi": "Férfiak", "gyerek": "Gyerekek"}
+GENDER_LEVELS = {"no", "nok", "noi", "ferfi", "ferfiak", "gyerek", "gyerekek", "gyermek", "women", "men", "kids"}
+# A leírás vége (a te nevedben): ezt a Jarvis teszi hozzá, nem a modell írja.
+DESCRIPTION_FOOTER = ("Ha kell pontos méret vagy több kép, írj nyugodtan! A profilomon még sok {what} találsz: "
+                      "ha többet rendelsz egyben, a csomag-összeállítással olcsóbban kapod meg.")
 TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200, "brand": 80,
-               "size": 40, "condition": 40, "color": 60, "material": 120, "location": 80,
+               "size": 40, "gender": 20, "condition": 40, "color": 60, "material": 120, "location": 80,
                "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20}
 MULTILINE = {"description", "prompt"}
 POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
@@ -144,6 +150,8 @@ NEEDS = [
     Need("product", "mit adsz el"),
     Need("price", "ár"),
     Need("condition", "állapot"),
+    # Kinek szól: ha nem kérdezzük meg, a kategóriafa első szintjén (Women, Men) a modell találgatna.
+    Need("gender", "kinek szól (női, férfi, gyerek)", ("vinted",), clothing_only=True),
     Need("brand", "márka", ("vinted",), clothing_only=True),
     Need("size", "méret", ("vinted",), clothing_only=True),
     # A Vinted a színt is kötelezően kéri („Fill in colour to continue”); ha nem kérdezzük meg, a modell kitalálná.
@@ -179,6 +187,7 @@ class Item:
     size: str = ""
     condition: str = ""
     color: str = ""
+    gender: str = ""                  # női, férfi, gyerek, uniszex (ruhánál; a kategóriaút első szintje)
     material: str = ""
     price: int | None = None          # forint
     min_price: int | None = None      # alkunál ennél kevesebbet nem fogad el (üres: az ár; lásd messages.py)
@@ -849,11 +858,17 @@ EXTRACT_SYSTEM = (
     "- product: röviden, mi ez (pl. „fekete póló”, „RTX 3060 Ti videókártya”).\n"
     "- kind: ezek egyike: " + ", ".join(KINDS) + " (a táska, öv, sapka, ékszer: kiegészítő).\n"
     "- title: legfeljebb 60 karakter, amit a vevő keres: márka, típus, fontos tulajdonság, méret.\n"
-    "- description: 2–4 rövid, természetes mondat a leírásban szereplő adatokból (állapot, hibák, "
-    "méret, tartozékok). Ne ígérj olyat, amit az eladó nem mondott (szállítás, garancia, alku, csere), "
-    "és ne írj árat.\n"
-    "- category: a legvalószínűbb kategóriaút, pl. „Nők > Ruhák > Pólók” vagy „Számítástechnika > "
-    "Videókártyák”.\n"
+    "- description: az eladó nevében, egyes szám első személyben (pl. „Egyszer hordtam.”), soha nem harmadik "
+    "személyben („az eladó szerint”). A tárgy adatait (márka, méret, szín, állapot) ne ismételd, azok külön "
+    "látszanak; csak ha a leírás hibát vagy fontos részletet említ (folt, kopás, hiányzó tartozék), azt írd meg "
+    "egy-két rövid mondatban, különben üres. Ne ígérj olyat, amit az eladó nem mondott (szállítás, garancia, "
+    "alku, csere), és ne írj árat.\n"
+    "- keywords: 5–8 rövid kulcsszó vesszővel, amire a vevők a Vinteden keresnek: márka, típus, szín, anyag, "
+    "stílus, alkalom vagy évszak (pl. „zara, póló, fekete, pamut, basic, nyári”). Csak a leírásból.\n"
+    "- gender: ruhánál, cipőnél, kiegészítőnél: női, férfi, gyerek vagy uniszex, csak ha a leírásból kiderül "
+    "(pl. „női”, „férfi”, „kisfiú”), különben üres. A márkából vagy a termékből ne találgass.\n"
+    "- category: a legvalószínűbb kategóriaút, pl. „Ruhák > Pólók” vagy „Számítástechnika > Videókártyák”. "
+    "Az első szint (Nők, Férfiak, Gyerekek) csak akkor, ha a gender kiderül.\n"
     "- condition: ezek egyike: " + "; ".join(CONDITIONS) + ". Csak ha a leírásból kiderül (pl. "
     "„egyszer hordott” = Nagyon jó, „bontatlan” = Új), különben üres.\n"
     "- color: a szín magyarul (pl. „fekete”, „világoskék”), csak ha a leírásból kiderül, különben üres.\n"
@@ -873,6 +888,8 @@ EXTRACT_SCHEMA: dict[str, Any] = {
         **{key: {"type": "string"} for key in LISTING_FIELDS},
         "kind": {"type": "string", "enum": KINDS},
         "condition": {"type": "string", "enum": [*CONDITIONS, ""]},
+        "gender": {"type": "string", "enum": ["női", "férfi", "gyerek", "uniszex", ""]},
+        "keywords": {"type": "string"},
         "price": {"type": "integer"},
     },
     "required": [*LISTING_FIELDS, "kind", "price"],
@@ -880,7 +897,7 @@ EXTRACT_SCHEMA: dict[str, Any] = {
 
 
 # Ha az EXTRACT_SYSTEM vagy a séma érdemben változik, emeld: a régi kiolvasások egyszer újra lefutnak.
-EXTRACT_VERSION = "1"
+EXTRACT_VERSION = "2"
 # Ha a hirdetés már fent van valahol, ezeket Jarvis magától nem írja át (a többi oldalon is ugyanaz a
 # hirdetés legyen, és a begyakorolt lépések kulcsa se változzon); kézzel persze átírhatod.
 FROZEN_WHEN_POSTED = ("title", "description", "category", "product", "kind")
@@ -939,12 +956,58 @@ class ListingExtractor:
             values["price"] = parse_price(data.get("price")) or None
         except ItemError:
             values["price"] = None
+        kind = (values.get("kind") if not only or "kind" in only else "") or item.kind
+        if not only or "description" in only:
+            values["description"] = compose_description(values["description"], str(data.get("keywords") or ""), kind)
         values = {k: v for k, v in values.items() if v not in ("", None)}   # amit nem mondott, nem törli
+        gender = (values.get("gender") if not only or "gender" in only else "") or item.gender
+        category = (values.get("category") if not only or "category" in only else "") or item.category
+        if gender and category and kind in CLOTHING:
+            fixed = gendered_category(category, gender)
+            if fixed != item.category:
+                values["category"] = fixed
+                if only:
+                    only = [*only, "category"]
         if only:
             values = {k: v for k, v in values.items() if k in only}
         if any(e.get("status") == POSTED for e in item.platforms.values()):
             values = {k: v for k, v in values.items() if k not in FROZEN_WHEN_POSTED}
         return self.store.update(item_id, **values, extracted_sig=extract_signature(item.prompt))
+
+
+def compose_description(text: str, keywords: str, kind: str) -> str:
+    """A hirdetés leírása: a modell rövid (első személyű) megjegyzése, ha van, a zárószöveg, és a kulcsszavak
+    a Vinted keresőjének (#zara #póló …)."""
+    parts = [text.strip()] if text.strip() else []
+    if "profilomon" not in fold(text):   # ha a modell mégis beleírta, nem kétszer
+        parts.append(DESCRIPTION_FOOTER.format(what="ruhát" if kind in CLOTHING else "holmit"))
+    tags = []
+    for word in re.split(r"[,;\n]+", keywords):
+        tag = re.sub(r"[^\w-]", "", word.strip().lower().replace(" ", ""))
+        if tag and f"#{tag}" not in tags:
+            tags.append(f"#{tag}")
+    if tags:
+        parts.append(" ".join(tags[:8]))
+    return "\n\n".join(p for p in parts if p)
+
+
+def gendered_category(category: str, gender: str) -> str:
+    """A kategóriaút első szintje a gender szerint (Nők, Férfiak, Gyerekek); uniszexnél marad, ahogy van."""
+    level = GENDERS.get(gender)
+    if not level:
+        return category
+    parts = [p.strip() for p in category.split(">") if p.strip()]
+    if parts and fold(parts[0]) in GENDER_LEVELS:
+        parts = parts[1:]
+    return " > ".join([level, *parts])
+
+
+def item_gender(item: Item) -> str:
+    """Kinek szól: a megadott, vagy a kategóriaút első szintjéből (a korábbi tárgyaknál)."""
+    if item.gender:
+        return item.gender
+    first = fold(item.category.split(">")[0].strip()) if item.category else ""
+    return first if first in GENDER_LEVELS else ""
 
 
 def missing_needs(item: Item, settings: dict[str, Any]) -> list[tuple[Need, list[str]]]:
@@ -953,7 +1016,8 @@ def missing_needs(item: Item, settings: dict[str, Any]) -> list[tuple[Need, list
     for need in needs_for(item.targets):
         if need.clothing_only and item.kind not in CLOTHING:
             continue
-        have = item.price if need.field == "price" else getattr(item, need.field)
+        have = (item.price if need.field == "price" else item_gender(item) if need.field == "gender"
+                else getattr(item, need.field))
         if not have and need.setting:
             have = settings.get(need.setting)
         if not have:

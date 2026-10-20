@@ -153,6 +153,8 @@ Az ablak tetején három menü van. A **Beszélgetés** ugyanaz, mint eddig: bá
 
 Jarvis egyetlen modellhívással kiolvassa a mondatodból a hirdetés adatait (egy leírást csak egyszer; ha visszakérdezett, a válaszodból csak a kérdezett mezőket, és ha a tárgy már fent van valahol, a címét és a leírását magától nem írja át) (cím, leírás, kategória, márka, méret, állapot, ár). A fotókat nem nézi, mert az sok idő lenne, ezért amit nem írtál, azt nem is találja ki. Ha a kiválasztott oldalakhoz valami hiányzik, a hirdetés kártyáján (és hangosan is) visszakérdez, pl. „még kell: állapot; átvétel helye (Jófogás)”. A kártyán válaszolsz, vagy egyszerűen beírod (bemondod) a Munka menüben. Ha minden megvan, sorban feltölti minden kiválasztott oldalra.
 
+**A leírás** a te nevedben szól (nem „az eladó szerint”), és nem ismétli, ami külön mezőben látszik (márka, méret, szín, állapot); csak ha hibát vagy fontos részletet írtál (folt, kopás), azt. Utána mindig ez jön: „Ha kell pontos méret vagy több kép, írj nyugodtan! A profilomon még sok ruhát találsz: ha többet rendelsz egyben, a csomag-összeállítással olcsóbban kapod meg.”, a végén pedig 5–8 kulcsszó a Vinted keresőjének (pl. `#sinsay #trikó #sárga #nyári`). **Női, férfi vagy gyerek:** ruhánál, cipőnél és kiegészítőnél a Vintedhez megkérdezi, ha nem írtad, és a kategória első szintje (Nők, Férfiak, Gyerekek) ehhez igazodik; nem találgat.
+
 | Mit kér | Vinted | Jófogás | Vatera | Hardverapró |
 |---|---|---|---|---|
 | mit adsz el, ár, állapot, legalább egy fotó | ✓ | ✓ | ✓ | ✓ |
