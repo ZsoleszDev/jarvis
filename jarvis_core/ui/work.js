@@ -377,7 +377,19 @@
     area.scrollTop = scroll;
   }
 
+  // Telefonon az „Új hirdetés” űrlap összecsukva kezdődik (ha van már tárgy), hogy a lista látsszon; a címére bökve nyílik.
+  const phone = window.matchMedia("(max-width: 640px)");
+  let composeTouched = false;
+  function foldCompose() {
+    if (!composeTouched) $("w-compose").classList.toggle("folded", phone.matches && items.size > 0);
+  }
+  $("w-compose-title").addEventListener("click", () => {
+    composeTouched = true;
+    $("w-compose").classList.toggle("folded");
+  });
+
   function render() {
+    foldCompose();
     renderFilters();
     $("w-msgs").hidden = filter !== "msgs";
     if (filter === "msgs") {
@@ -846,6 +858,8 @@
     const wanted = event.detail || {};
     openId = null;
     render();
+    composeTouched = true;
+    $("w-compose").classList.remove("folded");
     $("w-compose").scrollIntoView({ block: "start" });
     const files = [];
     for (let i = 0; i < (wanted.photos || 0); i++) {
