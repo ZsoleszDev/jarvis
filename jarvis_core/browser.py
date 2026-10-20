@@ -1166,6 +1166,7 @@ def wanted_state(text: str, label: str) -> bool | None:
 
 # browser_choose: ami egy kinyitott listában választható (az onclick-es div, li is), és a lista vezérlőgombjai. A
 # begyakorolt lépések (replay.is_choice_option) ugyanezeket fogadják el.
+CHECK_KINDS = {"checkbox", "input:checkbox", "switch"}   # bepipálható elemek (nem gombok)
 OPTION_KINDS = {"button", "radio", "input:radio", "checkbox", "input:checkbox", "option", "menuitem",
                 "menuitemradio", "menuitemcheckbox", "switch", "link", "input:button", "div", "li", "span",
                 "label", "td", "p", "treeitem", "gridcell"}
@@ -2061,8 +2062,11 @@ class BrowserController:
         if self._adopt_new_page(pages_before):
             note += " Új lapon nyílt meg."
             outcome = outcome or "tab"
-        self._emit({"do": "click", "el": self.describe(el, ordinal), "url": url_before, "url_after": self.url,
-                    "risky": risky, "chooser": bool(choosers)})
+        event = {"do": "click", "el": self.describe(el, ordinal), "url": url_before, "url_after": self.url,
+                 "risky": risky, "chooser": bool(choosers)}
+        if el.get("kind") in CHECK_KINDS:
+            event["check"] = True   # egy jelölőnégyzet vagy kapcsoló nem a közzététel gombja (lásd _record_write)
+        self._emit(event)
         return note, outcome
 
     @_restarts_after_crash

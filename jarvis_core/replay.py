@@ -1020,7 +1020,8 @@ class Replayer:
             for _level in range(MAX_LEVELS):
                 self.check()
                 elements = self.browser.scan()
-                options = distinct_options([e for e in elements if elem_id(e) not in base and is_choice_option(e)])
+                fresh = [e for e in elements if elem_id(e) not in base and is_choice_option(e)]
+                options = distinct_options(fresh)
                 if not options:
                     break
                 index = self._decide(name, value, [o.get("label", "") for o in options], picked)
@@ -1032,7 +1033,7 @@ class Replayer:
                 learned.append({"do": "click", "el": describe_found(option, elements)})
                 picked.append(option.get("label", ""))
                 self._press(option)
-                base |= {elem_id(e) for e in options}
+                base |= {elem_id(e) for e in fresh}   # az összevont azonos feliratúak is (pl. a sor és a gombja)
                 if option.get("kind") in FINAL_KINDS:
                     break
             if not picked:

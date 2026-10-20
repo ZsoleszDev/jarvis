@@ -1030,6 +1030,19 @@ class FormKindTests(unittest.TestCase):
                          "a nyitva maradt listát Esc-cel zárta be, és ez is a lépések között van")
         self.assertEqual(events[presses[0] - 1]["el"]["label"], "Kék")
 
+    def test_a_risky_checkbox_clicked_directly_is_not_a_publish_either(self):
+        events: list[dict] = []
+        self.browser.on_action = events.append
+        try:
+            self.browser.open(self.site.url("feltetelek.html"))
+            self.browser.click(self.el("Megerősítem, hogy elfogadom a feltételeket"))
+        finally:
+            self.browser.on_action = None
+        self.assertTrue(self.state("() => elfogad.checked"))
+        clicks = [e for e in events if e["do"] == "click"]
+        self.assertEqual([(e["risky"], e.get("check")) for e in clicks], [(True, True)],
+                         "browser_click-kel is jelölőnégyzetként jegyzi, nem a közzététel gombjaként")
+
     def test_steps_keep_the_approval_rules(self):
         with self.assertRaisesRegex(BrowserError, "csak utolsóként"):
             self.browser.do_actions([{"do": "click", "element": self.el("Közzététel")},
