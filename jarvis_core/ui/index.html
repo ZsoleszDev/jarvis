@@ -194,6 +194,16 @@
     </div>
   </dialog>
 
+  <dialog id="captcha-dialog" aria-labelledby="captcha-title">
+    <h2 id="captcha-title">Captcha megoldása</h2>
+    <p class="muted" id="captcha-note">Ez a Jarvis böngészője a gépen. Bökj oda, ahova kattintanál (pl. a „Nem vagyok
+      robot” négyzetre, vagy a képes feladat képeire): a Jarvis pontosan oda kattint, a captchát te oldod meg.</p>
+    <img id="captcha-screen" alt="A Jarvis böngészőjének képe" style="width: 100%; cursor: crosshair; touch-action: manipulation">
+    <div class="row">
+      <button id="captcha-close" type="button">Kész</button>
+    </div>
+  </dialog>
+
   <dialog id="notices-dialog" aria-labelledby="notices-title">
     <h2 id="notices-title">Értesítések</h2>
     <div id="notices-body"></div>

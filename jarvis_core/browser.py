@@ -1883,6 +1883,25 @@ class BrowserController:
         title, heading = (list(found or []) + ["", ""])[:2]
         return " ".join(str(title or "").split()), " ".join(str(heading or "").split())
 
+    def screen(self) -> bytes:
+        """Az aktív lap látható része JPEG-ben (a captcha megoldásához a telefonon, lásd tap)."""
+        page = self._ensure()
+        try:
+            return page.screenshot(type="jpeg", quality=60, timeout=8000)
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(f"Nem sikerült képet készíteni ({_short(exc)}).") from None
+
+    def tap(self, x: float, y: float) -> None:
+        """Egy kattintás oda, ahova a telefonon a képre böktél (x, y: 0–1, a látható rész arányában). Ez a te
+        kattintásod, nem a Jarvisé: így oldhatod meg távolról a captchát (a Jarvis maga soha nem kattint rá)."""
+        page = self._ensure()
+        size = page.viewport_size or page.evaluate("() => ({width: innerWidth, height: innerHeight})")
+        try:
+            page.mouse.click(min(max(x, 0.0), 1.0) * size["width"], min(max(y, 0.0), 1.0) * size["height"])
+            self._settle(page, max_wait=2.0)
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(f"Nem sikerült a kattintás ({_short(exc)}).") from None
+
     def challenged(self) -> bool:
         """Robot-ellenőrzést (captcha) vagy robotvédelmi köztes oldalt mutat-e az aktív lap."""
         page = self._ensure()

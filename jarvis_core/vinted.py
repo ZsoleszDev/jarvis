@@ -460,7 +460,8 @@ class VintedFiller:
             self.progress("a hirdetési űrlap megnyitása")
             self.browser.open(start_url)
             if self.browser.challenged():
-                return self._outcome("blocked", "A Vinted robot-ellenőrzést (captcha) kér. Oldd meg a böngészőablakomban, "
+                return self._outcome("blocked", "A Vinted robot-ellenőrzést (captcha) kér. Oldd meg a böngészőablakomban "
+                                                "(vagy a telefonon: Értesítések, Megoldom a telefonon), "
                                                 "utána az Újra gombbal folytatom.")
             elements = self.browser.scan()
             consent = consent_button(elements)
@@ -1024,7 +1025,7 @@ class VintedDelister:
         text = self.browser.open(url)
         if self.browser.challenged():
             raise _Stop(self._outcome("blocked", "A Vinted robot-ellenőrzést (captcha) kér. Oldd meg a "
-                                                 "böngészőablakomban, utána az Újra gombbal folytatom."))
+                                                 "böngészőablakomban (vagy a telefonon: Értesítések, Megoldom a telefonon), utána az Újra gombbal folytatom."))
         elements = self.browser.scan()
         consent = consent_button(elements)
         if consent is not None:

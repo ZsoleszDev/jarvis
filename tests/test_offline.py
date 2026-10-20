@@ -220,6 +220,25 @@ class ConfigTests(unittest.TestCase):
             app = JarvisApp(cfg, mock.Mock(), use_voice=True, use_speech=False, use_wake_word=False)
             self.assertFalse(app.use_voice, "mint a --text: a beszédfelismerő be sem töltődik")
 
+    def test_browser_calls_run_on_the_agent_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = JarvisApp(make_cfg(Path(tmp)), mock.Mock(), use_voice=False, use_speech=False, use_wake_word=False)
+            with self.assertRaises(Exception):
+                app.call_browser(lambda browser: 1, timeout=0.5)     # nem fut a böngésző
+            app.toolbox, app.work = mock.Mock(), mock.Mock(browser_ready=True)
+            app.toolbox.browser = "böngésző"
+            agent = threading.Thread(target=app._agent_loop, daemon=True)
+            agent.start()
+            try:
+                seen = []
+                self.assertEqual(app.call_browser(lambda b: (seen.append(threading.current_thread()), b)[1]), "böngésző")
+                self.assertIs(seen[0], agent, "a Playwright csak az ágens szálán használható")
+                with self.assertRaises(ValueError):
+                    app.call_browser(lambda b: int("x"))
+            finally:
+                app.requests.put(("quit", None))
+                agent.join(5)
+
     def test_unknown_keys_produce_warnings(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "c.toml"

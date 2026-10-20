@@ -600,6 +600,36 @@ class JarvisApp:
         assert self.work is not None
         return self.work.messages.run(int(self.cfg.scheduler.message_reads), check=ctx.check, notify=ctx.notify)
 
+    def call_browser(self, fn: Callable[[Any], Any], timeout: float = 10.0) -> Any:
+        """A Jarvis böngészőjén futtat egy rövid hívást az ágens szálán (bármelyik szálról hívható). Ha a Jarvis épp
+        dolgozik, és nem kerül sorra időben, TimeoutError."""
+        if self.toolbox is None or self.work is None or not self.work.browser_ready:
+            raise BrowserError("A Jarvis böngészője nem fut.")
+        call = {"fn": fn, "done": threading.Event(), "result": None, "error": None}
+        self._submit(("browser", call))
+        if not call["done"].wait(timeout):
+            raise TimeoutError("A Jarvis most mással dolgozik; próbáld újra pár másodperc múlva.")
+        if call["error"] is not None:
+            raise call["error"]
+        return call["result"]
+
+    def _browser_call(self, call: dict[str, Any]) -> None:
+        try:
+            call["result"] = call["fn"](self.toolbox.browser)
+        except Exception as exc:  # noqa: BLE001 - a hívó kapja meg
+            call["error"] = exc
+        finally:
+            with self._outstanding_lock:
+                self._outstanding -= 1
+            call["done"].set()
+
+    def _captcha_notice(self, reason: str) -> None:
+        """A captcha miatt megállt feltöltés vagy levétel: értesítés a telefonra is, a „Megoldom a telefonon” gombbal
+        (a Jarvis böngészőjének képe, és amire ott böksz, oda kattint; a captchát te oldod meg, nem a Jarvis)."""
+        if "captcha" in reason:
+            self._tell("error", "Captcha a Vinteden", reason,
+                       actions=[{"action": "captcha", "label": "Megoldom a telefonon"}])
+
     def _tell(self, kind: str, title: str, text: str, **extra: Any) -> None:
         """Értesítés a telefonra is (a naplóba nem kerül újra): pl. hogy egy feltöltés kész, vagy hogy Jarvis
         kérdez valamit egy tárgyról. Ha a feladatot a telefonról adtad, így ott is megtudod."""
@@ -1009,6 +1039,9 @@ class JarvisApp:
                 kind, payload = self.requests.get()
                 if kind == "quit":
                     break
+                if kind == "browser":     # egy gyors böngészőhívás (captcha a telefonon), a többi állapothoz nem nyúl
+                    self._browser_call(payload)
+                    continue
                 self.stop_event.clear()
                 self._current_kind = kind
                 if kind in INTERACTIVE:
@@ -1774,6 +1807,7 @@ class JarvisApp:
             return work.finish_post(item_id, key, "Nem engedélyezted a közzétételt.")
         if outcome.status == "blocked":
             self.ui.notice(outcome.reason)
+            self._captcha_notice(outcome.reason)
             return work.finish_post(item_id, key, outcome.reason)
         if outcome.status == "done":
             work.store.mark(item_id, key, POSTED, url=outcome.url if outcome.url.startswith("http") else "")
@@ -1998,6 +2032,7 @@ class JarvisApp:
             return work.finish_delist(item_id, key, "nem engedélyezted.")
         if outcome.status == "blocked":
             self.ui.notice(outcome.reason)
+            self._captcha_notice(outcome.reason)
             return work.finish_delist(item_id, key, outcome.reason)
         if outcome.status == "miss":
             work.current = None

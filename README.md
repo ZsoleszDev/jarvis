@@ -362,7 +362,7 @@ Webshopokban (Vinted, Jófogás, eMAG) fontos részletek:
 - A rendszerprompt szerint a modell az oldal **saját keresőjét és szűrőit** használja, nem találgat webcímet. Ha három-négy próbálkozás után sem jut előre, megáll, és elmondja, meddig jutott. Ha ugyanaz a lépés nem változtat semmit az oldalon, a második hiábavaló ismétlésnél a rendszer is szól neki, hogy próbáljon mást, a negyediknél pedig abbahagyja (az új elemek csillaga az oldalnézetben ebben nem számít változásnak).
 - Egy hosszú lenyíló listából (pl. 150 kategória) az oldalnézet az első 12 lehetőséget mutatja; feltöltés és levétel közben elöl azokat, amelyek a tárgy szavaival (kategória, márka, állapot, szín, település…) egyeznek.
 - A hirdetéskártyák linkje mellett az ár is ott van: akciónál a mostani (akciós ár, villámár), nem az áthúzott régi, ugyanúgy, ahogy az árkutatás is számol.
-- Ha az oldal **robot-ellenőrzést** (captcha) kér, szól, hogy oldd meg a böngészőablakban. A valódi Edge-ben ez ritkábban fordul elő, mint a Playwright Chromiumában.
+- Ha az oldal **robot-ellenőrzést** (captcha) kér, szól, hogy oldd meg a böngészőablakban. Csak a látható, megoldandó captcha számít (a háttérben betöltött, láthatatlan reCAPTCHA nem). Ha nem vagy otthon: feltöltésnél vagy levételnél a telefonra is jön egy értesítés **Megoldom a telefonon** gombbal. Ez megmutatja a Jarvis böngészőjének képét, és ahova böksz, oda kattint a gépen, így a pipát vagy a képes feladatot te oldod meg távolról (a Jarvis magától soha nem kattint a captchára). Utána az **Újra** gombbal folytatja. A valódi Edge-ben ez ritkábban fordul elő, mint a Playwright Chromiumában.
 
 A profil megőrzi a sütiket: ha egyszer belépsz valahova a Jarvis böngészőjében, legközelebb is bejelentkezve látja (lásd: Bejelentkezés).
 

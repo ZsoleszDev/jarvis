@@ -1046,6 +1046,14 @@ class FormKindTests(unittest.TestCase):
         self.browser.open(self.site.url("captcha.html"))
         self.assertTrue(self.browser.challenged(), "egy látható captcha-keret igen")
 
+    def test_screen_and_tap_for_solving_a_captcha_on_the_phone(self):
+        self.browser.open(self.site.url("feltetelek.html"))
+        self.assertTrue(self.browser.screen().startswith(b"\xff\xd8"), "JPEG")
+        box = self.state("""() => { const r = document.querySelector('#elfogad').getBoundingClientRect();
+            return [(r.left + r.width / 2) / innerWidth, (r.top + r.height / 2) / innerHeight]; }""")
+        self.browser.tap(*box)
+        self.assertTrue(self.state("() => elfogad.checked"), "oda kattintott, ahova a képen böktél")
+
     def test_a_risky_checkbox_clicked_directly_is_not_a_publish_either(self):
         events: list[dict] = []
         self.browser.on_action = events.append

@@ -495,7 +495,7 @@ $("jobs-body").addEventListener("change", async (event) => {
 
 let noticeList = [];
 let noticesUnread = 0;
-const NOTICE_ACTIONS = ["sold", "login"];
+const NOTICE_ACTIONS = ["sold", "login", "captcha"];
 
 function setNoticesUnread(count) {
   noticesUnread = Math.max(0, count);
@@ -564,10 +564,40 @@ $("notices-body").addEventListener("click", (event) => {
 // Egy értesítés gombja: a Munka menü (work.js) megnyitja hozzá a lapot. Magától semmit nem jelöl meg és nem vesz le.
 function noticeAction(wanted) {
   if (!wanted || !NOTICE_ACTIONS.includes(wanted.action)) return;
+  if (wanted.action === "captcha") { openCaptcha(); return; }
   if (!workAvailable) { toast("A Munka menü most nem érhető el a gépen."); return; }
   setMode("work");
   window.dispatchEvent(new CustomEvent("jarvis-notice-action", { detail: wanted }));
 }
+
+// Captcha a telefonon: a Jarvis böngészőjének képe (pár másodpercenként frissül), és amire böksz, oda kattint a
+// gépen. Ez a te kattintásod: a captchát te oldod meg, a Jarvis magától soha nem kattint rá.
+let captchaTimer = null;
+function captchaRefresh() {
+  $("captcha-screen").src = "/api/browser/screen?t=" + encodeURIComponent(token) + "&n=" + Date.now();
+}
+function openCaptcha() {
+  captchaRefresh();
+  clearInterval(captchaTimer);
+  captchaTimer = setInterval(captchaRefresh, 2000);
+  $("captcha-dialog").showModal();
+}
+function closeCaptcha() {
+  clearInterval(captchaTimer);
+  captchaTimer = null;
+  if ($("captcha-dialog").open) $("captcha-dialog").close();
+}
+$("captcha-screen").addEventListener("error", () => toast("A böngésző képe most nem érhető el (lehet, hogy a Jarvis épp dolgozik)."));
+$("captcha-screen").addEventListener("click", async (event) => {
+  const box = event.target.getBoundingClientRect();
+  const result = await postJson("/api/browser/tap", { x: (event.clientX - box.left) / box.width,
+                                                       y: (event.clientY - box.top) / box.height });
+  if (!result.ok) { toast(result.error || "Nem sikerült a kattintás."); return; }
+  captchaRefresh();
+  if (result.captcha === false) toast("A captcha eltűnt. A Kész után az Újra gombbal folytatom.");
+});
+$("captcha-close").addEventListener("click", closeCaptcha);
+$("captcha-dialog").addEventListener("close", closeCaptcha);
 
 // A push-értesítés gombja bezárt ablaknál ezzel a címmel nyitja meg az ablakot: /#act=sold&item=…&where=…&delist=1
 // (remote.py, service worker). Nyitott ablakban a service worker üzenetben szól.

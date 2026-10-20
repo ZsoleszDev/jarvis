@@ -419,6 +419,15 @@ class _Handler(BaseHTTPRequestHandler):
             if app is not None and not app.cfg.gui.gpu_bars:
                 return self._json(200, {"ok": True, "available": False, "gpus": []})
             return self._json(200, {"ok": True, **self.gui.gpu_monitor().snapshot()})
+        if parsed.path == "/api/browser/screen":   # a captcha megoldásához (telefonon is): a böngésző képe
+            if not self._token_ok(token):
+                return self._forbidden()
+            app = self.gui.app
+            try:
+                data = app.call_browser(lambda browser: browser.screen()) if app is not None else b""
+            except Exception as exc:  # noqa: BLE001 - nem fut a böngésző, vagy a Jarvis épp dolgozik
+                return self._json(409, {"ok": False, "error": str(exc)})
+            return self._send(200, data, "image/jpeg", {"Cache-Control": "no-store"})
         if parsed.path == "/api/jobs":
             if not self._token_ok(token):
                 return self._forbidden()
@@ -543,6 +552,15 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(202, {"ok": True})
         if app is None or app.assistant is None:
             return self._json(503, {"ok": False, "error": "A Jarvis még indul."})
+        if path == "/api/browser/tap":   # amire a böngésző képén böktél: a te kattintásod (captcha)
+            try:
+                x, y = float(body.get("x")), float(body.get("y"))
+                captcha = app.call_browser(lambda browser: (browser.tap(x, y), browser.challenged())[1])
+            except (TypeError, ValueError):
+                return self._json(400, {"ok": False})
+            except Exception as exc:  # noqa: BLE001
+                return self._json(409, {"ok": False, "error": str(exc)})
+            return self._json(200, {"ok": True, "captcha": captcha})
         if path == "/api/pause":
             app.submit_pause()
             return self._json(202, {"ok": True})
