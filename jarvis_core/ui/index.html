@@ -156,7 +156,9 @@
       <button id="reset" type="button">Új beszélgetés</button>
       <span class="spacer"></span>
       <button id="notify" type="button" class="quiet" hidden
-        title="Szóljon, ha kész egy feladat, vagy jóváhagyás kell, akkor is, ha az ablak nem látszik">Értesítések</button>
+        title="Szóljon, ha kész egy feladat, vagy jóváhagyás kell, akkor is, ha az ablak nem látszik">Értesítések bekapcsolása</button>
+      <button id="notices" type="button" class="quiet"
+        title="Amiről Jarvis a háttérben szólt (pl. egy elkeltnek látszó hirdetés), a gombjaikkal együtt">Értesítések<span id="notices-unread" class="unread"></span></button>
       <button id="jobs" type="button" class="quiet"
         title="Amit Jarvis magától, időnként megnéz (figyelők): itt törölheted vagy kikapcsolhatod">Automatikus munkák</button>
       <button id="phone" type="button" class="quiet" title="A telefonod párosítása (Tailscale-en át)">Telefon</button>
@@ -187,6 +189,14 @@
     <div id="jobs-body"></div>
     <div class="row">
       <button id="jobs-close" type="button">Bezárás</button>
+    </div>
+  </dialog>
+
+  <dialog id="notices-dialog" aria-labelledby="notices-title">
+    <h2 id="notices-title">Értesítések</h2>
+    <div id="notices-body"></div>
+    <div class="row">
+      <button id="notices-close" type="button">Bezárás</button>
     </div>
   </dialog>
 

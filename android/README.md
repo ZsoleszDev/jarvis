@@ -3,7 +3,9 @@
 A gépeden futó Jarvis ablaka a telefonon: ugyanaz a felület (Beszélgetés, Munka, Kreatív), ugyanaz a fekete-fehér
 téma, de minden a gépen fut (a modellek, a böngésző, a feltöltés). A telefon csak mutatja, és onnan adod a
 feladatot. Értesít, ha a Jarvis jóváhagyást kér (az értesítés gombjaival is megadhatod), ha kész vagy elakadt egy
-feladat, ha kérdez valamit egy tárgyról, vagy ha egy figyelő új találatot hozott.
+feladat, ha kérdez valamit egy tárgyról, ha egy figyelő új találatot hozott, vagy ha egy hirdetés elkeltnek látszik
+(az értesítés „Eladva itt, vedd le a többiről” gombja a hirdetés Eladva ablakát nyitja meg; a levételt ott hagyod
+jóvá).
 
 A telepítés és a párosítás leírása a fő README-ben van (Telefonos és laptopos alkalmazás).
 
@@ -13,7 +15,9 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
   a fotókhoz, mikrofon a „Hallgass meg” gombhoz, letöltések. Párosítás nélkül, vagy ha a gép nem érhető el, a
   beállító oldal jön (`assets/setup.html`).
 - `NotifyService`: háttérszolgáltatás, a gép eseményeit kérdezi le (`/api/v1/events`, hosszú lekérdezéssel), és
-  értesít. Firebase nem kell hozzá.
+  értesít. Firebase nem kell hozzá. Egy `sold` gombos értesítésnél (`notice.actions`) a gomb a `MainActivity`-t
+  nyitja meg (`hu.jarvis.app.SOLD`, a tárggyal); a felület a `JarvisApp.pending()` `sold` részéből a tárgy Eladva
+  ablakát mutatja. Az értesítésből közvetlenül semmit nem jelöl meg és nem vesz le.
 - `ActionReceiver`: a jóváhagyás gombjai az értesítésben (`/api/v1/confirm`), és az állandó értesítés Szünet /
   Folytatás gombja (`/api/v1/pause`, `/api/v1/resume`).
 - `VoiceTile`: gyorsbeállítás csempe a hangutasításhoz; `res/xml/shortcuts.xml`: parancsikonok (Hang, Új hirdetés).

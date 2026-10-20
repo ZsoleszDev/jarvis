@@ -120,6 +120,9 @@ _KEEP_STEMS = ("marad", "enyem", "sajatom", "hagyd")
 _UNSURE_RE = re.compile(r"\b(nem tudom|nem tudok|nem tom|nemtom|nem biztos|mindegy|fogalmam sincs|passz|h+m+)\b")
 # A tagadás ezeken átnyúlik: „ne legyen a javasolt”
 _NEGATION_SKIP = {"a", "az", "legyen", "is", "inkabb"}
+# Az árdöntés gombjai a felületen és a telefonon: marad, legyen a javasolt, vagy „Igen” a visszakérdezett összegre
+# („3 Ft-ra gondoltál?”); minden más egy összeg (WorkDesk.decide_price).
+PRICE_CHOICES = ("keep", "suggested", "confirmed")
 # Visszakérdezés után („3 Ft-ra gondoltál?”): igen
 _YES_WORDS = {"igen", "aha", "persze", "pontosan", "ja", "jaja", "stimmel", "helyes", "nana", "ugy", "ugyvan", "jo",
               "oke", "ok", "rendben", "mehet"}
@@ -1072,12 +1075,14 @@ class WorkDesk:
             updated = self.store.update(found.id, user=True, **values)
         except ItemError as exc:
             raise ToolError(str(exc)) from None
-        return (f"Módosítva ({found.name}): " + ", ".join(FIELD_NAMES.get(k, k) for k in values)
-                + self.drift_note(updated, set(values)))
+        names = ", ".join(FIELD_NAMES.get(k, k) for k in values)
+        note = self.drift_note(updated, set(values))
+        return f"Módosítva ({found.name}): {names}" + (f". {note}" if note else "")
 
     def drift_note(self, item: Item, changed: set[str]) -> str:
         """Ha a fent lévő hirdetésekben még a régi ár vagy cím van, őszintén megmondja, hogy csak itt írta át:
-        a hirdetéseket magától nem szerkeszti."""
+        a hirdetéseket magától nem szerkeszti. Üres, ha a most átírt mezők sehol nem térnek el. A modell
+        (item_update) és a felület is ezt kapja, amikor kézzel átírod (gui /api/work/update, api PATCH)."""
         parts = []
         for entry in item.drift():
             old = []
@@ -1090,7 +1095,7 @@ class WorkDesk:
                 parts.append(f"{where} még " + " és ".join(old))
         if not parts:
             return ""
-        return (". Csak itt írtam át; " + ", ".join(parts) + ". A fent lévő hirdetést magamtól nem szerkesztem: "
+        return ("Csak itt írtam át; " + ", ".join(parts) + ". A fent lévő hirdetést magamtól nem szerkesztem: "
                 "ott kézzel kell átírni (vagy levenni, és újra feltölteni).")
 
     def tool_research(self, item: str) -> str:

@@ -143,6 +143,7 @@ const handlers = {
     $("tab-creative").hidden = !creativeAvailable;
     if (!creativeAvailable && mode === "creative") setMode("chat");
     if (current.state === "idle") setState(current);
+    loadNotices();
     for (const hook of helloHooks) hook(e);
   },
   user(e) { const c = channelOf(e); openSeg[c] = null; add("you", e.text, c); },
@@ -195,6 +196,7 @@ const handlers = {
   notification(e) {
     const notice = e.notice || {};
     systemNotify(notice.title || "Jarvis", notice.text || "", "notice-" + (notice.id || ""));
+    addNotice(notice);
   },
   level(e) { eye.level = Math.max(eye.level, e.value); },
   confirm(e) {
@@ -485,6 +487,102 @@ $("jobs-body").addEventListener("change", async (event) => {
     box.closest("label").querySelector("small").textContent = jobState(job);
   }
 });
+
+// --- Értesítések: amiről Jarvis a háttérben szólt ---------------------------------------------------
+// Pl. egy elkeltnek látszó hirdetés: a gombja („Eladva itt, vedd le a többiről”) a hirdetés Eladva ablakát nyitja
+// meg, előre kiválasztva; a levétel ott is csak a Rendben gombra indul. A laptop push-értesítésének és az
+// Android-alkalmazás értesítésének gombja ugyanide visz (noticeAction).
+
+let noticeList = [];
+let noticesUnread = 0;
+const NOTICE_ACTIONS = ["sold", "login"];
+
+function setNoticesUnread(count) {
+  noticesUnread = Math.max(0, count);
+  $("notices-unread").textContent = noticesUnread ? String(noticesUnread) : "";
+  $("notices").classList.toggle("on", noticesUnread > 0);
+}
+
+async function loadNotices() {
+  try {
+    const response = await fetch("/api/notices?t=" + encodeURIComponent(token));
+    const data = await response.json();
+    if (!data.ok) return;
+    noticeList = data.notifications || [];
+    setNoticesUnread(data.unread || 0);
+  } catch { /* a Jarvis még indul: a következő "hello" újra lekéri */ }
+}
+
+function addNotice(notice) {
+  if (!notice.id || noticeList.some((n) => n.id === notice.id)) return;
+  noticeList = [notice, ...noticeList].slice(0, 50);
+  setNoticesUnread(noticesUnread + 1);
+  if ($("notices-dialog").open) renderNotices();
+}
+
+const noticeButtons = (notice) => (notice.actions || []).filter((a) => NOTICE_ACTIONS.includes(a.action));
+
+function renderNotices() {
+  const body = $("notices-body");
+  if (!noticeList.length) {
+    body.innerHTML = '<p class="muted">Még nincs értesítés. Itt látod, ha Jarvis a háttérben talál valamit (pl. egy ' +
+      "figyelő új találatát, vagy egy elkeltnek látszó hirdetést).</p>";
+    return;
+  }
+  body.innerHTML = `<ul class="notices">${noticeList.map((n, i) => `
+    <li${n.read ? "" : ' class="new"'}><span><b>${escHtml(n.title)}</b>
+      <small class="muted">${n.at ? escHtml(shortDate(n.at)) : ""}</small></span>
+      <span class="text">${escHtml(n.text)}</span>
+      ${noticeButtons(n).length ? `<span class="row">${noticeButtons(n).map((a, j) =>
+        `<button type="button" class="small" data-notice="${i}" data-act="${j}">${escHtml(a.label)}</button>`).join("")}</span>` : ""}
+    </li>`).join("")}</ul>`;
+}
+
+$("notices").addEventListener("click", async () => {
+  await loadNotices();
+  renderNotices();
+  $("notices-dialog").showModal();
+  $("notices-close").focus();
+  const ids = noticeList.filter((n) => !n.read).map((n) => n.id);
+  if (!ids.length) return;
+  const result = await postJson("/api/notices/read", { ids });
+  if (!result.ok) return;
+  for (const n of noticeList) if (ids.includes(n.id)) n.read = true;
+  setNoticesUnread(noticesUnread - (result.marked ?? ids.length));
+});
+$("notices-close").addEventListener("click", () => $("notices-dialog").close());
+$("notices-body").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-notice]");
+  if (!button) return;
+  const notice = noticeList[Number(button.dataset.notice)];
+  const wanted = notice && noticeButtons(notice)[Number(button.dataset.act)];
+  if (!wanted) return;
+  $("notices-dialog").close();
+  noticeAction({ ...wanted, item: notice.item || "" });
+});
+
+// Egy értesítés gombja: a Munka menü (work.js) megnyitja hozzá a lapot. Magától semmit nem jelöl meg és nem vesz le.
+function noticeAction(wanted) {
+  if (!wanted || !NOTICE_ACTIONS.includes(wanted.action)) return;
+  if (!workAvailable) { toast("A Munka menü most nem érhető el a gépen."); return; }
+  setMode("work");
+  window.dispatchEvent(new CustomEvent("jarvis-notice-action", { detail: wanted }));
+}
+
+// A push-értesítés gombja bezárt ablaknál ezzel a címmel nyitja meg az ablakot: /#act=sold&item=…&where=…&delist=1
+// (remote.py, service worker). Nyitott ablakban a service worker üzenetben szól.
+let hashAction = null;
+if (/^#act=/.test(location.hash)) {
+  const wanted = new URLSearchParams(location.hash.slice(1));
+  hashAction = { action: wanted.get("act"), item: wanted.get("item") || "", where: wanted.get("where") || "",
+                 platform: wanted.get("platform") || "", delist: wanted.get("delist") !== "0" };
+  history.replaceState(null, "", location.pathname + location.search);
+}
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data && event.data.type === "jarvis-action") noticeAction(event.data.action);
+  });
+}
 
 $("listen").addEventListener("click", () => (remote ? toggleRecording() : post("/api/listen")));
 
@@ -914,7 +1012,8 @@ gpuTimer = setInterval(pollGpus, 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) pollGpus(); });
 
 // --- az Android-alkalmazás kérései ----------------------------------------------------------
-// Hangutasítás (parancsikon, gyorsbeállítás csempe, az értesítés gombja), megosztott szöveg vagy fotók, új hirdetés.
+// Hangutasítás (parancsikon, gyorsbeállítás csempe, az értesítés gombja), megosztott szöveg vagy fotók, új hirdetés,
+// és egy elkeltnek látszó hirdetés értesítésének gombja (a hirdetés Eladva ablaka).
 // Az alkalmazás tárolja őket; mi kérdezzük le (indításkor, és amikor az alkalmazás szól: window.JarvisPending).
 
 function takePending() {
@@ -934,6 +1033,7 @@ function takePending() {
       toast("A Munka menü most nem érhető el a gépen.");
     }
   }
+  if (wanted.sold) noticeAction({ action: "sold", ...wanted.sold });   // az értesítés „Eladva itt…” gombja
   if (wanted.voice) {
     if (paused) toast("Szünetelek: előbb nyomd meg a Folytatás gombot.");
     else if (!voiceAvailable) toast("A gépen most nem fut beszédfelismerés; írd be, mit szeretnél.");
@@ -970,4 +1070,7 @@ helloHooks.push((e) => {
   }
 });
 helloHooks.push(() => takePending());   // a menü visszaállítása után: egy megosztás oda visz, ahova kell
+helloHooks.push(() => {                 // a push-értesítés gombja (a cím #act= része), egyszer
+  if (hashAction && workAvailable) { noticeAction(hashAction); hashAction = null; }
+});
 $("text").focus();

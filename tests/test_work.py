@@ -242,6 +242,22 @@ class ItemStoreTests(unittest.TestCase):
         item = self.store.mark(item.id, "vinted", "nincs fent")
         self.assertEqual(item.drift(), [], "ami nincs fent, ott nincs mit átírni")
 
+    def test_a_false_flag_can_be_dismissed(self):
+        item = self.store.create(targets=["vinted", "jofogas"], title="Levi's farmer", price=9000)
+        url = "https://www.vinted.hu/items/1234567-levis-farmer"
+        self.store.mark(item.id, "vinted", POSTED, url=url)
+        self.store.set_check(item.id, "vinted", "sold", when=1000.0, detail="„Eladva” jelzés az oldalán")
+        item = self.store.dismiss_check(item.id, "vinted")
+        entry = item.platforms["vinted"]
+        self.assertEqual((entry["check"], entry["check_dismissed"], entry["checked_at"]), ("live", "sold", 1000.0))
+        self.assertNotIn("check_note", entry)
+        self.assertEqual(self.changes[-1]["platforms"]["vinted"]["check"], "live", "a felület is látja")
+        item = self.store.mark(item.id, "vinted", POSTED, note="Itt kelt el.")
+        self.assertEqual(item.platforms["vinted"]["check_dismissed"], "sold", "ugyanaz a hirdetés: a jelölés marad")
+        for platform in ("jofogas", "ebay"):
+            with self.subTest(platform=platform), self.assertRaises(ItemError):
+                self.store.dismiss_check(item.id, platform)
+
     def test_photos(self):
         item = self.store.create()
         self.store.add_photo(item.id, jpeg(300, 200, orientation=6))     # a telefon elforgatva menti
@@ -993,6 +1009,13 @@ class WorkDeskTests(unittest.TestCase):
         self.assertIn("Vinted: feltöltve (ott még 9 000 Ft)", self.box.call("item_list", {}))
         self.assertEqual(self.box.call("item_update", {"item": item.id, "description": "Alig hordott."}),
                          "Módosítva (Levi's farmer): leírás", "ha az ár nem változott, nincs mit mondani róla")
+        # a felületnek (kézi átírás után) ugyanez, önálló mondatként
+        changed = self.store.update(item.id, user=True, title="Levi's 501 farmer")
+        self.assertEqual(self.desk.drift_note(changed, {"title"}),
+                         "Csak itt írtam át; a Vinteden még a régi cím („Levi's farmer”), a Hardveraprón még a régi "
+                         "cím („Levi's farmer”). A fent lévő hirdetést magamtól nem szerkesztem: ott kézzel kell "
+                         "átírni (vagy levenni, és újra feltölteni).")
+        self.assertEqual(self.desk.drift_note(changed, {"description"}), "")
         self.store.set_check(item.id, "vinted", "sold")
         self.assertIn("Vinted: feltöltve (ott még 9 000 Ft) (a háttérellenőrzés szerint elkelt)",
                       self.box.call("item_get", {"item": item.id}))
@@ -1476,6 +1499,19 @@ class SellFlowTests(unittest.TestCase):
         self.app.run_work({"action": "price", "ids": [item.id], "choice": "négy és fél ezer"})
         self.assertTrue(self.notices()[-1].startswith("4 500 Ft-ra gondoltál?"), "szóval beírva is összeg")
         self.assertEqual(self.fake.chat_bodies(), [], "modell nélkül")
+
+    def test_odd_price_confirmed_with_the_button(self):
+        item = self.ready_item(["vinted"])          # 500 Ft
+        self.store.update(item.id, size="")
+        self.store.set_pending(item.id, {"kind": "price", "question": "Marad?", "suggested": 450})
+        self.app.run_work({"action": "price", "ids": [item.id], "choice": "45"})
+        self.assertEqual(self.store.get(item.id).pending["confirm"], 45)
+        self.fake.chat_script = [extracted(**{**SHIRT, "size": ""})]     # utána a méretre kérdez rá
+        self.app.run_work({"action": "price", "ids": [item.id], "choice": "confirmed"})
+        item = self.store.get(item.id)
+        self.assertEqual((item.price, item.pending["kind"]), (45, "info"), "az Igen gomb: a visszakérdezett összeg")
+        self.assertIn("még kell: méret", self.notices()[-1])
+        self.assertEqual([e for e in self.ui.of("error")], [], "nem hibás árként értelmezi")
 
     def test_retry_one_site_then_everything_is_up(self):
         item = self.ready_item(["vinted", "jofogas"])

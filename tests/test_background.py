@@ -505,10 +505,38 @@ class ListingCheckTests(unittest.TestCase):
             self.assertEqual(len(self.site.visits()), 1, "az első akadálynál abbahagyja")
             self.assertEqual([n[0] for n in self.notices], ["error"])
             self.assertIn("holnap újra megpróbálom", self.notices[0][2])
+            # az értesítés gombja megnyitja az oldalt Jarvis böngészőjében (ott te lépsz be, vagy oldod meg)
+            label = "Bejelentkezés a böngészőmben" if path.endswith("adidas-polo") else "Megnyitás a böngészőmben"
+            extra = self.notices[0][3]
+            self.assertEqual(extra["actions"], [{"action": "login", "platform": extra["platform"], "label": label}])
             for item_id in (first, second):
                 self.assertNotIn("checked_at", next(iter(self.store.get(item_id).platforms.values())))
             for item_id in (first, second):
                 self.store.mark(item_id, sold=True)
+
+    def test_a_dismissed_flag_is_not_raised_again(self):
+        item_id = self.posted("Mango kabát", {"vinted": "/items/1002-mango-kabat"})
+        self.checker.run(5, notify=self.notify)
+        self.assertEqual(self.store.get(item_id).platforms["vinted"]["check"], SOLD)
+        self.assertEqual(len(self.notices), 1)
+        self.store.dismiss_check(item_id, "vinted")          # „Nem igaz, fent van”
+        self.clock.now += 86400 + 1
+        self.assertEqual(self.checker.run(5, notify=self.notify), "1 hirdetést néztem meg: 1 fent van.")
+        self.assertEqual(self.store.get(item_id).platforms["vinted"]["check"], LIVE)
+        self.assertEqual(len(self.notices), 1, "ugyanazt a jelzést nem hozza fel újra")
+
+    def test_a_new_signal_after_a_dismissed_one_is_raised(self):
+        path = "/items/1002-mango-kabat"
+        reserved = (200, listing_page("Mango kabát | Vinted", "<h1>Mango kabát</h1><div class='badge'>Foglalt</div>"))
+        item_id = self.posted("Mango kabát", {"vinted": path})
+        with mock.patch.dict(LISTINGS, {path: reserved}):
+            self.checker.run(5, notify=self.notify)
+        self.assertEqual(self.store.get(item_id).platforms["vinted"]["check"], SOLD)
+        self.store.dismiss_check(item_id, "vinted")          # „Nem igaz, fent van”: csak foglalt
+        self.clock.now += 86400 + 1
+        self.checker.run(5, notify=self.notify)              # most már „Eladva”
+        self.assertEqual(self.store.get(item_id).platforms["vinted"]["check"], SOLD)
+        self.assertEqual(len(self.notices), 2, "a foglalt után az eladott jelzést újra felhozza")
 
     def test_interrupt_between_listings(self):
         self.posted("Zara blézer", {"vinted": "/items/1001-zara-blezer", "jofogas": "/items/2001-zara-blezer"})

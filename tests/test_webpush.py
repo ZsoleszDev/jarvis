@@ -174,6 +174,18 @@ class WebPushTests(unittest.TestCase):
             self.assertEqual(headers["TTL"], str(12 * 3600))
             self.assertEqual(check_vapid(self, headers["Authorization"], url), webpush.unb64u(self.push.public_key()))
 
+    def test_notice_buttons_go_with_the_message(self):
+        browser = Browser()
+        self.push.subscribe("aaaa1111", browser.subscription())
+        sold = {"action": "sold", "where": "vinted", "delist": True, "label": "Eladva itt, vedd le a többiről"}
+        self.push.on_event({"type": "notification", "notice": {
+            "id": "n2", "kind": "sold", "title": "Elkelt? Farmer", "text": "A Vinteden eladottnak látszik.",
+            "item": "a1b2c3d4", "platform": "vinted", "actions": [sold, {"action": "delete", "label": "Törlés"}]}})
+        self.service.wait()
+        message = json.loads(browser.decrypt(self.service.calls[0][1]))
+        self.assertEqual((message["item"], message["actions"]), ("a1b2c3d4", [sold]),
+                         "csak az ismert gombok (a böngésző az ablakot nyitja meg, a döntés ott a tiéd)")
+
     def test_confirm_answer_key_is_single_use(self):
         browser = Browser()
         self.push.subscribe("aaaa1111", browser.subscription())

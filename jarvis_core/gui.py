@@ -35,6 +35,7 @@ from .gpu import GpuMonitor
 from .selling import MAX_PHOTO_BYTES, ItemError
 from .tools import summarize_result
 from .watches import WatchError
+from .work import PRICE_CHOICES
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 PAGE = UI_DIR / "index.html"
@@ -417,6 +418,10 @@ class _Handler(BaseHTTPRequestHandler):
             if not self._token_ok(token):
                 return self._forbidden()
             return self._json(200, self._jobs_info())
+        if parsed.path == "/api/notices":
+            if not self._token_ok(token):
+                return self._forbidden()
+            return self._json(200, self._notices_info())
         if parsed.path == "/api/ping":
             if not self._token_ok(token):
                 return self._forbidden()
@@ -440,6 +445,14 @@ class _Handler(BaseHTTPRequestHandler):
         return {"ok": True, "ready": True, "enabled": status["enabled"],
                 "search": app.toolbox is not None and app.toolbox.has("watch_add"),
                 "watches": [w.public() for w in app.watches.all()], "jobs": status["jobs"]}
+
+    def _notices_info(self) -> dict[str, Any]:
+        """Az Értesítések ablaknak: a legutóbbi értesítések (a gombjaikkal együtt), és hány olvasatlan."""
+        app = self.gui.app
+        notices = app.notices if app is not None else None
+        if notices is None:
+            return {"ok": True, "notifications": [], "unread": 0}
+        return {"ok": True, "notifications": notices.list(limit=50), "unread": notices.unread_count()}
 
     def _work(self) -> Any:
         app = self.gui.app
@@ -534,6 +547,9 @@ class _Handler(BaseHTTPRequestHandler):
             return self._creative_post(path, body)
         if path.startswith("/api/jobs/"):
             return self._jobs_post(path, body)
+        if path == "/api/notices/read":
+            ids = [str(i) for i in body.get("ids")][:200] if isinstance(body.get("ids"), list) else None
+            return self._json(200, {"ok": True, "marked": app.notices.mark_read(ids) if app.notices else 0})
         mode = str(body.get("mode") or "chat")
         if path == "/api/send":
             app.submit_text(str(body.get("text", ""))[:4000], mode=mode, silent=remote,
@@ -633,6 +649,12 @@ class _Handler(BaseHTTPRequestHandler):
                 fields = body.get("fields") if isinstance(body.get("fields"), dict) else {}
                 values = {k: v for k, v in fields.items() if k in EDITABLE}
                 item = work.store.update(item_id, user=True, **values)
+                # ha a fent lévő hirdetésben még a régi ár vagy cím van, megmondja (a felület kiírja)
+                return self._json(200, {"ok": True, "item": item.public(),
+                                        "drift_note": work.drift_note(item, set(values))})
+            if path == "/api/work/dismiss":
+                # „Nem igaz, fent van”: a háttérellenőrzés téves jelzése (elkelt, eltűnt) egy oldalon
+                item = work.store.dismiss_check(item_id, str(body.get("platform") or ""))
                 return self._json(200, {"ok": True, "item": item.public()})
             if path == "/api/work/photos":
                 if body.get("remove"):
@@ -670,7 +692,7 @@ class _Handler(BaseHTTPRequestHandler):
                         return self._json(400, {"ok": False, "error": "Üres válasz."})
                 if action == "price":
                     choice = body.get("choice")
-                    extra["choice"] = choice if choice in ("keep", "suggested") else str(choice or "")[:20]
+                    extra["choice"] = choice if choice in PRICE_CHOICES else str(choice or "")[:20]
                 if action == "delist":
                     extra["platforms"] = [str(p) for p in body.get("platforms") or [] if str(p) in work.platforms]
                 if action == "sold":

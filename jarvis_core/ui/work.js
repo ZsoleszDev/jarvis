@@ -20,14 +20,21 @@
   let openId = null;
   let composePhotos = [];               // a még fel nem küldött hirdetés fotói (File)
   let pickFor = null;                   // a fájlválasztó kinek választ: "compose" vagy egy tárgy
+  const driftNotes = new Map();         // tárgy -> a legutóbbi kézi átírás után: a hirdetésben még a régi ár, cím
   const area = $("w-area");
+  let markLoaded = null;
+  const loaded = new Promise((resolve) => { markLoaded = resolve; });   // az első betöltés után
 
   const POSTED = "feltöltve";
   const FAILED = "hiba";
   const STATUS_CLASS = { "vázlat": "vazlat", "kérdés": "kerdes", "árdöntés": "kerdes",
                          "részben fent": "kesz", "fent": "feltoltve", "eladva": "eladva" };
-  const FILTERS = [["all", "Mind"], ["todo", "Teendő"], ["up", "Fent van"], ["sold", "Eladva"]];
+  const FILTERS = [["all", "Mind"], ["todo", "Teendő"], ["up", "Fent van"], ["check", "Nézd meg"], ["sold", "Eladva"]];
   const CHECKED = { sold: "Elkeltnek látszik", gone: "Már nincs fent?" };   // a háttérellenőrzés jelzései
+  // Az árkutatás előszűrése (selling.prefilter): miért maradt ki egy találat.
+  const DROPPED = { "saját": "a sajátod", "kereső": "kereső vagy csere", "csomag": "csomag",
+                    "alkatrész": "alkatrész vagy hibás", "más termék": "más termék", "ismétlődő": "ismétlődő",
+                    "kevésbé illő": "kevésbé illő" };
 
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -40,9 +47,31 @@
   const siteState = (item, key) => (item.platforms[key] || {}).status || "";
   const store = (key, value) => { try { localStorage.setItem(key, value); } catch { /* nem baj */ } };
   const recall = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
+  const shortDate = (t) => new Date(t * 1000).toLocaleString("hu-HU",
+    { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const online = (item) => (item.sold || item.days_online === null || item.days_online === undefined ? ""
+    : item.days_online ? `${item.days_online} napja fent` : "ma került fel");
+
+  // Amire érdemes ránézni: a háttérellenőrzés szerint valahol elkelt vagy eltűnt, vagy a fent lévő hirdetésben
+  // még a régi ár vagy cím van (itt átírtad, ott nem).
+  function flags(item) {
+    if (item.sold) return [];
+    const out = [];
+    for (const [key, state] of Object.entries(item.platforms)) {
+      if (state.status === POSTED && CHECKED[state.check]) out.push(`${siteName(key)}: ${CHECKED[state.check].toLowerCase()}`);
+    }
+    const drifted = new Map();           // "ár", "cím" vagy "ár és cím" -> az oldalak, ahol még a régi van fent
+    for (const d of item.drift || []) {
+      const what = d.price !== undefined && d.title ? "ár és cím" : d.price !== undefined ? "ár" : "cím";
+      drifted.set(what, [...(drifted.get(what) || []), siteName(d.platform)]);
+    }
+    for (const [what, sites] of drifted) out.push(`A hirdetésben még a régi ${what}: ${sites.join(", ")}`);
+    return out;
+  }
 
   function matches(item) {
     if (filter === "sold") return item.sold;
+    if (filter === "check") return flags(item).length > 0;
     if (filter === "up") return !item.sold && (item.status === "fent" || item.status === "részben fent");
     if (filter === "todo") {
       return !item.sold && (item.status !== "fent" ||
@@ -72,6 +101,7 @@
       renderCompose();
       renderSetup();
       render();
+      markLoaded();
     } catch { /* a Jarvis még indul: a következő "hello" újra betölti */ }
   }
 
@@ -86,7 +116,9 @@
   }
 
   const update = async (id, fields) => {
-    if (!remember(await J.postJson("/api/work/update", { id, fields }), "Nem sikerült menteni.")) load();
+    const result = await J.postJson("/api/work/update", { id, fields });
+    if (result.ok) driftNotes.set(id, result.drift_note || "");
+    if (!remember(result, "Nem sikerült menteni.")) load();
   };
 
   async function action(name, id, extra = {}) {
@@ -374,9 +406,12 @@
           <button type="button" class="small quiet" data-cancel="${item.id}">Mégse</button></div></form>`;
     }
     if (p.kind === "price") {
-      return `<div class="ask"><p>${esc(p.question)}</p><div class="row">
+      // „3 Ft-ra gondoltál?”: az Igen a visszakérdezett összeg (a Marad és a Legyen ugyanúgy választható)
+      const yes = p.confirm ? `<button type="button" class="small primary" data-price="confirmed" data-id="${item.id}">` +
+        `Igen: ${esc(price(p.confirm))}</button>` : "";
+      return `<div class="ask"><p>${esc(p.question)}</p><div class="row">${yes}
         <button type="button" class="small" data-price="keep" data-id="${item.id}">Marad: ${esc(price(item.price))}</button>
-        <button type="button" class="small primary" data-price="suggested" data-id="${item.id}">Legyen: ${esc(price(p.suggested))}</button>
+        ${p.suggested ? `<button type="button" class="small${p.confirm ? "" : " primary"}" data-price="suggested" data-id="${item.id}">Legyen: ${esc(price(p.suggested))}</button>` : ""}
       </div></div>`;
     }
     return "";
@@ -387,13 +422,16 @@
       ? `<img class="thumb" src="${photoUrl(item.id, esc(item.photos[0]), true)}" alt="">`
       : '<span class="nothumb">nincs fotó</span>';
     const busy = uploading.get(item.id) || item.busy;
+    const marks = flags(item);
+    const facts = [price(item.price), online(item)].filter(Boolean).join(" · ");
     return `<div class="card${item.sold ? " sold" : ""}" data-id="${item.id}">
       <button type="button" class="cardthumb" data-open="${item.id}" aria-label="${esc(item.name)} részletei">${thumb}</button>
       <div class="body">
         <div class="row tight"><span class="chip ${STATUS_CLASS[item.status] || ""}">${esc(item.status)}</span>
-          <span class="facts">${esc(price(item.price))}</span></div>
+          <span class="facts">${esc(facts)}</span></div>
         <button type="button" class="title linklike" data-open="${item.id}">${esc(item.name)}</button>
         <div class="sites">${siteChips(item)}</div>
+        ${marks.length ? `<div class="flags">${marks.map((m) => `<span class="flag">${esc(m)}</span>`).join("")}</div>` : ""}
         ${busy ? `<span class="busy">${esc(busy)}</span>` : ""}
         ${pendingBlock(item)}
       </div></div>`;
@@ -422,6 +460,13 @@
       </div></div>`;
   }
 
+  // Miért maradt ki egy-egy találat a modell elől (pl. „3 kereső vagy csere, 2 más termék”); a régi kutatásnál "".
+  function droppedText(r) {
+    return Object.entries(r.dropped || {}).filter(([, n]) => n > 0).map(([why, n]) =>
+      why === "kevésbé illő" && r.kept ? `${n} kevésbé illő (a ${r.kept} legjobban illő maradt)`
+        : `${n} ${DROPPED[why] || why}`).join(", ");
+  }
+
   function researchBlock(item) {
     const r = item.research || {};
     if (!r.at) return "";
@@ -429,20 +474,48 @@
     let html = item.verdict ? `<p class="verdict">${esc(item.verdict)}</p>` : "";
     if (r.reason) html += `<p class="muted">${esc(r.reason)}</p>`;
     const dropped = (r.count || 0) - (r.kept ?? (r.count || 0));
+    const why = droppedText(r) || "kereső, csomag, alkatrész, a sajátod vagy más termék";
     html += `<p class="muted">Keresés: „${esc(r.query)}”, ${r.count || 0} találat` +
-            (dropped > 0 ? ` (${dropped} kiszűrve: kereső, csomag, alkatrész, a sajátod vagy más termék)` : "") +
+            (dropped > 0 ? ` (${dropped} kiszűrve: ${esc(why)})` : "") +
             (similar.length ? `, ebből ${similar.length} hasonló:` : ".") + "</p>";
     if (item.research_stale) html += '<p class="muted">Ez az árkutatás egy hétnél régebbi; árazás előtt frissítem.</p>';
     if (similar.length) {
       html += "<ul>" + similar.map((s) => {
         const text = `${esc(s.site)}: ${esc((s.text || "").slice(0, 90))}`;
         const link = safeUrl(s.url) ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${text}</a>` : text;
-        return `<li>${link} – ${esc(price(s.price))}</li>`;
+        const bid = s.auction ? ' <span class="auction" title="Licit: a mostani ajánlat, nem végleges ár">(licit)</span>' : "";
+        return `<li>${link} – ${esc(price(s.price))}${bid}</li>`;
       }).join("") + "</ul>";
+    }
+    // a robusztus statisztika (selling.price_stats): a hasonlók alsó és felső negyede, és mennyire megbízható
+    if (similar.length && r.p25 !== undefined && r.p75 !== undefined) {
+      const band = r.p25 < r.p75 ? `${price(r.p25)} – ${price(r.p75)}` : `${price(r.median)} körül`;
+      const basis = [r.n ? `${r.n} ár alapján` : "", r.confidence === "bizonytalan"
+        ? "bizonytalan: kevés vagy nagyon eltérő ár" : r.confidence || ""].filter(Boolean).join(", ");
+      html += `<p class="muted">A hasonlók középső fele: ${esc(band)}, középérték ${esc(price(r.median))}` +
+              (basis ? ` (${esc(basis)})` : "") + "." + (r.outliers ? ` ${r.outliers} kilógó árat kihagytam.` : "") + "</p>";
     }
     for (const error of r.errors || []) html += `<p class="muted">${esc(error)}</p>`;
     return `<section aria-labelledby="h-research"><h3 id="h-research">Árkutatás</h3>` +
            `<div class="research">${html}</div></section>`;
+  }
+
+  // Mikor nézte meg a háttérellenőrzés ezt a hirdetést, és mit látott (ha nem nyílt meg, azt is).
+  function checkNote(item, state) {
+    if (state.status !== POSTED || item.sold || !state.checked_at) return "";
+    const at = `Ellenőrizve: ${shortDate(state.checked_at)}`;
+    if (CHECKED[state.check]) return `${at}, ${state.check_note || CHECKED[state.check].toLowerCase()}.`;
+    if (state.check === "live" && !state.check_note) return `${at}, fent van.`;
+    return `${at}, de nem nyílt meg${state.check_note ? ` (${state.check_note})` : ""}; holnap újra megnézem.`;
+  }
+
+  // A fent lévő hirdetésben még a régi ár vagy cím van: Jarvis nem írja át, ott kézzel kell.
+  function driftText(item, drift) {
+    if (!drift) return "";
+    const parts = [];
+    if (drift.price !== undefined) parts.push(`Ár eltér: a hirdetésben még ${price(drift.price)}, itt ${price(item.price) || "nincs ár"}.`);
+    if (drift.title) parts.push(`Cím eltér: a hirdetésben még „${drift.title}”.`);
+    return parts.join(" ") + " Jarvis a fent lévő hirdetést nem írja át; ott kézzel módosítsd.";
   }
 
   function platformRow(item, p) {
@@ -455,20 +528,22 @@
       : delisted ? "Levéve" : chosen ? "Még nincs fent" : "";
     const when = state.at && state.status ? " (" + new Date(state.at * 1000).toLocaleDateString("hu-HU") + ")" : "";
     const note = state.note && state.status !== "nincs fent" ? state.note : "";
-    const drift = (item.drift || []).find((d) => d.platform === p.key && d.price !== undefined);
+    const drift = driftText(item, (item.drift || []).find((d) => d.platform === p.key));
+    const checked = checkNote(item, state);
     const others = Object.keys(item.platforms).some((k) => k !== p.key && siteState(item, k) === POSTED);
     return `<div class="platform">
       <label class="check pname"><input type="checkbox" data-target="${esc(p.key)}"${chosen ? " checked" : ""}> ${esc(p.name)}</label>
       <span class="pstatus${flagged ? " bad" : state.status === POSTED ? " on" : state.status === FAILED ? " bad" : ""}">${esc(label + (label ? when : ""))}</span>
       ${flagged ? `<button type="button" class="small" data-action="soldhere" data-platform="${esc(p.key)}" title="Megjelöli eladottnak; a többi oldalról a jóváhagyásod után leveszi">${others ? "Eladva itt, vedd le a többiről" : "Eladva itt"}</button>` : ""}
+      ${flagged ? `<button type="button" class="small quiet" data-action="dismiss" data-platform="${esc(p.key)}" title="A jelzés téves: a hirdetés fent van. Ennél a hirdetésnél ugyanezt a jelzést többé nem hozom fel.">Nem igaz, fent van</button>` : ""}
       ${state.status === POSTED && safeUrl(state.url) ? `<a class="button small" href="${esc(state.url)}" target="_blank" rel="noopener noreferrer">Megnyitás</a>` : ""}
       ${chosen && !item.sold && state.status !== POSTED && browserOn ? `<button type="button" class="small" data-action="post" data-platform="${esc(p.key)}">${state.status === FAILED ? "Újra" : "Feltöltés"}</button>` : ""}
       ${state.status === POSTED && browserOn ? `<button type="button" class="small" data-action="delist" data-platform="${esc(p.key)}" title="Jarvis leveszi a hirdetést erről az oldalról">Levétel</button>` : ""}
       ${chosen ? `<button type="button" class="small quiet" data-action="toggle" data-platform="${esc(p.key)}" title="Csak a nyilvántartást írja át">${state.status === POSTED ? "Már levettem" : "Fent van"}</button>` : ""}
       ${state.dossier ? `<button type="button" class="small quiet" data-action="dossier" data-platform="${esc(p.key)}" title="Képernyőkép, oldalnézet és a lépések abból a pillanatból, amikor elakadt">Hibacsomag</button>` : ""}
       ${note ? `<span class="pnote">${esc(note)}</span>` : ""}
-      ${flagged && state.check_note ? `<span class="pnote">${esc(state.check_note)}</span>` : ""}
-      ${drift ? `<span class="pnote">Ár eltér: a hirdetésben még ${esc(price(drift.price))}, itt ${esc(price(item.price) || "nincs ár")}. Jarvis a fent lévő hirdetést nem írja át; ott kézzel módosítsd.</span>` : ""}
+      ${checked ? `<span class="pnote${flagged ? " bad" : ""}">${esc(checked)}</span>` : ""}
+      ${drift ? `<span class="pnote">${esc(drift)}</span>` : ""}
     </div>`;
   }
 
@@ -479,6 +554,7 @@
         <button type="button" class="quiet small" data-action="back">← Hirdetéseim</button>
         <h2>${esc(item.name)}</h2>
         <span class="chip ${STATUS_CLASS[item.status] || ""}">${esc(item.status)}</span>
+        ${online(item) ? `<span class="muted">${esc(online(item))}</span>` : ""}
         ${busy ? `<span class="busy">${esc(busy)}</span>` : ""}
       </header>
       ${pendingBlock(item)}
@@ -516,6 +592,8 @@
           ${field("location", "Átvétel helye", item.location, `placeholder="${esc(settings.city || "az Alapadatokból")}"`)}
           ${field("shipping", "Szállítás", item.shipping, `placeholder="${esc(settings.shipping || "az Alapadatokból")}"`)}
         </div>
+        ${(item.drift || []).length && driftNotes.get(item.id)
+          ? `<p class="drift-note" role="status">${esc(driftNotes.get(item.id))}</p>` : ""}
         <p class="muted">Amit itt átírsz, azt Jarvis már nem írja felül.</p>
       </section>
       ${researchBlock(item)}
@@ -534,7 +612,7 @@
 
   // Eladva: hol kelt el, és vegye-e le Jarvis a többi oldalról (ahol nem ott kelt el). `where`: előre
   // kiválasztott oldal (pl. ahol a háttérellenőrzés szerint elkelt); a döntés itt is a tiéd.
-  function askSold(item, posted, where = "") {
+  function askSold(item, posted, where = "", delist = true) {
     return new Promise((resolve) => {
       const dialog = $("sold-dialog");
       const chosen = posted.includes(where) ? where : "";
@@ -542,7 +620,7 @@
       $("sold-where").innerHTML = [...posted.map((k) => [k, siteName(k)]), ["", "Máshol vagy személyesen"]]
         .map(([key, name]) => `<label class="check"><input type="radio" name="sold-where" value="${esc(key)}"` +
           `${key === chosen ? " checked" : ""}> ${esc(name)}</label>`).join("");
-      $("sold-delist").checked = true;
+      $("sold-delist").checked = delist;
       const finish = (value) => {
         $("sold-yes").removeEventListener("click", onYes);
         $("sold-no").removeEventListener("click", onNo);
@@ -564,7 +642,7 @@
     });
   }
 
-  async function sold(item, where = "") {
+  async function sold(item, where = "", delist = true) {
     if (item.sold) {   // mégsem kelt el
       remember(await J.postJson("/api/work/mark", { id: item.id, sold: false }), "Nem sikerült.");
       return;
@@ -574,7 +652,7 @@
       remember(await J.postJson("/api/work/mark", { id: item.id, sold: true }), "Nem sikerült.");
       return;
     }
-    const answer = await askSold(item, posted, where);
+    const answer = await askSold(item, posted, where, delist);
     if (!answer) return;
     const result = await J.postJson("/api/work/mark", { id: item.id, sold: true });
     if (!remember(result, "Nem sikerült.")) return;
@@ -641,6 +719,33 @@
     composePhotos = [...composePhotos, ...files].slice(0, maxPhotos);
     renderComposePhotos();
     J.toast(`${files.length} fotó a megosztásból: írd le, mit adsz el, és pipáld be, hova kerüljön.`);
+  });
+
+  // Egy értesítés gombja (app.js: az Értesítések ablak, a laptop push-értesítése, az Android-alkalmazás). Az
+  // „Eladva itt, vedd le a többiről” a hirdetés Eladva ablakát nyitja meg, előre kiválasztva: a levétel csak a
+  // Rendben gombra indul. A „Bejelentkezés a böngészőmben” megnyitja az oldalt Jarvis böngészőjében.
+  window.addEventListener("jarvis-notice-action", async (event) => {
+    const wanted = event.detail || {};
+    await loaded;
+    if (wanted.action === "login") {
+      if (!platforms.some((p) => p.key === wanted.platform)) return;
+      if (await action("login", null, { platform: wanted.platform })) {
+        J.toast("Megnyitom a Jarvis böngészőjében. Jelentkezz be, és pipáld be, hogy maradj bejelentkezve.");
+      }
+      return;
+    }
+    if (wanted.action !== "sold" || $("sold-dialog").open) return;
+    const item = items.get(wanted.item);
+    if (!item) { J.toast("Ez a hirdetés már nincs meg."); return; }
+    openId = item.id;
+    render();
+    area.scrollTop = 0;
+    if (item.sold) { J.toast("Ezt már eladottnak jelölted."); return; }
+    if (!Object.values(item.platforms).some((state) => state.status === POSTED)) {
+      J.toast("A nyilvántartás szerint már sehol nincs fent; ha elkelt, az Eladva gombbal jelöld meg.");
+      return;
+    }
+    sold(item, String(wanted.where || ""), wanted.delist !== false);
   });
 
   $("w-compose").addEventListener("submit", go);
@@ -716,7 +821,7 @@
     const button = event.target.closest("button[data-action]");
     if (!button) return;
     const name = button.dataset.action;
-    if (name === "back") { openId = null; render(); }
+    if (name === "back") { driftNotes.delete(item.id); openId = null; render(); }
     else if (name === "pickphotos") { pickFor = item.id; $("w-file").click(); }
     else if (name === "sell") {
       if (await acknowledge(item.targets)) action("sell", item.id);
@@ -742,6 +847,10 @@
     }
     else if (name === "sold") sold(item);
     else if (name === "soldhere") sold(item, button.dataset.platform);
+    else if (name === "dismiss") {
+      const result = await J.postJson("/api/work/dismiss", { id: item.id, platform: button.dataset.platform });
+      if (remember(result, "Nem sikerült.")) J.toast("Rendben, fent van. Ezt a jelzést többé nem hozom fel.");
+    }
     else if (name === "delete") remove(item);
   });
 

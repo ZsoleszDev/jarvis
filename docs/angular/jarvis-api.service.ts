@@ -70,7 +70,28 @@ export interface JarvisEvent {
 
 export interface EventsResponse { ok: boolean; events: JarvisEvent[]; last: number; gap: boolean; }
 
-export interface PlatformState { status: PlatformStatus; at: number; url?: string; note?: string; }
+/** A háttérellenőrzés eredménye: fent van, elkeltnek látszik, már nincs fent, vagy nem nyílt meg. */
+export type CheckState = 'live' | 'sold' | 'gone' | 'unknown';
+
+export interface PlatformState {
+  status: PlatformStatus; at: number; url?: string; note?: string; dossier?: string;
+  posted_at?: number; posted_price?: number; posted_title?: string;   // a feltöltéskor
+  check?: CheckState; checked_at?: number; check_note?: string;        // a háttérellenőrzés (listings)
+  check_dismissed?: 'sold' | 'gone';                                    // „Nem igaz, fent van” (dismissCheck)
+}
+
+/** Ahol a fent lévő hirdetésben még a régi ár vagy cím van (csak az eltérő mezők). */
+export interface Drift { platform: string; price?: number; title?: string; }
+
+export interface SimilarListing { site: string; text: string; price: number; url: string; auction?: boolean; }
+
+export interface Research {
+  query: string; at: number; count: number; kept?: number;
+  dropped?: Record<string, number>;   // miért maradt ki: kereső, csomag, alkatrész, saját, más termék, ismétlődő, kevésbé illő
+  similar: SimilarListing[]; errors: string[]; reason?: string;
+  min?: number; max?: number; p25?: number; median?: number; p75?: number; n?: number;
+  confidence?: 'megbízható' | 'bizonytalan'; outliers?: number; suggested?: number;
+}
 
 export interface WorkItem {
   id: string; name: string; status: ItemStatus; created: number; updated: number;
@@ -79,9 +100,15 @@ export interface WorkItem {
   brand: string; size: string; condition: string; color: string; material: string;
   price: number | null; location: string; shipping: string;
   edited: string[]; platforms: Record<string, PlatformState>;
-  pending: { kind?: 'info' | 'price'; question?: string; suggested?: number };
-  research: Record<string, unknown>; verdict: string; sold: boolean; busy: string;
+  // confirm: furcsa összeg, amire visszakérdezett („3 Ft-ra gondoltál?”); igen: decidePrice(id, 'confirmed')
+  pending: { kind?: 'info' | 'price'; question?: string; suggested?: number; confirm?: number };
+  research: Research | Record<string, never>; research_stale: boolean; verdict: string;
+  drift: Drift[]; online_since: number | null; days_online: number | null;
+  sold: boolean; busy: string;
 }
+
+/** A PATCH /work/items/{id} válasza: drift_note, ha a fent lévő hirdetésben még a régi ár vagy cím van. */
+export interface ItemUpdate { item: WorkItem; drift_note: string; }
 
 export interface Platform { key: string; name: string; research: boolean; }
 
@@ -98,9 +125,19 @@ export interface Watch {
   hits: { title: string; url: string; snippet: string; at: number }[];
 }
 
+/**
+ * Egy értesítés gombja. sold: nyisd meg a tárgy Eladva-kérdését előre kiválasztva (where, delist), és csak a
+ * felhasználó jóváhagyása után hívd a markSold-ot; login: a gépen nyitja meg az oldalt Jarvis böngészőjében.
+ */
+export interface NoticeAction {
+  action: 'sold' | 'login'; label: string; where?: string; delist?: boolean; platform?: string;
+}
+
 export interface Notice {
-  id: string; at: number; kind: 'watch' | 'stale' | 'delist' | 'work' | 'info';
+  id: string; at: number;
+  kind: 'watch' | 'stale' | 'sold' | 'delist' | 'post' | 'question' | 'error' | 'work' | 'info';
   title: string; text: string; read: boolean; url?: string; item?: string; items?: string[]; watch?: string;
+  platform?: string; state?: 'sold' | 'gone'; actions?: NoticeAction[];
 }
 
 export interface Device { id: string; name: string; created: number; last_seen: number; current?: boolean; }
@@ -251,9 +288,9 @@ export class JarvisApiService {
     return this.get<{ item: WorkItem }>(`/work/items/${id}`).pipe(map((r) => r.item));
   }
 
-  updateItem(id: string, fields: Partial<WorkItem>): Observable<WorkItem> {
-    return this.http.patch<{ item: WorkItem }>(this.url(`/work/items/${id}`), { fields }, { headers: this.headers() })
-      .pipe(map((r) => r.item));
+  /** Ha a fent lévő hirdetésben még a régi ár vagy cím van, a drift_note megmondja (mutasd meg). */
+  updateItem(id: string, fields: Partial<WorkItem>): Observable<ItemUpdate> {
+    return this.http.patch<ItemUpdate>(this.url(`/work/items/${id}`), { fields }, { headers: this.headers() });
   }
 
   deleteItem(id: string): Observable<unknown> {
@@ -284,7 +321,8 @@ export class JarvisApiService {
   /** Feltöltés a kiválasztott oldalakra (előbb acknowledge, ha 409 'acknowledge' jön). */
   sell(id: string, resume = false): Observable<unknown> { return this.post(`/work/items/${id}/sell`, { resume }); }
   reply(id: string, text: string): Observable<unknown> { return this.post(`/work/items/${id}/reply`, { text }); }
-  decidePrice(id: string, choice: 'keep' | 'suggested' | number): Observable<unknown> {
+  /** 'confirmed': igen a visszakérdezett összegre (pending.confirm). */
+  decidePrice(id: string, choice: 'keep' | 'suggested' | 'confirmed' | number): Observable<unknown> {
     return this.post(`/work/items/${id}/price`, { choice });
   }
   cancelQuestion(id: string): Observable<unknown> { return this.post(`/work/items/${id}/cancel`); }
@@ -310,6 +348,11 @@ export class JarvisApiService {
     return this.post<{ item: WorkItem }>(`/work/items/${id}/mark`, { platform, status, url });
   }
 
+  /** „Nem igaz, fent van”: a háttérellenőrzés téves jelzése (elkelt, eltűnt) ezen az oldalon. */
+  dismissCheck(id: string, platform: string): Observable<WorkItem> {
+    return this.post<{ item: WorkItem }>(`/work/items/${id}/dismiss`, { platform }).pipe(map((r) => r.item));
+  }
+
   acknowledge(platform: string): Observable<{ acknowledged: string[] }> {
     return this.post<{ acknowledged: string[] }>('/work/ack', { platform });
   }
@@ -321,7 +364,7 @@ export class JarvisApiService {
   // --- háttérmunka, figyelők, értesítések, eszközök ---
 
   jobs(): Observable<SchedulerStatus> { return this.get<SchedulerStatus>('/jobs'); }
-  runJob(key: 'watches' | 'stale' | string): Observable<unknown> { return this.post(`/jobs/${key}/run`); }
+  runJob(key: 'watches' | 'stale' | 'listings' | string): Observable<unknown> { return this.post(`/jobs/${key}/run`); }
   /** Ennyi percig nincs háttérmunka (0: újra mehet). */
   snooze(minutes: number): Observable<{ snoozed_until: number | null }> {
     return this.post<{ snoozed_until: number | null }>('/jobs/snooze', { minutes });
