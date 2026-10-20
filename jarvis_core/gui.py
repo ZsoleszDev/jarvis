@@ -774,6 +774,17 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **deals.accept(str(body.get("id") or ""), body.get("price"))})
             if action == "recalibrate":
                 return self._json(200, {"ok": True, **deals.recalibrate(str(body.get("id") or ""))})
+            if action == "offer":       # Vinted-ajánlat: az ágens-szálon, a küldés előtt jóváhagyást kér
+                deal = deals.get(str(body.get("id") or ""))
+                if app is None or not self._work().browser_ready:
+                    return self._json(409, {"ok": False, "error": "Az ajánlattételhez Jarvis saját böngészője kell."})
+                app.submit_work("deal_offer", deal=deal["id"], price=body.get("price"), **({"silent": True} if remote else {}))
+                return self._json(202, {"ok": True})
+            if action == "watch_add":
+                return self._json(200, {"ok": True, **deals.add_watch(str(body.get("target") or ""), body.get("min_profit"),
+                                                                     body.get("hours"), body.get("every"))})
+            if action == "watch_remove":
+                return self._json(200, {"ok": True, **deals.remove_watch(str(body.get("id") or ""))})
             if action == "remove":
                 return self._json(200, {"ok": True, **deals.remove_search(str(body.get("id") or ""))})
             if action == "dismiss":

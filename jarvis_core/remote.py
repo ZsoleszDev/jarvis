@@ -80,6 +80,7 @@ function openAction(action) {
     }
     const hash = new URLSearchParams({ act: action.action || "", item: action.item || "", where: action.where || "",
                                        platform: action.platform || "", delist: action.delist ? "1" : "0" });
+    if (action.deal) hash.set("deal", action.deal);   // Automata kereskedés: melyik találatra tegyen ajánlatot
     return self.clients.openWindow("/#" + hash.toString());
   });
 }

@@ -417,6 +417,14 @@
   $("job-deals").addEventListener("click", () => setJob("deals"));
 
   const every = (m) => (m >= 60 ? `${m / 60} óránként` : `${m} percenként`);
+  // Egy licit hátralévő ideje most (a találatkor látott idő, mínusz azóta eltelt): „2 óra 10 perc”.
+  function leftText(d) {
+    if (d.left === undefined || d.left === null) return "";
+    const s = Math.max(0, d.left - (Date.now() / 1000 - (d.at || 0)));
+    const days = Math.floor(s / 86400), hours = Math.floor((s % 86400) / 3600), minutes = Math.floor((s % 3600) / 60);
+    if (s < 60) return "lezárult";
+    return [days ? `${days} nap` : "", hours ? `${hours} óra` : "", !days && minutes ? `${minutes} perc` : ""].filter(Boolean).join(" ") + " múlva zárul";
+  }
   let editingRef = null;      // a keresés, aminél épp kézzel írod a szokásos árat
   let editingSearch = null;   // a keresés, amit az űrlapon szerkesztesz (Mentés: módosítás, nem új)
 
@@ -460,6 +468,12 @@
     return parts.join(" · ");
   }
 
+  // Vinted-ajánlat: a Jarvis megnyitja a hirdetést, beírja az összeget, és a küldés előtt rákérdez (pontosan ezzel).
+  async function makeOffer(id, amount) {
+    const result = await J.postJson("/api/work/deals", { action: "offer", id, price: amount });
+    J.toast(result.ok ? "Elkezdem; a küldés előtt rákérdezek, pontosan ezzel az összeggel." : (result.error || "Nem sikerült."));
+  }
+
   function renderDeals() {
     const box = $("w-deals");
     const siteName = (key) => (deals.sites.find((s) => s.key === key) || { name: key }).name;
@@ -482,11 +496,18 @@
       : buying === d.id ? `<span class="row"><input id="d-paid" type="number" min="1" value="${esc(d.price)}" style="width: 6em" aria-label="Vételár (Ft)">
           <button type="button" class="small primary" data-deal-paid="${esc(d.id)}">Mentés</button></span>`
       : `<button type="button" class="small" data-deal-buy="${esc(d.id)}">Megvettem</button>`;
+    const offerBox = (d) => d.offer_sent ? `<small>Ajánlat elküldve: <b>${esc(price(d.offer_sent.price))}</b> – ha az eladó
+          elfogadja, a Vinted értesít.</small>`
+      : d.offer ? `<span class="row"><input id="d-offer-${esc(d.id)}" type="number" min="1" value="${esc(d.offer)}" style="width: 6em"
+          aria-label="Ajánlat (Ft)"> Ft <button type="button" class="small primary" data-offer="${esc(d.id)}">Ajánlatot teszek</button></span>` : "";
     const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.text)}</a>
-        <small class="muted">${esc(d.site)} · <b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))})` : ""},
-        szokásos ár ${esc(price(d.median))}${d.profit !== undefined ? ` · várható haszon kb. <b>${esc(price(d.profit))}</b>` : ` (kb. ${esc(price(d.margin))}-tal olcsóbb)`}
+        <small class="muted">${esc(d.site)}${d.auction ? " (licit)" : ""} · <b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))})` : ""},
+        ${d.auction ? "máshol" : "szokásos ár"} ${esc(price(d.median))}${d.auction ? ` · ${esc(leftText(d))} · legfeljebb <b>${esc(price(d.max_bid))}</b>-ig érdemes licitálni`
+          : d.offer ? ` · ajánlattal (${esc(price(d.offer))}) kb. <b>${esc(price(d.profit))}</b> haszon`
+          : d.profit !== undefined ? ` · várható haszon kb. <b>${esc(price(d.profit))}</b>` : ` (kb. ${esc(price(d.margin))}-tal olcsóbb)`}
         ${d.calibration ? " · a felmérés közben" : ""}${d.note ? " · " + esc(d.note) : ""}</small>
-        ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}</span>
+        ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}
+        ${offerBox(d)}</span>
         <span class="row">${buyButton(d)}
         <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></span></li>`).join("");
     const edit = deals.searches.find((s) => s.id === editingSearch);
@@ -522,6 +543,24 @@
         <div class="row"><button type="submit" class="primary">${edit ? "Mentés" : "Hozzáadás"}</button>
           ${edit ? '<button type="button" id="d-cancel">Mégse</button>' : '<button type="button" id="d-run">Keresés most</button>'}</div>
       </form>
+      <h3 class="section-title">Vatera-licitek</h3>
+      <p class="muted">Itt nem kell megadnod, mit keresel: a hamarosan záruló licitekből a modell választ, és megnézem,
+        máshol mennyiért adják. A Vaterán állítsd be a kategóriát és a „hamarosan lejár” rendezést, és másold be az oldal
+        címét (vagy írj egy keresőszót). Ami illik egy fenti keresésedre, azt a szokásos árához mérem. Licitálni nem
+        fogok helyetted: megmondom, meddig érdemes.</p>
+      <ul class="dealist">${(deals.watches || []).map((w) => `<li><span><b>${esc(w.name)}</b>
+          <small class="muted">legalább ${esc(price(w.min_profit))} haszon · a zárás előtt legfeljebb ${w.hours} órával · ${esc(every(w.every))}</small>
+          <small><a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small></span>
+          <button type="button" class="small quiet" data-watch-remove="${esc(w.id)}">Törlés</button></li>`).join("") || '<li class="muted">Még nincs licitfigyelő.</li>'}</ul>
+      <form id="d-watch" class="compose" autocomplete="off">
+        <input id="dw-target" placeholder="Vatera-oldal címe vagy keresőszó">
+        <div class="row">
+          <label>Legalább <input id="dw-profit" type="number" min="0" value="3000" style="width: 6em"> Ft haszon,</label>
+          <label>a zárás előtt legfeljebb <input id="dw-hours" type="number" min="1" max="72" value="6" style="width: 4em"> órával</label>
+        </div>
+        <div class="row"><label>Nézze <select id="dw-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === 60 ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label></div>
+        <div class="row"><button type="submit" class="primary">Licitfigyelő hozzáadása</button></div>
+      </form>
       <h3 class="section-title">Olcsó hirdetések</h3>
       <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>`;
     $("d-enabled").addEventListener("change", (e) => dealAction({ action: "enable", on: e.target.checked }));
@@ -554,6 +593,13 @@
       if (await dealAction({ action: "recalibrate", id: b.dataset.recalibrate })) J.toast("A következő keresésnél újra felmérem.");
     });
     for (const b of box.querySelectorAll("[data-deal-remove]")) b.addEventListener("click", () => dealAction({ action: "remove", id: b.dataset.dealRemove }));
+    $("d-watch").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (await dealAction({ action: "watch_add", target: $("dw-target").value, min_profit: $("dw-profit").value,
+                             hours: $("dw-hours").value, every: $("dw-every").value })) J.toast("Rendben, figyelem a liciteket.");
+    });
+    for (const b of box.querySelectorAll("[data-watch-remove]")) b.addEventListener("click", () => dealAction({ action: "watch_remove", id: b.dataset.watchRemove }));
+    for (const b of box.querySelectorAll("[data-offer]")) b.addEventListener("click", () => makeOffer(b.dataset.offer, $(`d-offer-${b.dataset.offer}`).value));
     for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
     for (const b of box.querySelectorAll("[data-deal-buy]")) b.addEventListener("click", () => { buying = b.dataset.dealBuy; renderDeals(); $("d-paid").focus(); });
     for (const b of box.querySelectorAll("[data-deal-paid]")) b.addEventListener("click", async () => {
@@ -1078,6 +1124,7 @@
     const wanted = event.detail || {};
     await loaded;
     if (wanted.action === "deals") { setJob("deals"); return; }   // pl. a szokásos ár jóváhagyása
+    if (wanted.action === "offer") { setJob("deals"); await makeOffer(wanted.deal, ""); return; }   // a javasolt összeggel
     if (wanted.action === "login") {
       if (!platforms.some((p) => p.key === wanted.platform)) return;
       if (await action("login", null, { platform: wanted.platform })) {

@@ -457,9 +457,10 @@ class WorkDesk:
     def confirm_context(self) -> str:
         """A jóváhagyó ablak első sora feltöltés közben: melyik oldal, melyik tárgy, mennyiért.
         Visszajátszásnál alatta az is, mit választott ki (kategória, állapot, méret…), hogy ránézésre
-        ellenőrizhesd, mielőtt jóváhagyod. Üzenet küldésekor: kinek, melyik oldalon, és pontosan mi megy el."""
+        ellenőrizhesd, mielőtt jóváhagyod. Üzenet küldésekor: kinek, melyik oldalon, és pontosan mi megy el.
+        Ajánlattételkor (Automata kereskedés): melyik hirdetésre, mennyit."""
         if self.current is None:
-            return self.messages.sending
+            return self.messages.sending or self.deals.offering
         try:
             item = self.store.get(self.current[0])
         except ItemError:

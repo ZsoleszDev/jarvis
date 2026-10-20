@@ -1505,6 +1505,8 @@ class JarvisApp:
                     self._message_draft(str(payload.get("conversation") or ""))
                 elif action == "message_send":
                     self._message_send(str(payload.get("conversation") or ""), str(payload.get("text") or ""))
+                elif action == "deal_offer":
+                    self._deal_offer(str(payload.get("deal") or ""), payload.get("price"))
                 else:
                     self.ui.error(f"Ismeretlen feladat: {action}")
             except ItemError as exc:
@@ -2074,6 +2076,16 @@ class JarvisApp:
         self.ui.notice(result)
         self.say(result)
         self._tell("message", f"Üzenet: {partner}", result, conversation=conv_id)
+
+    def _deal_offer(self, deal_id: str, price: Any) -> None:
+        """Automata kereskedés: ajánlattétel a Vinteden (a felület vagy az értesítés gombja). A küldés előtt
+        jóváhagyást kér, pontosan az összeggel; fizetni nem fizet."""
+        assert self.work is not None
+        result = self.work.deals.make_offer(deal_id, price, confirm=self.confirm,
+                                            progress=lambda detail: self._set_phase("working", f"Ajánlat: {detail}"))
+        self.ui.notice(result)
+        self.say(result)
+        self._tell("deal", "Ajánlat a Vinteden", result)
 
     def _research(self, item_id: str) -> None:
         """Árkutatás külön kérésre (csak ajánlás, nem állítja meg az eladást)."""

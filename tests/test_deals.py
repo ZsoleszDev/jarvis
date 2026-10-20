@@ -5,14 +5,22 @@ from __future__ import annotations
 import re
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from jarvis_core.browser import BrowserError  # noqa: E402
-from jarvis_core.deals import DealError, DealHunter, expected_profit  # noqa: E402
+from test_offline import make_cfg  # noqa: E402
+from test_web_browser import HAS_CHROMIUM  # noqa: E402
+
+from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
+from jarvis_core.deals import (DealError, DealHunter, ModelLane, expected_profit, highest_ok, left_text,  # noqa: E402
+                               offer_price, parse_auction)
+from jarvis_core.scheduler import Preempted  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
 
 
@@ -30,19 +38,43 @@ RESULTS = NORMAL + [
     listing(13, "Laptop táska", 5000),
 ]
 CHEAP = "https://hardverapro.hu/apro/100010.html"
+# Vatera: hamarosan záruló licitek (egy ismert keresésre illő, egy ismeretlen értékes, egy olcsó semmiség), egy
+# 3 nap múlva záruló és egy fix áras; és amennyiért máshol adják őket.
+AUCTIONS = [
+    {"text": "PS5 DualSense kontroller · Hátralévő idő: 2 óra 10 perc · 3 licit", "price": 3500,
+     "url": "https://www.vatera.hu/termek/1001", "auction": True},
+    {"text": "Nintendo Switch OLED konzol · Hátralévő idő: 1 óra 5 perc · 7 licit", "price": 20000,
+     "url": "https://www.vatera.hu/termek/1002", "auction": True},
+    {"text": "Régi könyvcsomag · Hátralévő idő: 3 óra · 0 licit", "price": 1, "url": "https://www.vatera.hu/termek/1003",
+     "auction": True},
+    {"text": "Xbox kontroller · Hátralévő idő: 3 nap · 1 licit", "price": 1, "url": "https://www.vatera.hu/termek/1004",
+     "auction": True},
+    {"text": "Fix áras PS5 kontroller", "price": 9000, "url": "https://www.vatera.hu/termek/1005"},
+]
+SWITCH = [listing(60 + n, f"Nintendo Switch OLED fehér {n}", p, "www.jofogas.hu") for n, p in
+          enumerate((100000, 95000, 105000, 98000, 102000))]
+CONTROLLERS = [listing(70 + n, f"PS5 DualSense kontroller {n}", p, "www.jofogas.hu") for n, p in
+               enumerate((14000, 13500, 15000, 13800, 14500))]
 
 
 class FakeBrowser:
-    """A keresők találatai, és egy-egy hirdetés oldala (pages: webcím → a lap szövege, vagy a lap adatai)."""
+    """A keresők találatai (by_url: ha a webcímben benne van a szó, azok a találatok), és egy-egy hirdetés oldala
+    (pages: webcím → a lap szövege, vagy a lap adatai). Feljegyzi, melyik szálról hívták (a böngésző egy szálon fut)."""
 
     def __init__(self, results=None, fail=()):
         self.results, self.fail, self.urls, self.looked = list(results or RESULTS), set(fail), [], []
         self.pages: dict[str, object] = {}
+        self.by_url: list[tuple[str, list[dict]]] = []
+        self.threads: set[str] = set()
 
     def extract_listings(self, url: str) -> list[dict]:
         self.urls.append(url)
+        self.threads.add(threading.current_thread().name)
         if any(f in url for f in self.fail):
             raise BrowserError("nem nyílt meg")
+        for word, results in self.by_url:
+            if word in url:
+                return [dict(r) for r in results]
         return [dict(r) for r in self.results]
 
     def look(self, url: str) -> dict:
@@ -62,13 +94,35 @@ class Clock:
 
 
 class FakeLlm:
-    """A felmérésnél (similar) a sorok közül választ (pick: melyik sor számít, alapból mind), a jelöltnél igen/nem."""
+    """A felmérésnél (similar) a sorok közül választ (pick: melyik sor számít, alapból mind), a jelöltnél igen/nem, a
+    Vatera-liciteknél (picks) az explore szerint. Feljegyzi, melyik szálról hívták, és hány hívás futott egyszerre."""
 
     def __init__(self, ok: bool = True, pick=None):
         self.ok, self.pick, self.calls, self.judged = ok, pick, [], []
+        self.explore: list[dict] = []
+        self.threads: set[str] = set()
+        self.running = self.most = 0
+        self.delay = 0.0
+        self.started = threading.Event()      # elindult egy modellhívás
+        self._lock = threading.Lock()
 
     def chat_json(self, messages, schema, **kwargs):
+        with self._lock:
+            self.running += 1
+            self.most = max(self.most, self.running)
+            self.threads.add(threading.current_thread().name)
+        self.started.set()
+        try:
+            time.sleep(self.delay)
+            return self._answer(messages, schema)
+        finally:
+            with self._lock:
+                self.running -= 1
+
+    def _answer(self, messages, schema):
         self.calls.append(messages)
+        if "picks" in schema["properties"]:
+            return {"picks": self.explore, "reason": "Ezek megérhetik."}
         if "similar" in schema["properties"]:
             lines = [line for line in messages[1]["content"].splitlines() if re.match(r"\d+\. ", line)]
             self.judged.append(lines)
@@ -275,7 +329,8 @@ class DealTests(unittest.TestCase):
         state = self.hunter.add_search("Nike Air Max 42", ["vinted", "nincs ilyen"], discount=95, exclude="Gyerek; gyerek")
         [search] = state["searches"]
         self.assertEqual((search["sites"], search["discount"], search["exclude"]), (["vinted"], 80, ["gyerek"]))
-        self.assertEqual([s["key"] for s in state["sites"]], ["vinted", "jofogas", "hardverapro"])
+        self.assertEqual([s["key"] for s in state["sites"]], ["vinted", "jofogas", "vatera", "hardverapro"],
+                         "a Vaterán a fix áras hirdetések is")
         self.hunter.accept(search["id"], 30000)
         [search] = self.hunter.update_search(search["id"], min_price="10000", every=60)["searches"]
         self.assertEqual((search["min_price"], search["every"], search["reference"]), (10000, 60, 30000))
@@ -288,7 +343,7 @@ class DealTests(unittest.TestCase):
         result = self.hunter.run(notify=self.notify)
         self.assertIn("order=newest_first", self.browser.urls[0], "a Vinteden a legújabb elöl")
         self.assertIn("Vinted: nem nyílt meg", result)
-        self.assertEqual(len(self.browser.urls), 3, "a többi oldalt is megnézte")
+        self.assertEqual(len(self.browser.urls), 4, "a többi oldalt is megnézte")
         self.assertEqual(len(self.notices), 1, "ugyanaz a hirdetés több oldalon is: egyszer")
         self.browser.results = []
         self.assertIn("Hardverapró: nem találtam árat a találati oldalon", self.hunter.run(notify=self.notify, force=True))
@@ -351,6 +406,282 @@ class DealTests(unittest.TestCase):
         other.run(notify=self.notify)
         [notice] = self.notices
         self.assertIn("nem néztem meg (robot-ellenőrzés)", notice[2], "captchánál szól, de jelzi, hogy nem nézte meg")
+
+
+    # --- ajánlat a Vinteden ---
+
+    def test_a_bit_too_expensive_on_vinted_suggests_an_offer(self):
+        self.browser.results = [listing(n, f"RTX 3060 Ti videókártya {n}", p, "www.vinted.hu") for n, p in
+                                enumerate((95000, 100000, 105000, 98000, 110000))] + [
+            listing(50, "MSI RTX 3060 Ti Ventus", 80000, "www.vinted.hu")]
+        self.hunter.add_search("RTX 3060 Ti", ["vinted"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: 1 olcsó hirdetés.")
+        [(_kind, title, text, extra)] = self.notices
+        self.assertEqual(title, "Olcsó: MSI RTX 3060 Ti Ventus")
+        self.assertIn("Ha 70 000 Ft-ért megkapod (ajánlattétel), kb. 18 500 Ft a haszon. Ajánlatot tegyek? Csak a "
+                      "jóváhagyásod után küldöm el.", text)
+        [deal] = self.hunter.state()["deals"]
+        self.assertEqual((deal["offer"], deal["profit"]), (70000, 18500))
+        self.assertEqual(extra["actions"][0], {"action": "offer", "deal": deal["id"], "label": "Ajánlatot teszek (70 000 Ft)"})
+        other = self.make("jofogas")
+        other.add_search("RTX 3060 Ti", ["jofogas"], reference=100000)
+        other.set_enabled(True)
+        self.notices.clear()
+        other.run(notify=self.notify)
+        self.assertEqual(self.notices, [], "ajánlatot csak a Vinteden lehet tenni")
+
+    def test_the_highest_price_that_still_pays_and_the_offer(self):
+        plain, profit = {"discount": 30}, {"discount": 30, "min_profit": 5000}
+        self.assertEqual((highest_ok(plain, 100000), highest_ok(profit, 100000)), (70000, 83500))
+        self.assertEqual(highest_ok({"discount": 30, "max_price": 50000}, 100000), 50000)
+        self.assertIsNone(highest_ok({"discount": 30, "min_price": 80000}, 100000), "az ársávban nincs ilyen")
+        for search in (plain, profit, {"discount": 10}, {"discount": 50, "min_profit": 1000}):
+            for reference in (4000, 14000, 13333, 100000):
+                top = highest_ok(search, reference)
+                if top is None:
+                    continue
+                self.assertTrue(self.hunter._cheap(search, top, reference), (search, reference))
+                self.assertFalse(self.hunter._cheap(search, top + 1, reference), (search, reference))
+        self.assertEqual(offer_price(plain, 80000, 100000), 70000)
+        self.assertIsNone(offer_price(plain, 95000, 100000), "26% engedmény: nem fogadná el")
+        self.assertIsNone(offer_price(plain, 70000, 100000), "így is megéri: nem kell ajánlat")
+
+    # --- Vatera-licitek ---
+
+    def test_auction_text(self):
+        self.assertEqual(parse_auction("PS5 kontroller · Hátralévő idő: 2 óra 10 perc · 3 licit"), {"left": 7800, "bids": 3})
+        self.assertEqual(parse_auction("Licitek: 12, még 1 nap 5 óra"), {"left": 104400, "bids": 12})
+        self.assertEqual(parse_auction("Azonnal megvásárolható"), {"left": None, "bids": None})
+        self.assertEqual((left_text(7800), left_text(104400), left_text(None)), ("2 óra 10 perc", "1 nap 5 óra",
+                                                                                "nem tudom, mikor"))
+
+    def test_vatera_auctions_known_searches_and_explored_ones(self):
+        self.browser.by_url = [("vatera.hu", AUCTIONS), ("Nintendo", SWITCH), ("PS5", CONTROLLERS)]
+        self.hunter.add_search("PS5 kontroller", ["jofogas"], reference=14000)
+        self.hunter.add_watch("https://www.vatera.hu/listings/index.php?c=123&ob=ending")
+        self.llm.explore = [{"n": 1, "query": "Nintendo Switch OLED"}]
+        self.hunter.set_enabled(True)
+        self.assertEqual(self.hunter.every_minutes(), 60.0)
+        self.assertEqual(self.hunter.run(notify=self.notify), "2 keresés: 2 olcsó hirdetés.")
+        notice = {title.split(" ·")[0]: text for _kind, title, text, _extra in self.notices}
+        self.assertIn("Legfeljebb 9 800 Ft-ig érdemes licitálni", notice["Licit: PS5 DualSense kontroller"])
+        switch = notice["Licit: Nintendo Switch OLED konzol"]
+        self.assertIn("1 óra 5 perc múlva zárul, most 20 000 Ft, 7 licit. Máshol kb. 100 000 Ft-ért adják. Legfeljebb "
+                      "85 500 Ft-ig érdemes licitálni", switch)
+        self.assertIn("Licitálni nem fogok helyetted.", switch)
+        explored = [m for m in self.llm.calls if "Hamarosan záruló licitek" in m[1]["content"]]
+        self.assertEqual(len(explored), 1, "a modell egyszer nézi át a liciteket")
+        self.assertNotIn("Xbox", explored[0][1]["content"], "a 3 nap múlva záruló még nem érdekes")
+        self.assertNotIn("Fix áras", explored[0][1]["content"], "a fix áras nem licit")
+        self.assertNotIn("PS5", explored[0][1]["content"], "ami illik egy keresésedre, ahhoz nem kell modell")
+        self.notices.clear()
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual(self.notices, [], "egy licitről egyszer szól")
+
+    def test_watch_validation_and_a_page_without_auctions(self):
+        for bad in ("", "https://example.com/aukcio"):
+            with self.assertRaises(DealError):
+                self.hunter.add_watch(bad)
+        [watch] = self.hunter.add_watch("PS5", min_profit="5 000", hours=3)["watches"]
+        self.assertEqual((watch["name"], watch["min_profit"], watch["hours"]), ("PS5", 5000, 3))
+        self.assertIn("vatera.hu/listings/index.php?q=PS5", watch["url"])
+        self.hunter.set_enabled(True)
+        self.assertIn("Vatera (PS5): nem találtam licitet az oldalon", self.hunter.run(notify=self.notify))
+        self.assertEqual(self.hunter.remove_watch(watch["id"])["watches"], [])
+
+    def test_without_a_model_unknown_auctions_are_not_explored(self):
+        self.browser.by_url = [("vatera.hu", AUCTIONS)]
+        hunter = self.make("modell-nelkul", llm=None)
+        hunter.add_watch("Nintendo")
+        hunter.set_enabled(True)
+        hunter.run(notify=self.notify)
+        self.assertEqual(self.notices, [])
+        self.assertEqual([u for u in self.browser.urls if "vatera" not in u], [], "máshol nem keresett")
+
+
+class LaneTests(unittest.TestCase):
+    def test_the_lane_runs_tasks_one_by_one_and_hands_results_back(self):
+        lane, got = ModelLane(), []
+        try:
+            for n in range(3):
+                lane.submit(lambda n=n: (threading.current_thread().name, n), got.append)
+            while lane.busy:
+                lane.deliver(wait=0.5)
+        finally:
+            lane.close()
+        self.assertEqual(got, [("jarvis-modell-sor", 0), ("jarvis-modell-sor", 1), ("jarvis-modell-sor", 2)])
+        deadline = time.monotonic() + 2
+        while lane.alive and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(lane.alive)
+
+    def test_model_calls_one_at_a_time_and_the_browser_stays_on_its_thread(self):
+        browser, llm = FakeBrowser(), FakeLlm()
+        llm.delay = 0.05
+        with tempfile.TemporaryDirectory() as tmp:
+            hunter = DealHunter(Path(tmp), PLATFORMS, lambda: browser, llm)
+            for _ in range(3):
+                hunter.add_search("RTX 3060 Ti", ["hardverapro"])
+            hunter.set_enabled(True)
+            hunter.run()
+            self.assertEqual(len(llm.judged), 3)
+        self.assertEqual((llm.most, llm.threads), (1, {"jarvis-modell-sor"}), "egyszerre egy modellhívás, a modell-sorban")
+        self.assertEqual(browser.threads, {threading.current_thread().name}, "a böngésző a hívó szálán marad")
+
+    def test_a_preempted_round_stops_the_lane(self):
+        browser, llm = FakeBrowser(), FakeLlm()
+        llm.delay = 1.0              # tovább tart, mint a kör egy várakozása (0,3 mp)
+
+        def check():
+            if llm.started.is_set():  # a felhasználó közbeszólt, miközben a modell dolgozik
+                raise Preempted()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hunter = DealHunter(Path(tmp), PLATFORMS, lambda: browser, llm)
+            hunter.add_search("RTX 3060 Ti", ["hardverapro"])
+            hunter.set_enabled(True)
+            with self.assertRaises(Preempted):
+                hunter.run(check=check)
+            self.assertEqual(hunter.state()["searches"][0]["status"], "felmérés", "a félbemaradt felmérés újra jön")
+        deadline = time.monotonic() + 3
+        while any(t.name == "jarvis-modell-sor" for t in threading.enumerate()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(any(t.name == "jarvis-modell-sor" for t in threading.enumerate()))
+
+
+# --- ajánlattétel egy helyi „Vinted” hirdetésen, valódi böngészővel ---
+
+OFFER_PAGE = """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>PS5 kontroller | Vinted</title></head>
+<body><header>{header}</header><main><h1>PS5 DualSense kontroller</h1><p>16 000 Ft</p>
+<button type="button">Vásárlás</button> {offer}
+<div id="modal" role="dialog" hidden><label>Ajánlatod (Ft) <input id="amount" type="number"></label>
+<button type="button" id="send">{send}</button></div><p id="out"></p></main>
+<script>
+const offer = document.getElementById('offer');
+if (offer) offer.onclick = () => {{ modal.hidden = false; }};
+send.onclick = () => {{
+  fetch('/offer?amount=' + amount.value, {{method: 'POST'}});
+  modal.hidden = true;
+  out.textContent = 'Ajánlat elküldve: ' + amount.value + ' Ft';
+}};
+</script></body></html>"""
+OFFER_BUTTON = '<button type="button" id="offer">Ajánlattétel</button>'
+PAGES = {
+    "/items/1-ps5": OFFER_PAGE.format(header="<a href='/member'>Profil</a>", offer=OFFER_BUTTON, send="Ajánlat küldése"),
+    "/items/2-sima": OFFER_PAGE.format(header="<a href='/member'>Profil</a>", offer=OFFER_BUTTON, send="Ajánlatot teszek"),
+    "/items/3-kint": OFFER_PAGE.format(header="<button type='button'>Bejelentkezés</button>", offer=OFFER_BUTTON,
+                                       send="Ajánlat küldése"),
+    "/items/4-nincs": OFFER_PAGE.format(header="<a href='/member'>Profil</a>", offer="", send="Ajánlat küldése"),
+}
+
+
+class OfferSite:
+    def __init__(self):
+        self.posts: list[str] = []
+        site = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                body = PAGES.get(self.path.split("?")[0], "<h1>Nincs</h1>")
+                data = body.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self):
+                site.posts.append(self.path.split("amount=")[-1])
+                self.send_response(204)
+                self.end_headers()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}{path}"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
+class OfferTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cfg = make_cfg(Path(cls.tmp.name))
+        cfg.browser.headless = True
+        cls.browser = BrowserController(cfg.browser, allow_local=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.site = OfferSite()
+        self.dir = tempfile.TemporaryDirectory()
+        self.hunter = DealHunter(Path(self.dir.name), PLATFORMS, lambda: self.browser, None)
+        self.prompts: list[str] = []
+        self.answer = True
+        # mint az app: a böngésző kérdése elé a jóváhagyó ablak első sora (WorkDesk.confirm_context)
+        self.browser.confirm = lambda prompt: self.confirm(f"{self.hunter.offering}\n\n{prompt}")
+
+    def tearDown(self):
+        self.site.close()
+        self.dir.cleanup()
+
+    def confirm(self, prompt: str) -> bool:
+        self.prompts.append(prompt)
+        return self.answer
+
+    def deal(self, path: str, platform: str = "vinted") -> str:
+        deal = {"id": f"d{len(self.prompts)}{path[-3:]}", "url": self.site.url(path), "text": "PS5 DualSense kontroller",
+                "site": "Vinted", "platform": platform, "price": 16000, "median": 20000, "offer": 14000,
+                "at": time.time()}
+        self.hunter._remember(deal)
+        return deal["id"]
+
+    def test_the_offer_goes_only_with_your_approval_and_the_exact_amount(self):
+        deal = self.deal("/items/1-ps5")
+        self.answer = False
+        self.assertEqual(self.hunter.make_offer(deal, None, confirm=self.confirm), "Rendben, nem tettem ajánlatot.")
+        self.assertEqual(self.site.posts, [])
+        self.assertIn("Ajánlat a Vinteden: 14 000 Ft – „PS5 DualSense kontroller” (most 16 000 Ft).", self.prompts[-1])
+        self.assertIn("fizetni magától nem fogok", self.prompts[-1])
+        self.answer = True
+        result = self.hunter.make_offer(deal, "13 500", confirm=self.confirm)
+        self.assertEqual(result, "Elküldtem az ajánlatot (13 500 Ft) a Vinteden. Ha az eladó elfogadja, a Vinted értesít, "
+                                 "és akkor megveheted.")
+        self.assertEqual(self.site.posts, ["13500"])
+        self.assertEqual(self.hunter.get(deal)["offer_sent"]["price"], 13500)
+        self.assertEqual(self.hunter.offering, "", "a jóváhagyó ablak első sora csak az ajánlattétel alatt")
+        with self.assertRaisesRegex(DealError, "Erre már tettél ajánlatot"):
+            self.hunter.make_offer(deal, None, confirm=self.confirm)
+
+    def test_a_send_button_the_browser_would_not_ask_about_still_needs_approval(self):
+        deal = self.deal("/items/2-sima")
+        self.answer = False
+        self.assertEqual(self.hunter.make_offer(deal, None, confirm=self.confirm), "Rendben, nem tettem ajánlatot.")
+        self.assertIn('Jarvis elküldené (erre kattintana: "Ajánlatot teszek")', self.prompts[-1])
+        self.assertEqual(self.site.posts, [])
+
+    def test_logged_out_or_no_offer_button_stops_and_bad_amounts(self):
+        with self.assertRaisesRegex(DealError, "Ki vagy jelentkezve"):
+            self.hunter.make_offer(self.deal("/items/3-kint"), None, confirm=self.confirm)
+        with self.assertRaisesRegex(DealError, "Nem találom a hirdetésen az Ajánlattétel gombot"):
+            self.hunter.make_offer(self.deal("/items/4-nincs"), None, confirm=self.confirm)
+        with self.assertRaisesRegex(DealError, "kevesebb a kért árnál"):
+            self.hunter.make_offer(self.deal("/items/1-ps5"), 16000, confirm=self.confirm)
+        with self.assertRaisesRegex(DealError, "csak a Vinteden"):
+            self.hunter.make_offer(self.deal("/items/1-ps5", platform="jofogas"), None, confirm=self.confirm)
+        self.assertEqual((self.site.posts, self.prompts), ([], []))
 
 
 class MatchTests(unittest.TestCase):

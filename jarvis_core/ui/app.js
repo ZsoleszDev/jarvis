@@ -495,7 +495,7 @@ $("jobs-body").addEventListener("change", async (event) => {
 
 let noticeList = [];
 let noticesUnread = 0;
-const NOTICE_ACTIONS = ["sold", "login", "captcha", "deals"];
+const NOTICE_ACTIONS = ["sold", "login", "captcha", "deals", "offer"];
 
 function setNoticesUnread(count) {
   noticesUnread = Math.max(0, count);
@@ -606,7 +606,7 @@ let hashAction = null;
 if (/^#act=/.test(location.hash)) {
   const wanted = new URLSearchParams(location.hash.slice(1));
   hashAction = { action: wanted.get("act"), item: wanted.get("item") || "", where: wanted.get("where") || "",
-                 platform: wanted.get("platform") || "", delist: wanted.get("delist") !== "0" };
+                 platform: wanted.get("platform") || "", delist: wanted.get("delist") !== "0", deal: wanted.get("deal") || "" };
   history.replaceState(null, "", location.pathname + location.search);
 }
 if ("serviceWorker" in navigator) {

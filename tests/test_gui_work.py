@@ -130,6 +130,24 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertEqual((status, data["searches"][-1]["status"]), (200, "felmérés"))
         self.post("/api/work/deals", {"action": "remove", "id": search["id"]})
 
+    def test_vatera_watches_and_offers_from_the_window(self):
+        status, data = self.post("/api/work/deals", {"action": "watch_add", "target": "PS5", "min_profit": "4000",
+                                                     "hours": "4", "every": "60"})
+        self.assertEqual(status, 200, data)
+        [watch] = data["watches"]
+        self.assertEqual((watch["name"], watch["min_profit"], watch["hours"], watch["every"]), ("PS5", 4000, 4, 60))
+        status, data = self.post("/api/work/deals", {"action": "watch_add", "target": "https://example.com/x"})
+        self.assertEqual(status, 400, "csak Vatera-oldal")
+        status, data = self.post("/api/work/deals", {"action": "watch_remove", "id": watch["id"]})
+        self.assertEqual((status, data["watches"]), (200, []))
+        status, data = self.post("/api/work/deals", {"action": "offer", "id": "nincs-ilyen"})
+        self.assertEqual(status, 400)
+        self.h.app.work.deals._remember({"id": "o1", "url": "https://www.jofogas.hu/1", "text": "PS5 kontroller",
+                                         "site": "Jófogás", "platform": "jofogas", "price": 16000, "median": 20000,
+                                         "offer": 14000, "at": time.time()})
+        status, data = self.post("/api/work/deals", {"action": "offer", "id": "o1"})
+        self.assertEqual(status, 202, "az ágens-szálon fut, és a küldés előtt rákérdez")
+
     def test_bought_deal_becomes_an_item_and_profit_is_tracked(self):
         deals = self.h.app.work.deals
         deals._remember({"id": "d1", "url": "https://hardverapro.hu/apro/1.html", "text": "RTX 3060 Ti", "site": "Hardverapró",
