@@ -140,6 +140,8 @@ A tárgy fontos mezői:
   a cím a feltöltéskor. A háttérellenőrzés (lásd lent) eredménye: `check` (`live` fent van, `sold` elkeltnek látszik,
   `gone` már nincs fent, `unknown` nem nyílt meg), `checked_at` (mikor), `check_note` (miből látszik, vagy miért
   nem nyílt meg); `check_dismissed`: ezt a jelzést nem igaznak jelölted (`/dismiss`), pontosan ugyanazt nem hozza fel újra (`check_dismissed_note`), egy másikat igen.
+- `bought_price`, `bought_at`, `source`, `sold_price`, `sold_at`: haszonkövetés (mennyiért vetted, honnan, mennyiért
+  adtad el; az `sold_price` az Eladva jelöléskor az akkori ár). A `bought_price` és a `sold_price` a `PATCH`-csel átírható.
 - `drift`: ahol a fent lévő hirdetésben még a régi ár vagy cím van (itt átírtad, ott nem; Jarvis a fent lévő
   hirdetést magától nem szerkeszti): `[{platform, price?, title?}]`, csak az eltérő mezőkkel.
 - `online_since` (mióta van fent valahol, Unix-idő vagy `null`), `days_online` („12 napja fent”, vagy `null`).

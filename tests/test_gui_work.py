@@ -113,6 +113,27 @@ class WorkSecurityTests(unittest.TestCase):
                     "/api/work/photo/../../01.jpg"):
             self.assertEqual(request(self.port, "GET", f"{bad}?t={self.h.server.token}", host)[0], 404, bad)
 
+    def test_bought_deal_becomes_an_item_and_profit_is_tracked(self):
+        deals = self.h.app.work.deals
+        deals._remember({"id": "d1", "url": "https://hardverapro.hu/apro/1.html", "text": "RTX 3060 Ti", "site": "Hardverapró",
+                         "price": 55000, "median": 100000, "margin": 45000, "at": time.time()})
+        status, data = self.post("/api/work/deals", {"action": "bought", "id": "d1", "price": "52 000"})
+        self.assertEqual(status, 200, data)
+        item = self.h.store.get(data["item"])
+        self.assertEqual((item.bought_price, item.source, item.prompt),
+                         (52000, "https://hardverapro.hu/apro/1.html", "RTX 3060 Ti, 100000 Ft"))
+        self.assertEqual(data["deals"][0]["bought"], item.id)
+        self.assertEqual(data["profit"]["open"], {"count": 1, "spent": 52000})
+        self.h.store.update(item.id, price=95000)
+        self.h.store.mark(item.id, sold=True)
+        status, data = request(self.port, "GET", f"/api/work/deals?t={self.h.server.token}", self.ok)
+        profit = json.loads(data)["profit"]
+        self.assertEqual((profit["month"], profit["total"]["profit"], profit["open"]["count"]),
+                         ({"profit": 43000, "count": 1}, 43000, 0))
+        status, data = self.post("/api/work/update", {"id": item.id, "fields": {"sold_price": "90000"}})
+        self.assertEqual((status, self.h.store.get(item.id).sold_price), (200, 90000), "az eladási ár átírható")
+        self.h.store.delete(item.id)
+
     def test_upload_needs_token_and_same_origin(self):
         item = self.h.store.create(targets=["vinted"])
         path = f"/api/work/items/{item.id}/photo"

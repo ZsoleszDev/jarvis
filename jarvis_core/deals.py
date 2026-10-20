@@ -76,6 +76,43 @@ class DealError(Exception):
     pass
 
 
+def profit_report(items: list[Item], now: float | None = None) -> dict[str, Any]:
+    """Haszonkövetés a vételárral megjelölt tárgyakból (Megvettem, vagy a tárgy lapján a Vételár): az eladottak haszna
+    (eladási ár − vételár) ebben a hónapban és összesen, átlagosan hány nap alatt kelt el, és mennyi pénz van még
+    bent a meg nem eladott tárgyakban."""
+    now = time.time() if now is None else now
+    month = time.localtime(now)[:2]
+    rows, total, this_month, days = [], [0, 0, 0, 0], [0, 0], []   # haszon, darab, vételár, bevétel
+    open_count, open_spent = 0, 0
+    for item in items:
+        if item.bought_price is None:
+            continue
+        row: dict[str, Any] = {"id": item.id, "name": item.name, "bought_price": item.bought_price,
+                               "sold": item.sold, "sold_price": item.sold_price, "profit": None, "days": None}
+        if item.sold and item.sold_price is not None:
+            profit = item.sold_price - item.bought_price
+            row["profit"] = profit
+            total[0] += profit
+            total[1] += 1
+            total[2] += item.bought_price
+            total[3] += item.sold_price
+            if item.sold_at and item.bought_at:
+                row["days"] = max(0, int((item.sold_at - item.bought_at) // 86400))
+                days.append(row["days"])
+            if item.sold_at and time.localtime(item.sold_at)[:2] == month:
+                this_month[0] += profit
+                this_month[1] += 1
+        elif not item.sold:
+            open_count += 1
+            open_spent += item.bought_price
+        rows.append(row)
+    rows.sort(key=lambda r: (r["sold"], r["name"]))
+    return {"month": {"profit": this_month[0], "count": this_month[1]},
+            "total": {"profit": total[0], "count": total[1], "spent": total[2], "revenue": total[3]},
+            "open": {"count": open_count, "spent": open_spent},
+            "days": round(sum(days) / len(days)) if days else None, "rows": rows}
+
+
 class DealHunter:
     """A keresések, a kapcsoló és a talált olcsó hirdetések (munka/kereskedes.json)."""
 
@@ -159,6 +196,22 @@ class DealHunter:
     def remove_search(self, search_id: str) -> dict[str, Any]:
         with self._lock:
             self._data["searches"] = [s for s in self._data["searches"] if s.get("id") != search_id]
+            self._save()
+        return self.state()
+
+    def get(self, deal_id: str) -> dict[str, Any]:
+        with self._lock:
+            for deal in self._data["deals"]:
+                if deal.get("id") == deal_id:
+                    return dict(deal)
+        raise DealError("Ez a találat már nincs meg.")
+
+    def mark_bought(self, deal_id: str, item_id: str) -> dict[str, Any]:
+        """Megvetted: a találatból eladási tárgy lett (item_id); a listában jelölve marad."""
+        with self._lock:
+            for deal in self._data["deals"]:
+                if deal.get("id") == deal_id:
+                    deal["bought"] = item_id
             self._save()
         return self.state()
 

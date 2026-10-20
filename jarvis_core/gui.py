@@ -30,7 +30,7 @@ from . import console, creative_templates, instance, qr, remote
 from .app import STATE_TEXT, JarvisApp, tool_label
 from .config import GuiCfg, app_data
 from .creative import MAX_TEXT, StoryError
-from .deals import DealError
+from .deals import DealError, profit_report
 from .dossier import open_folder
 from .gpu import GpuMonitor
 from .messages import CONV_ID_RE, MAX_TEXT as MAX_MESSAGE
@@ -48,7 +48,8 @@ PHOTO_POST_RE = re.compile(r"^/api/work/items/([0-9a-f]{8})/photo$")
 MAX_VOICE_BYTES = 15 * 1024 * 1024    # a telefon vagy a laptop mikrofonjával felvett kérdés (távoli ablak)
 # Amit a felületről át lehet írni egy tárgyon, és amit el lehet indítani.
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
-            "size", "condition", "color", "material", "price", "min_price", "location", "shipping"}
+            "size", "condition", "color", "material", "price", "min_price", "location", "shipping", "bought_price",
+            "sold_price"}
 ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold"}
 IS_WINDOWS = sys.platform == "win32"
 CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
@@ -481,7 +482,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "items": [i.public() for i in work.store.all()],
                                     **work.describe()})
         if path == "/api/work/deals":
-            return self._json(200, {"ok": True, **work.deals.state()})
+            return self._json(200, {"ok": True, **work.deals.state(), "profit": profit_report(work.store.all())})
         if path == "/api/work/messages":
             return self._json(200, {"ok": True, "conversations": work.messages.conversations(),
                                     "unread": work.messages.unread_count(), "browser": work.messages.browser is not None})
@@ -771,6 +772,13 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **deals.remove_search(str(body.get("id") or ""))})
             if action == "dismiss":
                 return self._json(200, {"ok": True, **deals.dismiss(str(body.get("id") or ""))})
+            if action == "bought":      # Megvettem: eladási tárgy lesz belőle, a vételárral (haszonkövetés)
+                deal = deals.get(str(body.get("id") or ""))
+                store = self._work().store
+                item = store.create(prompt=f"{deal['text']}, {deal['median']} Ft", source=deal["url"],
+                                    bought_price=body.get("price") or deal["price"], bought_at=time.time())
+                state = deals.mark_bought(deal["id"], item.id)
+                return self._json(200, {"ok": True, **state, "item": item.id, "profit": profit_report(store.all())})
             if action == "run":
                 if app is None or app.scheduler is None or "deals" not in app.scheduler.jobs:
                     return self._json(409, {"ok": False, "error": "A kereséshez Jarvis saját böngészője kell."})
@@ -778,7 +786,7 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(409, {"ok": False, "error": "Kapcsold be, és adj meg legalább egy keresést."})
                 app.run_job_now("deals")
                 return self._json(202, {"ok": True})
-        except DealError as exc:
+        except (DealError, ItemError) as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
         return self._json(400, {"ok": False})
 

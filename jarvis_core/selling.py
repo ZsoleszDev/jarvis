@@ -51,7 +51,7 @@ DESCRIPTION_FOOTER = ("Ha kell pontos méret vagy több kép, írj nyugodtan! A 
                       "ha többet rendelsz egyben, a csomag-összeállítással olcsóbban kapod meg.")
 TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200, "brand": 80,
                "size": 40, "gender": 20, "condition": 40, "color": 60, "material": 120, "location": 80,
-               "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20}
+               "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20, "source": 300}
 MULTILINE = {"description", "prompt"}
 POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
 # Egy fent lévő hirdetés újbóli megjelölésekor (ugyanaz a hirdetés) ezek maradnak: mióta van fent, a feltöltéskori ár és cím,
@@ -200,6 +200,13 @@ class Item:
     platforms: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending: dict[str, Any] = field(default_factory=dict)  # visszakérdezés vagy árdöntés
     sold: bool = False
+    # Haszonkövetés (deals.profit_report): mennyiért vetted, honnan, és mennyiért adtad el (az Eladva jelölésekor
+    # az akkori ár, utána átírható).
+    bought_price: int | None = None
+    bought_at: float = 0.0
+    source: str = ""                  # a hirdetés, ahol vetted (Automata kereskedés, Megvettem)
+    sold_price: int | None = None
+    sold_at: float = 0.0
     reminded: float = 0.0             # mikor szólt utoljára, hogy régóta fent van és nem kelt el
     busy: str = ""                    # épp min dolgozik a Jarvis (nem mentjük)
 
@@ -498,8 +505,10 @@ class ItemStore:
     def _apply(self, item: Item, values: dict[str, Any]) -> list[str]:
         changed = []
         for key, value in values.items():
-            if key in ("price", "min_price"):
+            if key in ("price", "min_price", "bought_price", "sold_price"):
                 value = parse_price(value)
+            elif key in ("bought_at", "sold_at"):
+                value = float(value or 0)
             elif key == "condition":
                 value = closest_condition(str(value or "")) if value else ""
             elif key == "kind":
@@ -592,6 +601,12 @@ class ItemStore:
                         entry.setdefault("posted_title", item.title)
                 item.platforms[platform] = entry
             if sold is not None:
+                if sold and not item.sold:          # most kelt el: az akkori ár és idő a haszonkövetéshez
+                    item.sold_at = time.time()
+                    if item.sold_price is None:
+                        item.sold_price = item.price
+                elif not sold:
+                    item.sold_at = 0.0
                 item.sold = bool(sold)
             return self._changed(item)
 

@@ -47,7 +47,8 @@ CODE_TRIES = 5
 LOG_LIMIT = 800
 LOG_SKIP = {"delta", "level", "segment_end"}       # ezek túl sűrűk; a végleges szöveg "assistant" eseményként jön
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
-            "size", "condition", "color", "material", "price", "min_price", "location", "shipping"}
+            "size", "condition", "color", "material", "price", "min_price", "location", "shipping", "bought_price",
+            "sold_price"}
 AGENT_ACTIONS = {"sell", "reply", "price", "post", "research", "delist"}
 
 

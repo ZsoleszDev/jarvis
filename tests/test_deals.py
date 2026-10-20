@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -215,6 +216,30 @@ class DealTests(unittest.TestCase):
         other.run(notify=self.notify)
         [notice] = self.notices
         self.assertIn("nem néztem meg (robot-ellenőrzés)", notice[2], "captchánál szól, de jelzi, hogy nem nézte meg")
+
+
+
+class ProfitTests(unittest.TestCase):
+    def test_profit_month_total_days_and_money_still_in_items(self):
+        from jarvis_core.deals import profit_report
+        from jarvis_core.selling import ItemStore
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ItemStore(Path(tmp))
+            now = time.time()
+            sold = store.create(title="RTX 3060 Ti", price=95000, bought_price=55000, bought_at=now - 10 * 86400)
+            store.mark(sold.id, sold=True)
+            self.assertEqual(store.get(sold.id).sold_price, 95000, "az Eladva jelöléskor az akkori ár")
+            old = store.create(title="PS5 kontroller", bought_price=9000, sold_price=12000, bought_at=now - 90 * 86400)
+            store.mark(old.id, sold=True)
+            store.update(old.id, sold_at=now - 60 * 86400)
+            store.create(title="Nike Air Max", bought_price=15000)
+            store.create(title="Saját póló", price=2000)          # nem vett tárgy: nem számít
+            report = profit_report(store.all(), now)
+        self.assertEqual(report["month"], {"profit": 40000, "count": 1})
+        self.assertEqual(report["total"], {"profit": 43000, "count": 2, "spent": 64000, "revenue": 107000})
+        self.assertEqual(report["open"], {"count": 1, "spent": 15000})
+        self.assertEqual(report["days"], 20, "átlagosan (10 + 30) / 2 nap alatt kelt el")
+        self.assertEqual([r["name"] for r in report["rows"]], ["Nike Air Max", "PS5 kontroller", "RTX 3060 Ti"])
 
 
 if __name__ == "__main__":

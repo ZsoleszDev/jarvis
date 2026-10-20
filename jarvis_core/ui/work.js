@@ -390,7 +390,8 @@
 
   // --- Automata kereskedés: olcsó hirdetések keresése (deals.py) ---
   let job = "sales";
-  let deals = { enabled: false, searches: [], deals: [], sites: [], browser: false };
+  let deals = { enabled: false, searches: [], deals: [], sites: [], browser: false, profit: null };
+  let buying = null;      // a találat, aminél épp a vételárat írod (Megvettem)
   async function loadDeals() {
     try {
       const response = await fetch("/api/work/deals?t=" + encodeURIComponent(token));
@@ -401,9 +402,9 @@
   async function dealAction(body) {
     const result = await J.postJson("/api/work/deals", body);
     if (!result.ok) { J.toast(result.error || "Nem sikerült."); return false; }
-    if (result.searches) deals = result;
+    if (result.searches) deals = { ...deals, ...result };
     render();
-    return true;
+    return result;
   }
   function setJob(name) {
     job = name;
@@ -423,17 +424,33 @@
         <small class="muted">${esc(s.sites.map(siteName).join(", "))} · ${s.discount}%-kal olcsóbb · ${esc(every(s.every))}
         ${s.max_price ? " · legfeljebb " + esc(price(s.max_price)) : ""}</small></span>
         <button type="button" class="small quiet" data-deal-remove="${esc(s.id)}">Törlés</button></li>`).join("");
+    const p = deals.profit;
+    const profitBox = p && (p.rows.length) ? `
+      <h3 class="section-title">Haszon</h3>
+      <p class="profit"><b>${esc(price(p.month.profit) || "0 Ft")}</b> ebben a hónapban (${p.month.count} eladás) ·
+        összesen <b>${esc(price(p.total.profit) || "0 Ft")}</b> (${p.total.count} eladás${p.days !== null ? `, átlagosan ${p.days} nap alatt` : ""})
+        ${p.open.count ? ` · bent van ${esc(price(p.open.spent))} (${p.open.count} tárgy még nem kelt el)` : ""}</p>
+      <details class="setup"><summary>Tárgyak vételárral</summary><ul class="dealist">${p.rows.map((r) => `<li><span>
+        <button type="button" class="linklike" data-open="${esc(r.id)}">${esc(r.name)}</button>
+        <small class="muted">vétel ${esc(price(r.bought_price))}${r.sold ? ` · eladva ${esc(price(r.sold_price) || "?")}` : " · még nem kelt el"}
+        ${r.profit !== null ? ` · haszon <b>${esc(price(r.profit))}</b>` : ""}${r.days !== null ? ` · ${r.days} nap` : ""}</small></span></li>`).join("")}</ul></details>` : "";
+    const buyButton = (d) => d.bought ? '<small class="muted">Megvetted ✓</small>'
+      : buying === d.id ? `<span class="row"><input id="d-paid" type="number" min="1" value="${esc(d.price)}" style="width: 6em" aria-label="Vételár (Ft)">
+          <button type="button" class="small primary" data-deal-paid="${esc(d.id)}">Mentés</button></span>`
+      : `<button type="button" class="small" data-deal-buy="${esc(d.id)}">Megvettem</button>`;
     const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.text)}</a>
         <small class="muted">${esc(d.site)} · <b>${esc(price(d.price))}</b>, szokásos ár ${esc(price(d.median))}
         (kb. ${esc(price(d.margin))}-tal olcsóbb)${d.note ? " · " + esc(d.note) : ""}</small>
         ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}</span>
-        <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></li>`).join("");
+        <span class="row">${buyButton(d)}
+        <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></span></li>`).join("");
     box.innerHTML = `
       <label class="check"><input type="checkbox" id="d-enabled" ${deals.enabled ? "checked" : ""}> <b>Bekapcsolva</b></label>
       <p class="muted">A legújabb hirdetéseket nézi, és szól, ha valami jóval olcsóbb a szokásos áránál. A jelölt hirdetés
         oldalát is átnézi (elkelt-e, hibás-e, gyanús-e), és csak utána kérdezi meg a modellt. Csak olvas: semmit nem vesz
         meg, és nem ír senkinek. A Vintedet legfeljebb kétóránként nézi.
         ${deals.browser ? "" : "<b>Ehhez Jarvis saját böngészője kell.</b>"}</p>
+      ${profitBox}
       <h3 class="section-title">Keresések</h3>
       <ul class="dealist">${searches || '<li class="muted">Még nincs keresés.</li>'}</ul>
       <form id="d-add" class="compose" autocomplete="off">
@@ -462,6 +479,17 @@
     });
     for (const b of box.querySelectorAll("[data-deal-remove]")) b.addEventListener("click", () => dealAction({ action: "remove", id: b.dataset.dealRemove }));
     for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
+    for (const b of box.querySelectorAll("[data-deal-buy]")) b.addEventListener("click", () => { buying = b.dataset.dealBuy; renderDeals(); $("d-paid").focus(); });
+    for (const b of box.querySelectorAll("[data-deal-paid]")) b.addEventListener("click", async () => {
+      const result = await dealAction({ action: "bought", id: b.dataset.dealPaid, price: $("d-paid").value });
+      if (!result) return;
+      buying = null;
+      J.toast("Felvettem az eladandók közé, a vételárral. Pipáld be, hova töltsem fel.");
+      openId = result.item;
+      await load();
+      setJob("sales");
+    });
+    for (const b of box.querySelectorAll("[data-open]")) b.addEventListener("click", () => { openId = b.dataset.open; setJob("sales"); });
   }
 
   function render() {
@@ -730,6 +758,10 @@
           ${field("price", "Ár (Ft)", item.price ?? "", 'inputmode="numeric"')}
           ${messagesOn ? field("min_price", "Alkunál legalább (Ft)", item.min_price ?? "",
             `inputmode="numeric" placeholder="${esc(price(item.price) || "az ár")}"`) : ""}
+          ${field("bought_price", "Vételár (Ft)", item.bought_price ?? "", 'inputmode="numeric" placeholder="ha vetted"')}
+          ${item.sold ? field("sold_price", "Eladási ár (Ft)", item.sold_price ?? "", 'inputmode="numeric"') : ""}
+          ${item.sold && item.bought_price != null && item.sold_price != null
+            ? `<div class="field"><label>Haszon</label><b>${esc(price(item.sold_price - item.bought_price))}</b></div>` : ""}
           ${conditionField(item.condition)}
           ${field("brand", "Márka", item.brand)}
           ${field("size", "Méret", item.size)}
