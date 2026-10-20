@@ -421,6 +421,7 @@ Az újabb Ollama (0.40-től) a modellt egy beépített llama-serverrel tölti be
 ## Beállítások (`config.toml`)
 
 **Beszéd és hang**
+- `[stt] enabled = false`: csak gépelés, mint a `--text` kapcsoló, de az automatikus indításnál is érvényes. Nem tölti be a beszédfelismerőt (a „turbo” modell kb. 1,6 GB VRAM), így gyorsabban indul, és több hely marad a nyelvi modellnek. A mikrofon és az ébresztőszó sem fut, és a telefonról küldött hangüzenetre azt írja, hogy küldd el szövegként.
 - `[stt] device`: `"auto"` (GPU, ha lehet), `"cuda"` vagy `"cpu"`.
 - `[stt] gpu_device_index`: az `nvidia-smi` sorszáma. Nálad 0 = RTX 3060 Ti, 1 = RTX 5060 Ti.
 - `[stt] initial_prompt`: gyakori szavak, nevek, így jobban felismeri őket.

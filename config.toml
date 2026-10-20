@@ -41,6 +41,10 @@ request_timeout = 180
 warm_up = true
 
 [stt]
+# false: csak gépelés (mint a --text kapcsoló): nem tölti be a beszédfelismerőt és a mikrofont, így gyorsabban
+# indul, és a videókártyán is több hely marad a nyelvi modellnek. A telefonról küldött hangüzenet ilyenkor nem
+# megy, írásban igen. Az ébresztőszó is a mikrofonra épül, az sem fut.
+enabled = true
 # "auto": GPU, ha a CUDA-könyvtárak telepítve vannak (requirements-gpu.txt), különben CPU
 # "cuda": mindenképp GPU    "cpu": mindenképp CPU
 device = "auto"

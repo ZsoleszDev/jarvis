@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from jarvis_core import cuda_libs, textutil  # noqa: E402
 from jarvis_core.assistant import FALLBACK_REPLY, TOO_LONG_REPLY, TOO_MANY_STEPS, Assistant  # noqa: E402
+from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.config import Config, load_config  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, normalize_message  # noqa: E402
 from jarvis_core.recorder import Recorder, resample  # noqa: E402
@@ -206,6 +207,18 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("jegyzettömb", cfg.apps)
         self.assertIsInstance(cfg.stt.gpu_device_index, int)
         self.assertEqual(cfg.tts.voice, "hu_HU-imre-medium")
+
+    def test_speech_recognition_can_be_switched_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.toml"
+            path.write_text("[stt]\nenabled = false\n", encoding="utf-8")
+            loaded = load_config(path)
+            self.assertFalse(loaded.stt.enabled)
+            self.assertFalse(any("enabled" in w for w in loaded.warnings))
+            cfg = make_cfg(Path(tmp))
+            cfg.stt.enabled = False
+            app = JarvisApp(cfg, mock.Mock(), use_voice=True, use_speech=False, use_wake_word=False)
+            self.assertFalse(app.use_voice, "mint a --text: a beszédfelismerő be sem töltődik")
 
     def test_unknown_keys_produce_warnings(self):
         with tempfile.TemporaryDirectory() as tmp:

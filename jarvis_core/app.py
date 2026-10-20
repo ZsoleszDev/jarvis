@@ -232,7 +232,7 @@ class JarvisApp:
         self.cfg = cfg
         self.ui = ui
         self.name = cfg.assistant.name
-        self.use_voice = use_voice
+        self.use_voice = use_voice and cfg.stt.enabled   # [stt] enabled = false: mint a --text
         self.use_speech = use_speech
         self.use_wake_word = use_wake_word
         self.llm = OllamaClient(cfg.llm)

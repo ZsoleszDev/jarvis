@@ -46,6 +46,7 @@ class LlmCfg:
 
 @dataclass
 class SttCfg:
+    enabled: bool = True   # false: nincs mikrofon és beszédfelismerés (mint a --text), csak gépelés
     device: str = "auto"
     language: str = "hu"
     gpu_model: str = "turbo"
