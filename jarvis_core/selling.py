@@ -1141,7 +1141,7 @@ def _same_listing(words: set[str], price: int, other: set[str], other_price: int
     return len(words & other) / len(words | other) >= 0.8
 
 
-def prefilter(item: Item, rows: list[dict[str, Any]], limit: int = JUDGE_ROWS
+def prefilter(item: Item, rows: list[dict[str, Any]], limit: int = JUDGE_ROWS, dedupe: bool = True
               ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Modell nélküli előszűrés a bíráló modellhívás előtt. Kimarad: a kereső- és a cserehirdetés, a csomag,
     az alkatrész és a hibás (hacsak a te tárgyad nem ilyen), ami egy szóban sem egyezik a tárgyad címével,
@@ -1173,7 +1173,7 @@ def prefilter(item: Item, rows: list[dict[str, Any]], limit: int = JUDGE_ROWS
             reason = "alkatrész"
         elif wanted and not _shared(wanted, words):
             reason = "más termék"
-        elif any(_same_listing(words, price, other, other_price) for other, other_price in seen):
+        elif dedupe and any(_same_listing(words, price, other, other_price) for other, other_price in seen):
             reason = "ismétlődő"
         if reason:
             dropped[reason] = dropped.get(reason, 0) + 1

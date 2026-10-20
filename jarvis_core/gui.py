@@ -30,6 +30,7 @@ from . import console, creative_templates, instance, qr, remote
 from .app import STATE_TEXT, JarvisApp, tool_label
 from .config import GuiCfg, app_data
 from .creative import MAX_TEXT, StoryError
+from .deals import DealError
 from .dossier import open_folder
 from .gpu import GpuMonitor
 from .messages import CONV_ID_RE, MAX_TEXT as MAX_MESSAGE
@@ -479,6 +480,8 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/work/items":
             return self._json(200, {"ok": True, "items": [i.public() for i in work.store.all()],
                                     **work.describe()})
+        if path == "/api/work/deals":
+            return self._json(200, {"ok": True, **work.deals.state()})
         if path == "/api/work/messages":
             return self._json(200, {"ok": True, "conversations": work.messages.conversations(),
                                     "unread": work.messages.unread_count(), "browser": work.messages.browser is not None})
@@ -669,6 +672,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if path.startswith("/api/work/messages/"):
                 return self._messages_post(path, body, remote)
+            if path == "/api/work/deals":
+                return self._deals_post(body)
             if path == "/api/work/new":
                 values = {"targets": body.get("targets") or [], "prompt": str(body.get("prompt") or ""),
                           "research_wanted": bool(body.get("research_wanted"))}
@@ -749,6 +754,32 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             return self._json(500, {"ok": False, "error": f"Nem sikerült: {exc}"})
         self._json(404, {"ok": False})
+
+    def _deals_post(self, body: dict[str, Any]) -> None:
+        """Az Automata kereskedés gombjai: be/ki, keresés hozzáadása és törlése, egy találat elrejtése, keresés most."""
+        app, deals = self.gui.app, self._work().deals
+        action = str(body.get("action") or "")
+        try:
+            if action == "enable":
+                return self._json(200, {"ok": True, **deals.set_enabled(bool(body.get("on")))})
+            if action == "add":
+                sites = body.get("sites") if isinstance(body.get("sites"), list) else None
+                return self._json(200, {"ok": True, **deals.add_search(str(body.get("query") or ""), sites,
+                                                                      body.get("max_price"), body.get("discount"))})
+            if action == "remove":
+                return self._json(200, {"ok": True, **deals.remove_search(str(body.get("id") or ""))})
+            if action == "dismiss":
+                return self._json(200, {"ok": True, **deals.dismiss(str(body.get("id") or ""))})
+            if action == "run":
+                if app is None or app.scheduler is None or "deals" not in app.scheduler.jobs:
+                    return self._json(409, {"ok": False, "error": "A kereséshez Jarvis saját böngészője kell."})
+                if not deals.available():
+                    return self._json(409, {"ok": False, "error": "Kapcsold be, és adj meg legalább egy keresést."})
+                app.run_job_now("deals")
+                return self._json(202, {"ok": True})
+        except DealError as exc:
+            return self._json(400, {"ok": False, "error": str(exc)})
+        return self._json(400, {"ok": False})
 
     def _messages_post(self, path: str, body: dict[str, Any], remote: bool = False) -> None:
         """A vevői üzenetek gombjai: vázlat kérése, a vázlat mentése, megnézve, küldés (jóváhagyással), frissítés."""

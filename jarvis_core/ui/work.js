@@ -388,8 +388,87 @@
     $("w-compose").classList.toggle("folded");
   });
 
+  // --- Automata kereskedés: olcsó hirdetések keresése (deals.py) ---
+  let job = "sales";
+  let deals = { enabled: false, searches: [], deals: [], sites: [], browser: false };
+  async function loadDeals() {
+    try {
+      const response = await fetch("/api/work/deals?t=" + encodeURIComponent(token));
+      if (response.ok) deals = await response.json();
+    } catch { /* a következő megnyitáskor újra */ }
+    if (job === "deals") render();
+  }
+  async function dealAction(body) {
+    const result = await J.postJson("/api/work/deals", body);
+    if (!result.ok) { J.toast(result.error || "Nem sikerült."); return false; }
+    if (result.searches) deals = result;
+    render();
+    return true;
+  }
+  function setJob(name) {
+    job = name;
+    $("job-sales").setAttribute("aria-selected", String(name === "sales"));
+    $("job-deals").setAttribute("aria-selected", String(name === "deals"));
+    if (name === "deals") loadDeals();
+    render();
+  }
+  $("job-sales").addEventListener("click", () => setJob("sales"));
+  $("job-deals").addEventListener("click", () => setJob("deals"));
+
+  function renderDeals() {
+    const box = $("w-deals");
+    const siteName = (key) => (deals.sites.find((s) => s.key === key) || { name: key }).name;
+    const searches = deals.searches.map((s) => `<li><span><b>${esc(s.query)}</b>
+        <small class="muted">${esc(s.sites.map(siteName).join(", "))} · ${s.discount}%-kal olcsóbb
+        ${s.max_price ? " · legfeljebb " + esc(price(s.max_price)) : ""}</small></span>
+        <button type="button" class="small quiet" data-deal-remove="${esc(s.id)}">Törlés</button></li>`).join("");
+    const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.text)}</a>
+        <small class="muted">${esc(d.site)} · <b>${esc(price(d.price))}</b>, szokásos ár ${esc(price(d.median))}
+        (kb. ${esc(price(d.margin))}-tal olcsóbb)${d.note ? " · " + esc(d.note) : ""}</small></span>
+        <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></li>`).join("");
+    box.innerHTML = `
+      <label class="check"><input type="checkbox" id="d-enabled" ${deals.enabled ? "checked" : ""}> <b>Bekapcsolva</b></label>
+      <p class="muted">Időnként megnézi a keresések találatait, és szól, ha valami jóval olcsóbb a szokásos áránál. Csak
+        olvas: semmit nem vesz meg, és nem ír senkinek. Modellt csak a kevés olcsó jelöltre használ.
+        ${deals.browser ? "" : "<b>Ehhez Jarvis saját böngészője kell.</b>"}</p>
+      <h3 class="section-title">Keresések</h3>
+      <ul class="dealist">${searches || '<li class="muted">Még nincs keresés.</li>'}</ul>
+      <form id="d-add" class="compose" autocomplete="off">
+        <input id="d-query" placeholder="Mit keressek? Pl. RTX 3060 Ti, Nike Air Max 42">
+        <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-site" value="${esc(s.key)}" checked> ${esc(s.name)}</label>`).join("")}</div>
+        <div class="row">
+          <label>Legalább <input id="d-discount" type="number" min="10" max="80" value="30" style="width: 4em">%-kal olcsóbb</label>
+          <label>Legfeljebb <input id="d-max" type="number" min="0" placeholder="bármennyi" style="width: 7em"> Ft</label>
+        </div>
+        <div class="row"><button type="submit" class="primary">Hozzáadás</button>
+          <button type="button" id="d-run">Keresés most</button></div>
+      </form>
+      <h3 class="section-title">Olcsó hirdetések</h3>
+      <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>`;
+    $("d-enabled").addEventListener("change", (e) => dealAction({ action: "enable", on: e.target.checked }));
+    $("d-add").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const sites = [...box.querySelectorAll('input[name="d-site"]:checked')].map((i) => i.value);
+      await dealAction({ action: "add", query: $("d-query").value, sites, discount: $("d-discount").value,
+                         max_price: $("d-max").value });
+    });
+    $("d-run").addEventListener("click", async () => {
+      const result = await J.postJson("/api/work/deals", { action: "run" });
+      J.toast(result.ok ? "Keresem; ha találok valamit, szólok." : (result.error || "Nem sikerült."));
+    });
+    for (const b of box.querySelectorAll("[data-deal-remove]")) b.addEventListener("click", () => dealAction({ action: "remove", id: b.dataset.dealRemove }));
+    for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
+  }
+
   function render() {
     foldCompose();
+    $("w-deals").hidden = job !== "deals";
+    $("w-filters").hidden = job === "deals";
+    if (job === "deals") {
+      $("w-msgs").hidden = $("w-list-view").hidden = $("w-detail").hidden = true;
+      if (!$("w-deals").contains(document.activeElement) || !document.activeElement.matches("input")) renderDeals();
+      return;
+    }
     renderFilters();
     $("w-msgs").hidden = filter !== "msgs";
     if (filter === "msgs") {
