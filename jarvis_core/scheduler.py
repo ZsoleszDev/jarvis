@@ -54,6 +54,7 @@ class Job:
     needs_models: bool = True                   # kell-e hozzá a nyelvi modell (készenlétben nem fut)
     needs_browser: bool = False                 # kell-e hozzá a böngésző (készenlétben az sincs: nem fut)
     note: Callable[[], str] = lambda: ""        # a felületnek: mit csinál most (pl. „Pihen 14:05-ig”)
+    standby_ok: Callable[[], bool] = lambda: False   # készenlétben is futhat (pl. a napközbeni böngészés)
 
 
 @dataclass
@@ -70,6 +71,13 @@ class JobContext:
 
     def notify(self, kind: str, title: str, text: str, **extra: Any) -> None:
         self.scheduler.hooks.notify(kind, title, text, **extra)
+
+
+def standby_ok(job: Job) -> bool:
+    try:
+        return bool(job.standby_ok())
+    except Exception:  # noqa: BLE001 - egy hibás feltétel miatt ne álljon le az ütemező
+        return False
 
 
 def parse_hours(text: str) -> tuple[int, int] | None:
@@ -183,10 +191,11 @@ class Scheduler:
         return self.hooks.preempted() or (self.hooks.paused() and not self.hooks.standby())
 
     def _allowed(self, job: Job) -> bool:
-        """Futhat-e most ez a munka (készenlétben csak a modell és böngésző nélküliek)."""
+        """Futhat-e most ez a munka (készenlétben csak a modell és böngésző nélküliek, és amelyik kéri, pl. a
+        napközbeni böngészés)."""
         if not self.hooks.paused():
             return True
-        return self.hooks.standby() and not job.needs_models and not job.needs_browser
+        return self.hooks.standby() and (not job.needs_models and not job.needs_browser or standby_ok(job))
 
     def due(self, job: Job, now: float) -> bool:
         every = float(job.every_minutes() or 0)

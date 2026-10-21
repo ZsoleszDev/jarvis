@@ -107,14 +107,17 @@ FAKE_RATIO = 0.6
 SPEED_CHECKS = 2           # egy körben ennyi régebben látott hirdetést néz meg újra (elkelt-e; a Vintedet nem)
 DEFAULT_DAY = (7, 23)      # a gép általában ekkor megy (óra): a licitekről még az esti leállás előtt szól
 # Böngészés napközben: a gép üzemidejében (DEFAULT_DAY) munkamenetekben dolgozik, ahogy egy ember: egy oldalon kb.
-# BROWSE_WORK percig nézelődik (két oldalbetöltés között BROWSE_STEP másodperc), aztán BROWSE_REST perc pihenő, és a
-# következő oldal jön (BROWSE_ORDER). Egy munkamenetben legfeljebb BROWSE_PAGES oldalt tölt be; a Vintedre két
-# munkamenet között legalább SITE_GAP percet vár. Ha egy oldal robot-ellenőrzést kér, aznap már nem nézi.
+# BROWSE_WORK percig nézelődik (két oldalbetöltés között STEP_PAUSE másodperc), aztán egy rövid SWITCH_PAUSE után a
+# következő oldalra vált (BROWSE_ORDER). Csak az az oldal pihen, amelyiken épp dolgozott: legalább BROWSE_REST percig
+# (±30%), a Vinted SITE_GAP percig; a Jarvis maga csak akkor áll meg, ha minden bejelölt oldal pihen. Egy munkamenetben
+# legfeljebb BROWSE_PAGES oldalt tölt be. Ha egy oldal robot-ellenőrzést kér, aznap már nem nézi.
 BROWSE_WORK = 20
-BROWSE_REST = 15
-BROWSE_STEP = (60, 150)
-BROWSE_PAGES = {"vinted": 8}
-BROWSE_MAX_PAGES = 15
+BROWSE_REST = 10
+DEFAULT_STEP = (25, 75)
+STEP_PAUSE = {"vinted": (45, 120)}
+SWITCH_PAUSE = (20, 60)
+BROWSE_PAGES = {"vinted": 10}
+BROWSE_MAX_PAGES = 30
 SITE_GAP = {"vinted": 120}
 OPEN_CHANCE = 0.35         # egy találati oldal után ekkora eséllyel megnyit egy hirdetést (a Vinted kezdőoldalán mindig)
 # A modellre váró ismeretlenek: EXPLORE_ROWS-onként egy hívás; a munkamenet végén csak legalább MIN_FLUSH (vagy egy
@@ -533,7 +536,7 @@ class DealHunter:
                            "min_profit": int(browse.get("min_profit") or WATCH_PROFIT)},
                 "lanes": dicts("lanes"),          # indulóoldal → mit hozott (és a tanultak címe)
                 "session": data.get("session") if isinstance(data.get("session"), dict) else {},
-                "sites_state": {"ended": {}, "blocked": {}, "learned": "",
+                "sites_state": {"ended": {}, "rest": {}, "blocked": {}, "learned": "",
                                 **(data.get("sites_state") if isinstance(data.get("sites_state"), dict) else {})},
                 "feedback": dicts("feedback"),    # termék → elrejtve / megvetted (öntanulás)
                 "searches": [s for s in data.get("searches") or [] if isinstance(s, dict) and s.get("query")],
@@ -589,6 +592,13 @@ class DealHunter:
         """A keresés most nem fut: a szokásos ár jóváhagyásra vár, vagy kevés volt a hasonló (egy nap múlva újra)."""
         status, proposal = search_status(search), search.get("proposal") or {}
         return status == "javaslat" or (status == "kevés" and now - float(proposal.get("at") or 0) < CALIBRATE_RETRY)
+
+    def browsing(self) -> bool:
+        """Most a napközbeni böngészés ideje van-e (be van kapcsolva, és a gép üzemidejében vagyunk): ilyenkor a
+        kereskedés a Jarvis készenlétében is fut (az ütemező standby_ok-ja)."""
+        with self._lock:
+            return (self._data["enabled"] and self._data["browse"]["on"] and self.browser is not None
+                    and self._day_ok(self.clock()))
 
     def note(self) -> str:
         """Az Automatikus munkák ablakának: mit csinál most a böngészés (üres, ha nincs bekapcsolva)."""
@@ -1550,23 +1560,38 @@ class DealHunter:
                                        ("pages", "rows", "candidates", "deals", "bought", "dismissed")}})
         return out
 
-    def _next_site(self, now: float) -> str | None:
-        """A következő oldal a sorban (BROWSE_ORDER), ami be van jelölve, ma nem kért robot-ellenőrzést, és az utolsó
-        munkamenete óta eltelt legalább SITE_GAP perc."""
-        state, today = self._data["sites_state"], day_of(now)
+    def _rotation(self) -> list[str]:
+        """A bejelölt oldalak sorban (BROWSE_ORDER), a legutóbbi utánitól kezdve."""
         order = [k for k in BROWSE_ORDER if k in self._data["browse"]["sites"] and k in self.platforms and self._lanes(k)]
-        if not order:
-            return None
         last = self._data["session"].get("site")
         start = order.index(last) + 1 if last in order else 0
-        for index in range(len(order)):
-            site = order[(start + index) % len(order)]
-            if state["blocked"].get(site) == today:
-                continue
-            if now - float(state["ended"].get(site) or 0) < SITE_GAP.get(site, 0) * 60:
-                continue
-            return site
+        return order[start:] + order[:start]
+
+    def _ready_at(self, site: str, now: float) -> float | None:
+        """Mikortól nézheti újra ezt az oldalt: a saját pihenője (BROWSE_REST) és a Vinted két órája (SITE_GAP) után.
+        None, ha ma már nem (robot-ellenőrzést kért)."""
+        state = self._data["sites_state"]
+        if state["blocked"].get(site) == day_of(now):
+            return None
+        ended = float(state["ended"].get(site) or 0)
+        return max(float(state["rest"].get(site) or 0), ended + SITE_GAP.get(site, 0) * 60 if ended else 0.0)
+
+    def _next_site(self, now: float) -> str | None:
+        """A következő oldal a sorban, ami már kipihente magát (a többi oldal pihenője nem számít)."""
+        for site in self._rotation():
+            ready = self._ready_at(site, now)
+            if ready is not None and ready <= now:
+                return site
         return None
+
+    def _next_free(self, now: float) -> tuple[str, float] | None:
+        """Melyik oldal jöhet legközelebb, és mikor (ha most mind pihen, a legkorábban kipihent)."""
+        best: tuple[str, float] | None = None
+        for site in self._rotation():
+            ready = self._ready_at(site, now)
+            if ready is not None and (best is None or max(ready, now) < best[1]):
+                best = (site, max(ready, now))
+        return best
 
     def _browse_due(self, now: float) -> bool:
         """Esedékes-e a böngészés következő lépése (a zár a hívónál)."""
@@ -1590,13 +1615,14 @@ class DealHunter:
         clock = lambda t: time.strftime("%H:%M", time.localtime(t))  # noqa: E731
         name = lambda key: self.platforms[key].name if key in self.platforms else key  # noqa: E731
         if session.get("phase") == "work" and now < float(session.get("until") or 0):
-            return f"Most: {name(session['site'])} ({clock(float(session['start']))} óta), utána pihenő."
+            return f"Most: {name(session['site'])} ({clock(float(session['start']))} óta)."
         if not self._day_ok(now):
             return f"Napközben böngészik ({start}–{end} óra); most nem dolgozik."
-        upcoming = self._next_site(max(now, float(session.get("until") or 0)))
-        if session.get("phase") == "rest" and now < float(session.get("until") or 0):
-            return f"Pihen {clock(float(session['until']))}-ig" + (f", utána: {name(upcoming)}." if upcoming else ".")
-        return f"Hamarosan kezd: {name(upcoming)}." if upcoming else "Most egyik oldal sem esedékes."
+        upcoming = self._next_free(max(now, float(session.get("until") or 0)))
+        if upcoming is None:
+            return "Most egyik oldal sem esedékes."
+        site, at = upcoming
+        return f"Pihen {clock(at)}-ig, utána: {name(site)}." if at - now > 90 else f"Hamarosan: {name(site)}."
 
     def _step_browse(self, game: _Round, running: list[dict[str, Any]]) -> None:
         """Egy lépés a napközbeni böngészésből: ha kell, új munkamenetet kezd a következő oldalon, vagy lezárja a
@@ -1645,7 +1671,7 @@ class DealHunter:
             self._lane_count(lane["id"], "rows", len(rows or []))
             session["lanes"].append(lane["name"])
             session["rows"] = int(session.get("rows") or 0) + len(rows or [])
-            session["next"] = self.clock() + self.rng.uniform(*BROWSE_STEP)
+            session["next"] = self.clock() + self.rng.uniform(*STEP_PAUSE.get(site, DEFAULT_STEP))
             self._save()
         game.notes.append(f"{lane['name']}: {len(rows or [])} hirdetés")
 
@@ -1724,8 +1750,9 @@ class DealHunter:
         self._close_session(game)
 
     def _finish_session(self, game: _Round) -> str:
-        """A munkamenet lezárása a kör végén: egy naplóbejegyzés (mikor, hol, hány oldal és hirdetés, mit talált), és
-        pihenő BROWSE_REST percig (±30%)."""
+        """A munkamenet lezárása a kör végén: egy naplóbejegyzés (mikor, hol, hány oldal és hirdetés, mit talált). Ez az
+        oldal BROWSE_REST percig (±30%) pihen, a Jarvis pedig egy rövid szünet (SWITCH_PAUSE) után a következő oldalon
+        folytatja; csak akkor vár tovább, ha minden oldal pihen."""
         now = self.clock()
         with self._lock:
             session = self._data["session"]
@@ -1742,11 +1769,16 @@ class DealHunter:
                 text += f", a modell {session['named']} hirdetést nevezett meg"
             hits = session.get("hits") or []
             text += f"; jó találat: {'; '.join(hits[:3])}." if hits else "; nem volt jó találat."
-            rest = BROWSE_REST * 60 * self.rng.uniform(0.7, 1.3)
-            if self._day_ok(now):
-                text += f" Pihenő {clock(now + rest)}-ig."
-            self._data["sites_state"]["ended"][site] = now
-            self._data["session"] = {"phase": "rest", "site": site, "until": now + rest}
+            state = self._data["sites_state"]
+            state["ended"][site] = now
+            state["rest"][site] = now + BROWSE_REST * 60 * self.rng.uniform(0.7, 1.3)
+            switch = now + self.rng.uniform(*SWITCH_PAUSE)
+            self._data["session"] = {"phase": "rest", "site": site, "until": switch}
+            following = self._next_free(switch)
+            if following and self._day_ok(now):
+                other = self.platforms[following[0]].name if following[0] in self.platforms else following[0]
+                text += (f" Utána: {other}." if following[1] <= switch + 1 else
+                         f" Pihenő {clock(following[1])}-ig, utána: {other}.")
             self._save()
         self.journal.add(text, at=end)
         return text

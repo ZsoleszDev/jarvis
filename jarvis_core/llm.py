@@ -160,6 +160,12 @@ class OllamaClient:
         # A betöltés eredményének emléke (load_fitted): így legközelebb egyből jó kontextussal tölt be.
         self.fit_memory: Path | None = None
         self.server_version = ""
+        # Ha beáll (pl. készenlétben), a kérések ennyi ideig tartják a modellt a videókártyán (a beállítás helyett).
+        self.keep_alive_override: int | str | None = None
+
+    @property
+    def keep_alive(self) -> int | str:
+        return self.cfg.keep_alive if self.keep_alive_override is None else self.keep_alive_override
 
     # --- alacsony szint -------------------------------------------------
 
@@ -215,7 +221,7 @@ class OllamaClient:
             "model": self.cfg.model,
             "prompt": "",
             "stream": False,
-            "keep_alive": self.cfg.keep_alive,
+            "keep_alive": self.keep_alive,
         }
         if self.num_ctx:
             payload["options"] = {"num_ctx": self.num_ctx}
@@ -393,7 +399,7 @@ class OllamaClient:
             "model": self.cfg.model,
             "messages": messages,
             "stream": False,
-            "keep_alive": self.cfg.keep_alive,
+            "keep_alive": self.keep_alive,
             "options": {**self._options(), **(options or {}), "num_predict": 1},
         }
         if tools:
@@ -527,7 +533,7 @@ class OllamaClient:
             "model": self.cfg.model,
             "messages": messages,
             "stream": on_text is not None,
-            "keep_alive": self.cfg.keep_alive,
+            "keep_alive": self.keep_alive,
             "options": {**self._options(), **(options or {})},
         }
         if tools:
@@ -564,7 +570,7 @@ class OllamaClient:
             "model": self.cfg.model,
             "messages": messages,
             "stream": False,
-            "keep_alive": self.cfg.keep_alive,
+            "keep_alive": self.keep_alive,
             "options": options,
             "format": schema or "json",
         }
@@ -595,7 +601,7 @@ class OllamaClient:
             "model": self.cfg.model,
             "messages": messages,
             "stream": True,
-            "keep_alive": self.cfg.keep_alive,
+            "keep_alive": self.keep_alive,
             "options": {**self._options(), **(options or {})},
         }
         if json_schema is not None:
@@ -655,7 +661,7 @@ class OllamaClient:
             "model": self.cfg.model,
             "messages": messages,
             "stream": False,
-            "keep_alive": self.cfg.keep_alive,
+            "keep_alive": self.keep_alive,
             "options": {**options, "num_predict": VISION_MAX_TOKENS},
         }
         if conversation is not None and conversation.get("tools"):

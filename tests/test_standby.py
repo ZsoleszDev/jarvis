@@ -36,7 +36,7 @@ from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
 from jarvis_core import autostart, instance  # noqa: E402
 from jarvis_core.api import start_api  # noqa: E402
-from jarvis_core.app import PAUSED_REPLY, JarvisApp  # noqa: E402
+from jarvis_core.app import PAUSED_REPLY, STANDBY_KEEP_ALIVE, JarvisApp  # noqa: E402
 from jarvis_core.config import PROJECT_DIR, SchedulerCfg  # noqa: E402
 from jarvis_core.gui import EventBus, GuiServer, GuiUI  # noqa: E402
 from jarvis_core.scheduler import Hooks, Job, Scheduler  # noqa: E402
@@ -168,6 +168,14 @@ class StandbyAppTests(unittest.TestCase):
         self.assertEqual(loads(self.fake), [])
         self.assertEqual(self.ui.of("user")[-1][1], "Pihenj!")
 
+    def test_in_standby_the_model_stays_loaded_only_briefly(self):
+        self.standby_start()
+        self.assertEqual(self.app.llm.keep_alive, STANDBY_KEEP_ALIVE, "a háttérmunka egy kérdése után kiürül")
+        self.fake.chat_script = [reply("Szia!")]
+        self.app.submit_text("Szia")
+        wait_for(lambda: self.ui.of("assistant_end"))
+        self.assertEqual(self.app.llm.keep_alive, self.cfg.llm.keep_alive, "ébren a beállítás szerint")
+
     def test_model_free_background_work_runs_in_standby_only(self):
         self.standby_start()
         store = self.app.work.store
@@ -213,9 +221,20 @@ class SchedulerStandbyTests(unittest.TestCase):
             self.assertEqual(scheduler.run("listings"), "Szünetelek, ezért most nem dolgozom.")
             self.assertEqual(scheduler.run("digest", forced=True), "Szünetelek, ezért most nem dolgozom.")
             self.assertEqual(scheduler.run("watches"), "ok")
+            # a napközbeni böngészés kéri, hogy készenlétben is fusson (a böngésző újraindul)
+            day = {"on": True}
+            trading = Job("deals", "Automata kereskedés", lambda: 1.0, lambda ctx: "ok", needs_models=False,
+                          needs_browser=True, standby_ok=lambda: day["on"])
+            scheduler.register(trading)
+            self.assertTrue(scheduler.due(trading, now))
+            self.assertEqual(scheduler.run("deals"), "ok")
+            day["on"] = False                # este, vagy kikapcsoltad a böngészést
+            self.assertFalse(scheduler.due(trading, time.time() + 120))
             flags["standby"] = False         # a Szünet gombbal
             self.assertEqual(scheduler.blocked_reason(), "szünet")
             self.assertTrue(scheduler.should_yield())
+            day["on"] = True
+            self.assertFalse(scheduler.due(trading, time.time() + 240), "Szünetben semmi nem fut")
 
 
 # --- telefon és felület készenlétben -------------------------------------------------------------------

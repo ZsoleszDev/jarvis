@@ -540,10 +540,11 @@
         <button type="button" class="small" id="d-day">Mentés</button></div>
       <h3 class="section-title">Böngészés napközben</h3>
       <label class="check"><input type="checkbox" id="d-browse" ${b.on ? "checked" : ""}> <b>Napközben böngésszen</b> (a fenti órákban)</label>
-      <p class="muted">Ahogy egy ember: kb. 20 percig nézelődik egy oldalon (1–2 percenként egy oldal, néha megnyit egy
-        hirdetést), aztán pihen, és a következő oldal jön. A Vinteden a kezdőoldallal kezd, a Hardveraprón a felkapott
-        kategóriákat nézi (videókártya, memória, SSD, processzor, alaplap). A Vintedet legfeljebb kétóránként nézi, és ha egy
-        oldal robot-ellenőrzést kér, aznap már nem. A modellt csak kötegben kérdezi (energiatakarékos), és amint talál
+      <p class="muted">Ahogy egy ember: kb. 20 percig nézelődik egy oldalon (fél-egy percenként egy oldal, a Vinteden
+        lassabban; néha megnyit egy hirdetést), aztán rögtön a következő oldalra vált. Csak az az oldal pihen, amelyiken épp
+        volt (legalább 10 percet, a Vinted két órát); ha minden bejelölt oldal pihen, ő is. A Vinteden a kezdőoldallal
+        kezd, a Hardveraprón a felkapott kategóriákat nézi (videókártya, memória, SSD, processzor, alaplap). Ha egy oldal
+        robot-ellenőrzést kér, aznap már nem nézi. A modellt csak kötegben kérdezi (energiatakarékos), és amint talál
         valamit, amiből haszon lehet, szól. Tanul is: amelyik oldal többet hoz, azt gyakrabban nézi, a gyorsan kelő
         termékeket külön figyeli, és amit kétszer elrejtesz, arról egy hónapig nem szól.</p>
       <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-bsite" value="${esc(s.key)}" ${(b.sites || []).includes(s.key) ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>

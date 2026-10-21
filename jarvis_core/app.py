@@ -32,7 +32,7 @@ from .notices import NoticeBoard
 from .ollama_log import CACHE_SETTING, CHECKPOINT_SETTING, ServerLog, explain, find_cause, pagefile_tip, user_setting
 from .recorder import Recorder
 from .browser import BrowserError
-from .scheduler import Hooks, Job, Scheduler
+from .scheduler import Hooks, Job, Scheduler, standby_ok
 from .selling import NOT_POSTED, POSTED, ItemError, format_price, parse_price, price_verdict
 from .stt import SpeechToText
 from .textutil import SentenceSplitter, fold
@@ -60,6 +60,8 @@ RESTART_LOG_DELAY = 5.0
 # A Munka menü egy körének felső határa (token): ott a válasz egy-két mondat vagy egy eszközhívás (a hosszú
 # hirdetésszöveg is belefér); egy beragadt válasz így sem foglalja percekig a modellt és a nyitott űrlapot.
 WORK_MAX_TOKENS = 1024
+# Készenlétben a háttérmunka egy-egy modellkérdése után a modell csak ennyi ideig marad a videókártyán.
+STANDBY_KEEP_ALIVE = "5m"
 # Ha a modell egy része a processzorra került: ezekkel a KV-gyorsítótár-típusokkal a kontextus már kicsi.
 SMALL_KV_TYPES = {"q8_0", "q4_0"}
 KV_SETTING = "OLLAMA_KV_CACHE_TYPE"
@@ -409,6 +411,7 @@ class JarvisApp:
                 options={"temperature": float(self.cfg.work.temperature), "num_predict": WORK_MAX_TOKENS})
         if standby:
             self.paused = self.standby = True
+            self.llm.keep_alive_override = STANDBY_KEEP_ALIVE
             for warning in self.cfg.warnings:
                 self.ui.warn(warning)
             self._warned = True
@@ -518,7 +521,7 @@ class JarvisApp:
                                         else 0.0,
                                         lambda ctx: deals.run(check=ctx.check, notify=ctx.notify, force=ctx.forced),
                                         available=deals.available, needs_models=False, needs_browser=True,
-                                        note=deals.note))
+                                        note=deals.note, standby_ok=deals.browsing))
 
     def _register_watch_tools(self) -> None:
         box, watches = self.toolbox, self.watches
@@ -1146,11 +1149,12 @@ class JarvisApp:
         return kind == "text" and isinstance(payload, dict) and is_pause_request(str(payload.get("text") or ""))
 
     def _light_job(self, payload: Any) -> bool:
-        """Készenlétben is lefuthat-e (a modell és böngésző nélküli háttérmunkák: figyelők, régi hirdetések)."""
+        """Készenlétben is lefuthat-e (a modell és böngésző nélküli háttérmunkák: figyelők, régi hirdetések; és amelyik
+        kéri, pl. a napközbeni böngészés: a böngésző ilyenkor újraindul, a modell csak röviden töltődik be)."""
         if not self.standby or self.scheduler is None or not isinstance(payload, dict):
             return False
         job = self.scheduler.jobs.get(str(payload.get("key") or ""))
-        return job is not None and not job.needs_models and not job.needs_browser
+        return job is not None and (not job.needs_models and not job.needs_browser or standby_ok(job))
 
     def _wake_up(self, mode: str | None = None) -> None:
         """Készenlétből: betölti a modelleket, és utána jöhet a kérés (`mode`: a kérés menüje, annak az elejét
@@ -1242,6 +1246,9 @@ class JarvisApp:
         self.model_loaded = False
         self.paused = True
         self.standby = standby
+        # Készenlétben a háttérmunka (pl. a napközbeni böngészés) néha kérdezi a modellt: utána ne maradjon a
+        # videókártyán (a beállított keep_alive helyett csak STANDBY_KEEP_ALIVE ideig).
+        self.llm.keep_alive_override = STANDBY_KEEP_ALIVE if standby else None
         if self.work is not None:
             self.work.current = None
         gc.collect()
@@ -1265,7 +1272,10 @@ class JarvisApp:
             return
         if announce:
             self.ui.info("Folytatom: betöltöm a modelleket...")
+        self.llm.keep_alive_override = None      # ébren a beállítás szerint marad a videókártyán
         if not self.load_model():
+            if self.standby:
+                self.llm.keep_alive_override = STANDBY_KEEP_ALIVE
             self._set_phase(self._rest_phase())
             self.ui.error("Nem sikerült betölteni a nyelvi modellt, ezért továbbra is szünetelek.")
             return

@@ -727,17 +727,17 @@ class BrowseTests(HunterCase):
         summary = self.hunter.run(notify=self.notify)
         self.assertRegex(summary, r"^\d\d:\d\d–\d\d:\d\d Hardverapró: \d+ oldal \(.+\), \d+ hirdetés; jó találat: "
                                   r"„Gigabyte RTX 3060 Ti Gaming OC” 70 000 Ft \(Hardverapró, kb\. 17 600 Ft haszon\)\. "
-                                  r"Pihenő \d\d:\d\d-ig\.$")
+                                  r"Utána: Vinted\.$")
         self.assertEqual(self.explored(), [], "két ismeretlenért nem tölti be a modellt: a következő munkamenetre várnak")
         self.assertEqual(len(self.hunter._pending), 2)
         self.assertEqual(self.journal()[0], summary)
         self.assertTrue(self.journal()[1].startswith("Jó találat: „Gigabyte RTX 3060 Ti Gaming OC”"))
-        self.assertFalse(self.hunter.available(), "pihenő")
-        self.assertRegex(self.hunter.note(), r"^Pihen \d\d:\d\d-ig, utána: Vinted\.$")
-        # a következő oldal: a Vinteden a kezdőoldallal kezd, és megnyit egy hirdetést
+        self.assertFalse(self.hunter.available(), "egy rövid szünet, és vált")
+        self.assertEqual(self.hunter.note(), "Hamarosan: Vinted.")
+        # a következő oldal (nem vár a Hardverapró pihenőjére): a Vinteden a kezdőoldallal kezd, és megnyit egy hirdetést
         feed = [listing(40, "Nike pulóver", 8000, "www.vinted.hu"), listing(41, "Zara kabát", 12000, "www.vinted.hu")]
         self.browser.by_url = [("vinted.hu", feed)]
-        self.clock.now += 31 * 60
+        self.clock.now += 61
         self.assertTrue(self.hunter.available())
         self.hunter.run(notify=self.notify)
         self.assertEqual(self.browser.urls[-1], "https://www.vinted.hu/")
@@ -782,6 +782,28 @@ class BrowseTests(HunterCase):
         self.browser.challenge = set()
         self.assertTrue(self.hunter.available(), "másnap újra")
 
+    def test_only_the_site_just_browsed_rests(self):
+        self.hunter.set_browse(on=True, sites=["hardverapro", "jofogas"])
+        self.hunter.run(notify=self.notify)
+        self.clock.now += 76
+        self.assertTrue(self.hunter.available(), "két oldalbetöltés között legfeljebb 75 másodperc")
+        self.clock.now += 26 * 60
+        summary = self.hunter.run(notify=self.notify)
+        self.assertTrue(summary.endswith(" Utána: Jófogás."), summary)
+        self.clock.now += 61
+        self.hunter.run(notify=self.notify)
+        self.assertIn("jofogas.hu", self.browser.urls[-1], "rögtön a következő oldal, a Hardverapró közben pihen")
+        self.clock.now += 26 * 60
+        summary = self.hunter.run(notify=self.notify)
+        self.assertTrue(summary.endswith(" Utána: Hardverapró."), "a Hardverapró közben kipihente magát")
+        # ha csak egy oldal van bejelölve, az pihen egy kicsit, és a Jarvis addig vár
+        self.hunter.set_browse(sites=["jofogas"])
+        self.clock.now += 61
+        self.assertFalse(self.hunter.available())
+        self.assertRegex(self.hunter.note(), r"^Pihen \d\d:\d\d-ig, utána: Jófogás\.$")
+        self.clock.now += 14 * 60
+        self.assertTrue(self.hunter.available())
+
     def test_vinted_at_most_every_two_hours(self):
         self.browser.by_url = [("vinted.hu", [])]
         self.hunter.set_browse(on=True, sites=["vinted"])
@@ -790,7 +812,7 @@ class BrowseTests(HunterCase):
         self.hunter.run(notify=self.notify)             # a munkamenet vége
         self.clock.now += 40 * 60
         self.assertFalse(self.hunter.available(), "a pihenő után sem: a Vintedre két óra")
-        self.assertEqual(self.hunter.note(), "Most egyik oldal sem esedékes.")
+        self.assertRegex(self.hunter.note(), r"^Pihen \d\d:\d\d-ig, utána: Vinted\.$")
         self.clock.now += 81 * 60
         self.assertTrue(self.hunter.available(), "két órával az előző Vinted-munkamenet vége után")
 
@@ -800,8 +822,10 @@ class BrowseTests(HunterCase):
         self.hunter.set_browse(on=True, sites=["hardverapro"])
         self.clock.now = at(15, 23)
         self.assertFalse(self.hunter.available())
+        self.assertFalse(self.hunter.browsing(), "este a Jarvis készenlétében sem fut")
         self.assertEqual(self.hunter.note(), "Napközben böngészik (8–22 óra); most nem dolgozik.")
         self.clock.now = at(15, 21, 50)
+        self.assertTrue(self.hunter.browsing(), "napközben a Jarvis készenlétében is fut")
         self.hunter.run(notify=self.notify)
         self.clock.now = at(15, 22, 1)
         self.assertTrue(self.hunter.available(), "este lezárja a munkamenetet")
