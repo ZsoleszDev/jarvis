@@ -973,7 +973,7 @@ class DealHunter:
         browse = False
         if game.done:
             game.work.append(partial(self._step_revisit, game))
-        elif not force:
+        else:                                 # „Keresés most” is: ha nincs keresés, a böngészés lép
             with self._lock:
                 browse = self._browse_due(now)
             if browse:

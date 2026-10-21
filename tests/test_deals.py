@@ -782,6 +782,11 @@ class BrowseTests(HunterCase):
         self.browser.challenge = set()
         self.assertTrue(self.hunter.available(), "másnap újra")
 
+    def test_search_now_starts_browsing_when_there_is_no_search(self):
+        self.hunter.set_browse(on=True, sites=["hardverapro"])
+        self.assertTrue(self.hunter.run(notify=self.notify, force=True).startswith("Böngészés: Hardverapró: "))
+        self.assertIn("Most: Hardverapró", self.hunter.note())
+
     def test_only_the_site_just_browsed_rests(self):
         self.hunter.set_browse(on=True, sites=["hardverapro", "jofogas"])
         self.hunter.run(notify=self.notify)

@@ -784,8 +784,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **deals.add_watch(str(body.get("target") or ""), body.get("min_profit"),
                                                                      body.get("hours"), body.get("every"))})
             if action == "browse":      # böngészés napközben: be/ki, oldalak, legkisebb haszon
-                return self._json(200, {"ok": True, **deals.set_browse(body.get("on"), body.get("sites"),
-                                                                      body.get("min_profit"))})
+                state = deals.set_browse(body.get("on"), body.get("sites"), body.get("min_profit"))
+                # bekapcsoláskor rögtön kezd (nem várja meg az ütemező csendes perceit)
+                if body.get("on") and app is not None and app.scheduler is not None and "deals" in app.scheduler.jobs \
+                        and deals.available():
+                    app.run_job_now("deals", silent=remote)
+                return self._json(200, {"ok": True, **state})
             if action == "journal":     # a napló egy napja (alapból a mai)
                 return self._json(200, {"ok": True, "entries": deals.journal_entries(str(body.get("day") or ""))})
             if action == "day":         # mikor megy általában a gép (a licitekről még az esti leállás előtt szól)
@@ -809,7 +813,8 @@ class _Handler(BaseHTTPRequestHandler):
                 if app is None or app.scheduler is None or "deals" not in app.scheduler.jobs:
                     return self._json(409, {"ok": False, "error": "A kereséshez Jarvis saját böngészője kell."})
                 if not deals.available():
-                    return self._json(409, {"ok": False, "error": "Kapcsold be, és adj meg legalább egy keresést."})
+                    return self._json(409, {"ok": False, "error": "Most nincs esedékes keresés vagy figyelt oldal (a "
+                                                                  "böngészés is pihen, vagy ki van kapcsolva)."})
                 app.run_job_now("deals", silent=remote)    # a telefonról indítva a gép ne beszéljen
                 return self._json(202, {"ok": True})
         except (DealError, ItemError) as exc:
