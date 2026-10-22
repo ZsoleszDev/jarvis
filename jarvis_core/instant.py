@@ -28,6 +28,7 @@ import threading
 import time
 import urllib.parse
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -417,6 +418,7 @@ class InstantWatch:
                    "deal": deal["id"], "cheap": True,
                    **{k: deal.get(k) for k in ("site", "platform", "text", "title", "price", "url", "drop", "note")},
                    "reference": deal["median"], "profit": deal["profit"], "n": deal.get("similar"),
+                   "sites": deal.get("sites") or [],
                    "warnings": deal.get("warnings") or []}
             hit["title"] = hit["title"] or hit["text"]
             hits.append(hit)
@@ -462,17 +464,20 @@ class InstantWatch:
             return None
 
     def _search(self, query: str) -> list[dict[str, Any]]:
-        """Mennyiért adják máshol: a keresőszó találatai a gyors oldalakon (böngésző nélkül)."""
-        out: list[dict[str, Any]] = []
-        for site, platform in self.platforms.items():
+        """Mennyiért adják máshol: a keresőszó találatai a gyors oldalakon (böngésző nélkül), az oldalak egyszerre (a
+        letöltő oldalanként egy kérést enged, a szünetekkel)."""
+        def one(site: str, platform: Platform) -> list[dict[str, Any]]:
             try:
                 rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site, self._check)
             except FeedError:
-                continue
-            out += [{"site": platform.name, "platform": site, "text": str(r.get("text") or "")[:180],
+                return []
+            return [{"site": platform.name, "platform": site, "text": str(r.get("text") or "")[:180],
                      "price": int(r["price"]), "url": str(r["url"])} for r in rows[:MAX_ROWS]
                     if r.get("url") and not r.get("auction")]
-        return out
+
+        with ThreadPoolExecutor(max_workers=max(1, len(self.platforms)), thread_name_prefix="jarvis-ar") as pool:
+            jobs = [pool.submit(one, site, platform) for site, platform in self.platforms.items()]
+            return [row for job in jobs for row in job.result()]
 
     def _tell(self, alert: dict[str, Any], hit: dict[str, Any]) -> None:
         warn = "".join(f" Figyelj: {w}." for w in hit.get("warnings") or [])
@@ -487,7 +492,8 @@ class InstantWatch:
         if hit.get("drop"):
             text += f" (leárazta: {format_price(hit['drop'])} → {format_price(hit['price'])})"
         if hit.get("reference"):
-            basis = f", {hit['n']} hasonló alapján" if hit.get("n") else ""
+            where = f", {' és '.join(hit['sites'])}" if hit.get("sites") else ""
+            basis = f", {hit['n']} hasonló alapján{where}" if hit.get("n") else ""
             text += f". A szokásos ára kb. {format_price(hit['reference'])}{basis}"
             if hit.get("profit", 0) > 0:
                 text += f", kb. {format_price(hit['profit'])} haszon lehet"

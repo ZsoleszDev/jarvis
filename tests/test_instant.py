@@ -305,7 +305,8 @@ class InstantTests(InstantCase):
         """Amit az árbázis a címből nem ismer fel, azt a modell nevezi meg (egy hívás az egészre). Ha így ismert, ahhoz
         méri; ha nem, megnézi, mennyiért adják a többi oldalon (akkor is, ha a modell szerint nem érné meg)."""
         self.hunter.book.add([{"text": f"Sony WH-1000XM4 fejhallgató {n}", "price": 70000 + n * 500,
-                               "url": f"https://www.jofogas.hu/b/sony_{n}.htm", "platform": "jofogas"} for n in range(5)])
+                               "url": f"https://www.jofogas.hu/b/sony_{n}.htm", "platform": ("jofogas", "hardverapro")[n % 2]}
+                              for n in range(5)])   # két oldalról: biztos ár, máshol nem kell megnézni
         self.watch.add("https://hardverapro.hu/aprok/hang/fejhallgato/index.html")
         self.watch.set_enabled(True)
         self.results([ha_card(1, "Régi fülhallgató", "2 000 Ft")], "fejhallgato/index")
@@ -319,20 +320,52 @@ class InstantTests(InstantCase):
         self.net.pages["_32/friss"] = page_html("Szép állapot, működik.")
         others = "".join(jf_card(40 + n, f"Bose QuietComfort 45 fejhallgató {n}", f"{78 + n} 000") for n in range(5))
         self.net.pages["q=Bose"] = (200, f"<html><body>{others}</body></html>")
-        self.net.pages["stext=Bose"] = (200, ha_page([]))
+        self.net.pages["stext=Bose"] = (200, ha_page([ha_card(50, "Bose QuietComfort 45 fejhallgató", "80 000 Ft")]))
         self.hunter.llm.explore = [{"n": 1, "query": "Sony WH-1000XM4", "buy": False},
                                    {"n": 2, "query": "Bose QuietComfort 45", "buy": False}]   # a modell nem tudja
         self.watch.tick()
         titles = [n[1] for n in self.notices]
         self.assertEqual(titles, ["Megéri: Eladó zajszűrős Sony fejhallgató, alig használt",
                                   "Megéri: Bose fejhallgató szép állapotban"])
-        self.assertIn("A szokásos ára kb. 71 000 Ft, 5 hasonló alapján", self.notices[0][2], "az árbázisból")
-        self.assertIn("A szokásos ára kb. 80 000 Ft, 5 hasonló alapján", self.notices[1][2], "a Jófogás áraiból")
+        self.assertIn("A szokásos ára kb. 71 000 Ft, 5 hasonló alapján, Hardverapró és Jófogás", self.notices[0][2],
+                      "az árbázisból")
+        self.assertIn("A szokásos ára kb. 80 000 Ft, 6 hasonló alapján, Hardverapró és Jófogás", self.notices[1][2],
+                      "a két oldal áraiból")
         explore_calls = [c for c in self.hunter.llm.calls if "Friss hirdetések" in c[1]["content"]]
         self.assertEqual(len(explore_calls), 1, "egy modellhívás a megnevezésre")
         self.assertNotIn("kábelcsomag", explore_calls[0][1]["content"], "a csomag a modellhez sem jut el")
         searched = [url for _t, url in self.net.asked if "Bose" in url]
         self.assertEqual(len(searched), 2, "a Bose árát mindkét oldalon megnézte (böngésző nélkül), a Sonyét nem kellett")
+
+    def test_a_price_seen_on_one_site_only_is_checked_on_the_other_one(self):
+        """Az árbázis a Sonyt csak a Jófogásról ismeri (5 ár): mielőtt szólna, a két oldalon is megnézi (egyszerre).
+        Ha így sincs elég hasonló, nem szól (a naplóba beírja); ha van, és ott is jóval drágább, szól."""
+        self.hunter.book.add([{"text": f"Sony WH-1000XM4 fejhallgató {n}", "price": 70000 + n * 500,
+                               "url": f"https://www.jofogas.hu/b/sony_{n}.htm", "platform": "jofogas"} for n in range(5)])
+        self.watch.add("https://hardverapro.hu/aprok/hang/fejhallgato/index.html")
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi fülhallgató", "2 000 Ft")], "fejhallgato/index")
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(31, "Sony WH-1000XM4 fejhallgató", "30 000 Ft"), ha_card(1, "Régi fülhallgató", "2 000 Ft")],
+                     "fejhallgato/index")
+        self.net.pages["_31/friss"] = page_html("Hibátlan, dobozában.")
+        self.watch.tick()
+        self.assertEqual(self.notices, [])
+        searched = [url for _t, url in self.net.asked if "sony" in url.lower() and "friss" not in url]
+        self.assertEqual(len(searched), 2, "mindkét oldalon megnézte")
+        self.assertIn("csak 5 hasonló árat találtam (Jófogás)",
+                      " ".join(e["text"] for e in self.hunter.journal.entries() if e["text"].startswith("Nem biztos")))
+        self.later()
+        self.results([ha_card(32, "Sony WH-1000XM4 fejhallgató fekete", "31 000 Ft"),
+                      ha_card(31, "Sony WH-1000XM4 fejhallgató", "30 000 Ft")], "fejhallgato/index")
+        self.net.pages["_32/friss"] = page_html("Hibátlan, dobozában.")
+        self.net.pages["stext=Sony"] = (200, ha_page([ha_card(60 + n, f"Sony WH-1000XM4 {n}", f"{69 + n} 000 Ft")
+                                                      for n in range(3)]))
+        self.watch.tick()
+        [(_kind, title, text, _extra)] = self.notices
+        self.assertEqual(title, "Megéri: Sony WH-1000XM4 fejhallgató fekete")
+        self.assertIn("A szokásos ára kb. 70 800 Ft, 8 hasonló alapján, Hardverapró és Jófogás", text)
 
     def test_waits_for_the_model_while_you_use_jarvis(self):
         """Amíg dolgozol a Jarvisszal, a modellt nem kérdezi: a modell nélkül is felmérhető megérőről rögtön szól (a
@@ -354,8 +387,8 @@ class InstantTests(InstantCase):
         self.assertNotIn("Ugyanaz a kártya", self.notices[0][2], "most nem kérdezte a modellt")
         self.assertEqual(self.watch.state()["waiting"], 1)
         self.assertEqual(self.hunter.llm.calls, [])
-        self.hunter.book.add([{"text": f"Sony WH-1000XM4 {n}", "price": 70000, "url": f"https://x.hu/s{n}"}
-                              for n in range(5)])
+        self.hunter.book.add([{"text": f"Sony WH-1000XM4 {n}", "price": 70000, "url": f"https://x.hu/s{n}",
+                               "platform": ("jofogas", "hardverapro")[n % 2]} for n in range(5)])
         self.hunter.llm.explore = [{"n": 1, "query": "Sony WH-1000XM4", "buy": False}]
         self.watch.model_ok = lambda: True
         self.watch.tick()

@@ -210,6 +210,15 @@ class PriceBook:
         """A termékkulcs a tanult márkákkal együtt (lásd product_key)."""
         return product_key(text, frozenset(self.brands))
 
+    def query(self, text: str) -> str:
+        """Keresőszó egy hirdetés termékéhez: a címének azok a szavai, amelyekből a termékkulcs lett, ahogy a címben
+        írták („Sony WH-1000XM4”: az oldalak keresője a kötőjeles alakot találja meg). Üres, ha a címből nincs kulcs."""
+        found = self.key(text)
+        if found is None:
+            return ""
+        wanted = set(found[0].split())
+        return " ".join(token for token in text.split() if set(_words(token)) & wanted) or found[1]
+
     def learn_name(self, name: str) -> str:
         """Öntanulás: ha a modell egy terméket olyan márkával nevez meg, amit a kulcsfelismerés nem ismer (és emiatt
         nem kap kulcsot, pl. „Anker PowerCore 20000”), feljegyzi; LEARN_AFTER előfordulás után megtanulja, és onnantól
@@ -240,7 +249,7 @@ class PriceBook:
                 text, url, price = str(row.get("text") or ""), str(row.get("url") or ""), int(row.get("price") or 0)
                 if row.get("auction") or not url or price <= 0 or not usable(text):
                     continue
-                found = named or self.key(text)
+                found = named or self.key(str(row.get("title") or text))   # a cím: a kártyán a város, az eladó is ott van
                 if found is None:
                     continue
                 key, label = found
@@ -263,23 +272,29 @@ class PriceBook:
             self._dirty = self._dirty or bool(added)
         return added
 
+    def samples(self, key: str, exclude: str = "") -> list[dict[str, Any]]:
+        """Egy termék friss árai (MAX_AGE-en belül látva): {p: ár, site: oldal, url}. Az exclude hirdetés (pl. maga a
+        jelölt) nincs köztük."""
+        now = self.clock()
+        skip = listing_key(exclude) if exclude else ""
+        with self._lock:
+            return [{"p": int(s["p"]), "site": str(s.get("site") or ""), "url": str(s.get("url") or "")}
+                    for s in (self._keys.get(key) or {}).get("samples") or []
+                    if now - float(s.get("last") or 0) <= MAX_AGE and not (skip and listing_key(s.get("url", "")) == skip)]
+
     def reference(self, key: str, exclude: str = "") -> dict[str, Any] | None:
         """A szokásos ár egy termékre: a friss árak középértéke (a kilógók nélkül), ha legalább MIN_SAMPLES van, és
-        nem szórnak nagyon (price_stats: megbízható). Az exclude hirdetés (pl. maga a jelölt) nem számít bele."""
-        now = self.clock()
+        nem szórnak nagyon (price_stats: megbízható). Az exclude hirdetés (pl. maga a jelölt) nem számít bele. A sites:
+        melyik oldalakon láttuk ezeket az árakat."""
+        samples = self.samples(key, exclude)
         with self._lock:
-            entry = self._keys.get(key)
-            if not entry:
-                return None
-            skip = listing_key(exclude) if exclude else ""
-            prices = [int(s["p"]) for s in entry["samples"] if now - float(s.get("last") or 0) <= MAX_AGE
-                      and not (skip and listing_key(s.get("url", "")) == skip)]
-            name = entry.get("name") or key
-        stats = price_stats(prices)
+            name = (self._keys.get(key) or {}).get("name") or key
+        stats = price_stats([s["p"] for s in samples])
         if not stats or stats["n"] < MIN_SAMPLES or stats["confidence"] != "megbízható":
             return None
+        kept = [s for s in samples if s["site"] and stats["min"] <= s["p"] <= stats["max"]]   # a kilógók oldala nem
         return {"price": round_price(stats["median"]), "n": stats["n"], "p25": stats["p25"], "p75": stats["p75"],
-                "name": name, "key": key}
+                "name": name, "key": key, "sites": sorted({s["site"] for s in kept})}
 
     def speed(self, key: str) -> dict[str, Any]:
         """Eladási sebesség az újranézett hirdetésekből: hányat néztünk meg (checked), hány tűnt el / kelt el (sold),

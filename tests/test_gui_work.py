@@ -742,28 +742,31 @@ class WorkBrowserTests(unittest.TestCase):
     def test_deal_window_from_a_notification(self):
         """Az Android-alkalmazás értesítésére bökve (hamis alkalmazás-híddal) a találat ablaka nyílik meg: a címe az áru
         neve, alatta az ára, mennyiért mennek most és mennyit kereshetsz vele; a gomb kimásolja az eladónak szóló
-        üzenetet, és megnyitja a hirdetést."""
+        üzenetet, és megnyitja a hirdetést. A Szakértői tipp kimásolja a kérdést a hirdetés linkjével, és megnyitja a
+        ChatGPT alkalmazást."""
         deals = self.h.app.work.deals
         self.h.app.work.instant.allowed = lambda: False
         listing = self.h.pages.url("katalogus.html") + "?hirdetes=palit"
         deals._remember({"id": "q1", "url": listing, "text": "Palit RTX 3060 Ti Dual Budapest 52 000 Ft",
                          "title": "Palit RTX 3060 Ti Dual", "site": "Hardverapró", "platform": "hardverapro",
-                         "price": 52000, "median": 100000, "similar": 12, "profit": 36500, "at": time.time() - 150,
+                         "price": 52000, "median": 100000, "similar": 12, "profit": 31500, "at": time.time() - 150,
+                         "low": 85000, "sites": ["Hardverapró", "Jófogás"],
                          "quick": True, "note": "Ugyanaz a kártya.", "explore": "azonnali figyelő: Videókártyák"})
         context = self.browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True,
                                            user_agent="Mozilla/5.0 (Linux; Android 14) Chrome/141.0 Mobile JarvisAndroid/1")
         context.add_init_script("""(() => {
             let wanted = {deal: "q1"};
             window.JarvisApp = { pending() { const out = JSON.stringify(wanted); wanted = {}; return out; },
-                                 copy(text) { window.__copied = text; } };
+                                 copy(text) { window.__copied = text; },
+                                 openChatGpt() { window.__chatgpt = (window.__chatgpt || 0) + 1; } };
           })();""")
         page = context.new_page()
         page.goto(self.h.server.url)
         page.wait_for_selector("#deal-dialog[open]", timeout=15000)
         self.assertEqual(page.inner_text("#deal-title"), "Palit RTX 3060 Ti Dual")
         body = page.inner_text("#deal-body")
-        for part in ("52 000 Ft", "Most ennyiért mennek", "kb. 100 000 Ft (12 hasonló alapján)", "Ennyit kereshetsz vele",
-                     "kb. 36 500 Ft", "Ugyanaz a kártya.", "3 perce"):
+        for part in ("52 000 Ft", "Most ennyiért mennek", "kb. 100 000 Ft (12 hasonló alapján, Hardverapró és Jófogás)",
+                     "Ennyit kereshetsz vele", "kb. 31 500 Ft (ha kb. 85 000 Ft-ért eladod", "Ugyanaz a kártya.", "3 perce"):
             self.assertIn(part, body)
         self.assertEqual(page.inner_text(".msgpreview"), "Szia!\nMegvan még a termék?\nKöszi előre is\nÜdv, Zsolt")
         self.assertEqual(page.get_attribute("#deal-go", "href"), listing)
@@ -771,6 +774,18 @@ class WorkBrowserTests(unittest.TestCase):
             page.click("#deal-go")
         self.assertEqual(opened.value.url, listing, "a hirdetés megnyílik")
         self.assertEqual(page.evaluate("window.__copied"), "Szia!\nMegvan még a termék?\nKöszi előre is\nÜdv, Zsolt")
+        self.assertFalse(page.evaluate("document.getElementById('deal-dialog').open"))
+        page.click('[data-deal-open="q1"]')
+        page.wait_for_selector("#deal-dialog[open]")
+        pages = len(context.pages)
+        page.click("#deal-expert")
+        self.assertEqual(page.evaluate("window.__chatgpt"), 1, "a ChatGPT alkalmazás nyílik meg")
+        self.assertEqual(len(context.pages), pages, "nem a böngészőben")
+        asked = page.evaluate("window.__copied")
+        self.assertTrue(asked.startswith("Találtam egy jónak tűnő árut, ami jó befektetés lehetne, ha vétel után kicsit "
+                                         "drágábban továbbárusítanám. Megnéznéd, hogy tényleg jó vétel lenne-e?"), asked)
+        self.assertIn("Palit RTX 3060 Ti Dual\nÁra: 52 000 Ft (Hardverapró)\n", asked)
+        self.assertTrue(asked.endswith(listing), "a végén a hirdetés linkje")
         self.assertFalse(page.evaluate("document.getElementById('deal-dialog').open"))
         page.click('[data-deal-open="q1"]')
         page.wait_for_selector("#deal-dialog[open]")

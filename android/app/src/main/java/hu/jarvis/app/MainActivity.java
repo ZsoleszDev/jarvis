@@ -72,6 +72,9 @@ public class MainActivity extends Activity {
     static final String ACTION_NEW_LISTING = "hu.jarvis.app.NEW_LISTING";
     static final String ACTION_SOLD = "hu.jarvis.app.SOLD";
     static final String ACTION_DEAL = "hu.jarvis.app.DEAL";
+    /** A ChatGPT alkalmazás (a Szakértői tipp gombhoz); ha nincs telepítve, a weboldala a böngészőben. */
+    static final String CHATGPT_PACKAGE = "com.openai.chatgpt";
+    static final String CHATGPT_URL = "https://chatgpt.com/";
     private static final String SETUP = "file:///android_asset/setup.html";
     private static final String SHARED_PATH = "/__jarvis_shared/";
     private static final int MAX_SHARED = 20;
@@ -593,14 +596,28 @@ public class MainActivity extends Activity {
             }, "jarvis-pair").start();
         }
 
-        /** A felület egy szövege a vágólapra (pl. a megérő hirdetés ablakából az eladónak szóló üzenet). */
+        /** A felület egy szövege a vágólapra (pl. a megérő hirdetés ablakából az eladónak szóló üzenet, vagy a
+         *  Szakértői tipp kérdése). */
         @JavascriptInterface
         public void copy(String text) {
             runOnUiThread(() -> {
                 ClipboardManager clipboard = getSystemService(ClipboardManager.class);
                 if (clipboard != null) {
                     clipboard.setPrimaryClip(ClipData.newPlainText("Jarvis", text == null ? "" : text));
-                    Toast.makeText(MainActivity.this, "Kimásoltam az üzenetet.", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(MainActivity.this, "Kimásoltam a vágólapra.", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+
+        /** Szakértői tipp: a ChatGPT alkalmazás (ha telepítve van), különben a chatgpt.com a böngészőben. */
+        @JavascriptInterface
+        public void openChatGpt() {
+            runOnUiThread(() -> {
+                Intent launch = getPackageManager().getLaunchIntentForPackage(CHATGPT_PACKAGE);
+                try {
+                    startActivity(launch != null ? launch : new Intent(Intent.ACTION_VIEW, Uri.parse(CHATGPT_URL)));
+                } catch (ActivityNotFoundException e) {
+                    Toast.makeText(MainActivity.this, "Nem tudtam megnyitni a ChatGPT-t.", Toast.LENGTH_SHORT).show();
                 }
             });
         }

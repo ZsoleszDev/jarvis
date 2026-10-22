@@ -544,10 +544,12 @@
   // --- egy megérő találat ablaka (értesítésből vagy a listából) ---------------------------------------------------
   // Mennyibe kerül, mennyiért mennek most, mennyit kereshetsz vele; a gomb kimásolja az eladónak szóló üzenetet, és
   // megnyitja a hirdetést (a telefonon a hirdetési oldal alkalmazásában vagy a böngészőben), ahol rögtön elküldheted.
+  // Az óvatos eladási ár (deals.safe_sale): a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede.
   function dealFacts(d) {
-    const sale = d.median ? Math.round(d.median * (deals.sale_ratio || 0.9) / 100) * 100 : null;
+    const sale = d.median ? Math.round(Math.min(d.median * (deals.sale_ratio || 0.9), d.low || Infinity) / 100) * 100 : null;
+    const where = (d.sites || []).length ? `, ${d.sites.join(" és ")}` : "";
     const rows = [["Ára", `<b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))} → ${esc(price(d.price))})` : ""} · ${esc(d.site)}${d.auction ? " (licit)" : ""}`],
-                  [d.auction ? "Máshol ennyiért adják" : "Most ennyiért mennek", `kb. ${esc(price(d.median))}${d.similar ? ` (${esc(d.similar)} hasonló alapján)` : ""}`]];
+                  [d.auction ? "Máshol ennyiért adják" : "Most ennyiért mennek", `kb. ${esc(price(d.median))}${d.similar ? ` (${esc(d.similar)} hasonló alapján${esc(where)})` : ""}`]];
     if (d.auction) rows.push(["Meddig licitálj", `legfeljebb <b>${esc(price(d.max_bid))}</b>-ig${d.left ? ` · ${esc(leftText(d))}` : ""}`]);
     else if (d.offer) rows.push(["Ajánlattal", `ha ${esc(price(d.offer))}-ért megkapod, kb. <b>${esc(price(d.profit))}</b> a haszon`]);
     else rows.push(["Ennyit kereshetsz vele", `<b>kb. ${esc(price(d.profit))}</b>${sale ? ` (ha kb. ${esc(price(sale))}-ért eladod; a posta benne van)` : ""}`]);
@@ -572,7 +574,7 @@
     if (!$("deal-dialog").open) $("deal-dialog").showModal();
   }
   // Szöveg a vágólapra: az Android-alkalmazásban a saját hídján (a WebView-ban ez a biztos), máshol a böngészőével.
-  function copyText(text) {
+  function copyText(text, done = "Kimásoltam az üzenetet.") {
     try {
       if (window.JarvisApp && window.JarvisApp.copy) { window.JarvisApp.copy(text); return; }
     } catch { /* tovább a böngészőével */ }
@@ -583,11 +585,11 @@
       box.style.opacity = "0";
       document.body.appendChild(box);
       box.select();
-      try { document.execCommand("copy"); J.toast("Kimásoltam az üzenetet."); } catch { J.toast("Nem sikerült kimásolni."); }
+      try { document.execCommand("copy"); J.toast(done); } catch { J.toast("Nem sikerült kimásolni."); }
       box.remove();
     };
     if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(() => J.toast("Kimásoltam az üzenetet."), fallback);
+      navigator.clipboard.writeText(text).then(() => J.toast(done), fallback);
     } else {
       fallback();
     }
@@ -595,6 +597,24 @@
   $("deal-go").addEventListener("click", (event) => {
     if ($("deal-go").getAttribute("href") === "#") { event.preventDefault(); return; }
     copyText(deals.message || "");           // a hirdetés (a link) utána magától megnyílik
+    $("deal-dialog").close();
+  });
+  // Szakértői tipp: a kérdés (a hirdetés adataival és linkjével) a vágólapra, és megnyílik a ChatGPT (az
+  // Android-alkalmazásban a ChatGPT alkalmazás, ha telepítve van), ahol csak be kell illeszteni.
+  function expertPrompt(d) {
+    return "Találtam egy jónak tűnő árut, ami jó befektetés lehetne, ha vétel után kicsit drágábban továbbárusítanám. " +
+      "Megnéznéd, hogy tényleg jó vétel lenne-e?\n\n" +
+      `${d.title || d.text}\nÁra: ${price(d.price)} (${d.site})\n` +
+      (d.median ? `A hasonlók most kb. ${price(d.median)}-ért mennek${d.similar ? ` (${d.similar} hirdetés alapján)` : ""}.\n` : "") +
+      d.url;
+  }
+  $("deal-expert").addEventListener("click", (event) => {
+    const d = (deals.deals || []).find((x) => x.id === dealOpen);
+    if (!d) { event.preventDefault(); return; }
+    copyText(expertPrompt(d), "Kimásoltam a kérdést: a ChatGPT-ben csak illeszd be.");
+    try {
+      if (window.JarvisApp && window.JarvisApp.openChatGpt) { event.preventDefault(); window.JarvisApp.openChatGpt(); }
+    } catch { /* a link nyitja meg */ }
     $("deal-dialog").close();
   });
   $("deal-close").addEventListener("click", () => $("deal-dialog").close());

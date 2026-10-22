@@ -711,6 +711,7 @@ LISTINGS_JS = r"""
     seen.add(card.href);
     const summary = (card.label.length > 15 && !text.includes(card.label)) ? card.label + ' | ' + text : text;
     const entry = {text: summary.slice(0, 240), price, url: card.href};
+    if (card.label.length > 3 && card.label.length <= 160 && !PRICE.test(card.label)) entry.title = card.label;
     if (!fixed && AUCTION.test(text)) entry.auction = true;
     out.push(entry);
     if (out.length >= 40) break;
