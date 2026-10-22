@@ -412,7 +412,7 @@ class ExtractionTests(unittest.TestCase):
         self.assertNotIn("eladó", item.description)
         # a zárómondat a tárgy szerint az egyik változat (nem minden hirdetésé szóról szóra ugyanaz)
         footer = next(f.format(what="ruhát") for f in DESCRIPTION_FOOTERS if f.format(what="ruhát") in item.description)
-        self.assertIn("A profilomon", footer)
+        self.assertIn("a profilomon", footer.lower())   # mindegyik változat a profilodra hív (egyikben kisbetűvel)
         self.assertEqual(compose_description("", "x", "ruha", seed=item.id).split("\n\n")[0], footer, "mindig ugyanaz")
         self.assertGreater(len({compose_description("", "", "ruha", seed=str(n)) for n in range(12)}), 1)
         self.assertTrue(item.description.endswith("#sinsay #trikó #sárga #nyári"))
