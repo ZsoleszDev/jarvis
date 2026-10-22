@@ -719,3 +719,60 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
 .dealist li > .row { flex: none; gap: 6px; align-items: center; }
 .dealrows { margin: 4px 0; padding-left: 18px; font-size: 13px; }
 .dealist li > span > .row { flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.deals .buyform label { display: inline-flex; gap: 6px; align-items: baseline; font-size: 13px; color: var(--ash); }
+.deals .buyform input[type="number"] { width: 6.5em; }
+
+/* --- Vételeim: összesítő csempék, a megvett tárgyak kártyái, havonta ----------------------------------------- */
+.ledger { gap: 14px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.tile { display: grid; gap: 2px; align-content: start; padding: 10px 12px; border: 1px solid var(--rule);
+        border-radius: 8px; background: var(--graphite); }
+.tile b { font: 600 20px/1.2 var(--ui); color: var(--white); }
+.tile small { font-size: 12.5px; color: var(--ash); }
+.lbar { justify-content: space-between; }
+.lbar .filters { margin-left: 0; }
+.ledger-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; }
+.lcard { display: grid; grid-template-columns: 84px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--rule);
+         border-radius: 8px; background: var(--graphite); align-self: start; }
+.lcard.sold { opacity: 0.75; }
+.lcard .cardthumb { min-height: 100px; }
+.lcard .body { display: grid; gap: 6px; align-content: start; padding: 10px 12px 12px; min-width: 0; }
+.lhead { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
+.lhead .title { font: 15px/1.3 var(--ui); overflow-wrap: anywhere; }
+.lhead .chip { flex: none; }
+.lnums { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.lnums span { display: grid; gap: 1px; min-width: 0; }
+.lnums small { font-size: 11.5px; color: var(--ash); overflow-wrap: anywhere; }
+.lnums b { font: 600 15px/1.25 var(--ui); color: var(--paper); }
+.lnums b.loss { color: var(--ash); }   /* veszteség: halványabb, a mínuszjel mondja meg */
+.lcard .note { font-size: 12.5px; color: var(--silver); overflow-wrap: anywhere; }
+.lcard .note::before { content: "✎ "; color: var(--steel); }
+.lcard .warn { font-size: 12.5px; color: var(--white); }
+.lform { grid-column: 1 / -1; display: grid; gap: 10px; padding: 12px 12px 14px; border-top: 1px solid var(--rule); }
+.lform .fields { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px 14px; }
+.months { display: grid; gap: 6px; margin: 8px 0 4px; padding: 0; list-style: none; }
+.months li { display: grid; grid-template-columns: 6.5em minmax(0, 1fr) auto auto; gap: 10px; align-items: center;
+             font-size: 13.5px; }
+.mbar { height: 8px; border-radius: 4px; background: var(--graphite-hi); overflow: hidden; }
+.mbar i { display: block; height: 100%; background: var(--silver); }
+.mbar i.loss { background: var(--steel); }
+@media (max-width: 640px) {
+  .subtabs { overflow-x: auto; scrollbar-width: none; }
+  .subtabs::-webkit-scrollbar { display: none; }
+  .subtabs button { flex: none; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .tile { padding: 8px 10px; }
+  .tile b { font-size: 17px; }
+  .ledger-list { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .lcard { grid-template-columns: 64px minmax(0, 1fr); }
+  .lcard .cardthumb { min-height: 76px; }
+  .lcard .body { padding: 8px 10px 10px; gap: 5px; }
+  .lnums b { font-size: 14px; }
+  .lform { padding: 10px 10px 12px; }
+  .lform .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+  .lbar .filters { flex: 1 1 100%; }
+  .months li { grid-template-columns: 5.5em minmax(0, 1fr) auto; }
+  .months li small { display: none; }
+  /* a számmezők a telefonon nagyobbak: könnyebb eltalálni őket, és az iOS sem nagyít rájuk */
+  .lform input, .lform textarea, #l-add input { font-size: 16px; }
+}

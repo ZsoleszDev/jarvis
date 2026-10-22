@@ -32,7 +32,7 @@ from .notices import NoticeBoard
 from .ollama_log import CACHE_SETTING, CHECKPOINT_SETTING, ServerLog, explain, find_cause, pagefile_tip, user_setting
 from .recorder import Recorder
 from .browser import BrowserError
-from .scheduler import Hooks, Job, Scheduler, standby_ok
+from .scheduler import Hooks, Job, Scheduler, standby_ok, within_hours
 from .selling import NOT_POSTED, POSTED, ItemError, format_price, parse_price, price_verdict
 from .stt import SpeechToText
 from .textutil import SentenceSplitter, fold
@@ -512,6 +512,13 @@ class JarvisApp:
             # A vevői üzenetek olvasása: modell nélkül, csak olvasva, de a böngésző kell hozzá (készenlétben nem fut).
             self.scheduler.register(Job("messages", "Vevői üzenetek", self._message_minutes, self._messages_job,
                                         available=messages.available, needs_models=False, needs_browser=True))
+        instant = self.work.instant if self.work is not None else None
+        if instant is not None:
+            # Azonnali figyelő (Hardverapró, Jófogás): saját szálon, böngésző és modell nélkül; a Szünet leállítja, a
+            # készenlét nem, és a beszélgetésre sem vár (csak a felolvasás vár, ha épp dolgozol vele).
+            instant.notify = self._quick_notify
+            instant.allowed = self._instant_allowed
+            instant.start()
         deals = self.work.deals if self.work is not None else None
         if deals is not None and deals.browser is not None:
             # Olcsó hirdetések keresése: modell nélkül (csak a kevés jelöltre egy rövid kérdés), a böngésző kell hozzá.
@@ -660,6 +667,29 @@ class JarvisApp:
         if self.cfg.scheduler.speak and not self.paused:
             try:
                 self.say(text)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _instant_allowed(self) -> bool:
+        """Az azonnali figyelő mehet-e most: a háttérmunka be van kapcsolva, nincs Szünet (a készenlét nem számít), az
+        aktív órákban vagyunk ([scheduler] active_hours), és nem függesztetted fel a háttérmunkát."""
+        now = time.time()
+        if not self.cfg.scheduler.enabled or (self.paused and not self.standby):
+            return False
+        if not within_hours(self.cfg.scheduler.active_hours, now):
+            return False
+        scheduler = self.scheduler
+        return scheduler is None or float(scheduler.state.get("snoozed_until") or 0) <= now
+
+    def _quick_notify(self, kind: str, title: str, text: str, spoken: str = "", **extra: Any) -> None:
+        """Az azonnali figyelő értesítése (a saját szálán): a telefonra is, és ha szabad, röviden fel is olvassa (csak a
+        címét: ha épp beszélgetsz vagy dolgozol a Jarvisszal, akkor sem)."""
+        if self.notices is not None:
+            self.notices.add(kind, title, text, **extra)
+        self.ui.notice(text)
+        if self.cfg.scheduler.speak and not self.paused and not self.busy and spoken:
+            try:
+                self.say(spoken)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -852,6 +882,8 @@ class JarvisApp:
         self.stop_event.set()
         if self.scheduler is not None:
             self.scheduler.stop()
+        if self.work is not None and getattr(self.work, "instant", None) is not None:
+            self.work.instant.stop()
         if self.speech:
             self.speech.interrupt()
         if self.wake is not None:

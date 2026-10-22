@@ -199,6 +199,11 @@ publish_gap_minutes = 2.0
 # A Munka menü beszélgetésének mintavétele (a Beszélgetésé az [llm] temperature): kisebb érték = kevesebb
 # véletlen az űrlapkitöltésnél (melyik mezőbe, mit). A modellt nem tölti újra.
 temperature = 0.3
+# A Hardverapró és a Jófogás találati oldalait (és hirdetéseit) böngésző nélkül is olvassa: gyorsabb, párhuzamosan megy a
+# böngészővel (az közben a Vintedet, a Vaterát nézi), és erre épül az azonnali figyelő (Munka › Automata kereskedés), ami
+# 2–15 percenként nézi a figyelt kereséseket, és rögtön szól az új hirdetésekről. Oldalanként egyszerre egy kérés, 8–16
+# másodperc szünetekkel, óránként legfeljebb 90; ha egy oldal tilt, ott magától a böngésző marad. false = csak böngészővel.
+fast_fetch = true
 
 [creative]
 # A Kreatív menü: közös történetmesélés (kaland, mint az AI Dungeon) és beszélgetés egy karakterrel

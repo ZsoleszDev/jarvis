@@ -10,8 +10,20 @@
 - Fotóellenőrzés: homályos, sötét, túl világos, ellenfényes, kicsi, ismétlődő (a tárgyon belül és más tárgynál), borítójavaslat.
 - Automata kereskedés: keresések szokásos árral, Vinted-ajánlat, Vatera-licitek, haszonkövetés; Felfedező (figyelt oldalak keresőszó nélkül), árbázis termékkulccsal, „Mennyit ér?”, eladási sebesség, esti leállás a liciteknél; böngészés napközben (munkamenetek, oldalanként pihenő, rögtön oldalváltás; készenlétben is), öntanulás, napló.
 - Természetesebb hirdetéscím (márka + termék, szín és méret nélkül) és változatos zárómondat.
+- Vételeim fül: vételár, posta, egyéb költség, honnan, mikor, úton/nálad/fent/eladva, tervezett eladási ár, eladási posta
+  és díj, megjegyzés; várható és tényleges haszon, megtérülés, havonta; a „most kb.” ár az árbázisból; Új vétel kézzel.
+- Böngésző nélküli olvasás (feeds.py) a Hardveraprón és a Jófogáson: a kör elején a háttérben, párhuzamosan a
+  böngészővel; tempó, óránkénti keret, tiltásnál és üres oldalnál böngészős tartalék.
+- Azonnali figyelő (instant.py): keresőszó vagy oldalcím, minden új / csak ami megéri, 2–15 percenként, saját szálon;
+  sürgős push-értesítés.
 
 ## Élesben kipróbálandó
+- A Hardverapró és a Jófogás sima letöltéssel (feeds.py): a valódi oldalakon a kártyák kiolvasása (most a böngészős
+  elemzés másolata, a tesztoldalak a két oldal szerkezetét utánozzák), hogy a Jófogás tényleg a szerveren rajzolja-e ki a
+  találatokat (ha nem, háromszor üres után magától a böngészőre vált), és hogy a 8–16 másodperces szünet és az óránkénti
+  90 kérés nem túl sok-e (ha egy oldal 403-at vagy 429-et ad, a `feeds.GAP` és `HOURLY` csökkentendő).
+- Az azonnali figyelő az előresorolt (felfrissített) régi hirdetéseket is újnak látja, ha az első letöltéskor nem voltak
+  az első oldalon.
 - A Vinted üzenetoldala: a beszélgetések és üzenetek felismerése általános szabályokkal megy, a valódi oldalon nincs kipróbálva. Ha „nem találtam beszélgetést / üzenetet” jön, egy hibacsomag vagy az oldal HTML-je kell.
 - Az Android-módosítások (értesítés gombja → Eladva ablak) itt nem fordultak le: a GitHub Actions fordítását meg kell nézni.
 - A fotóküszöbök valódi telefonos fotókon (főleg: világos tárgy fehér háttér előtt, gyenge fény).
@@ -53,6 +65,14 @@
 - Készenlétben a böngészés miatt a böngésző újraindul; egy app-szintű teszt (a kereskedés munkája készenlétben, valódi böngészővel) még hiányzik, csak az ütemezőé van meg.
 - Az indulóoldalak súlya csak nő vagy csökken; ha egy oldal hetekig nem hoz semmit, a régi sikerei miatt még sokáig előre kerül.
 - Ami csak a termékcsaládot nevezi meg típus nélkül („PS5 konzol”, „Nintendo Switch”), nem kap kulcsot (a játékkal, kiegészítővel keveredne): ezeket csak a modell nevezi meg, vagy egy keresés méri.
+
+### Vételeim és azonnali figyelő
+- Az azonnali figyelő „minden új” hirdetéséhez (ami nem éri meg) nincs Megvettem gomb: azt a Vételeim › Új vétel veszi fel.
+- A napközbeni böngészés hardverapró/jófogás munkamenetei böngésző nélkül mennek, de továbbra is egymás után a Vinted- és
+  Vatera-munkamenetekkel; a két sor párhuzamosan is futhatna (a böngésző közben a Vintedet nézné).
+- A „most kb.” ár (Vételeim) a tárgy címéből vagy termékéből keres kulcsot; a csak leírással (prompt) felvett tárgynál
+  az első kiolvasás után jelenik meg.
+- Az azonnali figyelő ütemezése (mikor jön a következő) a memóriában van: újraindítás után rögtön néz egyet.
 
 ### Fotók (photos.py)
 - Két külön elkészített, nagyon hasonló fotót (kicsit elmozdult kamera) nem ismer fel ismétlődőnek.

@@ -30,11 +30,11 @@ from . import console, creative_templates, instance, qr, remote
 from .app import STATE_TEXT, JarvisApp, tool_label
 from .config import GuiCfg, app_data
 from .creative import MAX_TEXT, StoryError
-from .deals import DealError, profit_report
+from .deals import SALE_RATIO, SHIPPING, DealError, profit_report
 from .dossier import open_folder
 from .gpu import GpuMonitor
 from .messages import CONV_ID_RE, MAX_TEXT as MAX_MESSAGE
-from .selling import MAX_PHOTO_BYTES, ItemError
+from .selling import LEDGER_FIELDS, MAX_PHOTO_BYTES, ItemError, round_price
 from .tools import summarize_result
 from .watches import WatchError
 from .work import PRICE_CHOICES
@@ -51,7 +51,7 @@ DEAL_FIELDS = ("query", "sites", "max_price", "min_price", "discount", "min_prof
 # Amit a felületről át lehet írni egy tárgyon, és amit el lehet indítani.
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
             "size", "condition", "color", "material", "price", "min_price", "location", "shipping", "bought_price",
-            "sold_price"}
+            "sold_price", *LEDGER_FIELDS}
 ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold"}
 IS_WINDOWS = sys.platform == "win32"
 CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
@@ -484,7 +484,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "items": [i.public() for i in work.store.all()],
                                     **work.describe()})
         if path == "/api/work/deals":
-            return self._json(200, {"ok": True, **work.deals.state(), "profit": profit_report(work.store.all())})
+            return self._json(200, {"ok": True, **work.deals.state(), "profit": profit_report(work.store.all()),
+                                    "instant": work.instant.state() if work.instant is not None else None})
+        if path == "/api/work/ledger":       # Vételeim: a megvett tárgyak költségei, haszna, és mennyiért adják most
+            return self._json(200, self._ledger(work))
         if path == "/api/work/messages":
             return self._json(200, {"ok": True, "conversations": work.messages.conversations(),
                                     "unread": work.messages.unread_count(), "browser": work.messages.browser is not None})
@@ -677,6 +680,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._messages_post(path, body, remote)
             if path == "/api/work/deals":
                 return self._deals_post(body, remote)
+            if path == "/api/work/ledger":
+                return self._ledger_post(body)
             if path == "/api/work/new":
                 values = {"targets": body.get("targets") or [], "prompt": str(body.get("prompt") or ""),
                           "research_wanted": bool(body.get("research_wanted"))}
@@ -761,8 +766,26 @@ class _Handler(BaseHTTPRequestHandler):
     def _deals_post(self, body: dict[str, Any], remote: bool = False) -> None:
         """Az Automata kereskedés gombjai: be/ki, keresés hozzáadása és törlése, egy találat elrejtése, keresés most."""
         app, deals = self.gui.app, self._work().deals
+        instant = self._work().instant
         action = str(body.get("action") or "")
         try:
+            if action.startswith("instant_"):   # azonnali figyelő (Hardverapró, Jófogás; böngésző nélkül)
+                if instant is None:
+                    return self._json(409, {"ok": False, "error": "Az azonnali figyelő ki van kapcsolva ([work] "
+                                                                  "fast_fetch = false)."})
+                if action == "instant_enable":
+                    state = instant.set_enabled(bool(body.get("on")))
+                elif action == "instant_add":
+                    state = instant.add(str(body.get("target") or ""), body.get("sites"), str(body.get("mode") or ""),
+                                        body.get("max_price"), body.get("min_price"), body.get("exclude"),
+                                        body.get("every"))
+                elif action == "instant_remove":
+                    state = instant.remove(str(body.get("id") or ""))
+                elif action == "instant_pause":
+                    state = instant.pause(str(body.get("id") or ""), bool(body.get("off")))
+                else:
+                    return self._json(400, {"ok": False})
+                return self._json(200, {"ok": True, **deals.state(), "instant": state})
             if action == "enable":
                 return self._json(200, {"ok": True, **deals.set_enabled(bool(body.get("on")))})
             fields = {k: body.get(k) for k in DEAL_FIELDS if k in body}
@@ -802,11 +825,15 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **deals.remove_search(str(body.get("id") or ""))})
             if action == "dismiss":
                 return self._json(200, {"ok": True, **deals.dismiss(str(body.get("id") or ""))})
-            if action == "bought":      # Megvettem: eladási tárgy lesz belőle, a vételárral (haszonkövetés)
+            if action == "bought":      # Megvettem: eladási tárgy lesz belőle, a vételárral (Vételeim)
                 deal = deals.get(str(body.get("id") or ""))
                 store = self._work().store
+                median = int(deal.get("median") or 0) or None
                 item = store.create(prompt=f"{deal['text']}, {deal['median']} Ft", source=deal["url"],
-                                    bought_price=body.get("price") or deal["price"], bought_at=time.time())
+                                    bought_price=body.get("price") or deal["price"], bought_at=time.time(),
+                                    bought_shipping=body.get("shipping"), bought_from=str(deal.get("site") or ""),
+                                    in_transit=bool(body.get("in_transit", True)), market_price=median,
+                                    target_price=round_price(median * SALE_RATIO) if median else None)
                 state = deals.mark_bought(deal["id"], item.id)
                 return self._json(200, {"ok": True, **state, "item": item.id, "profit": profit_report(store.all())})
             if action == "run":
@@ -820,6 +847,36 @@ class _Handler(BaseHTTPRequestHandler):
         except (DealError, ItemError) as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
         return self._json(400, {"ok": False})
+
+    @staticmethod
+    def _ledger(work: Any) -> dict[str, Any]:
+        return {"ok": True, **profit_report(work.store.all(), book=work.deals.book),
+                "sites": [p.name for p in work.platforms.values()], "shipping": SHIPPING}
+
+    def _ledger_post(self, body: dict[str, Any]) -> None:
+        """Vételeim: egy vétel kézzel (nem az Automata kereskedésből: pl. bolhapiacon vetted), és egy tárgy vételi
+        adatainak mentése (a tárgy lapjának mentése is jó, ez a fülnek a friss összesítést is visszaadja)."""
+        work = self._work()
+        action = str(body.get("action") or "")
+        if action == "add":
+            name = " ".join(str(body.get("name") or "").split())[:100]
+            if not name:
+                return self._json(400, {"ok": False, "error": "Írd be, mit vettél."})
+            if body.get("price") in (None, ""):
+                return self._json(400, {"ok": False, "error": "Mennyiért vetted?"})
+            values = {k: body.get(k) for k in ("bought_shipping", "bought_extra", "bought_from", "target_price",
+                                                "trade_note") if body.get(k) not in (None, "")}
+            item = work.store.create(prompt=name, bought_price=body.get("price"), bought_at=time.time(),
+                                     in_transit=bool(body.get("in_transit")), **values)
+            return self._json(200, {**self._ledger(work), "item": item.id})
+        if action == "update":
+            fields = body.get("fields") if isinstance(body.get("fields"), dict) else {}
+            values = {k: v for k, v in fields.items() if k in EDITABLE}
+            if not values:
+                return self._json(400, {"ok": False, "error": "Nincs mit menteni."})
+            work.store.update(str(body.get("id") or ""), user=True, **values)
+            return self._json(200, self._ledger(work))
+        return self._json(400, {"ok": False, "error": "Ismeretlen művelet."})
 
     def _messages_post(self, path: str, body: dict[str, Any], remote: bool = False) -> None:
         """A vevői üzenetek gombjai: vázlat kérése, a vázlat mentése, megnézve, küldés (jóváhagyással), frissítés."""

@@ -59,8 +59,16 @@ DESCRIPTION_FOOTERS = (
 DESCRIPTION_FOOTER = DESCRIPTION_FOOTERS[0]
 TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200, "brand": 80,
                "size": 40, "gender": 20, "condition": 40, "color": 60, "material": 120, "location": 80,
-               "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20, "source": 300}
-MULTILINE = {"description", "prompt"}
+               "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20, "source": 300, "bought_from": 80,
+               "trade_note": 500}
+MULTILINE = {"description", "prompt", "trade_note"}
+# Forintösszegek (parse_price) és időpontok a tárgyon.
+AMOUNT_FIELDS = ("price", "min_price", "bought_price", "sold_price", "bought_shipping", "bought_extra",
+                 "market_price", "target_price", "sell_shipping", "sell_fee")
+TIME_FIELDS = ("bought_at", "sold_at")
+# A Vételeim fülön (és a telefonos API-ban) átírható vételi és eladási adatok (a vételár és az eladási ár mellett).
+LEDGER_FIELDS = ("bought_shipping", "bought_extra", "bought_from", "bought_at", "in_transit", "market_price",
+                 "target_price", "sell_shipping", "sell_fee", "trade_note", "sold_at")
 POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
 # Egy fent lévő hirdetés újbóli megjelölésekor (ugyanaz a hirdetés) ezek maradnak: mióta van fent, a feltöltéskori ár és cím,
 # és a háttérellenőrzés eredménye (lásd listings.py), a „Nem igaz, fent van” jelöléssel együtt.
@@ -215,6 +223,16 @@ class Item:
     source: str = ""                  # a hirdetés, ahol vetted (Automata kereskedés, Megvettem)
     sold_price: int | None = None
     sold_at: float = 0.0
+    # Vételi napló (Vételeim fül): a vétel többi költsége, mennyit ér, mennyiért adnád tovább, és az eladás költségei.
+    bought_shipping: int | None = None    # vételkor a posta (csomagautomata, futár)
+    bought_extra: int | None = None       # egyéb költség (javítás, tisztítás, alkatrész, benzin)
+    bought_from: str = ""             # honnan vetted (pl. „Hardverapró”, „bolhapiac”)
+    in_transit: bool = False          # megvetted, de még nem érkezett meg (a Megvettem után, amíg nem jelölöd)
+    market_price: int | None = None       # a szokásos ára a vételkor (a találatból)
+    target_price: int | None = None       # mennyiért adnád tovább (a várható haszonhoz)
+    sell_shipping: int | None = None      # eladáskor a posta, ha te fizeted
+    sell_fee: int | None = None           # eladási díj (jutalék, kiemelés)
+    trade_note: str = ""              # megjegyzés (csomagszám, az eladó, egy hiba)
     reminded: float = 0.0             # mikor szólt utoljára, hogy régóta fent van és nem kelt el
     busy: str = ""                    # épp min dolgozik a Jarvis (nem mentjük)
 
@@ -513,10 +531,15 @@ class ItemStore:
     def _apply(self, item: Item, values: dict[str, Any]) -> list[str]:
         changed = []
         for key, value in values.items():
-            if key in ("price", "min_price", "bought_price", "sold_price"):
+            if key in AMOUNT_FIELDS:
                 value = parse_price(value)
-            elif key in ("bought_at", "sold_at"):
-                value = float(value or 0)
+            elif key in TIME_FIELDS:
+                try:
+                    value = max(0.0, float(value or 0))
+                except (TypeError, ValueError):
+                    raise ItemError("Az időpont nem érvényes.") from None
+            elif key in ("research_wanted", "in_transit"):
+                value = bool(value)
             elif key == "condition":
                 value = closest_condition(str(value or "")) if value else ""
             elif key == "kind":
@@ -529,8 +552,6 @@ class ItemStore:
                 if unknown:
                     raise ItemError(f"Ismeretlen hirdetési oldal: {', '.join(map(str, unknown))}")
                 value = [t for t in self.platform_keys if t in value]
-            elif key == "research_wanted":
-                value = bool(value)
             elif key == "extracted_sig":
                 value = str(value or "")[:64]
             elif key in TEXT_LIMITS:
@@ -546,6 +567,8 @@ class ItemStore:
             if getattr(item, key) != value:
                 setattr(item, key, value)
                 changed.append(key)
+        if item.bought_price is not None and not item.bought_at:
+            item.bought_at = time.time()      # a vételár első megadásakor: ma vetted (a Vételeim fülön átírható)
         return changed
 
     def update(self, item_id: str, user: bool = False, **values: Any) -> Item:

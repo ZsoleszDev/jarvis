@@ -175,21 +175,88 @@ class WorkSecurityTests(unittest.TestCase):
         deals = self.h.app.work.deals
         deals._remember({"id": "d1", "url": "https://hardverapro.hu/apro/1.html", "text": "RTX 3060 Ti", "site": "Hardverapró",
                          "price": 55000, "median": 100000, "margin": 45000, "at": time.time()})
-        status, data = self.post("/api/work/deals", {"action": "bought", "id": "d1", "price": "52 000"})
+        status, data = self.post("/api/work/deals", {"action": "bought", "id": "d1", "price": "52 000",
+                                                     "shipping": "1500", "in_transit": True})
         self.assertEqual(status, 200, data)
         item = self.h.store.get(data["item"])
         self.assertEqual((item.bought_price, item.source, item.prompt),
                          (52000, "https://hardverapro.hu/apro/1.html", "RTX 3060 Ti, 100000 Ft"))
+        self.assertEqual((item.bought_shipping, item.bought_from, item.in_transit, item.market_price, item.target_price),
+                         (1500, "Hardverapró", True, 100000, 90000), "a találatból: honnan, a szokásos ár és a 90%-a")
         self.assertEqual(data["deals"][0]["bought"], item.id)
-        self.assertEqual(data["profit"]["open"], {"count": 1, "spent": 52000})
+        self.assertEqual((data["profit"]["open"]["count"], data["profit"]["open"]["spent"],
+                          data["profit"]["open"]["expected"]), (1, 53500, 36500))
+        status, data = request(self.port, "GET", f"/api/work/ledger?t={self.h.server.token}", self.ok)
+        ledger = json.loads(data)
+        self.assertEqual((status, ledger["rows"][0]["stage"], ledger["rows"][0]["cost"]), (200, "úton", 53500))
+        status, data = self.post("/api/work/ledger", {"action": "update", "id": item.id,
+                                                      "fields": {"in_transit": False, "bought_extra": "2 000",
+                                                                 "trade_note": "Foxpost, 123", "status": "x"}})
+        self.assertEqual((status, data["rows"][0]["stage"], data["rows"][0]["cost"], data["rows"][0]["trade_note"]),
+                         (200, "nálad", 55500, "Foxpost, 123"), "megérkezett; a nem átírható mező kimarad")
+        self.assertEqual(self.post("/api/work/ledger", {"action": "update", "id": item.id,
+                                                        "fields": {"sold": True}})[0], 400, "nincs mit menteni")
         self.h.store.update(item.id, price=95000)
         self.h.store.mark(item.id, sold=True)
         status, data = request(self.port, "GET", f"/api/work/deals?t={self.h.server.token}", self.ok)
         profit = json.loads(data)["profit"]
         self.assertEqual((profit["month"], profit["total"]["profit"], profit["open"]["count"]),
-                         ({"profit": 43000, "count": 1}, 43000, 0))
+                         ({"profit": 39500, "count": 1, "revenue": 95000}, 39500, 0),
+                         "95 000 − (52 000 + 1 500 posta + 2 000 egyéb)")
         status, data = self.post("/api/work/update", {"id": item.id, "fields": {"sold_price": "90000"}})
         self.assertEqual((status, self.h.store.get(item.id).sold_price), (200, 90000), "az eladási ár átírható")
+        self.h.store.delete(item.id)
+
+    def test_instant_watch_from_the_window(self):
+        """Azonnali figyelő: be/ki, egy keresőszó két oldalon, egy oldalcím (csak ami megéri), szünet és törlés."""
+        status, data = request(self.port, "GET", f"/api/work/deals?t={self.h.server.token}", self.ok)
+        instant = json.loads(data)["instant"]
+        self.assertEqual((status, instant["enabled"], [s["key"] for s in instant["sites"]]),
+                         (200, False, ["jofogas", "hardverapro"]))
+        self.assertTrue(self.h.app.work.instant.working(), "a szála a Jarvisszal együtt indul")
+        status, data = self.post("/api/work/deals", {"action": "instant_add", "target": "RTX 3080", "sites": ["jofogas"],
+                                                     "max_price": "200 000", "every": "4"})
+        alert = data["instant"]["alerts"][0]
+        self.assertEqual((status, alert["sites"], alert["mode"], alert["max_price"], alert["every"]),
+                         (200, ["jofogas"], "all", 200000, 3))
+        self.assertIn("searches", data, "a fül többi része is jön")
+        page = self.h.pages.url("katalogus.html")
+        status, data = self.post("/api/work/deals", {"action": "instant_add", "target": page})
+        self.assertEqual((status, data["instant"]["alerts"][1]["mode"]), (200, "cheap"))
+        self.assertEqual(self.post("/api/work/deals", {"action": "instant_add", "target": ""})[0], 400)
+        status, data = self.post("/api/work/deals", {"action": "instant_pause", "id": alert["id"], "off": True})
+        self.assertTrue(data["instant"]["alerts"][0]["off"])
+        status, data = self.post("/api/work/deals", {"action": "instant_enable", "on": True})
+        self.assertTrue(data["instant"]["enabled"])
+        self.post("/api/work/deals", {"action": "instant_enable", "on": False})
+        for stored in data["instant"]["alerts"]:
+            status, data = self.post("/api/work/deals", {"action": "instant_remove", "id": stored["id"]})
+        self.assertEqual((status, data["instant"]["alerts"]), (200, []))
+        self.assertEqual(self.post("/api/work/deals", {"action": "instant_nincs"})[0], 400)
+        app = self.h.app
+        self.assertTrue(app._instant_allowed())
+        app.scheduler.snooze(30)
+        self.assertFalse(app._instant_allowed(), "a háttérmunka felfüggesztése őt is megállítja")
+        app.scheduler.snooze(0)
+        app.cfg.scheduler.active_hours = "00:00-00:01" if time.localtime().tm_hour else "23:00-23:59"
+        self.assertFalse(app._instant_allowed(), "az aktív órákon kívül")
+        app.cfg.scheduler.active_hours = ""
+        self.assertTrue(app._instant_allowed())
+
+    def test_a_purchase_can_be_added_by_hand(self):
+        """Vételeim › Új vétel: ami nem az Automata kereskedésből jött (pl. bolhapiacon vetted)."""
+        status, data = self.post("/api/work/ledger", {"action": "add", "name": "Makita DHP482", "price": "12 000",
+                                                      "bought_shipping": "", "bought_from": "bolhapiac",
+                                                      "target_price": "25000", "in_transit": False})
+        self.assertEqual(status, 200, data)
+        item = self.h.store.get(data["item"])
+        self.assertEqual((item.prompt, item.bought_price, item.bought_from, item.target_price, item.in_transit),
+                         ("Makita DHP482", 12000, "bolhapiac", 25000, False))
+        row = next(r for r in data["rows"] if r["id"] == item.id)
+        self.assertEqual((row["stage"], row["expected"]), ("nálad", 13000))
+        self.assertEqual(self.post("/api/work/ledger", {"action": "add", "name": "", "price": "1"})[0], 400)
+        self.assertEqual(self.post("/api/work/ledger", {"action": "add", "name": "Valami"})[0], 400, "a vételár kell")
+        self.assertEqual(self.post("/api/work/ledger", {"action": "nincs"})[0], 400)
         self.h.store.delete(item.id)
 
     def test_upload_needs_token_and_same_origin(self):
@@ -462,6 +529,103 @@ class WorkBrowserTests(unittest.TestCase):
         found = store.get(item.id)
         self.assertTrue(found.sold)
         self.assertEqual(found.platforms["vinted"]["note"], "Itt kelt el.")
+
+    def test_ledger_tab_on_a_phone(self):
+        """Vételeim telefonméretben: az összesítő, a kártyák (úton, nálad, eladva), a Megérkezett gomb, a részletek
+        szerkesztése és egy új vétel; vízszintes görgetés nélkül."""
+        store = self.h.store
+        now = time.time()
+        road = store.create(title="RTX 3060 Ti Gaming OC", bought_price=55000, bought_shipping=1500, target_price=90000,
+                            in_transit=True, bought_from="Hardverapró", source="https://hardverapro.hu/apro/1.html")
+        sold = store.create(title="Nike Air Max 90", bought_price=15000, sold_price=24000, sell_fee=800,
+                            bought_at=now - 4 * 86400)
+        store.mark(sold.id, sold=True)
+        page = self.page
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.click("#job-ledger")
+        page.wait_for_selector(".lcard")
+        self.assertTrue(page.is_hidden("#w-list-view") and page.is_hidden("#w-filters"))
+        tiles = page.inner_text(".tiles")
+        self.assertIn("+8 200 Ft", tiles, "a hónap haszna: 24 000 − 800 − 15 000")
+        self.assertIn("56 500 Ft", tiles, "ennyi van bent (vételár + posta)")
+        self.assertIn("+33 500 Ft", tiles, "várható haszon a tervezett árral")
+        first = page.locator(".lcard").first
+        self.assertIn("Úton", first.inner_text())
+        self.assertIn("55 000 Ft + posta 1 500 Ft", first.inner_text())
+        page.click('[data-lfilter="eladva"]')
+        self.assertEqual(page.locator(".lcard").count(), 1)
+        self.assertIn("Nike Air Max 90", page.inner_text(".lcard"))
+        page.click('[data-lfilter="all"]')
+        page.click(f'[data-larrived="{road.id}"]')
+        page.wait_for_selector('.toast:has-text("Megérkezett")')
+        self.wait_for(lambda: not store.get(road.id).in_transit)
+        page.click(f'.lcard .row [data-lopen="{road.id}"]')
+        page.fill("#l-bought_extra", "2000")
+        page.fill("#l-trade_note", "Foxpost 123")
+        page.click('[data-lsave] button[type="submit"]')
+        page.wait_for_selector('.toast:has-text("Mentve")')
+        self.assertEqual((store.get(road.id).bought_extra, store.get(road.id).trade_note), (2000, "Foxpost 123"))
+        self.assertGreater(store.get(road.id).bought_at, 0, "a vétel napja nem változott, nem lett 0")
+        self.assertIn("Foxpost 123", page.inner_text(".ledger-list"))
+        page.click("#l-add-toggle")
+        page.fill("#la-name", "Makita DHP482")
+        page.fill("#la-price", "12000")
+        page.fill("#la-target", "25000")
+        page.click('#l-add button[type="submit"]')
+        page.wait_for_selector('.lcard:has-text("Makita DHP482")')
+        self.assertIn("+13 000 Ft", page.inner_text('.lcard:has-text("Makita DHP482")'))
+        wide = page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        self.assertFalse(wide, "telefonon nincs vízszintes görgetés")
+        page.click('.lcard:has-text("Makita DHP482") [data-open]')
+        page.wait_for_selector("#f-title")
+        self.assertTrue(page.is_hidden("#w-ledger"))
+
+    def test_instant_watch_section_on_a_phone(self):
+        """Az Automata kereskedés fülön az azonnali figyelő: bekapcsolás, egy figyelő felvétele (oldalcímnél magától „csak
+        ami megéri”), gyors hozzáadás, és a friss hirdetések; a megérőnél a Megvettem a találathoz visz."""
+        instant, deals = self.h.app.work.instant, self.h.app.work.deals
+        deals._remember({"id": "q1", "url": "https://hardverapro.hu/apro/palit/friss.html", "text": "Palit RTX 3060 Ti",
+                         "site": "Hardverapró", "platform": "hardverapro", "price": 52000, "median": 100000,
+                         "profit": 36500, "at": time.time(), "quick": True})
+        with instant._lock:
+            instant._data["hits"] = [
+                {"id": "h1", "alert": "a", "alert_name": "Videókártyák", "at": time.time() - 120, "site": "Hardverapró",
+                 "platform": "hardverapro", "text": "Palit RTX 3060 Ti Dual Budapest", "title": "Palit RTX 3060 Ti",
+                 "price": 52000, "url": "https://hardverapro.hu/apro/palit/friss.html", "cheap": True,
+                 "reference": 100000, "profit": 36500, "deal": "q1"},
+                {"id": "h2", "alert": "b", "alert_name": "RTX 3080", "at": time.time() - 30, "site": "Jófogás",
+                 "platform": "jofogas", "text": "MSI RTX 3080", "title": "MSI RTX 3080", "price": 185000,
+                 "url": "https://www.jofogas.hu/budapest/msi_1.htm", "cheap": False}]
+        page = self.page
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.click("#job-deals")
+        page.wait_for_selector("#di-enabled")
+        page.check("#di-enabled")
+        page.wait_for_selector('.toast:has-text("amint új hirdetés kerül fel")')
+        self.assertTrue(instant.state()["enabled"])
+        page.fill("#di-target", "RTX 3080")
+        self.assertEqual(page.input_value("#di-mode"), "all")
+        page.fill("#di-target", self.h.pages.url("katalogus.html"))
+        self.assertEqual(page.input_value("#di-mode"), "cheap", "egy egész oldalnál csak ami megéri")
+        page.fill("#di-target", "RTX 3080")
+        page.select_option("#di-mode", "cheap")
+        page.fill("#di-target", "RTX 3080 Ti")
+        self.assertEqual(page.input_value("#di-mode"), "cheap", "amit kézzel választottál, marad")
+        page.fill("#di-max", "250000")
+        page.click('#di-add button[type="submit"]')
+        page.wait_for_selector('.dealist li:has-text("RTX 3080 Ti")')
+        alert = instant.state()["alerts"][0]
+        self.assertEqual((alert["query"], alert["mode"], alert["max_price"]), ("RTX 3080 Ti", "cheap", 250000))
+        hits = page.inner_text("details:has-text('Friss hirdetések')")
+        self.assertIn("Palit RTX 3060 Ti", hits)
+        self.assertIn("Megéri:", hits)
+        self.assertIn("2 perce", hits)
+        page.click('details:has-text("Friss hirdetések") [data-deal-buy="q1"]')
+        page.wait_for_selector("#d-paid")
+        self.assertEqual(page.input_value("#d-paid"), "52000")
+        instant.set_enabled(False)
+        wide = page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        self.assertFalse(wide, "telefonon nincs vízszintes görgetés")
 
     def test_flags_filter_last_check_and_a_false_flag(self):
         store = self.h.store

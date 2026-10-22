@@ -53,6 +53,7 @@
       <nav class="subtabs" role="tablist" aria-label="Munkák">
         <button id="job-sales" type="button" role="tab" aria-selected="true">Adás/Vétel</button>
         <button id="job-deals" type="button" role="tab" aria-selected="false">Automata kereskedés</button>
+        <button id="job-ledger" type="button" role="tab" aria-selected="false">Vételeim</button>
       </nav>
       <div id="w-filters" class="filters" role="group" aria-label="Szűrés"></div>
     </div>
@@ -87,6 +88,8 @@
       <!-- vevői üzenetek: a beszélgetések, egy beszélgetés és a válasz (work.js) -->
       <article id="w-msgs" class="detail msgs" hidden></article>
       <article id="w-deals" class="detail deals" hidden></article>
+      <!-- vételeim: a megvett tárgyak költségei, mennyiért adnád tovább, és a haszon (work.js) -->
+      <article id="w-ledger" class="detail ledger" hidden></article>
       <!-- állandó fájlválasztó: a lap frissítése közben se vesszen el, amit kiválasztottál -->
       <input id="w-file" type="file" accept="image/*" multiple hidden>
     </div>

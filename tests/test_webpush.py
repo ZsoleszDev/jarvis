@@ -186,6 +186,19 @@ class WebPushTests(unittest.TestCase):
         self.assertEqual((message["item"], message["actions"]), ("a1b2c3d4", [sold]),
                          "csak az ismert gombok (a böngésző az ablakot nyitja meg, a döntés ott a tiéd)")
 
+    def test_a_fresh_listing_is_urgent(self):
+        """Az azonnali figyelő értesítése sürgős: a telefon alvó állapotban is rögtön megkapja; a többi normál."""
+        browser = Browser()
+        self.push.subscribe("aaaa1111", browser.subscription())
+        self.push.on_event({"type": "notification", "notice": {"id": "n3", "kind": "deal", "title": "Új: RTX 3080",
+                                                              "text": "Hardverapró: 185 000 Ft", "urgent": True}})
+        self.push.on_event({"type": "notification", "notice": {"id": "n4", "kind": "post", "title": "Feltöltve",
+                                                              "text": "Fent van."}})
+        self.service.wait(2)
+        time.sleep(0.1)
+        urgency = {json.loads(browser.decrypt(body))["tag"]: headers["Urgency"] for _u, body, headers in self.service.calls}
+        self.assertEqual(urgency, {"notice-n3": "high", "notice-n4": "normal"})
+
     def test_confirm_answer_key_is_single_use(self):
         browser = Browser()
         self.push.subscribe("aaaa1111", browser.subscription())

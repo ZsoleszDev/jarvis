@@ -1144,11 +1144,63 @@ class ProfitTests(unittest.TestCase):
             store.create(title="Nike Air Max", bought_price=15000)
             store.create(title="Saját póló", price=2000)          # nem vett tárgy: nem számít
             report = profit_report(store.all(), now)
-        self.assertEqual(report["month"], {"profit": 40000, "count": 1})
-        self.assertEqual(report["total"], {"profit": 43000, "count": 2, "spent": 64000, "revenue": 107000})
-        self.assertEqual(report["open"], {"count": 1, "spent": 15000})
+        self.assertEqual(report["month"], {"profit": 40000, "count": 1, "revenue": 95000})
+        self.assertEqual(report["total"], {"profit": 43000, "count": 2, "spent": 64000, "revenue": 107000, "roi": 67})
+        self.assertEqual((report["open"]["count"], report["open"]["spent"], report["open"]["unknown"]), (1, 15000, 1),
+                         "a Nike-nak nincs ára: nem tudni, mennyi haszon várható belőle")
         self.assertEqual(report["days"], 20, "átlagosan (10 + 30) / 2 nap alatt kelt el")
-        self.assertEqual([r["name"] for r in report["rows"]], ["Nike Air Max", "PS5 kontroller", "RTX 3060 Ti"])
+        self.assertEqual([r["name"] for r in report["rows"]], ["Nike Air Max", "RTX 3060 Ti", "PS5 kontroller"],
+                         "elöl a meg nem eladott, aztán a legutóbb eladott")
+        self.assertEqual([(m["profit"], m["count"]) for m in report["months"]], [(40000, 1), (3000, 1)])
+
+    def test_costs_expected_profit_stages_and_todays_price(self):
+        """A bekerülés a vételár, a posta és az egyéb költség; a haszon az eladás költségeivel (posta, díj) együtt. Amíg
+        nem kelt el, a tervezett eladási árból (vagy a hirdetési árból) számolja a várható hasznot, és az árbázisból,
+        hogy most mennyiért adják."""
+        from jarvis_core.deals import profit_report
+        from jarvis_core.selling import ItemStore
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ItemStore(Path(tmp) / "eladas")
+            book = PriceBook(Path(tmp))
+            book.add([{"text": f"RTX 3060 Ti videókártya {n}", "price": 100000 + n * 1000,
+                       "url": f"https://hardverapro.hu/apro/{100000 + n}.html"} for n in range(5)])
+            now = time.time()
+            road = store.create(title="RTX 3060 Ti Gaming OC", bought_price=55000, bought_shipping=1500,
+                                bought_extra=2000, target_price=90000, in_transit=True, bought_at=now - 2 * 86400,
+                                bought_from="Hardverapró")
+            listed = store.create(title="PS5 kontroller", bought_price=9000, price=14000, sell_fee="500",
+                                  targets=["vinted"])
+            store.mark(listed.id, platform="vinted")
+            sold = store.create(title="Nike Air Max 90", bought_price=15000, bought_shipping=1200, sold_price=24000,
+                                sell_shipping=1500, sell_fee=800, bought_at=now - 5 * 86400)
+            store.mark(sold.id, sold=True)
+            guess = store.create(title="Valami", bought_price=5000, market_price=10000)
+            with self.assertRaises(Exception):
+                store.update(road.id, bought_shipping="sok")
+            report = profit_report(store.all(), now, book=book)
+        rows = {r["id"]: r for r in report["rows"]}
+        self.assertEqual([r["stage"] for r in report["rows"]], ["úton", "nálad", "fent", "eladva"])
+        self.assertEqual((rows[road.id]["cost"], rows[road.id]["estimate"], rows[road.id]["expected"],
+                          rows[road.id]["roi"], rows[road.id]["days"]), (58500, 90000, 31500, 54, 2))
+        self.assertEqual(rows[road.id]["market_now"]["price"], 102000, "most ennyiért adják (árbázis)")
+        self.assertEqual((rows[listed.id]["estimate"], rows[listed.id]["expected"]), (14000, 4500),
+                         "tervezett ár nélkül a hirdetési ár, mínusz a díj")
+        self.assertEqual((rows[guess.id]["estimate"], rows[guess.id]["expected"]), (9000, 4000),
+                         "se tervezett, se hirdetési ár: a szokásos ár 90%-a")
+        self.assertEqual((rows[sold.id]["cost"], rows[sold.id]["profit"], rows[sold.id]["roi"]), (16200, 5500, 34))
+        self.assertEqual(report["open"], {"count": 3, "spent": 72500, "expected": 40000, "value": 113000,
+                                          "unknown": 0})
+        self.assertEqual(report["stages"], {"úton": 1, "nálad": 1, "fent": 1, "eladva": 1})
+        self.assertEqual(report["total"]["profit"], 5500)
+        self.assertEqual(rows[road.id]["advice"], [], "kb. 92 000 Ft-ért kelne el: nem sokkal több, mint a 90 000")
+        later = profit_report(store.all(), now + 8.5 * 86400, book=book)
+        advice = {r["id"]: r["advice"] for r in later["rows"]}
+        self.assertEqual(advice[road.id], ["10 napja úton van: kérdezd meg az eladót, vagy jelöld megérkezettnek."])
+        self.assertEqual(advice[guess.id], ["8 napja nálad van, és még nincs fent sehol: tölts fel róla hirdetést."])
+        self.assertEqual(advice[listed.id], [])
+        store.update(road.id, target_price=80000)
+        cheaper = {r["id"]: r["advice"] for r in profit_report(store.all(), now, book=book)["rows"]}
+        self.assertEqual(cheaper[road.id], ["Most drágábban adják: kérhetsz többet (kb. 91 800 Ft-ért is elkelhet)."])
 
 
 if __name__ == "__main__":

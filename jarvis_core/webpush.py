@@ -273,7 +273,8 @@ class WebPush:
                 message["actions"] = actions
                 if notice.get("item"):
                     message["item"] = str(notice["item"])[:16]
-            self._enqueue(message, ttl=12 * 3600, urgency="normal")
+            # egy friss hirdetésnél számít a perc: a telefon akkor is rögtön kapja meg, ha alszik
+            self._enqueue(message, ttl=12 * 3600, urgency="high" if notice.get("urgent") else "normal")
 
     def answer(self, key: str) -> int | None:
         """Az értesítés gombjának válaszkulcsa: melyik jóváhagyásra felel (egyszer használható)."""

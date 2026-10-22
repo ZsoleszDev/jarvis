@@ -31,6 +31,8 @@ from .config import Config, data_path, resolve_path
 from .dossier import Dossiers
 from .listings import CHECK_WORDS, GONE, SOLD, ListingChecker
 from .deals import DealHunter
+from .feeds import FAST_SITES, SiteFetcher
+from .instant import InstantWatch
 from .messages import MessageDesk
 from .replay import (FlowRecorder, FlowStore, Replayer, ReplayOutcome, entry_for, entry_problem, flow_key, item_values,
                      url_shape)
@@ -224,8 +226,15 @@ class WorkDesk:
                                     settings=lambda: self.settings, confirm=lambda prompt: self.confirm(prompt),
                                     check_stop=lambda: self.check_stop(), on_change=on_message)
         # Automata kereskedés (deals.py): alulárazott hirdetések keresése, modell nélkül (csak a jelöltekre egy kérdés).
+        # A Hardverapró és a Jófogás böngésző nélkül is (feeds.py): gyorsabb, a böngészővel párhuzamosan megy, és erre
+        # épül az azonnali figyelő (instant.py), ami szól, amint új hirdetés kerül fel.
+        fast = tuple(k for k in FAST_SITES if k in self.platforms)
+        self.fetcher = (SiteFetcher(fast, domains={k: self.platforms[k].domains for k in fast})
+                        if cfg.work.fast_fetch and fast else None)
         self.deals = DealHunter(self.root, self.platforms, (lambda: toolbox.browser) if self.browser_ready else None,
-                                llm, default_every=float(cfg.scheduler.deal_minutes or 180))
+                                llm, default_every=float(cfg.scheduler.deal_minutes or 180), fetcher=self.fetcher)
+        self.instant = (InstantWatch(self.root, self.platforms, self.fetcher, self.deals)
+                        if self.fetcher is not None else None)
         # Begyakorolt lépések: a modell sikeres feltöltéseiből és levételeiből tanul (replay.py).
         self.flows = FlowStore(self.root / "folyamatok")
         # A Vinted-kitöltő (vinted.py) választásai, pl. egy tárgyfajta kategóriaútja: legközelebb modell nélkül.

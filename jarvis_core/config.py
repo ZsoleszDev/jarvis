@@ -160,6 +160,9 @@ class WorkCfg:
     # A Munka menü beszélgetésének mintavétele: kisebb, mint a Beszélgetésé ([llm] temperature), hogy az
     # űrlapkitöltésnél (elemszámok, mezőértékek) kevesebb legyen a véletlen. A modellt nem tölti újra.
     temperature: float = 0.3
+    # A Hardverapró és a Jófogás találati oldalait (és hirdetéseit) böngésző nélkül is olvashatja (feeds.py): gyorsabb,
+    # párhuzamosan megy a böngészővel, és erre épül az azonnali figyelő. Ha egy oldal tilt, ott magától a böngésző marad.
+    fast_fetch: bool = True
 
 
 @dataclass

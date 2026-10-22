@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from . import remote
 from .config import ApiCfg
 from .messages import MAX_TEXT
-from .selling import FAILED, MAX_PHOTO_BYTES, NOT_POSTED, POSTED, ItemError
+from .selling import FAILED, LEDGER_FIELDS, MAX_PHOTO_BYTES, NOT_POSTED, POSTED, ItemError
 from .watches import WatchError
 from .webpush import INSTALL_HINT, PushError, WebPush, available as push_available
 from .work import PRICE_CHOICES
@@ -48,7 +48,7 @@ LOG_LIMIT = 800
 LOG_SKIP = {"delta", "level", "segment_end"}       # ezek túl sűrűk; a végleges szöveg "assistant" eseményként jön
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
             "size", "condition", "color", "material", "price", "min_price", "location", "shipping", "bought_price",
-            "sold_price"}
+            "sold_price", *LEDGER_FIELDS}
 AGENT_ACTIONS = {"sell", "reply", "price", "post", "research", "delist"}
 
 

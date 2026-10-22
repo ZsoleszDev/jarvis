@@ -410,11 +410,14 @@
     job = name;
     $("job-sales").setAttribute("aria-selected", String(name === "sales"));
     $("job-deals").setAttribute("aria-selected", String(name === "deals"));
+    $("job-ledger").setAttribute("aria-selected", String(name === "ledger"));
     if (name === "deals") loadDeals();
+    if (name === "ledger") loadLedger();
     render();
   }
   $("job-sales").addEventListener("click", () => setJob("sales"));
   $("job-deals").addEventListener("click", () => setJob("deals"));
+  $("job-ledger").addEventListener("click", () => setJob("ledger"));
 
   const every = (m) => (m >= 60 ? `${m / 60} óránként` : `${m} percenként`);
   // Egy licit hátralévő ideje most (a találatkor látott idő, mínusz azóta eltelt): „2 óra 10 perc”.
@@ -472,6 +475,66 @@
     return parts.join(" · ");
   }
 
+  // „5 perce”, „2 órája”, „okt. 21.”: mikor (a friss hirdetéseknél és a figyelőknél)
+  function ago(t) {
+    if (!t) return "";
+    const s = Date.now() / 1000 - t;
+    if (s < 90) return "most";
+    if (s < 3600) return `${Math.round(s / 60)} perce`;
+    if (s < 86400) return `${Math.round(s / 3600)} órája`;
+    return new Date(t * 1000).toLocaleDateString("hu-HU", { month: "short", day: "numeric" });
+  }
+
+  // Azonnali figyelő (instant.py): a Hardverapró és a Jófogás új hirdetései, böngésző nélkül, pár percenként.
+  function instantBox() {
+    const I = deals.instant;
+    if (!I) return "";
+    const siteLine = (I.sites || []).map((s) => `${esc(s.name)}: ${s.blocked_until ? `tilt (${esc(s.reason)}), ${esc(hhmmOf(s.blocked_until))}-ig szünetel`
+      : s.browser_only ? "most nem olvasható böngésző nélkül (a böngésző nézi)" : `kb. ${s.per_hour} kérés óránként (keret: ${I.hourly})`}`).join(" · ");
+    const alerts = (I.alerts || []).map((a) => {
+      const sites = (a.sites || []).map((k) => (I.sites.find((s) => s.key === k) || { name: k }).name).join(", ");
+      const range = a.min_price || a.max_price ? ` · ${a.min_price ? price(a.min_price) : "0"}–${a.max_price ? price(a.max_price) : "bármennyi"}` : "";
+      const last = Math.max(0, ...Object.values(a.last || {}));
+      return `<li><span><b>${esc(a.name)}</b>
+          <small class="muted">${esc(sites)} · ${a.mode === "cheap" ? "csak ami megéri" : "minden új"}${esc(range)}${(a.exclude || []).length ? ` · kivéve: ${esc(a.exclude.join(", "))}` : ""} · ${a.every} percenként</small>
+          <small class="muted">${a.off ? "szünetel" : last ? `utoljára ${esc(ago(last))}` : "még nem nézte"}${a.found ? ` · eddig ${a.found} új` : ""}${a.found_at ? ` (legutóbb ${esc(ago(a.found_at))})` : ""}</small>
+          ${Object.values(a.errors || {}).map((e) => `<small class="warn">${esc(e)}</small>`).join("")}
+          ${a.url ? `<small><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small>` : ""}</span>
+        <span class="row"><button type="button" class="small quiet" data-ipause="${esc(a.id)}" data-off="${a.off ? "" : "1"}">${a.off ? "Folytatás" : "Szünet"}</button>
+          <button type="button" class="small quiet" data-iremove="${esc(a.id)}">Törlés</button></span></li>`;
+    }).join("");
+    const hits = (I.hits || []).slice(0, 25).map((h) => `<li><span><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.title || h.text)}</a>
+        <small class="muted">${esc(h.site)} · <b>${esc(price(h.price))}</b>${h.drop ? ` (leárazta: ${esc(price(h.drop))})` : ""} · ${esc(ago(h.at))} · ${esc(h.alert_name)}</small>
+        ${h.reference ? `<small class="${h.cheap ? "" : "muted"}">${h.cheap ? "<b>Megéri:</b> " : ""}szokásos ár kb. ${esc(price(h.reference))}${h.profit > 0 ? ` · kb. ${esc(price(h.profit))} haszon` : ""}</small>` : ""}
+        ${(h.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}</span>
+        ${h.deal ? `<span class="row"><button type="button" class="small" data-deal-buy="${esc(h.deal)}">Megvettem</button></span>` : ""}</li>`).join("");
+    const presets = (I.presets || []).map((p) => `<button type="button" class="small" data-ipreset="${esc(p.url)}">${esc(p.name)}</button>`).join("");
+    return `<h3 class="section-title">Azonnali figyelő: Hardverapró, Jófogás</h3>
+      <label class="check"><input type="checkbox" id="di-enabled" ${I.enabled ? "checked" : ""}> <span><b>Szóljon, amint új hirdetés kerül fel</b> (a fenti órákban)</span></label>
+      <p class="muted">Ezeken az oldalakon nincs „értesíts, ha új jön”: pár percenként megnézem a keresésed legújabb hirdetéseit
+        (böngésző nélkül, így gyors, és nem vár a többi munkára), és rögtön szólok, a telefonon is. Oldalanként egyszerre egy
+        kérés, szünetekkel; ha egy oldal tiltana, ott egy ideig leállok. Csak olvasok: venni te veszel.</p>
+      ${I.enabled && siteLine ? `<p><small>${siteLine}</small></p>` : ""}
+      <ul class="dealist">${alerts || '<li class="muted">Még nincs azonnali figyelő.</li>'}</ul>
+      <form id="di-add" class="compose" autocomplete="off">
+        <input id="di-target" placeholder="Mit figyeljek? Pl. RTX 3080, vagy egy oldal címe">
+        <div class="checks">${(I.sites || []).map((s) => `<label class="check"><input type="checkbox" name="di-site" value="${esc(s.key)}" checked> ${esc(s.name)}</label>`).join("")}</div>
+        <div class="row">
+          <label><select id="di-mode"><option value="all">Minden új hirdetésről szóljon</option><option value="cheap">Csak ha megéri (a szokásos ár alatt)</option></select></label>
+          <label>Nézze <select id="di-every">${(I.every_choices || [2, 3, 5, 10, 15]).map((m) => `<option value="${m}"${m === 3 ? " selected" : ""}>${m} percenként</option>`).join("")}</select></label>
+        </div>
+        <div class="row">
+          <label>Ár: legalább <input id="di-min" type="number" inputmode="numeric" min="0" placeholder="0" style="width: 6em"> Ft</label>
+          <label>legfeljebb <input id="di-max" type="number" inputmode="numeric" min="0" placeholder="bármennyi" style="width: 7em"> Ft</label>
+        </div>
+        <label class="field-label">Kizáró szavak <input id="di-exclude" placeholder="pl. hibás, tok, doboz"></label>
+        <div class="row"><button type="submit" class="primary">Figyelő hozzáadása</button></div>
+        ${presets ? `<div class="row presets"><small class="muted">Gyorsan (Hardverapró, csak ami megéri):</small>${presets}</div>` : ""}
+      </form>
+      ${hits ? `<details class="setup" open><summary>Friss hirdetések (${(I.hits || []).length})</summary><ul class="dealist">${hits}</ul></details>` : ""}`;
+  }
+  const hhmmOf = (t) => new Date(t * 1000).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit" });
+
   // Vinted-ajánlat: a Jarvis megnyitja a hirdetést, beírja az összeget, és a küldés előtt rákérdez (pontosan ezzel).
   async function makeOffer(id, amount) {
     const result = await J.postJson("/api/work/deals", { action: "offer", id, price: amount });
@@ -489,15 +552,16 @@
     const p = deals.profit;
     const profitBox = p && (p.rows.length) ? `
       <h3 class="section-title">Haszon</h3>
-      <p class="profit"><b>${esc(price(p.month.profit) || "0 Ft")}</b> ebben a hónapban (${p.month.count} eladás) ·
-        összesen <b>${esc(price(p.total.profit) || "0 Ft")}</b> (${p.total.count} eladás${p.days !== null ? `, átlagosan ${p.days} nap alatt` : ""})
+      <p class="profit"><b>${esc(signed(p.month.profit))}</b> ebben a hónapban (${p.month.count} eladás) ·
+        összesen <b>${esc(signed(p.total.profit))}</b> (${p.total.count} eladás${p.days !== null ? `, átlagosan ${p.days} nap alatt` : ""})
         ${p.open.count ? ` · bent van ${esc(price(p.open.spent))} (${p.open.count} tárgy még nem kelt el)` : ""}</p>
-      <details class="setup"><summary>Tárgyak vételárral</summary><ul class="dealist">${p.rows.map((r) => `<li><span>
-        <button type="button" class="linklike" data-open="${esc(r.id)}">${esc(r.name)}</button>
-        <small class="muted">vétel ${esc(price(r.bought_price))}${r.sold ? ` · eladva ${esc(price(r.sold_price) || "?")}` : " · még nem kelt el"}
-        ${r.profit !== null ? ` · haszon <b>${esc(price(r.profit))}</b>` : ""}${r.days !== null ? ` · ${r.days} nap` : ""}</small></span></li>`).join("")}</ul></details>` : "";
+      <div class="row"><button type="button" class="small" data-job="ledger">Vételeim részletesen</button></div>` : "";
+    // Megvettem: a vételár (alapból a hirdetés ára), a posta, és hogy postán jön-e (akkor „úton” a Vételeim fülön)
     const buyButton = (d) => d.bought ? '<small class="muted">Megvetted ✓</small>'
-      : buying === d.id ? `<span class="row"><input id="d-paid" type="number" min="1" value="${esc(d.price)}" style="width: 6em" aria-label="Vételár (Ft)">
+      : buying === d.id ? `<span class="row buyform">
+          <label>Vételár <input id="d-paid" type="number" inputmode="numeric" min="1" value="${esc(d.price)}" aria-label="Vételár (Ft)"></label>
+          <label>Posta <input id="d-ship" type="number" inputmode="numeric" min="0" placeholder="0" aria-label="Posta (Ft)"></label>
+          <label class="check"><input id="d-transit" type="checkbox" checked> postán jön</label>
           <button type="button" class="small primary" data-deal-paid="${esc(d.id)}">Mentés</button></span>`
       : `<button type="button" class="small" data-deal-buy="${esc(d.id)}">Megvettem</button>`;
     const offerBox = (d) => d.offer_sent ? `<small>Ajánlat elküldve: <b>${esc(price(d.offer_sent.price))}</b> – ha az eladó
@@ -538,6 +602,7 @@
         <input id="d-day-start" type="number" min="0" max="23" value="${esc(day[0])}" style="width: 3.5em"> órától
         <input id="d-day-end" type="number" min="1" max="24" value="${esc(day[1])}" style="width: 3.5em"> óráig megy</label>
         <button type="button" class="small" id="d-day">Mentés</button></div>
+      ${instantBox()}
       <h3 class="section-title">Böngészés napközben</h3>
       <label class="check"><input type="checkbox" id="d-browse" ${b.on ? "checked" : ""}> <b>Napközben böngésszen</b> (a fenti órákban)</label>
       <p class="muted">Ahogy egy ember: kb. 20 percig nézelődik egy oldalon (fél-egy percenként egy oldal, a Vinteden
@@ -613,6 +678,30 @@
       <div class="row"><label>Nap <select id="d-jday"><option value="">Ma</option>${dayOptions}</select></label></div>
       <ul class="dealist">${journalRows}</ul>`;
     $("d-enabled").addEventListener("change", (e) => dealAction({ action: "enable", on: e.target.checked }));
+    if ($("di-enabled")) {
+      $("di-enabled").addEventListener("change", async (e) => {
+        if (await dealAction({ action: "instant_enable", on: e.target.checked }))
+          J.toast(e.target.checked ? "Rendben: amint új hirdetés kerül fel, szólok." : "Kikapcsoltam az azonnali figyelőt.");
+      });
+      let modeTouched = false;
+      $("di-mode").addEventListener("change", () => { modeTouched = true; });
+      // egy egész oldal (kategória) új hirdetései: alapból csak ami megéri, különben túl sok lenne
+      $("di-target").addEventListener("input", (e) => { if (!modeTouched) $("di-mode").value = /^https?:\/\//i.test(e.target.value.trim()) ? "cheap" : "all"; });
+      $("di-add").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const sites = [...box.querySelectorAll('input[name="di-site"]:checked')].map((i) => i.value);
+        if (await dealAction({ action: "instant_add", target: $("di-target").value, sites, mode: $("di-mode").value,
+                               min_price: $("di-min").value, max_price: $("di-max").value, exclude: $("di-exclude").value,
+                               every: $("di-every").value }))
+          J.toast(deals.instant && deals.instant.enabled ? "Rendben: először megjegyzem, ami már fent van, utána minden újról szólok."
+            : "Felvettem. Kapcsold be fent az azonnali figyelőt.");
+      });
+      for (const b of box.querySelectorAll("[data-ipreset]")) b.addEventListener("click", async () => {
+        if (await dealAction({ action: "instant_add", target: b.dataset.ipreset, mode: "cheap" })) J.toast("Felvettem: csak arról szólok, ami megéri.");
+      });
+      for (const b of box.querySelectorAll("[data-iremove]")) b.addEventListener("click", () => dealAction({ action: "instant_remove", id: b.dataset.iremove }));
+      for (const b of box.querySelectorAll("[data-ipause]")) b.addEventListener("click", () => dealAction({ action: "instant_pause", id: b.dataset.ipause, off: !!b.dataset.off }));
+    }
     $("d-browse").addEventListener("change", async (e) => {
       if (await dealAction({ action: "browse", on: e.target.checked }))
         J.toast(e.target.checked ? "Rendben: napközben böngészem az oldalakat, és szólok, ha találok valamit." : "Kikapcsoltam a böngészést.");
@@ -679,26 +768,226 @@
     for (const b of box.querySelectorAll("[data-watch-remove]")) b.addEventListener("click", () => dealAction({ action: "watch_remove", id: b.dataset.watchRemove }));
     for (const b of box.querySelectorAll("[data-offer]")) b.addEventListener("click", () => makeOffer(b.dataset.offer, $(`d-offer-${b.dataset.offer}`).value));
     for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
-    for (const b of box.querySelectorAll("[data-deal-buy]")) b.addEventListener("click", () => { buying = b.dataset.dealBuy; renderDeals(); $("d-paid").focus(); });
+    for (const b of box.querySelectorAll("[data-deal-buy]")) b.addEventListener("click", () => {
+      buying = b.dataset.dealBuy;
+      renderDeals();
+      if (!$("d-paid")) { J.toast("Ez a találat már nincs a listában."); return; }
+      $("d-paid").scrollIntoView({ block: "center" });
+      $("d-paid").focus();
+    });
     for (const b of box.querySelectorAll("[data-deal-paid]")) b.addEventListener("click", async () => {
-      const result = await dealAction({ action: "bought", id: b.dataset.dealPaid, price: $("d-paid").value });
+      const result = await dealAction({ action: "bought", id: b.dataset.dealPaid, price: $("d-paid").value,
+                                        shipping: $("d-ship").value, in_transit: $("d-transit").checked });
       if (!result) return;
       buying = null;
-      J.toast("Felvettem az eladandók közé, a vételárral. Pipáld be, hova töltsem fel.");
+      J.toast("Felvettem a Vételeim közé és az eladandók közé. Pipáld be, hova töltsem fel.");
       openId = result.item;
       await load();
       setJob("sales");
     });
     for (const b of box.querySelectorAll("[data-open]")) b.addEventListener("click", () => { openId = b.dataset.open; setJob("sales"); });
+    for (const b of box.querySelectorAll("[data-job]")) b.addEventListener("click", () => setJob(b.dataset.job));
+  }
+
+  // --- Vételeim: a megvett tárgyak költségei (vételár, posta, egyéb), mennyiért adnád tovább, és a haszon ---
+  let ledger = null;          // a /api/work/ledger válasza (deals.profit_report)
+  let ledgerFilter = "all";   // all, úton, nálad, fent, eladva
+  let ledgerOpen = null;      // a tárgy, aminek a részleteit szerkeszted
+  let ledgerAdding = false;   // az „Új vétel” űrlap nyitva
+  let ledgerTimer = null;
+  const LEDGER_FILTERS = [["all", "Mind"], ["úton", "Úton"], ["nálad", "Nálad"], ["fent", "Fent"], ["eladva", "Eladva"]];
+  const STAGE_CHIP = { "úton": "kerdes", "nálad": "kesz", "fent": "feltoltve", "eladva": "eladva" };
+  const STAGE_TEXT = { "úton": "Úton", "nálad": "Nálad", "fent": "Fent van", "eladva": "Eladva" };
+  // +12 300 Ft / −4 000 Ft: a haszon előjellel (a veszteség is látsszon)
+  function signed(value) {
+    if (value === null || value === undefined) return "–";
+    return (value > 0 ? "+" : value < 0 ? "−" : "") + price(Math.abs(value));
+  }
+  const dayInput = (t) => {
+    if (!t) return "";
+    const d = new Date(t * 1000);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  async function loadLedger() {
+    try {
+      const response = await fetch("/api/work/ledger?t=" + encodeURIComponent(token));
+      if (response.ok) ledger = await response.json();
+    } catch { /* a következő megnyitáskor újra */ }
+    if (job === "ledger") render();
+  }
+  // egy tárgy változott (pl. eladva, új ár): a fül összesítése is frissül (egyszerre csak egy kérés)
+  function refreshLedger() {
+    if (job !== "ledger") return;
+    clearTimeout(ledgerTimer);
+    ledgerTimer = setTimeout(loadLedger, 400);
+  }
+  async function ledgerAction(body) {
+    const result = await J.postJson("/api/work/ledger", body);
+    if (!result.ok) { J.toast(result.error || "Nem sikerült."); return false; }
+    ledger = result;
+    render();
+    return result;
+  }
+
+  function ledgerCard(r) {
+    const sold = r.stage === "eladva";
+    const thumb = r.photo ? `<img class="thumb" src="${photoUrl(r.id, esc(r.photo), true)}" alt="">` : '<span class="nothumb">nincs fotó</span>';
+    const extra = [r.bought_shipping ? `posta ${price(r.bought_shipping)}` : "", r.bought_extra ? `egyéb ${price(r.bought_extra)}` : ""].filter(Boolean);
+    const sale = sold ? r.sold_price : r.estimate;
+    const gain = sold ? r.profit : r.expected;
+    const when = sold ? (r.sold_at ? `${r.days} nap alatt kelt el` : "") : (r.days ? `${r.days} napja vetted` : "ma vetted");
+    const facts = [r.bought_from, when];
+    const now = r.market_now ? `Most kb. <b>${esc(price(r.market_now.price))}</b>-ért adják (${r.market_now.n} ár)${r.market_now.speed ? ` · ${esc(r.market_now.speed)}` : ""}` : "";
+    const sellCost = (r.sell_shipping || 0) + (r.sell_fee || 0);
+    return `<article class="lcard${sold ? " sold" : ""}">
+      <button type="button" class="cardthumb" data-lopen="${esc(r.id)}" aria-label="${esc(r.name)}: részletek">${thumb}</button>
+      <div class="body">
+        <div class="lhead"><button type="button" class="linklike title" data-lopen="${esc(r.id)}">${esc(r.name)}</button>
+          <span class="chip ${STAGE_CHIP[r.stage]}">${STAGE_TEXT[r.stage]}</span></div>
+        <div class="lnums">
+          <span><small>Bekerülés</small><b>${esc(price(r.cost))}</b>${extra.length ? `<small>${esc(price(r.bought_price))} + ${esc(extra.join(" + "))}</small>` : ""}</span>
+          <span><small>${sold ? "Eladva" : "Eladnád"}</small><b>${sale !== null && sale !== undefined ? esc(price(sale)) : "?"}</b>${sellCost ? `<small>költség ${esc(price(sellCost))}</small>` : ""}</span>
+          <span><small>${sold ? "Haszon" : "Várható haszon"}</small><b class="${gain < 0 ? "loss" : ""}">${esc(signed(gain))}</b>${r.roi !== null ? `<small>${r.roi}%</small>` : ""}</span>
+        </div>
+        <small class="muted">${esc(facts.filter(Boolean).join(" · "))}${r.source && safeUrl(r.source) ? ` · <a href="${esc(r.source)}" target="_blank" rel="noopener noreferrer">a hirdetés</a>` : ""}</small>
+        ${!sold && now ? `<small class="muted">${now}</small>` : ""}
+        ${!sold && sale === null ? '<small class="warn">Add meg, mennyiért adnád tovább: abból számolom a várható hasznot.</small>' : ""}
+        ${(r.advice || []).map((a) => `<small class="warn">${esc(a)}</small>`).join("")}
+        ${r.trade_note ? `<small class="note">${esc(r.trade_note)}</small>` : ""}
+        <div class="row">
+          <button type="button" class="small" data-lopen="${esc(r.id)}" aria-expanded="${ledgerOpen === r.id}">${ledgerOpen === r.id ? "Bezárás" : "Részletek"}</button>
+          ${r.stage === "úton" ? `<button type="button" class="small" data-larrived="${esc(r.id)}">Megérkezett</button>` : ""}
+          <button type="button" class="small quiet" data-open="${esc(r.id)}">A tárgy lapja</button>
+        </div>
+      </div>
+      ${ledgerOpen === r.id ? ledgerForm(r) : ""}</article>`;
+  }
+
+  function ledgerForm(r) {
+    const num = (name, label, value, hint = "") => `<div class="field"><label for="l-${name}">${label}</label>
+      <input id="l-${name}" data-lfield="${name}" type="number" inputmode="numeric" min="0" value="${esc(value ?? "")}" placeholder="${esc(hint)}"></div>`;
+    const sold = r.stage === "eladva";
+    const sites = (ledger.sites || []).map((s) => `<option value="${esc(s)}">`).join("");
+    return `<form class="lform" data-lsave="${esc(r.id)}" autocomplete="off">
+      <div class="fields">
+        ${num("bought_price", "Vételár (Ft)", r.bought_price)}
+        ${num("bought_shipping", "Posta a vételkor (Ft)", r.bought_shipping, "0")}
+        ${num("bought_extra", "Egyéb költség (Ft)", r.bought_extra, "javítás, tisztítás…")}
+        <div class="field"><label for="l-bought_from">Honnan</label>
+          <input id="l-bought_from" data-lfield="bought_from" list="l-sites" value="${esc(r.bought_from)}" placeholder="pl. Hardverapró"></div>
+        <div class="field"><label for="l-bought_at">Mikor vetted</label>
+          <input id="l-bought_at" data-lfield="bought_at" data-day="${esc(dayInput(r.bought_at))}" type="date" value="${esc(dayInput(r.bought_at))}"></div>
+        ${num("market_price", "Szokásos ára (Ft)", r.market_price, r.market_now ? String(r.market_now.price) : "")}
+        ${num("target_price", "Mennyiért adnád tovább (Ft)", r.target_price, r.price ? String(r.price) : "")}
+        ${num("sell_shipping", "Posta az eladáskor (Ft)", r.sell_shipping, "ha te fizeted")}
+        ${num("sell_fee", "Eladási díj (Ft)", r.sell_fee, "jutalék, kiemelés")}
+        ${sold ? num("sold_price", "Eladási ár (Ft)", r.sold_price) : ""}
+        ${sold ? `<div class="field"><label for="l-sold_at">Mikor kelt el</label>
+          <input id="l-sold_at" data-lfield="sold_at" data-day="${esc(dayInput(r.sold_at))}" type="date" value="${esc(dayInput(r.sold_at))}"></div>` : ""}
+        <div class="field wide"><label for="l-trade_note">Megjegyzés</label>
+          <textarea id="l-trade_note" data-lfield="trade_note" rows="2" placeholder="pl. csomagszám, az eladó neve, egy apró hiba">${esc(r.trade_note)}</textarea></div>
+      </div>
+      <datalist id="l-sites">${sites}</datalist>
+      ${sold ? "" : `<label class="check"><input type="checkbox" data-lfield="in_transit" ${r.in_transit ? "checked" : ""}> Még úton van (postán jön)</label>`}
+      <div class="row"><button type="submit" class="primary small">Mentés</button>
+        <button type="button" class="small" data-lclose>Mégse</button></div>
+    </form>`;
+  }
+
+  function renderLedger() {
+    const box = $("w-ledger");
+    if (!ledger) { box.innerHTML = '<p class="muted">Betöltöm…</p>'; return; }
+    const L = ledger;
+    const counts = L.stages || {};
+    const rows = L.rows.filter((r) => ledgerFilter === "all" || r.stage === ledgerFilter);
+    const months = (L.months || []);
+    const best = Math.max(1, ...months.map((m) => Math.abs(m.profit)));
+    const monthRows = months.map((m) => `<li><span class="mname">${esc(m.month.replace("-", ". "))}.</span>
+        <span class="mbar"><i style="width: ${Math.round(Math.abs(m.profit) / best * 100)}%"${m.profit < 0 ? ' class="loss"' : ""}></i></span>
+        <b>${esc(signed(m.profit))}</b><small class="muted">${m.count} eladás</small></li>`).join("");
+    const sites = (L.sites || []).map((s) => `<option value="${esc(s)}">`).join("");
+    box.innerHTML = `
+      <div class="tiles">
+        <div class="tile"><small>Ebben a hónapban</small><b>${esc(signed(L.month.profit))}</b><small>${L.month.count} eladás</small></div>
+        <div class="tile"><small>Összesen</small><b>${esc(signed(L.total.profit))}</b>
+          <small>${L.total.count} eladás${L.total.roi !== null ? ` · ${L.total.roi}%` : ""}${L.days !== null ? ` · átl. ${L.days} nap` : ""}</small></div>
+        <div class="tile"><small>Bent van</small><b>${esc(price(L.open.spent) || "0 Ft")}</b>
+          <small>${L.open.count} tárgy${counts["úton"] ? ` · ${counts["úton"]} úton` : ""}</small></div>
+        <div class="tile"><small>Várható haszon</small><b>${esc(signed(L.open.expected))}</b>
+          <small>${L.open.unknown ? `${L.open.unknown} tárgynál nincs ár` : "ha a tervezett áron elkelnek"}</small></div>
+      </div>
+      ${monthRows ? `<details class="setup"><summary>Havonta</summary><ul class="months">${monthRows}</ul></details>` : ""}
+      <div class="row lbar">
+        <div class="filters" role="group" aria-label="Szűrés">${LEDGER_FILTERS.map(([key, label]) => {
+          const n = key === "all" ? L.rows.length : (counts[key] || 0);
+          return `<button type="button" data-lfilter="${key}" aria-pressed="${ledgerFilter === key}">${label}<span class="count">${n}</span></button>`;
+        }).join("")}</div>
+        <button type="button" class="small${ledgerAdding ? "" : " primary"}" id="l-add-toggle">${ledgerAdding ? "Mégse" : "+ Új vétel"}</button>
+      </div>
+      ${ledgerAdding ? `<form id="l-add" class="compose" autocomplete="off">
+        <input id="la-name" placeholder="Mit vettél? Pl. RTX 3060 Ti, Nike Air Max 90">
+        <div class="fields">
+          <div class="field"><label for="la-price">Vételár (Ft)</label><input id="la-price" type="number" inputmode="numeric" min="0"></div>
+          <div class="field"><label for="la-ship">Posta (Ft)</label><input id="la-ship" type="number" inputmode="numeric" min="0" placeholder="0"></div>
+          <div class="field"><label for="la-from">Honnan</label><input id="la-from" list="la-sites" placeholder="pl. Jófogás, bolhapiac"></div>
+          <div class="field"><label for="la-target">Mennyiért adnád tovább (Ft)</label><input id="la-target" type="number" inputmode="numeric" min="0"></div>
+        </div>
+        <datalist id="la-sites">${sites}</datalist>
+        <label class="check"><input id="la-transit" type="checkbox"> Még úton van (postán jön)</label>
+        <div class="row"><button type="submit" class="primary">Felveszem</button></div>
+      </form>` : ""}
+      <div class="ledger-list">${rows.map(ledgerCard).join("") || `<p class="muted">${L.rows.length ? "Ebben a csoportban nincs tárgy."
+        : "Még nincs megvett tárgy. Az Automata kereskedés találatainál a Megvettem gombbal, vagy itt az Új vétellel veheted fel; bármelyik tárgy lapján a Vételár is ide teszi."}</p>`}</div>
+      <p class="muted">A haszon: az eladási ár, mínusz az eladás költségei (posta, díj), mínusz amibe került (vételár, posta,
+        egyéb). Amíg nem kelt el, a várható haszon a tervezett eladási árral (ha nincs, a hirdetési árral) számol. A
+        „most kb.” ár az árbázisból jön: ennyiért hirdetik most a hasonlókat.</p>`;
+    for (const b of box.querySelectorAll("[data-lfilter]")) b.addEventListener("click", () => { ledgerFilter = b.dataset.lfilter; renderLedger(); });
+    $("l-add-toggle").addEventListener("click", () => { ledgerAdding = !ledgerAdding; renderLedger(); if (ledgerAdding) $("la-name").focus(); });
+    if ($("l-add")) $("l-add").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const result = await ledgerAction({ action: "add", name: $("la-name").value, price: $("la-price").value,
+        bought_shipping: $("la-ship").value, bought_from: $("la-from").value, target_price: $("la-target").value,
+        in_transit: $("la-transit").checked });
+      if (result) { ledgerAdding = false; ledgerOpen = null; renderLedger(); J.toast("Felvettem; az eladandók között is ott van."); load(); }
+    });
+    for (const b of box.querySelectorAll("[data-lopen]")) b.addEventListener("click", () => {
+      ledgerOpen = ledgerOpen === b.dataset.lopen ? null : b.dataset.lopen;
+      renderLedger();
+    });
+    for (const b of box.querySelectorAll("[data-lclose]")) b.addEventListener("click", () => { ledgerOpen = null; renderLedger(); });
+    for (const b of box.querySelectorAll("[data-larrived]")) b.addEventListener("click", async () => {
+      if (await ledgerAction({ action: "update", id: b.dataset.larrived, fields: { in_transit: false } })) J.toast("Megérkezett: most már nálad van.");
+    });
+    for (const b of box.querySelectorAll("[data-open]")) b.addEventListener("click", () => { openId = b.dataset.open; setJob("sales"); });
+    for (const form of box.querySelectorAll("[data-lsave]")) form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fields = {};
+      for (const input of form.querySelectorAll("[data-lfield]")) {
+        const name = input.dataset.lfield;
+        if (input.type === "checkbox") fields[name] = input.checked;
+        else if (input.type === "date") {
+          // csak ha átírtad a napot (különben a napon belüli időpont maradna el)
+          if (input.value !== input.dataset.day) fields[name] = input.value ? new Date(`${input.value}T12:00:00`).getTime() / 1000 : 0;
+        } else fields[name] = input.value;
+      }
+      if (!String(fields.bought_price || "").trim()) { J.toast("A vételár kell (különben kikerül a Vételeim közül)."); return; }
+      if (await ledgerAction({ action: "update", id: form.dataset.lsave, fields })) { ledgerOpen = null; renderLedger(); J.toast("Mentve."); }
+    });
   }
 
   function render() {
     foldCompose();
     $("w-deals").hidden = job !== "deals";
-    $("w-filters").hidden = job === "deals";
+    $("w-ledger").hidden = job !== "ledger";
+    $("w-filters").hidden = job !== "sales";
     if (job === "deals") {
       $("w-msgs").hidden = $("w-list-view").hidden = $("w-detail").hidden = true;
       if (!$("w-deals").contains(document.activeElement) || !document.activeElement.matches("input")) renderDeals();
+      return;
+    }
+    if (job === "ledger") {
+      $("w-msgs").hidden = $("w-list-view").hidden = $("w-detail").hidden = true;
+      if (!$("w-ledger").contains(document.activeElement) || !document.activeElement.matches("input, textarea, select")) renderLedger();
       return;
     }
     renderFilters();
@@ -961,7 +1250,10 @@
           ${field("bought_price", "Vételár (Ft)", item.bought_price ?? "", 'inputmode="numeric" placeholder="ha vetted"')}
           ${item.sold ? field("sold_price", "Eladási ár (Ft)", item.sold_price ?? "", 'inputmode="numeric"') : ""}
           ${item.sold && item.bought_price != null && item.sold_price != null
-            ? `<div class="field"><label>Haszon</label><b>${esc(price(item.sold_price - item.bought_price))}</b></div>` : ""}
+            ? `<div class="field"><label>Haszon</label><b>${esc(signed(item.sold_price - (item.sell_shipping || 0) - (item.sell_fee || 0)
+                - item.bought_price - (item.bought_shipping || 0) - (item.bought_extra || 0)))}</b></div>` : ""}
+          ${item.bought_price != null ? `<div class="field"><label>Vétel részletei</label>
+            <button type="button" class="small" data-action="ledger">Vételeim fül</button></div>` : ""}
           ${conditionField(item.condition)}
           ${field("brand", "Márka", item.brand)}
           ${field("size", "Méret", item.size)}
@@ -1336,6 +1628,7 @@
       }
     }
     else if (name === "sold") sold(item);
+    else if (name === "ledger") { ledgerOpen = item.id; setJob("ledger"); }
     else if (name === "soldhere") sold(item, button.dataset.platform);
     else if (name === "dismiss") {
       const result = await J.postJson("/api/work/dismiss", { id: item.id, platform: button.dataset.platform });
@@ -1395,9 +1688,10 @@
   window.addEventListener("dragover", (event) => { if (hasFiles(event)) event.preventDefault(); });
   window.addEventListener("drop", (event) => { if (hasFiles(event)) event.preventDefault(); });
 
-  J.on("work_item", (event) => { items.set(event.item.id, event.item); scheduleRender(event.item.id); });
+  J.on("work_item", (event) => { items.set(event.item.id, event.item); scheduleRender(event.item.id); refreshLedger(); });
   J.on("work_removed", (event) => {
     items.delete(event.id);
+    refreshLedger();
     if (openId === event.id) openId = null;
     scheduleRender(event.id);
   });

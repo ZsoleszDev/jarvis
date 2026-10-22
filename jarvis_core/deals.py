@@ -41,11 +41,13 @@ import threading
 import time
 import urllib.parse
 from collections import Counter, deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
 from .browser import DECLINED, LISTING_PAGE_JS, BrowserError, is_risky
+from .feeds import FeedError
 from .listings import BLOCKED, GONE, SOLD, classify
 from .journal import Journal, day_of
 from .pricebook import PriceBook, fake_prone, speed_text, usable
@@ -378,6 +380,15 @@ class _Round:
         self.hits: list[str] = []             # a jó találatok röviden (a naplóba)
         self.notes: list[str] = []
         self.errors: list[str] = []
+        # A gyors (böngésző nélküli) oldalak letöltése a háttérben, amíg a böngésző a többit nézi: webcím → eredmény.
+        self.pool: ThreadPoolExecutor | None = None
+        self.prefetch: dict[str, Future] = {}
+        self.fast = 0                          # ennyi oldal jött böngésző nélkül
+
+    def fetch_ahead(self, fetcher: Any, url: str, platform: str) -> None:
+        """Egy gyors oldal letöltése a háttérben (ha még nem indult el, és az oldal most így olvasható)."""
+        if self.pool is not None and fetcher is not None and url not in self.prefetch and fetcher.usable(platform):
+            self.prefetch[url] = self.pool.submit(fetcher.listings, url, platform, self.check)
 
     def next(self, steps: list[Callable[[], None]]) -> None:
         """Ezek jönnek rögtön (pl. egy keresés jelöltjei a következő keresés előtt)."""
@@ -457,40 +468,129 @@ def search_status(search: dict[str, Any]) -> str:
     return "kevés" if proposal else "felmérés"
 
 
-def profit_report(items: list[Item], now: float | None = None) -> dict[str, Any]:
-    """Haszonkövetés a vételárral megjelölt tárgyakból (Megvettem, vagy a tárgy lapján a Vételár): az eladottak haszna
-    (eladási ár − vételár) ebben a hónapban és összesen, átlagosan hány nap alatt kelt el, és mennyi pénz van még
-    bent a meg nem eladott tárgyakban."""
+LEDGER_MONTHS = 6          # a Vételeim fülön ennyi hónap haszna látszik havonta
+IDLE_DAYS = 3              # ennyi nap után szól, hogy a nálad lévő tárgy még nincs fent sehol
+TRANSIT_DAYS = 7           # ennyi nap után szól, hogy a csomag még mindig úton van
+PRICE_UP = 1.1             # ha most legalább ennyivel drágábban adják (a 90%-ot nézve), mint amennyiért eladnád
+
+
+def item_cost(item: Item) -> int:
+    """Amibe egy megvett tárgy került: a vételár, a posta és az egyéb költség (javítás, tisztítás…)."""
+    return int(item.bought_price or 0) + int(item.bought_shipping or 0) + int(item.bought_extra or 0)
+
+
+def sale_estimate(item: Item) -> int | None:
+    """Mennyiért adod el várhatóan: amit megadtál (tervezett eladási ár), különben a hirdetési ár, különben a vételkori
+    szokásos ár 90%-a (a hirdetési árnál többnyire kicsit olcsóbban kel el). None, ha egyik sincs meg."""
+    if item.target_price:
+        return int(item.target_price)
+    if item.price:
+        return int(item.price)
+    return round_price(item.market_price * SALE_RATIO) if item.market_price else None
+
+
+def stage(item: Item) -> str:
+    """Hol tart egy megvett tárgy: úton (még nem érkezett meg), nálad (még nincs fent), fent, eladva."""
+    if item.sold:
+        return "eladva"
+    if item.status in ("fent", "részben fent"):
+        return "fent"
+    return "úton" if item.in_transit else "nálad"
+
+
+def _percent(profit: int, cost: int) -> int | None:
+    return round(profit * 100 / cost) if cost > 0 else None
+
+
+def _advice(row: dict[str, Any]) -> list[str]:
+    """Tippek egy megvett tárgyhoz: ha most drágábban adják, mint amennyiért eladnád; ha napok óta nálad van, de még
+    nincs fent; ha a csomag régóta úton van."""
+    out = []
+    market, estimate = row.get("market_now"), row.get("estimate")
+    if market and estimate and market["price"] * SALE_RATIO >= estimate * PRICE_UP:
+        out.append(f"Most drágábban adják: kérhetsz többet (kb. {format_price(round_price(market['price'] * SALE_RATIO))}"
+                   f"-ért is elkelhet).")
+    if row["stage"] == "nálad" and row["days"] >= IDLE_DAYS:
+        out.append(f"{row['days']} napja nálad van, és még nincs fent sehol: tölts fel róla hirdetést.")
+    if row["stage"] == "úton" and row["days"] >= TRANSIT_DAYS:
+        out.append(f"{row['days']} napja úton van: kérdezd meg az eladót, vagy jelöld megérkezettnek.")
+    return out
+
+
+def profit_report(items: list[Item], now: float | None = None, book: PriceBook | None = None) -> dict[str, Any]:
+    """Haszonkövetés (Vételeim) a vételárral megjelölt tárgyakból (Megvettem, vagy a tárgy lapján a Vételár). Egy tárgy
+    bekerülése a vételár, a posta és az egyéb költség; a haszna az eladási ár, mínusz az eladás költségei (posta, díj) és
+    a bekerülés. Ebben a hónapban, összesen és havonta (LEDGER_MONTHS); átlagosan hány nap alatt kelt el, mennyi pénz
+    van még bent a meg nem eladott tárgyakban, és mennyi haszon várható belőlük (sale_estimate). Ha az árbázis megvan
+    (book), a meg nem eladott tárgyaknál azt is, mennyiért adják most."""
     now = time.time() if now is None else now
-    month = time.localtime(now)[:2]
-    rows, total, this_month, days = [], [0, 0, 0, 0], [0, 0], []   # haszon, darab, vételár, bevétel
-    open_count, open_spent = 0, 0
+    month = time.strftime("%Y-%m", time.localtime(now))
+    rows: list[dict[str, Any]] = []
+    total = {"profit": 0, "count": 0, "spent": 0, "revenue": 0, "roi": None}
+    this_month = {"profit": 0, "count": 0, "revenue": 0}
+    stock = {"count": 0, "spent": 0, "expected": 0, "value": 0, "unknown": 0}
+    by_month: dict[str, dict[str, Any]] = {}
+    stages: Counter = Counter()
+    days: list[int] = []
     for item in items:
         if item.bought_price is None:
             continue
-        row: dict[str, Any] = {"id": item.id, "name": item.name, "bought_price": item.bought_price,
-                               "sold": item.sold, "sold_price": item.sold_price, "profit": None, "days": None}
+        cost, sell_cost = item_cost(item), int(item.sell_shipping or 0) + int(item.sell_fee or 0)
+        bought_at = item.bought_at or item.created
+        where = stage(item)
+        stages[where] += 1
+        row: dict[str, Any] = {
+            "id": item.id, "name": item.name, "stage": where, "sold": item.sold, "status": item.status,
+            "photo": item.photos[0] if item.photos else "", "source": item.source, "bought_from": item.bought_from,
+            "bought_at": bought_at, "bought_price": item.bought_price, "bought_shipping": item.bought_shipping,
+            "bought_extra": item.bought_extra, "cost": cost, "market_price": item.market_price,
+            "target_price": item.target_price, "price": item.price, "sold_price": item.sold_price,
+            "sold_at": item.sold_at or None, "sell_shipping": item.sell_shipping, "sell_fee": item.sell_fee,
+            "in_transit": item.in_transit, "trade_note": item.trade_note, "profit": None, "roi": None,
+            "expected": None, "estimate": None, "market_now": None,
+            "days": max(0, int(((item.sold_at if item.sold and item.sold_at else now) - bought_at) // 86400))}
         if item.sold and item.sold_price is not None:
-            profit = item.sold_price - item.bought_price
-            row["profit"] = profit
-            total[0] += profit
-            total[1] += 1
-            total[2] += item.bought_price
-            total[3] += item.sold_price
-            if item.sold_at and item.bought_at:
-                row["days"] = max(0, int((item.sold_at - item.bought_at) // 86400))
+            profit = item.sold_price - sell_cost - cost
+            row.update(profit=profit, roi=_percent(profit, cost))
+            total["profit"] += profit
+            total["count"] += 1
+            total["spent"] += cost
+            total["revenue"] += item.sold_price
+            if item.sold_at:
                 days.append(row["days"])
-            if item.sold_at and time.localtime(item.sold_at)[:2] == month:
-                this_month[0] += profit
-                this_month[1] += 1
+                when = time.strftime("%Y-%m", time.localtime(item.sold_at))
+                bucket = by_month.setdefault(when, {"month": when, "profit": 0, "count": 0})
+                bucket["profit"] += profit
+                bucket["count"] += 1
+                if when == month:
+                    this_month["profit"] += profit
+                    this_month["count"] += 1
+                    this_month["revenue"] += item.sold_price
         elif not item.sold:
-            open_count += 1
-            open_spent += item.bought_price
+            stock["count"] += 1
+            stock["spent"] += cost
+            estimate = sale_estimate(item)
+            if estimate is None:
+                stock["unknown"] += 1
+            else:
+                expected = estimate - sell_cost - cost
+                row.update(estimate=estimate, expected=expected, roi=_percent(expected, cost))
+                stock["expected"] += expected
+                stock["value"] += estimate
+            if book is not None:
+                found = next((k for k in (book.key(t) for t in (item.title, item.product, item.search_query) if t)
+                              if k), None)
+                reference = book.reference(found[0]) if found else None
+                if reference:
+                    row["market_now"] = {"price": reference["price"], "n": reference["n"], "name": reference["name"],
+                                         "speed": speed_text(book.speed(found[0]))}
+        row["advice"] = _advice(row)
         rows.append(row)
-    rows.sort(key=lambda r: (r["sold"], r["name"]))
-    return {"month": {"profit": this_month[0], "count": this_month[1]},
-            "total": {"profit": total[0], "count": total[1], "spent": total[2], "revenue": total[3]},
-            "open": {"count": open_count, "spent": open_spent},
+    total["roi"] = _percent(total["profit"], total["spent"])
+    order = {"úton": 0, "nálad": 1, "fent": 2, "eladva": 3}
+    rows.sort(key=lambda r: (order[r["stage"]], -(r["sold_at"] or r["bought_at"] or 0)))
+    months = [by_month[key] for key in sorted(by_month, reverse=True)[:LEDGER_MONTHS]]
+    return {"month": this_month, "total": total, "open": stock, "months": months, "stages": dict(stages),
             "days": round(sum(days) / len(days)) if days else None, "rows": rows}
 
 
@@ -499,10 +599,12 @@ class DealHunter:
 
     def __init__(self, root: Path, platforms: dict[str, Platform], browser: Callable[[], Any] | None,
                  llm: Any = None, clock: Callable[[], float] = time.time, default_every: float = DEFAULT_EVERY,
-                 rng: random.Random | None = None):
+                 rng: random.Random | None = None, fetcher: Any = None):
         self.path = Path(root) / "kereskedes.json"
         self.platforms = {k: p for k, p in platforms.items() if k in DEAL_SITES and p.search_url}
         self.browser = browser
+        # A Hardverapró és a Jófogás böngésző nélkül (feeds.SiteFetcher): gyorsabb, és a böngészővel párhuzamosan megy.
+        self.fetcher = fetcher
         self.llm = llm
         self.clock = clock
         self.default_every = default_every    # az új keresések gyakorisága ([scheduler] deal_minutes)
@@ -978,11 +1080,20 @@ class DealHunter:
                 browse = self._browse_due(now)
             if browse:
                 game.work.append(partial(self._step_browse, game, running))
+        if self.fetcher is not None and game.done:
+            # a Hardverapró és a Jófogás találati oldalai rögtön, a háttérben (oldalanként egyszerre egy, szünetekkel),
+            # amíg a böngésző a Vintedet és a Vaterát nézi
+            game.pool = ThreadPoolExecutor(max_workers=max(1, len(getattr(self.fetcher, "sites", ()) or (1,))),
+                                           thread_name_prefix="jarvis-gyors")
+            for url, platform in self._fast_loads(searches, watches, now, force):
+                game.fetch_ahead(self.fetcher, url, platform)
         try:
             game.loop()
         finally:
             if game.lane is not None:
                 game.lane.close()
+            if game.pool is not None:
+                game.pool.shutdown(wait=False, cancel_futures=True)
             self.book.save()
         if browse:
             return self._after_browse(game)
@@ -997,9 +1108,61 @@ class DealHunter:
                                                           else "nincs új olcsó hirdetés") + ".")
         return text + "."
 
+    def _search_url(self, search: dict[str, Any], key: str) -> str:
+        return self.platforms[key].search_url.format(q=urllib.parse.quote(search["query"])) + NEWEST.get(key, "")
+
+    def _fast_loads(self, searches: list[dict[str, Any]], watches: list[dict[str, Any]], now: float,
+                    force: bool) -> list[tuple[str, str]]:
+        """A kör gyors (böngésző nélkül olvasható) oldalai: az esedékes, futó keresések és figyelt oldalak címe."""
+        out = []
+        for search in searches:
+            if self._search_waits(search, now):
+                continue
+            for key in search.get("sites") or list(self.platforms):
+                if key in self.platforms and self.fetcher.handles(key) and (force or self._due(search, key, now)):
+                    out.append((self._search_url(search, key), key))
+        for watch in watches:
+            platform = watch.get("platform") or "vatera"
+            if platform in self.platforms and self.fetcher.handles(platform) and (force or self._due(watch, platform,
+                                                                                                     now)):
+                out.append((watch["url"], platform))
+        return out
+
+    def _listings(self, url: str, platform: str, check: Callable[[], None],
+                  game: _Round | None = None) -> list[dict[str, Any]]:
+        """Egy találati oldal hirdetései: a Hardverapróról és a Jófogásról böngésző nélkül (ha a kör elején már
+        letöltötte, onnan), különben, vagy ha így nem sikerült (tilt, üres), a böngészővel. BrowserError, ha egyik sem."""
+        future = game.prefetch.pop(url, None) if game is not None else None
+        if future is not None or (self.fetcher is not None and self.fetcher.usable(platform)):
+            try:
+                rows = future.result() if future is not None else self.fetcher.listings(url, platform, check)
+            except FeedError:
+                rows = None
+            if rows:
+                if game is not None:
+                    game.fast += 1
+                return rows
+        return self.browser().extract_listings(url)
+
+    def _platform_of(self, url: str) -> str:
+        host = (urllib.parse.urlsplit(url).hostname or "").removeprefix("www.")
+        return next((k for k, p in self.platforms.items() if any(host == d or host.endswith("." + d)
+                                                                 for d in p.domains)), "")
+
+    def _look(self, url: str, platform: str = "", check: Callable[[], None] = lambda: None) -> dict[str, Any]:
+        """Egy hirdetés oldala csak olvasva: a gyors oldalakon böngésző nélkül, különben (vagy ha így nem megy) a
+        böngészővel. BrowserError, ha nem sikerült."""
+        platform = platform or self._platform_of(url)
+        if self.fetcher is not None and self.fetcher.usable(platform):
+            try:
+                return self.fetcher.page(url, platform, check)
+            except FeedError:
+                pass
+        return self.browser().look(url)
+
     def _step_search(self, game: _Round, search: dict[str, Any], sites: list[str], status: str) -> None:
         """Egy keresés: a találati oldalak, majd a szokásos árhoz mért jelöltek, vagy (ha még nincs) a felmérés."""
-        rows, problems = self._collect(search, sites, game.check)
+        rows, problems = self._collect(search, sites, game.check, game=game)
         game.errors += problems
         if not rows:
             return
@@ -1041,10 +1204,14 @@ class DealHunter:
                 f"{format_price(deal['profit'])}. {origin}{when}{warn}")
 
     def _collect(self, search: dict[str, Any], sites: list[str], check: Callable[[], None],
-                 track: bool = True) -> tuple[list[dict[str, Any]], list[str]]:
+                 track: bool = True, game: _Round | None = None) -> tuple[list[dict[str, Any]], list[str]]:
         rows, errors = [], []
-        query = urllib.parse.quote(search["query"])
-        browser = self.browser()
+        urls = {key: self._search_url(search, key) for key in sites}
+        if game is not None and game.pool is not None:
+            # a gyors oldalak a háttérben töltődnek, amíg a böngésző a többit nézi: azok jönnek előbb
+            for key in sites:
+                game.fetch_ahead(self.fetcher, urls[key], key)
+            sites = sorted(sites, key=lambda key: urls[key] in game.prefetch)
         for key in sites:
             site = self.platforms[key]
             check()
@@ -1052,7 +1219,7 @@ class DealHunter:
                 with self._lock:
                     self._data["last"][f"{search['id']}:{key}"] = self.clock()
             try:
-                listings = browser.extract_listings(site.search_url.format(q=query) + NEWEST.get(key, ""))
+                listings = self._listings(urls[key], key, check, game)
             except BrowserError as exc:
                 errors.append(f"{site.name}: {str(exc).splitlines()[0][:120]}")
                 continue
@@ -1293,7 +1460,7 @@ class DealHunter:
         site = self.platforms[platform]
         browser = self.browser()
         try:
-            listings = browser.extract_listings(url)
+            listings = self._listings(url, platform, game.check, game)
         except BrowserError as exc:
             game.errors.append(f"{site.name}: {str(exc).splitlines()[0][:120]}")
             return None
@@ -1464,7 +1631,7 @@ class DealHunter:
         probe = {"id": watch["id"], "query": query}
         sites = [k for k in RESALE_SITES if k in self.platforms and k != row.get("platform")] or \
             [k for k in RESALE_SITES if k in self.platforms]
-        rows, _problems = self._collect(probe, sites, game.check, track=False)
+        rows, _problems = self._collect(probe, sites, game.check, track=False, game=game)
         kept = [r for r in self._relevant(probe, rows) if listing_key(r["url"]) != listing_key(row["url"])]
         stats = price_stats([r["price"] for r in kept])
         if not stats or stats["n"] < CALIBRATE_MIN:
@@ -1481,7 +1648,7 @@ class DealHunter:
                 return
             game.check()
             try:
-                page = self.browser().look(url)
+                page = self._look(url, check=game.check)
             except BrowserError:
                 continue
             state, _detail = classify(page, url)
@@ -1689,7 +1856,7 @@ class DealHunter:
         row = self.rng.choice(pool)
         game.check()
         try:
-            page = self.browser().look(row["url"])
+            page = self._look(row["url"], row.get("platform", ""), game.check)
         except BrowserError:
             return
         game.loaded += 1
@@ -1970,7 +2137,7 @@ class DealHunter:
         leírás elejét a jelölthöz teszi (a modellkérdéshez)."""
         if page is None:
             try:
-                page = self.browser().look(deal["url"])
+                page = self._look(deal["url"], deal.get("platform", ""))
             except BrowserError:
                 deal.setdefault("warnings", []).append("a hirdetés oldalát nem tudtam megnyitni")
                 return ""
@@ -2013,3 +2180,56 @@ class DealHunter:
         with self._lock:
             self._data["deals"] = ([deal] + self._data["deals"])[:MAX_DEALS]
             self._save()
+
+    # --- az azonnali figyelőnek (instant.py): egy friss hirdetés értéke, modell nélkül ---
+
+    def in_day(self) -> bool:
+        """A gép üzemideje van-e (a fül tetején megadott órák): az azonnali figyelő is csak ekkor dolgozik."""
+        with self._lock:
+            return self._day_ok(self.clock())
+
+    def quick_value(self, row: dict[str, Any], min_profit: int | None = None) -> dict[str, Any] | None:
+        """Mennyit ér egy friss hirdetés, modell nélkül: ha egy felmért keresésedre illik, annak a szokásos ára (és a
+        keresés szabályai: kedvezmény, haszon, ársáv), különben az árbázisé (legalább EXPLORE_CUT-tal olcsóbb, és
+        legalább min_profit haszon). {reference, n, name, profit, cheap, search?}; None, ha nem tudni."""
+        with self._lock:
+            running = [json.loads(json.dumps(s)) for s in self._data["searches"] if search_status(s) == "fut"]
+            floor = int(min_profit or self._data["browse"].get("min_profit") or WATCH_PROFIT)
+        price = int(row["price"])
+        search = next((s for s in running if matches_query(s["query"], row["text"])
+                       and not excluded(s.get("exclude") or [], row["text"])), None)
+        if search is not None:
+            reference = int(search["reference"])
+            return {"reference": reference, "n": None, "name": search["query"], "search": search["id"],
+                    "profit": expected_profit(reference, price), "cheap": pays(search, price, reference)}
+        product = self.book.key(row["text"])
+        found = self.book.reference(product[0], exclude=row["url"]) if product else None
+        if found is None:
+            return None
+        reference = int(found["price"])
+        return {"reference": reference, "n": found["n"], "name": found["name"],
+                "profit": expected_profit(reference, price),
+                "cheap": reference * FLOOR <= price <= explore_top(reference, floor)}
+
+    def quick_deal(self, row: dict[str, Any], value: dict[str, Any], source: str,
+                   page: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str]:
+        """Az azonnali figyelő megérő találata a többi közé (a Megvettem gombbal), egyszer: (találat, ""). A hirdetés
+        oldalát (page, böngésző nélkül letöltve; None, ha nem sikerült) modell nélkül átnézi. Ha nem lesz belőle
+        találat, (None, miért): „ismert” (erről már szóltunk, pl. a böngészős kör), „elkelt”, „hibás”, „gyanús”, vagy
+        „elrejtett” (az ilyet többször elrejtetted)."""
+        with self._lock:
+            if listing_key(row["url"]) in self._deal_keys():
+                return None, "ismert"
+        probe = {"id": value.get("search") or "azonnali", "query": value["name"]}
+        deal = self._deal(probe, row, int(value["reference"]), explore=source, similar=value.get("n"), quick=True,
+                          product=value["name"])
+        verdict = self._inspect(deal, page) if page is not None else ""
+        self._mark(deal)
+        if verdict not in ("", "captcha"):
+            return None, verdict
+        if self._muted(deal.get("product_key"), self.clock()):
+            return None, "elrejtett"
+        self._remember(deal)
+        self.journal.add(f"Jó találat (azonnali figyelő): „{deal['text'][:60]}” {format_price(deal['price'])} "
+                         f"({deal['site']}, kb. {format_price(deal['profit'])} haszon) – {source}")
+        return deal, ""
