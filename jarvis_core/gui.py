@@ -776,9 +776,9 @@ class _Handler(BaseHTTPRequestHandler):
                 if action == "instant_enable":
                     state = instant.set_enabled(bool(body.get("on")))
                 elif action == "instant_add":
-                    state = instant.add(str(body.get("target") or ""), body.get("sites"), str(body.get("mode") or ""),
-                                        body.get("max_price"), body.get("min_price"), body.get("exclude"),
-                                        body.get("every"))
+                    state = instant.add(str(body.get("target") or ""), body.get("sites"), max_price=body.get("max_price"),
+                                        min_price=body.get("min_price"), exclude=body.get("exclude"),
+                                        every=body.get("every"))
                 elif action == "instant_remove":
                     state = instant.remove(str(body.get("id") or ""))
                 elif action == "instant_pause":
@@ -786,6 +786,17 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     return self._json(400, {"ok": False})
                 return self._json(200, {"ok": True, **deals.state(), "instant": state})
+            if action in ("start", "stop"):
+                # Indítás / Leállítás: minden egyszerre (keresések, figyelt oldalak, böngészés, azonnali figyelő),
+                # napszaktól függetlenül, amíg le nem állítod
+                state = deals.start() if action == "start" else deals.stop()
+                instant_state = instant.set_enabled(action == "start") if instant is not None else None
+                if action == "start" and app is not None and app.scheduler is not None \
+                        and "deals" in app.scheduler.jobs and deals.available():
+                    app.run_job_now("deals", silent=remote)
+                return self._json(200, {"ok": True, **state, "instant": instant_state})
+            if action == "limits":      # legfeljebb ennyiért vegyen, legalább ennyi haszonnal (minden keresésre)
+                return self._json(200, {"ok": True, **deals.set_limits(body.get("max_buy"), body.get("min_profit"))})
             if action == "enable":
                 return self._json(200, {"ok": True, **deals.set_enabled(bool(body.get("on")))})
             fields = {k: body.get(k) for k in DEAL_FIELDS if k in body}

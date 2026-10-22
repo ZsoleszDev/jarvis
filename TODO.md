@@ -14,8 +14,11 @@
   és díj, megjegyzés; várható és tényleges haszon, megtérülés, havonta; a „most kb.” ár az árbázisból; Új vétel kézzel.
 - Böngésző nélküli olvasás (feeds.py) a Hardveraprón és a Jófogáson: a kör elején a háttérben, párhuzamosan a
   böngészővel; tempó, óránkénti keret, tiltásnál és üres oldalnál böngészős tartalék.
-- Azonnali figyelő (instant.py): keresőszó vagy oldalcím, minden új / csak ami megéri, 2–15 percenként, saját szálon;
-  sürgős push-értesítés.
+- Azonnali figyelő (instant.py): keresőszó vagy oldalcím, 2–15 percenként, saját szálon; csak akkor szól, ha új ÉS
+  megéri (árbázis / keresés → a modell megnevezi → ár a másik oldalon → a hirdetés oldala → rövid modellkérdés); a
+  modellre váró hirdetések megvárják, hogy ne zavarja a beszélgetést; sürgős push-értesítés.
+- Automata kereskedés: egy Indítás/Leállítás gomb (keresések, figyelt oldalak, böngészés, azonnali figyelő; napszak
+  nélkül), közös max. vételár és min. haszon.
 
 ## Élesben kipróbálandó
 - A Hardverapró és a Jófogás sima letöltéssel (feeds.py): a valódi oldalakon a kártyák kiolvasása (most a böngészős
@@ -67,7 +70,9 @@
 - Ami csak a termékcsaládot nevezi meg típus nélkül („PS5 konzol”, „Nintendo Switch”), nem kap kulcsot (a játékkal, kiegészítővel keveredne): ezeket csak a modell nevezi meg, vagy egy keresés méri.
 
 ### Vételeim és azonnali figyelő
-- Az azonnali figyelő „minden új” hirdetéséhez (ami nem éri meg) nincs Megvettem gomb: azt a Vételeim › Új vétel veszi fel.
+- Az azonnali figyelő egy letöltésből legfeljebb három, az árbázis által nem ismert hirdetés árát nézi meg máshol (a modell
+  szerint megérők elöl); ha egy kategóriában egyszerre sok ismeretlen új jön, a többi kimarad (`deals.EXPLORE_PICKS`).
+- A régi napszak-beállítás (`set_day`, „day” művelet) a háttérben megvan, az Indítás 0–24 órára állítja; a felületen nincs.
 - A napközbeni böngészés hardverapró/jófogás munkamenetei böngésző nélkül mennek, de továbbra is egymás után a Vinted- és
   Vatera-munkamenetekkel; a két sor párhuzamosan is futhatna (a böngésző közben a Vintedet nézné).
 - A „most kb.” ár (Vételeim) a tárgy címéből vagy termékéből keres kulcsot; a csak leírással (prompt) felvett tárgynál

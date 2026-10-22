@@ -1,17 +1,21 @@
-"""Azonnali figyelő: szól, amint új hirdetés kerül fel a Hardverapróra vagy a Jófogásra (ezeken nincs ilyen értesítés).
+"""Azonnali figyelő: amint új hirdetés kerül fel a Hardverapróra vagy a Jófogásra, kideríti, megéri-e megvenni, és csak
+akkor szól, ha új ÉS megéri (a jó vételek többnyire a friss hirdetésekből jönnek; ezeken az oldalakon nincs is „szólj, ha
+új jön” értesítés).
 
 Megadod, mit figyeljen: egy keresőszót (pl. „RTX 3080”, mindkét oldalon), vagy egy találati oldal címét (pl. Hardverapró ›
-Videókártyák), és hogy minden új hirdetésről szóljon-e, vagy csak arról, ami megéri (a szokásos ár alatt, lásd
-DealHunter.quick_value). A Jarvis 2–15 percenként (alapból 3) letölti a találati oldal elejét, böngésző nélkül
-(feeds.SiteFetcher: oldalanként egyszerre egy kérés, szünetekkel, óránként legfeljebb INSTANT_HOURLY), egy saját szálon:
-nem vár a böngészőre, a modellre, és arra sem, hogy épp beszélgetsz-e vele. Az első letöltésnél csak megjegyzi, ami már
-fent van; utána minden új (vagy leárazott) hirdetésről szól, a telefonra is (sürgős értesítésként), a linkjével, az
-árával, és ha tudja, a szokásos árával és a várható haszonnal. Ha egyszerre több új jön, egy értesítésben.
+Videókártyák). A Jarvis 2–15 percenként (alapból 3) letölti a találati oldal elejét, böngésző nélkül (feeds.SiteFetcher:
+oldalanként egyszerre egy kérés, szünetekkel, óránként legfeljebb INSTANT_HOURLY), egy saját szálon: nem vár a
+böngészőre, és arra sem, hogy épp beszélgetsz-e vele. Az első letöltésnél csak megjegyzi, ami már fent van; utána minden
+új (vagy leárazott) hirdetést rögtön felmér (DealHunter.appraise): modell nélkül a felmért kereséseid és az árbázis
+szokásos árához méri; amit így nem ismer, azt a modell nevezi meg, és ha kell, megnézi, mennyiért adják a másik oldalon;
+a megérő jelölt oldalát átnézi (elkelt, hibás, gyanús?), és egy rövid modellkérdés után szól, a telefonra is (sürgős
+értesítésként), az árral, a szokásos árral és a várható haszonnal. A vételi limit (Automata kereskedés: legfeljebb
+ennyiért) fölötti hirdetést meg sem nézi. Ha épp dolgozol a Jarvisszal, a modellt nem zavarja: ami a modellre vár, az
+utána jön (legfeljebb WAIT_MAX-ig).
 
-Ami megéri, annak az oldalát is letölti (böngésző nélkül), és modell nélkül átnézi (elkelt, hibás, gyanús: nem szól), és
-az Automata kereskedés találatai közé teszi (Megvettem gomb). A modellt nem kérdezi (gyorsjelzés). Csak olvas: semmit nem
-vesz meg, nem ír senkinek. A gép üzemidejében dolgozik (a fül tetején megadott órák), a Szünet leállítja. Ha egy oldal
-tilt vagy robot-ellenőrzést kér, azon egy ideig nem próbálkozik (a SiteFetcher), és egyszer szól.
+Csak olvas: semmit nem vesz meg, nem ír senkinek. Az Automata kereskedés Indítás gombjával indul, a Leállítással és a
+Szünettel áll le. Ha egy oldal tilt vagy robot-ellenőrzést kér, azon egy ideig nem próbálkozik (a SiteFetcher), és egyszer
+szól.
 """
 from __future__ import annotations
 
@@ -39,12 +43,11 @@ INSTANT_HOURLY = 60        # az azonnali figyelő oldalanként óránként legfe
 MAX_SEEN = 500             # figyelőnként ennyi látott hirdetést jegyez meg
 MAX_HITS = 60
 MAX_ROWS = 30              # egy letöltésből ennyi hirdetést néz (az oldal eleje: a legújabbak)
-GROUP_AFTER = 2            # ennél több új hirdetés egy letöltésben: egy közös értesítés
-MAX_PAGES = 3              # egy letöltés után legfeljebb ennyi megérő hirdetés oldalát tölti le
+MAX_WAITING = 60           # ennyi hirdetés várhat a modellre
+WAIT_MAX = 1800            # ennyi ideig (másodperc); ami addig sem került sorra, az kimarad
 TICK = 2.0
 BOOK_SAVE = 600            # az árbázist legfeljebb ennyi másodpercenként írja ki (nagy fájl; a körök is mentik)
 JITTER = (0.85, 1.15)
-MODES = ("all", "cheap")
 
 
 class InstantError(DealError):
@@ -70,6 +73,9 @@ class InstantWatch:
         # Szünet, a háttérmunka nincs kikapcsolva).
         self.notify: Callable[..., None] = lambda *a, **k: None
         self.allowed: Callable[[], bool] = lambda: True
+        # Kérdezheti-e most a modellt (nem, amíg épp dolgozol a Jarvisszal: addig a hirdetés vár, lásd _waiting).
+        self.model_ok: Callable[[], bool] = lambda: True
+        self._waiting: list[tuple[str, str, dict[str, Any], float]] = []   # (figyelő, oldal, hirdetés, mióta vár)
         self._lock = threading.RLock()
         self._next: dict[str, float] = {}           # figyelő:oldal → mikor jön legközelebb (a memóriában)
         self._recent: dict[str, deque] = {k: deque() for k in self.platforms}
@@ -111,7 +117,8 @@ class InstantWatch:
         return {"enabled": enabled, "alerts": alerts, "hits": hits, "every_choices": list(EVERY_CHOICES),
                 "sites": [{"key": k, "name": p.name, **status.get(k, {}), "per_hour": load.get(k, 0)}
                           for k, p in self.platforms.items()],
-                "hourly": INSTANT_HOURLY, "presets": self.presets(), "working": self.working()}
+                "hourly": INSTANT_HOURLY, "presets": self.presets(), "working": self.working(),
+                "waiting": len(self._waiting)}
 
     def working(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -140,14 +147,15 @@ class InstantWatch:
         with self._lock:
             self._data["enabled"] = bool(on)
             self._next.clear()                 # bekapcsoláskor rögtön kezd
+            if not on:
+                self._waiting = []
             self._save()
-        self.hunter.journal.add("Bekapcsoltad az azonnali figyelőt (Hardverapró, Jófogás)." if on else
-                                "Kikapcsoltad az azonnali figyelőt.")
-        return self.state()
+        return self.state()                    # a naplóba az Indítás és a Leállítás ír (DealHunter.start, stop)
 
-    def add(self, target: str, sites: Any = None, mode: str = "", max_price: Any = None, min_price: Any = None,
+    def add(self, target: str, sites: Any = None, max_price: Any = None, min_price: Any = None,
             exclude: Any = None, every: Any = None) -> dict[str, Any]:
-        """Új figyelő: egy keresőszó (a megadott oldalakon), vagy egy Hardverapró- vagy Jófogás-találati oldal címe."""
+        """Új figyelő: egy keresőszó (a megadott oldalakon), vagy egy Hardverapró- vagy Jófogás-találati oldal címe. Csak
+        az új és megérő hirdetésekről szól."""
         target = " ".join(str(target or "").split())[:300]
         if not target:
             raise InstantError("Írd be, mit figyeljek (pl. „RTX 3080”), vagy másolj be egy találati oldalt.")
@@ -169,13 +177,10 @@ class InstantWatch:
                                if segments else ""])[0].split())
             alert.update(url=target, sites=[platform], query="",
                          name=self.platforms[platform].name + (f": {label[:40]}" if label else ""))
-            default_mode = "cheap"             # egy egész kategória: csak ami megéri (különben túl sok)
         else:
             chosen = [k for k in self.platforms if k in (sites if isinstance(sites, (list, tuple)) else [])] or \
                 list(self.platforms)
             alert.update(query=target[:80], url="", sites=chosen, name=target[:80])
-            default_mode = "all"
-        alert["mode"] = mode if mode in MODES else default_mode
         try:
             alert["max_price"] = parse_price(max_price) or None
             alert["min_price"] = parse_price(min_price) or None
@@ -280,6 +285,7 @@ class InstantWatch:
         """Egy kör: oldalanként legfeljebb egy esedékes figyelő (ha az oldal most kérhető). Visszaadja, hányat nézett."""
         if not self.active():
             return 0
+        self._retry_waiting()
         now = self.clock()
         done, used = 0, set()
         for alert, site in self.due(now):
@@ -349,8 +355,7 @@ class InstantWatch:
             self._save()
         if first:
             self.hunter.journal.add(f"Azonnali figyelő: {alert['name']} ({name}): elindult, {len(rows)} hirdetést már "
-                                    "ismerek; innentől minden újról szólok" +
-                                    (" (ami megéri)." if alert.get("mode") == "cheap" else "."))
+                                    "ismerek; innentől minden újat felmérek, és ha megéri, szólok.")
             return []
         return self._report(alert, site, fresh)
 
@@ -390,72 +395,88 @@ class InstantWatch:
                     "utána újra próbálom; addig a szokásos (böngészős) keresés marad.", actions=[DEALS_ACTION])
 
     def _report(self, alert: dict[str, Any], site: str, fresh: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Az új hirdetések: értékük (modell nélkül), a megérők oldala (elkelt, hibás, gyanús?), értesítés, és a friss
-        hirdetések listája. A „csak ami megéri” figyelőnél a többiről nem szól."""
+        """Az új hirdetések felmérése (DealHunter.appraise): amelyik megéri, arról rögtön szól (ahogy kiderül), és a friss
+        hirdetések közé teszi; ami a modellre vár, az a várakozók közé kerül. Visszaadja a megérőket."""
         source = f"azonnali figyelő: {alert['name']}"
-        out, pages = [], MAX_PAGES
-        for row in fresh:
-            value = self.hunter.quick_value(row)
-            cheap = bool(value and value["cheap"])
-            if alert.get("mode") == "cheap" and not cheap:
-                continue
+        hits: list[dict[str, Any]] = []
+
+        def found(deal: dict[str, Any]) -> None:
             hit = {"id": secrets.token_hex(5), "alert": alert["id"], "alert_name": alert["name"], "at": self.clock(),
-                   **{k: row[k] for k in ("site", "platform", "text", "title", "price", "url")}, "cheap": cheap}
-            if row.get("drop"):
-                hit["drop"] = row["drop"]
-            if value:
-                hit.update(reference=value["reference"], profit=value["profit"], n=value.get("n"))
-            if cheap:
-                page = None
-                if pages > 0:                  # a hirdetés oldala (elkelt, hibás, gyanús?); a többi átnézés nélkül
-                    pages -= 1
-                    try:
-                        page = self.fetcher.page(row["url"], site, self._check)
-                    except FeedError:
-                        page = None
-                deal, _why = self.hunter.quick_deal(row, value, source, page)
-                if deal is None:
-                    continue                   # már szóltunk róla, elkelt, hibás, gyanús, vagy az ilyet elrejtetted
-                hit["deal"] = deal["id"]
-                hit["warnings"] = deal.get("warnings") or []
-            out.append(hit)
-        if not out:
-            return []
+                   "deal": deal["id"], "cheap": True,
+                   **{k: deal.get(k) for k in ("site", "platform", "text", "title", "price", "url", "drop", "note")},
+                   "reference": deal["median"], "profit": deal["profit"], "n": deal.get("similar"),
+                   "warnings": deal.get("warnings") or []}
+            hit["title"] = hit["title"] or hit["text"]
+            hits.append(hit)
+            with self._lock:
+                self._data["hits"] = ([hit] + self._data["hits"])[:MAX_HITS]
+                for stored in self._data["alerts"]:
+                    if stored.get("id") == alert["id"]:
+                        stored["found"] = int(stored.get("found") or 0) + 1
+                        stored["found_at"] = self.clock()
+                self._save()
+            self._tell(alert, hit)
+
+        waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found)
+        if waiting:
+            now = self.clock()
+            with self._lock:
+                queued = {row["url"] for _a, _s, row, _t in self._waiting}
+                self._waiting += [(alert["id"], site, row, now) for row in waiting if row["url"] not in queued]
+                del self._waiting[:-MAX_WAITING]
+        return hits
+
+    def _retry_waiting(self) -> None:
+        """A modellre váró friss hirdetések, amint lehet kérdezni (amíg nem túl régiek)."""
+        if not self._waiting or not self.model_ok():
+            return
+        now = self.clock()
         with self._lock:
-            self._data["hits"] = (list(reversed(out)) + self._data["hits"])[:MAX_HITS]
-            for stored in self._data["alerts"]:
-                if stored.get("id") == alert["id"]:
-                    stored["found"] = int(stored.get("found") or 0) + len(out)
-                    stored["found_at"] = self.clock()
-            self._save()
-        self._tell(alert, out)
+            waiting = [entry for entry in self._waiting if now - entry[3] < WAIT_MAX]
+            self._waiting = []
+            alerts = {a["id"]: json.loads(json.dumps(a)) for a in self._data["alerts"]}
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for alert_id, site, row, _at in waiting:
+            if alert_id in alerts:
+                groups.setdefault((alert_id, site), []).append(row)
+        for (alert_id, site), rows in groups.items():
+            self._report(alerts[alert_id], site, rows)
+
+    def _look(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        """Egy hirdetés oldala böngésző nélkül (None, ha most nem sikerült)."""
+        try:
+            return self.fetcher.page(row["url"], row.get("platform", ""), self._check)
+        except FeedError:
+            return None
+
+    def _search(self, query: str) -> list[dict[str, Any]]:
+        """Mennyiért adják máshol: a keresőszó találatai a gyors oldalakon (böngésző nélkül)."""
+        out: list[dict[str, Any]] = []
+        for site, platform in self.platforms.items():
+            try:
+                rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site, self._check)
+            except FeedError:
+                continue
+            out += [{"site": platform.name, "platform": site, "text": str(r.get("text") or "")[:180],
+                     "price": int(r["price"]), "url": str(r["url"])} for r in rows[:MAX_ROWS]
+                    if r.get("url") and not r.get("auction")]
         return out
 
-    def _tell(self, alert: dict[str, Any], hits: list[dict[str, Any]]) -> None:
-        if len(hits) > GROUP_AFTER:
-            lines = [f"• {self._line(h)}" for h in hits[:6]]
-            more = f"\n…és még {len(hits) - 6}." if len(hits) > 6 else ""
-            cheap = sum(1 for h in hits if h["cheap"])
-            self.notify("deal", f"{len(hits)} új hirdetés: {alert['name'][:50]}",
-                        f"{len(hits)} új hirdetés ({alert['name']})" + (f", ebből {cheap} megéri" if cheap else "") +
-                        ":\n" + "\n".join(lines) + more, spoken=f"{len(hits)} új hirdetés: {alert['name'][:40]}.",
-                        url=hits[0]["url"], actions=[DEALS_ACTION], urgent=True)
-            return
-        for hit in hits:
-            title = ("Megéri: " if hit["cheap"] else "Új: ") + hit["title"][:60]
-            warn = "".join(f" Figyelj: {w}." for w in hit.get("warnings") or [])
-            self.notify("deal", title, f"{self._line(hit)}. {alert['name']}.{warn}",
-                        spoken=("Megérő új hirdetés" if hit["cheap"] else "Új hirdetés") +
-                        f": {hit['title'][:50]}, {format_price(hit['price'])}.",
-                        url=hit["url"], actions=[DEALS_ACTION], urgent=True)
+    def _tell(self, alert: dict[str, Any], hit: dict[str, Any]) -> None:
+        warn = "".join(f" Figyelj: {w}." for w in hit.get("warnings") or [])
+        checked = f" {hit['note']}" if hit.get("note") else ""
+        self.notify("deal", "Megéri: " + hit["title"][:60], f"{self._line(hit)}.{checked}{warn} ({alert['name']})",
+                    spoken=f"Megérő új hirdetés: {hit['title'][:50]}, {format_price(hit['price'])}.",
+                    url=hit["url"], actions=[DEALS_ACTION], urgent=True)
 
     @staticmethod
     def _line(hit: dict[str, Any]) -> str:
-        text = f"{hit['site']}: „{hit['title'][:80]}” {format_price(hit['price'])}"
+        text = f"{hit['site']}: „{hit['title'][:80]}” {format_price(hit['price'])}, most került fel"
         if hit.get("drop"):
             text += f" (leárazta: {format_price(hit['drop'])} → {format_price(hit['price'])})"
         if hit.get("reference"):
-            text += f", a szokásos ára kb. {format_price(hit['reference'])}"
+            basis = f", {hit['n']} hasonló alapján" if hit.get("n") else ""
+            text += f". A szokásos ára kb. {format_price(hit['reference'])}{basis}"
             if hit.get("profit", 0) > 0:
                 text += f", kb. {format_price(hit['profit'])} haszon lehet"
         return text

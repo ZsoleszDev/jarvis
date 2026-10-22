@@ -1128,6 +1128,52 @@ class MatchTests(unittest.TestCase):
             self.assertEqual(browser.looked, [])
 
 
+class StartAndLimitTests(HunterCase):
+    def test_start_runs_everything_around_the_clock_until_stopped(self):
+        """Indítás: minden keresés, a figyelt oldalak és a böngészés is, napszaktól függetlenül, amíg le nem állítod."""
+        self.hunter.set_day(8, 20)
+        state = self.hunter.start()
+        self.assertEqual((state["running"], state["browse"]["on"], state["day"], state["started"]),
+                         (True, True, [0, 24], self.clock.now))
+        self.assertTrue(self.hunter.browsing() and self.hunter.in_day())
+        self.clock.now += 600
+        self.assertEqual(self.hunter.start()["started"], self.clock.now - 600, "a második Indítás nem kezd újra")
+        state = self.hunter.stop()
+        self.assertEqual((state["running"], state["browse"]["on"], state["started"]), (False, False, None))
+        self.assertFalse(self.hunter.available())
+        texts = [e["text"] for e in self.hunter.journal.entries()]
+        self.assertIn("Elindítottad az automata kereskedést (keresések, figyelt oldalak, böngészés, azonnali figyelő).",
+                      texts)
+        self.assertIn("Leállítottad az automata kereskedést.", texts)
+
+    def test_the_buy_limit_applies_to_searches_offers_and_auctions(self):
+        """Legfeljebb ennyiért vegyen: a keresés a limit fölötti olcsót sem jelöli (az oldalát meg sem nyitja); a
+        licitnél legfeljebb a limitig javasol; a Vinteden ajánlatot javasol, ha az belefér."""
+        self.ready()
+        with self.assertRaises(DealError):
+            self.hunter.set_limits(max_buy="sok")
+        self.assertEqual(self.hunter.set_limits(max_buy="50 000", min_profit="6000")["max_buy"], 50000)
+        self.assertEqual(self.hunter.state()["browse"]["min_profit"], 6000)
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(self.hunter.state()["deals"], [], "az 55 000 Ft-os Gigabyte a limit fölött van")
+        self.assertEqual(self.browser.looked, [])
+        source = {"id": "w", "name": "Vatera", "min_profit": 5000}
+        reference = {"price": 100000, "n": 5, "name": "Nintendo Switch OLED"}
+        auction = {"text": "Nintendo Switch OLED", "price": 20000, "url": "https://www.vatera.hu/termek/9", "site": "Vatera",
+                   "platform": "vatera", "auction": True, "left": 3600}
+        self.assertEqual(self.hunter._explore_deal(source, auction, reference)["max_bid"], 50000)
+        vinted = {"text": "Nintendo Switch OLED", "price": 60000, "url": "https://www.vinted.hu/items/9", "site": "Vinted",
+                  "platform": "vinted"}
+        self.assertEqual(self.hunter._explore_deal(source, vinted, reference)["offer"], 50000,
+                         "olcsó, de a limit fölött: ajánlattal belefér")
+        self.assertIsNone(self.hunter._explore_deal(source, {**vinted, "platform": "jofogas", "url": "https://jofogas.hu/9"},
+                                                    reference))
+        self.assertIsNone(self.hunter.set_limits(max_buy="")["max_buy"], "üresen nincs limit")
+        self.clock.now += 4 * 3600
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual([d["price"] for d in self.hunter.state()["deals"]], [55000])
+
+
 class ProfitTests(unittest.TestCase):
     def test_profit_month_total_days_and_money_still_in_items(self):
         from jarvis_core.deals import profit_report

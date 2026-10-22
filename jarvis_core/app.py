@@ -518,6 +518,7 @@ class JarvisApp:
             # készenlét nem, és a beszélgetésre sem vár (csak a felolvasás vár, ha épp dolgozol vele).
             instant.notify = self._quick_notify
             instant.allowed = self._instant_allowed
+            instant.model_ok = lambda: not self.busy   # amíg dolgozol a Jarvisszal, a modellre váró hirdetés vár
             instant.start()
         deals = self.work.deals if self.work is not None else None
         if deals is not None and deals.browser is not None:

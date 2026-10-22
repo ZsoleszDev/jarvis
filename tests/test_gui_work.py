@@ -208,7 +208,8 @@ class WorkSecurityTests(unittest.TestCase):
         self.h.store.delete(item.id)
 
     def test_instant_watch_from_the_window(self):
-        """Azonnali figyelő: be/ki, egy keresőszó két oldalon, egy oldalcím (csak ami megéri), szünet és törlés."""
+        """Azonnali figyelő: egy keresőszó két oldalon, egy oldalcím, szünet és törlés; az Indítás és a Leállítás vele együtt
+        mindent elindít és leállít; a vételi limit."""
         status, data = request(self.port, "GET", f"/api/work/deals?t={self.h.server.token}", self.ok)
         instant = json.loads(data)["instant"]
         self.assertEqual((status, instant["enabled"], [s["key"] for s in instant["sites"]]),
@@ -217,19 +218,26 @@ class WorkSecurityTests(unittest.TestCase):
         status, data = self.post("/api/work/deals", {"action": "instant_add", "target": "RTX 3080", "sites": ["jofogas"],
                                                      "max_price": "200 000", "every": "4"})
         alert = data["instant"]["alerts"][0]
-        self.assertEqual((status, alert["sites"], alert["mode"], alert["max_price"], alert["every"]),
-                         (200, ["jofogas"], "all", 200000, 3))
+        self.assertEqual((status, alert["sites"], alert["max_price"], alert["every"]), (200, ["jofogas"], 200000, 3))
         self.assertIn("searches", data, "a fül többi része is jön")
         page = self.h.pages.url("katalogus.html")
         status, data = self.post("/api/work/deals", {"action": "instant_add", "target": page})
-        self.assertEqual((status, data["instant"]["alerts"][1]["mode"]), (200, "cheap"))
+        self.assertEqual((status, data["instant"]["alerts"][1]["url"]), (200, page))
         self.assertEqual(self.post("/api/work/deals", {"action": "instant_add", "target": ""})[0], 400)
         status, data = self.post("/api/work/deals", {"action": "instant_pause", "id": alert["id"], "off": True})
         self.assertTrue(data["instant"]["alerts"][0]["off"])
-        status, data = self.post("/api/work/deals", {"action": "instant_enable", "on": True})
-        self.assertTrue(data["instant"]["enabled"])
-        self.post("/api/work/deals", {"action": "instant_enable", "on": False})
-        for stored in data["instant"]["alerts"]:
+        status, data = self.post("/api/work/deals", {"action": "start"})
+        self.assertEqual((status, data["running"], data["browse"]["on"], data["instant"]["enabled"], data["day"]),
+                         (200, True, True, True, [0, 24]), "egy gomb: minden elindul, napszaktól függetlenül")
+        status, data = self.post("/api/work/deals", {"action": "stop"})
+        self.assertEqual((status, data["running"], data["browse"]["on"], data["instant"]["enabled"]),
+                         (200, False, False, False))
+        alerts = data["instant"]["alerts"]
+        status, data = self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "min_profit": "4000"})
+        self.assertEqual((status, data["max_buy"], data["browse"]["min_profit"]), (200, 30000, 4000))
+        self.assertEqual(self.post("/api/work/deals", {"action": "limits", "max_buy": "sok"})[0], 400)
+        self.post("/api/work/deals", {"action": "limits", "max_buy": ""})
+        for stored in alerts:
             status, data = self.post("/api/work/deals", {"action": "instant_remove", "id": stored["id"]})
         self.assertEqual((status, data["instant"]["alerts"]), (200, []))
         self.assertEqual(self.post("/api/work/deals", {"action": "instant_nincs"})[0], 400)
@@ -580,10 +588,11 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector("#f-title")
         self.assertTrue(page.is_hidden("#w-ledger"))
 
-    def test_instant_watch_section_on_a_phone(self):
-        """Az Automata kereskedés fülön az azonnali figyelő: bekapcsolás, egy figyelő felvétele (oldalcímnél magától „csak
-        ami megéri”), gyors hozzáadás, és a friss hirdetések; a megérőnél a Megvettem a találathoz visz."""
+    def test_start_button_limits_and_instant_watch_on_a_phone(self):
+        """Az Automata kereskedés fülön egy gomb: Indítás (minden elindul), utána Leállítás; a vételi limit; az azonnali
+        figyelő felvétele, és a friss, megérő hirdetéseknél a Megvettem a találathoz visz."""
         instant, deals = self.h.app.work.instant, self.h.app.work.deals
+        instant.allowed = lambda: False          # a teszt alatt ne töltsön le semmit
         deals._remember({"id": "q1", "url": "https://hardverapro.hu/apro/palit/friss.html", "text": "Palit RTX 3060 Ti",
                          "site": "Hardverapró", "platform": "hardverapro", "price": 52000, "median": 100000,
                          "profit": 36500, "at": time.time(), "quick": True})
@@ -592,40 +601,40 @@ class WorkBrowserTests(unittest.TestCase):
                 {"id": "h1", "alert": "a", "alert_name": "Videókártyák", "at": time.time() - 120, "site": "Hardverapró",
                  "platform": "hardverapro", "text": "Palit RTX 3060 Ti Dual Budapest", "title": "Palit RTX 3060 Ti",
                  "price": 52000, "url": "https://hardverapro.hu/apro/palit/friss.html", "cheap": True,
-                 "reference": 100000, "profit": 36500, "deal": "q1"},
-                {"id": "h2", "alert": "b", "alert_name": "RTX 3080", "at": time.time() - 30, "site": "Jófogás",
-                 "platform": "jofogas", "text": "MSI RTX 3080", "title": "MSI RTX 3080", "price": 185000,
-                 "url": "https://www.jofogas.hu/budapest/msi_1.htm", "cheap": False}]
+                 "reference": 100000, "profit": 36500, "deal": "q1"}]
         page = self.page
         page.set_viewport_size({"width": 390, "height": 844})
         page.click("#job-deals")
-        page.wait_for_selector("#di-enabled")
-        page.check("#di-enabled")
-        page.wait_for_selector('.toast:has-text("amint új hirdetés kerül fel")')
-        self.assertTrue(instant.state()["enabled"])
-        page.fill("#di-target", "RTX 3080")
-        self.assertEqual(page.input_value("#di-mode"), "all")
-        page.fill("#di-target", self.h.pages.url("katalogus.html"))
-        self.assertEqual(page.input_value("#di-mode"), "cheap", "egy egész oldalnál csak ami megéri")
-        page.fill("#di-target", "RTX 3080")
-        page.select_option("#di-mode", "cheap")
+        page.wait_for_selector("#d-run-toggle")
+        self.assertEqual(page.inner_text("#d-run-toggle"), "Indítás")
+        self.assertEqual(page.locator("#d-enabled, #d-browse, #d-day-start, #di-enabled, #di-mode").count(), 0,
+                         "nincs külön kapcsoló és napszak")
+        page.click("#d-run-toggle")
+        page.wait_for_selector('#d-run-toggle:has-text("Leállítás")')
+        self.assertTrue(deals.state()["running"] and deals.state()["browse"]["on"] and instant.state()["enabled"])
+        self.assertIn("Fut", page.inner_text(".runstate"))
+        page.fill("#d-maxbuy", "30000")
+        page.click("#d-limits")
+        page.wait_for_selector('.toast:has-text("30 000 Ft fölött nem keresek")')
+        self.assertEqual(deals.state()["max_buy"], 30000)
         page.fill("#di-target", "RTX 3080 Ti")
-        self.assertEqual(page.input_value("#di-mode"), "cheap", "amit kézzel választottál, marad")
         page.fill("#di-max", "250000")
         page.click('#di-add button[type="submit"]')
         page.wait_for_selector('.dealist li:has-text("RTX 3080 Ti")')
         alert = instant.state()["alerts"][0]
-        self.assertEqual((alert["query"], alert["mode"], alert["max_price"]), ("RTX 3080 Ti", "cheap", 250000))
+        self.assertEqual((alert["query"], alert["max_price"]), ("RTX 3080 Ti", 250000))
         hits = page.inner_text("details:has-text('Friss hirdetések')")
         self.assertIn("Palit RTX 3060 Ti", hits)
-        self.assertIn("Megéri:", hits)
         self.assertIn("2 perce", hits)
         page.click('details:has-text("Friss hirdetések") [data-deal-buy="q1"]')
         page.wait_for_selector("#d-paid")
         self.assertEqual(page.input_value("#d-paid"), "52000")
-        instant.set_enabled(False)
         wide = page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
         self.assertFalse(wide, "telefonon nincs vízszintes görgetés")
+        page.click("#d-run-toggle")
+        page.wait_for_selector('#d-run-toggle:has-text("Indítás")')
+        self.assertFalse(deals.state()["running"] or instant.state()["enabled"])
+        self.assertIn("Áll", page.inner_text(".runstate"))
 
     def test_flags_filter_last_check_and_a_false_flag(self):
         store = self.h.store

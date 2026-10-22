@@ -719,6 +719,12 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
 .dealist li > .row { flex: none; gap: 6px; align-items: center; }
 .dealrows { margin: 4px 0; padding-left: 18px; font-size: 13px; }
 .dealist li > span > .row { flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+/* Indítás / Leállítás: egy nagy gomb, mellette az állapot */
+.runbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.runbar button { min-width: 9.5em; padding: 10px 22px; font-size: 16px; font-weight: 600; }
+.runstate { display: grid; gap: 2px; font-size: 14.5px; }
+.runstate small { color: var(--ash); font-size: 13px; }
+.deals .limits { max-width: 520px; }
 .deals .buyform label { display: inline-flex; gap: 6px; align-items: baseline; font-size: 13px; color: var(--ash); }
 .deals .buyform input[type="number"] { width: 6.5em; }
 
@@ -775,4 +781,5 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
   .months li small { display: none; }
   /* a számmezők a telefonon nagyobbak: könnyebb eltalálni őket, és az iOS sem nagyít rájuk */
   .lform input, .lform textarea, #l-add input { font-size: 16px; }
+  .runbar button { flex: 1 1 100%; }
 }

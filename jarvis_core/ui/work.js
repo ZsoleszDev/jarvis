@@ -496,7 +496,7 @@
       const range = a.min_price || a.max_price ? ` · ${a.min_price ? price(a.min_price) : "0"}–${a.max_price ? price(a.max_price) : "bármennyi"}` : "";
       const last = Math.max(0, ...Object.values(a.last || {}));
       return `<li><span><b>${esc(a.name)}</b>
-          <small class="muted">${esc(sites)} · ${a.mode === "cheap" ? "csak ami megéri" : "minden új"}${esc(range)}${(a.exclude || []).length ? ` · kivéve: ${esc(a.exclude.join(", "))}` : ""} · ${a.every} percenként</small>
+          <small class="muted">${esc(sites)}${esc(range)}${(a.exclude || []).length ? ` · kivéve: ${esc(a.exclude.join(", "))}` : ""} · ${a.every} percenként</small>
           <small class="muted">${a.off ? "szünetel" : last ? `utoljára ${esc(ago(last))}` : "még nem nézte"}${a.found ? ` · eddig ${a.found} új` : ""}${a.found_at ? ` (legutóbb ${esc(ago(a.found_at))})` : ""}</small>
           ${Object.values(a.errors || {}).map((e) => `<small class="warn">${esc(e)}</small>`).join("")}
           ${a.url ? `<small><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small>` : ""}</span>
@@ -510,17 +510,18 @@
         ${h.deal ? `<span class="row"><button type="button" class="small" data-deal-buy="${esc(h.deal)}">Megvettem</button></span>` : ""}</li>`).join("");
     const presets = (I.presets || []).map((p) => `<button type="button" class="small" data-ipreset="${esc(p.url)}">${esc(p.name)}</button>`).join("");
     return `<h3 class="section-title">Azonnali figyelő: Hardverapró, Jófogás</h3>
-      <label class="check"><input type="checkbox" id="di-enabled" ${I.enabled ? "checked" : ""}> <span><b>Szóljon, amint új hirdetés kerül fel</b> (a fenti órákban)</span></label>
-      <p class="muted">Ezeken az oldalakon nincs „értesíts, ha új jön”: pár percenként megnézem a keresésed legújabb hirdetéseit
-        (böngésző nélkül, így gyors, és nem vár a többi munkára), és rögtön szólok, a telefonon is. Oldalanként egyszerre egy
-        kérés, szünetekkel; ha egy oldal tiltana, ott egy ideig leállok. Csak olvasok: venni te veszel.</p>
+      <p class="muted">A jó vételek többnyire a friss hirdetésekből jönnek. Pár percenként megnézem a figyelt keresések és
+        kategóriák legújabb hirdetéseit (böngésző nélkül, így gyors, és nem vár a többi munkára), és ami új, arról rögtön
+        kiderítem, megéri-e: a kereséseid és az árbázis szokásos árához mérem, amit nem ismerek, azt a modell megnevezi, és ha
+        kell, megnézem, mennyiért adják a másik oldalon; a megérőnek az oldalát is átnézem. <b>Csak akkor szólok, ha új ÉS
+        megéri</b>, a telefonon is. Az Indítás gombbal megy.</p>
       ${I.enabled && siteLine ? `<p><small>${siteLine}</small></p>` : ""}
+      ${I.enabled && I.waiting ? `<p><small>${I.waiting} friss hirdetés vár a modellre (amíg a Jarvist használod).</small></p>` : ""}
       <ul class="dealist">${alerts || '<li class="muted">Még nincs azonnali figyelő.</li>'}</ul>
       <form id="di-add" class="compose" autocomplete="off">
         <input id="di-target" placeholder="Mit figyeljek? Pl. RTX 3080, vagy egy oldal címe">
         <div class="checks">${(I.sites || []).map((s) => `<label class="check"><input type="checkbox" name="di-site" value="${esc(s.key)}" checked> ${esc(s.name)}</label>`).join("")}</div>
         <div class="row">
-          <label><select id="di-mode"><option value="all">Minden új hirdetésről szóljon</option><option value="cheap">Csak ha megéri (a szokásos ár alatt)</option></select></label>
           <label>Nézze <select id="di-every">${(I.every_choices || [2, 3, 5, 10, 15]).map((m) => `<option value="${m}"${m === 3 ? " selected" : ""}>${m} percenként</option>`).join("")}</select></label>
         </div>
         <div class="row">
@@ -529,7 +530,7 @@
         </div>
         <label class="field-label">Kizáró szavak <input id="di-exclude" placeholder="pl. hibás, tok, doboz"></label>
         <div class="row"><button type="submit" class="primary">Figyelő hozzáadása</button></div>
-        ${presets ? `<div class="row presets"><small class="muted">Gyorsan (Hardverapró, csak ami megéri):</small>${presets}</div>` : ""}
+        ${presets ? `<div class="row presets"><small class="muted">Gyorsan (Hardverapró):</small>${presets}</div>` : ""}
       </form>
       ${hits ? `<details class="setup" open><summary>Friss hirdetések (${(I.hits || []).length})</summary><ul class="dealist">${hits}</ul></details>` : ""}`;
   }
@@ -584,7 +585,7 @@
         <small class="muted">${r.reference ? `kb. <b>${esc(price(r.reference.price))}</b> (${r.reference.n} ár, a többség
           ${esc(price(r.reference.p25))}–${esc(price(r.reference.p75))})` : `még nincs szokásos ár (${r.samples} ár, vagy nagyon szórnak)`}</small>
         ${r.speed_text ? `<small class="muted">${esc(r.speed_text)}</small>` : ""}</span></li>`).join("") || '<li class="muted">Ilyet még nem láttam.</li>'}</ul>`;
-    const day = deals.day || [7, 23];
+    const running = !!deals.running;
     const b = deals.browse || { on: false, sites: [], min_profit: 5000, status: "" };
     const laneRows = (deals.lanes || []).map((l) => `<li><span><b>${esc(l.name)}</b>${l.kind === "tanult" ? ' <small class="warn">tanult</small>' : ""}
         <small class="muted">${l.pages} oldal · ${l.candidates} jelölt · ${l.deals} jó találat${l.bought ? ` · ${l.bought} megvett` : ""}</small></span></li>`).join("");
@@ -597,14 +598,24 @@
     const v = (key, fallback = "") => esc(edit && edit[key] != null ? edit[key] : fallback);
     const checked = (key) => !edit || (edit.sites || []).includes(key) ? "checked" : "";
     box.innerHTML = `
-      <label class="check"><input type="checkbox" id="d-enabled" ${deals.enabled ? "checked" : ""}> <b>Bekapcsolva</b></label>
-      <div class="row"><label>A gép általában
-        <input id="d-day-start" type="number" min="0" max="23" value="${esc(day[0])}" style="width: 3.5em"> órától
-        <input id="d-day-end" type="number" min="1" max="24" value="${esc(day[1])}" style="width: 3.5em"> óráig megy</label>
-        <button type="button" class="small" id="d-day">Mentés</button></div>
+      <div class="runbar">
+        <button type="button" id="d-run-toggle" class="${running ? "" : "primary"}" ${deals.browser || deals.instant ? "" : "disabled"}>${running ? "Leállítás" : "Indítás"}</button>
+        <span class="runstate"><span><b>${running ? "Fut" : "Áll"}</b>${running && deals.started ? ` · ${esc(hhmmOf(deals.started))} óta` : ""}</span>
+          ${running && b.status ? `<small>${esc(b.status)}</small>` : ""}</span>
+      </div>
+      <p class="muted">${running ? "Dolgozom: a kereséseid, a figyelt oldalak, a böngészés és az azonnali figyelő is megy, amíg le nem állítod (közben pihenőket tartok, és ha a Jarvist használod, várok)."
+        : "Az Indítással minden elindul: a kereséseid, a figyelt oldalak, a böngészés és az azonnali figyelő, amíg le nem állítod."}
+        Csak olvasok: semmit nem veszek meg, és nem írok senkinek.</p>
+      <div class="fields limits">
+        <div class="field"><label for="d-maxbuy">Max. vételár (Ft)</label>
+          <input id="d-maxbuy" type="number" inputmode="numeric" min="0" placeholder="bármennyi" value="${esc(deals.max_buy ?? "")}"></div>
+        <div class="field"><label for="d-minprofit">Min. haszon (Ft)</label>
+          <input id="d-minprofit" type="number" inputmode="numeric" min="0" value="${esc(b.min_profit)}"></div>
+      </div>
+      <div class="row"><button type="button" class="small" id="d-limits">Mentés</button>
+        <small class="muted">Minden keresésre, figyelt oldalra, a böngészésre és az azonnali figyelőre is: ami a max. vételárnál drágább, azt meg sem nézem.</small></div>
       ${instantBox()}
-      <h3 class="section-title">Böngészés napközben</h3>
-      <label class="check"><input type="checkbox" id="d-browse" ${b.on ? "checked" : ""}> <b>Napközben böngésszen</b> (a fenti órákban)</label>
+      <h3 class="section-title">Böngészés</h3>
       <p class="muted">Ahogy egy ember: kb. 20 percig nézelődik egy oldalon (fél-egy percenként egy oldal, a Vinteden
         lassabban; néha megnyit egy hirdetést), aztán rögtön a következő oldalra vált. Csak az az oldal pihen, amelyiken épp
         volt (legalább 10 percet, a Vinted két órát); ha minden bejelölt oldal pihen, ő is. A Vinteden a kezdőoldallal
@@ -613,9 +624,7 @@
         valamit, amiből haszon lehet, szól. Tanul is: amelyik oldal többet hoz, azt gyakrabban nézi, a gyorsan kelő
         termékeket külön figyeli, és amit kétszer elrejtesz, arról egy hónapig nem szól.</p>
       <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-bsite" value="${esc(s.key)}" ${(b.sites || []).includes(s.key) ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>
-      <div class="row"><label>Legalább <input id="d-bprofit" type="number" min="0" value="${esc(b.min_profit)}" style="width: 6em"> Ft haszon</label>
-        <button type="button" class="small" id="d-bsave">Mentés</button></div>
-      ${b.on && b.status ? `<p><small>${esc(b.status)}</small></p>` : ""}
+      <div class="row"><button type="button" class="small" id="d-bsave">Oldalak mentése</button></div>
       <details class="setup"><summary>Indulóoldalak, és mit hoztak eddig</summary><ul class="dealist">${laneRows}</ul></details>
       <p class="muted">Egy új keresésnél először felmérem, mennyiért adják most (egy modellhívás), és ha jóváhagyod, ahhoz
         az árhoz mérem a legújabb hirdetéseket, modell nélkül. Ami jóval olcsóbb, annak az oldalát is átnézem (elkelt-e,
@@ -677,38 +686,34 @@
       <h3 class="section-title">Napló</h3>
       <div class="row"><label>Nap <select id="d-jday"><option value="">Ma</option>${dayOptions}</select></label></div>
       <ul class="dealist">${journalRows}</ul>`;
-    $("d-enabled").addEventListener("change", (e) => dealAction({ action: "enable", on: e.target.checked }));
-    if ($("di-enabled")) {
-      $("di-enabled").addEventListener("change", async (e) => {
-        if (await dealAction({ action: "instant_enable", on: e.target.checked }))
-          J.toast(e.target.checked ? "Rendben: amint új hirdetés kerül fel, szólok." : "Kikapcsoltam az azonnali figyelőt.");
-      });
-      let modeTouched = false;
-      $("di-mode").addEventListener("change", () => { modeTouched = true; });
-      // egy egész oldal (kategória) új hirdetései: alapból csak ami megéri, különben túl sok lenne
-      $("di-target").addEventListener("input", (e) => { if (!modeTouched) $("di-mode").value = /^https?:\/\//i.test(e.target.value.trim()) ? "cheap" : "all"; });
+    $("d-run-toggle").addEventListener("click", async () => {
+      const start = !running;
+      if (await dealAction({ action: start ? "start" : "stop" }))
+        J.toast(start ? "Elindítottam: keresek, és ha valami megéri, szólok." : "Leállítottam.");
+    });
+    $("d-limits").addEventListener("click", async () => {
+      if (await dealAction({ action: "limits", max_buy: $("d-maxbuy").value, min_profit: $("d-minprofit").value }))
+        J.toast($("d-maxbuy").value ? `Rendben: ${price($("d-maxbuy").value)} fölött nem keresek.` : "Rendben: bármilyen árban keresek.");
+    });
+    if ($("di-add")) {
       $("di-add").addEventListener("submit", async (e) => {
         e.preventDefault();
         const sites = [...box.querySelectorAll('input[name="di-site"]:checked')].map((i) => i.value);
-        if (await dealAction({ action: "instant_add", target: $("di-target").value, sites, mode: $("di-mode").value,
+        if (await dealAction({ action: "instant_add", target: $("di-target").value, sites,
                                min_price: $("di-min").value, max_price: $("di-max").value, exclude: $("di-exclude").value,
                                every: $("di-every").value }))
-          J.toast(deals.instant && deals.instant.enabled ? "Rendben: először megjegyzem, ami már fent van, utána minden újról szólok."
-            : "Felvettem. Kapcsold be fent az azonnali figyelőt.");
+          J.toast(running ? "Rendben: megjegyzem, ami már fent van, és ha új jön, ami megéri, szólok."
+            : "Felvettem. Az Indítás gombbal indul.");
       });
       for (const b of box.querySelectorAll("[data-ipreset]")) b.addEventListener("click", async () => {
-        if (await dealAction({ action: "instant_add", target: b.dataset.ipreset, mode: "cheap" })) J.toast("Felvettem: csak arról szólok, ami megéri.");
+        if (await dealAction({ action: "instant_add", target: b.dataset.ipreset })) J.toast("Felvettem: ha új jön, ami megéri, szólok.");
       });
       for (const b of box.querySelectorAll("[data-iremove]")) b.addEventListener("click", () => dealAction({ action: "instant_remove", id: b.dataset.iremove }));
       for (const b of box.querySelectorAll("[data-ipause]")) b.addEventListener("click", () => dealAction({ action: "instant_pause", id: b.dataset.ipause, off: !!b.dataset.off }));
     }
-    $("d-browse").addEventListener("change", async (e) => {
-      if (await dealAction({ action: "browse", on: e.target.checked }))
-        J.toast(e.target.checked ? "Rendben: napközben böngészem az oldalakat, és szólok, ha találok valamit." : "Kikapcsoltam a böngészést.");
-    });
     $("d-bsave").addEventListener("click", async () => {
       const sites = [...box.querySelectorAll('input[name="d-bsite"]:checked')].map((i) => i.value);
-      if (await dealAction({ action: "browse", sites, min_profit: $("d-bprofit").value })) J.toast("Mentve.");
+      if (await dealAction({ action: "browse", sites })) J.toast("Mentve.");
     });
     $("d-jday").addEventListener("change", async (e) => {
       journalDay = e.target.value;
@@ -718,10 +723,6 @@
         journalEntries = result.ok ? result.entries : [];
       }
       renderDeals();
-    });
-    $("d-day").addEventListener("click", async () => {
-      if (await dealAction({ action: "day", start: $("d-day-start").value, end: $("d-day-end").value }))
-        J.toast("Rendben: az éjjel záruló licitekről még este szólok.");
     });
     $("d-lookup").addEventListener("submit", async (e) => {
       e.preventDefault();
