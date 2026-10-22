@@ -41,8 +41,8 @@ PUSH_HOSTS = ("notify.windows.com", "fcm.googleapis.com", "android.googleapis.co
               "push.apple.com")
 INSTALL_HINT = "A laptopos értesítésekhez a gépen ez kell: pip install cryptography (utána indítsd újra a Jarvist)."
 # Az értesítések gombjai, amiket a push-üzenet is visz (a böngésző legfeljebb kettőt mutat).
-NOTICE_ACTIONS = ("sold", "login")
-NOTICE_ACTION_FIELDS = ("action", "where", "platform", "delist", "label")
+NOTICE_ACTIONS = ("sold", "login", "deal")
+NOTICE_ACTION_FIELDS = ("action", "where", "platform", "delist", "label", "deal")
 
 
 class PushError(Exception):
@@ -269,6 +269,9 @@ class WebPush:
             message = {"kind": "notice", "title": str(notice.get("title") or "Jarvis")[:80],
                        "text": str(notice.get("text") or "")[:300], "tag": f"notice-{notice.get('id') or ''}"}
             actions = notice_actions(notice)
+            if notice.get("deal"):                 # egy megérő találat: a kattintás a találat ablakát nyitja meg
+                message["deal"] = str(notice["deal"])[:16]
+                message["urgent"] = True
             if actions:
                 message["actions"] = actions
                 if notice.get("item"):

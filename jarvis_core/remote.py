@@ -54,6 +54,11 @@ self.addEventListener("push", (event) => {
     if (windows.some((w) => w.visibilityState === "visible")) return undefined;
     const options = { body: message.text || "", tag: message.tag || "jarvis", icon: "/icon-192.png",
                       badge: "/icon-192.png", data: message };
+    if (message.urgent) {                  // egy megérő hirdetés: marad, amíg rá nem nézel, és a telefon rezeg
+      options.requireInteraction = true;
+      options.renotify = true;
+      options.vibrate = [800, 400, 800, 400, 800];
+    }
     if (message.kind === "confirm" && message.answer) {
       options.actions = [{ action: "approve", title: "Engedélyezem" }, { action: "deny", title: "Mégse" }];
       options.requireInteraction = true;
@@ -105,6 +110,10 @@ self.addEventListener("notificationclick", (event) => {
   const action = button.startsWith("notice-") && (message.actions || [])[Number(button.slice(7))];
   if (action) {
     event.waitUntil(openAction({ ...action, item: message.item || "" }));
+    return;
+  }
+  if (message.deal) {                       // egy megérő hirdetés: a találat ablaka (üzenet az eladónak, a hirdetés)
+    event.waitUntil(openAction({ action: "deal", deal: message.deal }));
     return;
   }
   event.waitUntil(openWindow());

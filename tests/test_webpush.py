@@ -190,14 +190,20 @@ class WebPushTests(unittest.TestCase):
         """Az azonnali figyelő értesítése sürgős: a telefon alvó állapotban is rögtön megkapja; a többi normál."""
         browser = Browser()
         self.push.subscribe("aaaa1111", browser.subscription())
-        self.push.on_event({"type": "notification", "notice": {"id": "n3", "kind": "deal", "title": "Új: RTX 3080",
-                                                              "text": "Hardverapró: 185 000 Ft", "urgent": True}})
+        self.push.on_event({"type": "notification", "notice": {
+            "id": "n3", "kind": "deal", "title": "Megéri: RTX 3080", "text": "Hardverapró: 185 000 Ft", "urgent": True,
+            "deal": "q1", "actions": [{"action": "deal", "deal": "q1", "label": "Megnézem"}]}})
         self.push.on_event({"type": "notification", "notice": {"id": "n4", "kind": "post", "title": "Feltöltve",
                                                               "text": "Fent van."}})
         self.service.wait(2)
         time.sleep(0.1)
-        urgency = {json.loads(browser.decrypt(body))["tag"]: headers["Urgency"] for _u, body, headers in self.service.calls}
-        self.assertEqual(urgency, {"notice-n3": "high", "notice-n4": "normal"})
+        messages = {}
+        for _u, body, headers in self.service.calls:
+            message = json.loads(browser.decrypt(body))
+            messages[message["tag"]] = (headers["Urgency"], message.get("deal"), message.get("actions"))
+        self.assertEqual(messages["notice-n3"], ("high", "q1", [{"action": "deal", "deal": "q1", "label": "Megnézem"}]),
+                         "a kattintás (vagy a gomb) a találat ablakát nyitja meg")
+        self.assertEqual(messages["notice-n4"], ("normal", None, None))
 
     def test_confirm_answer_key_is_single_use(self):
         browser = Browser()

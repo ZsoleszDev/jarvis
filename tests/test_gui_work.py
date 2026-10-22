@@ -251,6 +251,26 @@ class WorkSecurityTests(unittest.TestCase):
         app.cfg.scheduler.active_hours = ""
         self.assertTrue(app._instant_allowed())
 
+    def test_budget_and_piling_up_from_the_window(self):
+        """Vételeim › Keret: a havi keret és a felhalmozódás határa; egy új vétel után rögtön szól, ha átlépte."""
+        status, data = self.post("/api/work/ledger", {"action": "money", "budget": "100 000", "stock_count": "1"})
+        self.assertEqual((status, data["money"]["budget"], data["money"]["limits"]["stock_count"]), (200, 100000, 1))
+        self.assertEqual(self.post("/api/work/ledger", {"action": "money", "budget": "sok"})[0], 400)
+        ids = []
+        for name in ("Makita DHP482", "Bosch GSR 18V"):
+            status, data = self.post("/api/work/ledger", {"action": "add", "name": name, "price": "45000"})
+            ids.append(data["item"])
+        self.assertIn("Felhalmozódtak a megvett tárgyak: 2 vár eladásra", " ".join(data["money"]["warnings"]))
+        self.assertEqual((data["money"]["spent"], data["money"]["remaining"]), (90000, 10000))
+        titles = [n["title"] for n in self.h.app.notices.list()]
+        self.assertIn("Sok tárgy vár eladásra", titles)
+        self.assertIn("A havi keret nagy része elment", titles)
+        status, data = request(self.port, "GET", f"/api/work/deals?t={self.h.server.token}", self.ok)
+        self.assertEqual(json.loads(data)["money"]["remaining"], 10000, "az Automata kereskedés fülön is látszik")
+        for item_id in ids:
+            self.h.store.delete(item_id)
+        self.post("/api/work/ledger", {"action": "money", "budget": "", "stock_count": ""})
+
     def test_a_purchase_can_be_added_by_hand(self):
         """Vételeim › Új vétel: ami nem az Automata kereskedésből jött (pl. bolhapiacon vetted)."""
         status, data = self.post("/api/work/ledger", {"action": "add", "name": "Makita DHP482", "price": "12 000",
@@ -635,6 +655,69 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector('#d-run-toggle:has-text("Indítás")')
         self.assertFalse(deals.state()["running"] or instant.state()["enabled"])
         self.assertIn("Áll", page.inner_text(".runstate"))
+
+    def test_starting_in_one_window_shows_in_the_other(self):
+        """A telefonról indítod: a gép ablakában is rögtön Leállítás lesz (újratöltés nélkül), és fordítva."""
+        self.h.app.work.instant.allowed = lambda: False
+        other = self.browser.new_context(viewport={"width": 390, "height": 844}).new_page()
+        other.goto(self.h.server.url)
+        other.wait_for_selector('body[data-state="idle"]', state="attached", timeout=15000)
+        other.click("#tab-work")
+        other.click("#job-deals")
+        other.wait_for_selector('#d-run-toggle:has-text("Indítás")')
+        page = self.page
+        page.click("#job-deals")
+        page.click("#d-run-toggle")
+        page.wait_for_selector('#d-run-toggle:has-text("Leállítás")')
+        other.wait_for_selector('#d-run-toggle:has-text("Leállítás")', timeout=5000)
+        other.click("#d-run-toggle")
+        page.wait_for_selector('#d-run-toggle:has-text("Indítás")', timeout=5000)
+        other.context.close()
+
+    def test_deal_window_from_a_notification(self):
+        """Az Android-alkalmazás értesítésére bökve (hamis alkalmazás-híddal) a találat ablaka nyílik meg: a címe az áru
+        neve, alatta az ára, mennyiért mennek most és mennyit kereshetsz vele; a gomb kimásolja az eladónak szóló
+        üzenetet, és megnyitja a hirdetést."""
+        deals = self.h.app.work.deals
+        self.h.app.work.instant.allowed = lambda: False
+        listing = self.h.pages.url("katalogus.html") + "?hirdetes=palit"
+        deals._remember({"id": "q1", "url": listing, "text": "Palit RTX 3060 Ti Dual Budapest 52 000 Ft",
+                         "title": "Palit RTX 3060 Ti Dual", "site": "Hardverapró", "platform": "hardverapro",
+                         "price": 52000, "median": 100000, "similar": 12, "profit": 36500, "at": time.time() - 150,
+                         "quick": True, "note": "Ugyanaz a kártya.", "explore": "azonnali figyelő: Videókártyák"})
+        context = self.browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True,
+                                           user_agent="Mozilla/5.0 (Linux; Android 14) Chrome/141.0 Mobile JarvisAndroid/1")
+        context.add_init_script("""(() => {
+            let wanted = {deal: "q1"};
+            window.JarvisApp = { pending() { const out = JSON.stringify(wanted); wanted = {}; return out; },
+                                 copy(text) { window.__copied = text; } };
+          })();""")
+        page = context.new_page()
+        page.goto(self.h.server.url)
+        page.wait_for_selector("#deal-dialog[open]", timeout=15000)
+        self.assertEqual(page.inner_text("#deal-title"), "Palit RTX 3060 Ti Dual")
+        body = page.inner_text("#deal-body")
+        for part in ("52 000 Ft", "Most ennyiért mennek", "kb. 100 000 Ft (12 hasonló alapján)", "Ennyit kereshetsz vele",
+                     "kb. 36 500 Ft", "Ugyanaz a kártya.", "3 perce"):
+            self.assertIn(part, body)
+        self.assertEqual(page.inner_text(".msgpreview"), "Szia!\nMegvan még a termék?\nKöszi előre is\nÜdv, Zsolt")
+        self.assertEqual(page.get_attribute("#deal-go", "href"), listing)
+        with context.expect_page() as opened:
+            page.click("#deal-go")
+        self.assertEqual(opened.value.url, listing, "a hirdetés megnyílik")
+        self.assertEqual(page.evaluate("window.__copied"), "Szia!\nMegvan még a termék?\nKöszi előre is\nÜdv, Zsolt")
+        self.assertFalse(page.evaluate("document.getElementById('deal-dialog').open"))
+        page.click('[data-deal-open="q1"]')
+        page.wait_for_selector("#deal-dialog[open]")
+        page.click("#deal-bought")
+        page.wait_for_selector("#d-paid")
+        self.assertEqual(page.input_value("#d-paid"), "52000")
+        page.click('summary:has-text("Üzenet az eladónak")')
+        page.fill("#d-message", "Szia! Megvan még?")
+        page.click("#d-message-save")
+        page.wait_for_selector('.toast:has-text("ezt másolom ki")')
+        self.assertEqual(deals.state()["message"], "Szia! Megvan még?")
+        context.close()
 
     def test_flags_filter_last_check_and_a_false_flag(self):
         store = self.h.store

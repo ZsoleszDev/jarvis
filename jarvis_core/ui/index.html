@@ -217,6 +217,17 @@
     </div>
   </dialog>
 
+  <!-- egy megérő találat (értesítésből vagy a listából): ár, mennyiért mennek, mennyit kereshetsz vele; a gomb kimásolja
+       az eladónak szóló üzenetet, és megnyitja a hirdetést (work.js) -->
+  <dialog id="deal-dialog" class="dealbox" aria-labelledby="deal-title">
+    <h2 id="deal-title"></h2>
+    <div id="deal-body"></div>
+    <div class="row">
+      <a id="deal-go" class="button primary" href="#" target="_blank" rel="noopener noreferrer">Üzenet másolása és a hirdetés megnyitása</a>
+      <button type="button" id="deal-bought">Megvettem</button>
+      <button type="button" id="deal-close" class="quiet">Bezárás</button>
+    </div>
+  </dialog>
   <dialog id="sold-dialog" aria-labelledby="sold-title">
     <h2 id="sold-title">Eladva</h2>
     <p id="sold-text"></p>

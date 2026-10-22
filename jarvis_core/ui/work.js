@@ -411,7 +411,7 @@
     $("job-sales").setAttribute("aria-selected", String(name === "sales"));
     $("job-deals").setAttribute("aria-selected", String(name === "deals"));
     $("job-ledger").setAttribute("aria-selected", String(name === "ledger"));
-    if (name === "deals") loadDeals();
+    if (name === "deals") loadDeals();       // mindig frissen (közben a telefonról is változhatott)
     if (name === "ledger") loadLedger();
     render();
   }
@@ -536,6 +536,71 @@
   }
   const hhmmOf = (t) => new Date(t * 1000).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit" });
 
+  // --- egy megérő találat ablaka (értesítésből vagy a listából) ---------------------------------------------------
+  // Mennyibe kerül, mennyiért mennek most, mennyit kereshetsz vele; a gomb kimásolja az eladónak szóló üzenetet, és
+  // megnyitja a hirdetést (a telefonon a hirdetési oldal alkalmazásában vagy a böngészőben), ahol rögtön elküldheted.
+  function dealFacts(d) {
+    const sale = d.median ? Math.round(d.median * (deals.sale_ratio || 0.9) / 100) * 100 : null;
+    const rows = [["Ára", `<b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))} → ${esc(price(d.price))})` : ""} · ${esc(d.site)}${d.auction ? " (licit)" : ""}`],
+                  [d.auction ? "Máshol ennyiért adják" : "Most ennyiért mennek", `kb. ${esc(price(d.median))}${d.similar ? ` (${esc(d.similar)} hasonló alapján)` : ""}`]];
+    if (d.auction) rows.push(["Meddig licitálj", `legfeljebb <b>${esc(price(d.max_bid))}</b>-ig${d.left ? ` · ${esc(leftText(d))}` : ""}`]);
+    else if (d.offer) rows.push(["Ajánlattal", `ha ${esc(price(d.offer))}-ért megkapod, kb. <b>${esc(price(d.profit))}</b> a haszon`]);
+    else rows.push(["Ennyit kereshetsz vele", `<b>kb. ${esc(price(d.profit))}</b>${sale ? ` (ha kb. ${esc(price(sale))}-ért eladod; a posta benne van)` : ""}`]);
+    if (d.speed) rows.push(["Eladási sebesség", esc(d.speed)]);
+    return `<p class="muted">Megtaláltam: ${esc(ago(d.at))}${d.explore ? ` · ${esc(d.explore)}` : ""}</p>
+      <dl class="facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+      ${d.note ? `<p class="muted">${esc(d.note)}</p>` : ""}
+      ${(d.warnings || []).map((w) => `<p class="warn">Figyelj: ${esc(w)}</p>`).join("")}
+      <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(deals.message || "")}</pre>`;
+  }
+  let dealOpen = null;
+  async function openDeal(id) {
+    setJob("deals");
+    await loadDeals();
+    const d = (deals.deals || []).find((x) => x.id === id);
+    if (!d) { J.toast("Ez a találat már nincs meg (lehet, hogy elrejtetted)."); return; }
+    dealOpen = d.id;
+    $("deal-title").textContent = d.title || d.text;
+    $("deal-body").innerHTML = dealFacts(d);
+    $("deal-go").href = safeUrl(d.url) || "#";
+    $("deal-bought").hidden = !!d.bought;
+    if (!$("deal-dialog").open) $("deal-dialog").showModal();
+  }
+  // Szöveg a vágólapra: az Android-alkalmazásban a saját hídján (a WebView-ban ez a biztos), máshol a böngészőével.
+  function copyText(text) {
+    try {
+      if (window.JarvisApp && window.JarvisApp.copy) { window.JarvisApp.copy(text); return; }
+    } catch { /* tovább a böngészőével */ }
+    const fallback = () => {
+      const box = document.createElement("textarea");
+      box.value = text;
+      box.style.position = "fixed";
+      box.style.opacity = "0";
+      document.body.appendChild(box);
+      box.select();
+      try { document.execCommand("copy"); J.toast("Kimásoltam az üzenetet."); } catch { J.toast("Nem sikerült kimásolni."); }
+      box.remove();
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => J.toast("Kimásoltam az üzenetet."), fallback);
+    } else {
+      fallback();
+    }
+  }
+  $("deal-go").addEventListener("click", (event) => {
+    if ($("deal-go").getAttribute("href") === "#") { event.preventDefault(); return; }
+    copyText(deals.message || "");           // a hirdetés (a link) utána magától megnyílik
+    $("deal-dialog").close();
+  });
+  $("deal-close").addEventListener("click", () => $("deal-dialog").close());
+  $("deal-bought").addEventListener("click", () => {
+    $("deal-dialog").close();
+    buying = dealOpen;
+    setJob("deals");
+    renderDeals();
+    if ($("d-paid")) { $("d-paid").scrollIntoView({ block: "center" }); $("d-paid").focus(); }
+  });
+
   // Vinted-ajánlat: a Jarvis megnyitja a hirdetést, beírja az összeget, és a küldés előtt rákérdez (pontosan ezzel).
   async function makeOffer(id, amount) {
     const result = await J.postJson("/api/work/deals", { action: "offer", id, price: amount });
@@ -578,7 +643,7 @@
         ${d.speed ? `<small class="muted">Eladási sebesség: ${esc(d.speed)}</small>` : ""}
         ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}
         ${offerBox(d)}</span>
-        <span class="row">${buyButton(d)}
+        <span class="row"><button type="button" class="small" data-deal-open="${esc(d.id)}">Részletek</button>${buyButton(d)}
         <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></span></li>`).join("");
     const book = deals.book || { products: 0, prices: 0, ready: 0 };
     const lookupRows = lookupResults === null ? "" : `<ul class="dealist">${lookupResults.map((r) => `<li><span><b>${esc(r.name)}</b>
@@ -614,6 +679,13 @@
       </div>
       <div class="row"><button type="button" class="small" id="d-limits">Mentés</button>
         <small class="muted">Minden keresésre, figyelt oldalra, a böngészésre és az azonnali figyelőre is: ami a max. vételárnál drágább, azt meg sem nézem.</small></div>
+      ${deals.money && deals.money.budget ? `<p><small>Havi keret: ${esc(price(deals.money.spent) || "0 Ft")} / ${esc(price(deals.money.budget))}
+        (${deals.money.remaining ? `${esc(price(deals.money.remaining))} maradt` : "elfogyott"}) · a Vételeim fülön állíthatod</small></p>` : ""}
+      ${((deals.money || {}).warnings || []).map((w) => `<p class="warn"><small>${esc(w)}</small></p>`).join("")}
+      <details class="setup"><summary>Üzenet az eladónak</summary>
+        <p class="muted">Egy megérő találat ablakában (az értesítésre bökve) a gomb ezt másolja ki, és megnyitja a hirdetést.</p>
+        <textarea id="d-message" rows="4">${esc(deals.message || "")}</textarea>
+        <div class="row"><button type="button" class="small" id="d-message-save">Mentés</button></div></details>
       ${instantBox()}
       <h3 class="section-title">Böngészés</h3>
       <p class="muted">Ahogy egy ember: kb. 20 percig nézelődik egy oldalon (fél-egy percenként egy oldal, a Vinteden
@@ -769,6 +841,10 @@
     for (const b of box.querySelectorAll("[data-watch-remove]")) b.addEventListener("click", () => dealAction({ action: "watch_remove", id: b.dataset.watchRemove }));
     for (const b of box.querySelectorAll("[data-offer]")) b.addEventListener("click", () => makeOffer(b.dataset.offer, $(`d-offer-${b.dataset.offer}`).value));
     for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
+    for (const b of box.querySelectorAll("[data-deal-open]")) b.addEventListener("click", () => openDeal(b.dataset.dealOpen));
+    $("d-message-save").addEventListener("click", async () => {
+      if (await dealAction({ action: "message", text: $("d-message").value })) J.toast("Mentve: ezt másolom ki az eladónak.");
+    });
     for (const b of box.querySelectorAll("[data-deal-buy]")) b.addEventListener("click", () => {
       buying = b.dataset.dealBuy;
       renderDeals();
@@ -895,6 +971,28 @@
     </form>`;
   }
 
+  // A havi keret (mennyi ment el, mennyi maradt), a figyelmeztetések, és a beállításuk.
+  function moneyBox(M) {
+    const lim = M.limits || {};
+    const used = M.budget ? Math.min(100, Math.round(M.spent * 100 / M.budget)) : 0;
+    const bar = M.budget ? `<div class="budget"><div class="row"><b>Havi keret</b><span>${esc(price(M.spent) || "0 Ft")} / ${esc(price(M.budget))}</span>
+        <small class="muted">${M.remaining ? `${esc(price(M.remaining))} maradt` : "elfogyott"}</small></div>
+        <span class="mbar"><i style="width: ${used}%"${used >= 100 ? ' class="loss"' : ""}></i></span></div>` : "";
+    const num = (id, label, value, min) => `<div class="field"><label for="${id}">${label}</label>
+      <input id="${id}" type="number" inputmode="numeric" min="${min}" placeholder="nincs" value="${esc(value ?? "")}"></div>`;
+    return `${bar}${(M.warnings || []).map((w) => `<p class="warn">${esc(w)}</p>`).join("")}
+      <details class="setup"><summary>Keret és figyelmeztetés</summary>
+        <div class="fields">
+          ${num("lm-budget", "Havi keret (Ft)", lim.budget, 0)}
+          ${num("lm-count", "Szóljon, ha ennél több tárgy vár eladásra", lim.stock_count, 1)}
+          ${num("lm-value", "… vagy ennél több pénz van bennük (Ft)", lim.stock_value, 0)}
+        </div>
+        <p class="muted">A havi keretbe az ebben a hónapban vett tárgyak vételára, postája és egyéb költsége számít. Ha
+          fogy, csak a maradékba beleférő ajánlatokról szólok; amikor a 80%-a elment, és amikor elfogyott, szólok. Ha túl sok
+          megvett tárgy vár eladásra, naponta egyszer szólok (és rögtön, amikor egy újabb vételt felveszel).</p>
+        <div class="row"><button type="button" class="small" id="lm-save">Mentés</button></div></details>`;
+  }
+
   function renderLedger() {
     const box = $("w-ledger");
     if (!ledger) { box.innerHTML = '<p class="muted">Betöltöm…</p>'; return; }
@@ -917,6 +1015,7 @@
         <div class="tile"><small>Várható haszon</small><b>${esc(signed(L.open.expected))}</b>
           <small>${L.open.unknown ? `${L.open.unknown} tárgynál nincs ár` : "ha a tervezett áron elkelnek"}</small></div>
       </div>
+      ${moneyBox(L.money || {})}
       ${monthRows ? `<details class="setup"><summary>Havonta</summary><ul class="months">${monthRows}</ul></details>` : ""}
       <div class="row lbar">
         <div class="filters" role="group" aria-label="Szűrés">${LEDGER_FILTERS.map(([key, label]) => {
@@ -943,6 +1042,10 @@
         egyéb). Amíg nem kelt el, a várható haszon a tervezett eladási árral (ha nincs, a hirdetési árral) számol. A
         „most kb.” ár az árbázisból jön: ennyiért hirdetik most a hasonlókat.</p>`;
     for (const b of box.querySelectorAll("[data-lfilter]")) b.addEventListener("click", () => { ledgerFilter = b.dataset.lfilter; renderLedger(); });
+    $("lm-save").addEventListener("click", async () => {
+      if (await ledgerAction({ action: "money", budget: $("lm-budget").value, stock_count: $("lm-count").value,
+                               stock_value: $("lm-value").value })) J.toast("Mentve.");
+    });
     $("l-add-toggle").addEventListener("click", () => { ledgerAdding = !ledgerAdding; renderLedger(); if (ledgerAdding) $("la-name").focus(); });
     if ($("l-add")) $("l-add").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -1495,6 +1598,8 @@
     const wanted = event.detail || {};
     await loaded;
     if (wanted.action === "deals") { setJob("deals"); return; }   // pl. a szokásos ár jóváhagyása
+    if (wanted.action === "deal") { await openDeal(wanted.deal); return; }   // egy megérő hirdetés: a találat ablaka
+    if (wanted.action === "ledger") { setJob("ledger"); return; }   // a havi keret vagy a felhalmozódott tárgyak
     if (wanted.action === "offer") { setJob("deals"); await makeOffer(wanted.deal, ""); return; }   // a javasolt összeggel
     if (wanted.action === "login") {
       if (!platforms.some((p) => p.key === wanted.platform)) return;
@@ -1707,5 +1812,9 @@
   window.addEventListener("jarvis-notice", (event) => {
     if (event.detail && event.detail.kind === "deal") loadDeals();
   });
+  // Egy másik ablakból (pl. a telefonról) elindítottad, leállítottad vagy átírtad: itt is frissül.
+  J.on("work_deals", () => { if (job === "deals") loadDeals(); });
+  // Amíg a fül látszik, félpercenként frissül az állapot („Most: Hardverapró…”), és ha a gép újraindult.
+  setInterval(() => { if (job === "deals" && !document.hidden) loadDeals(); }, 30000);
   J.onHello((event) => { if (event.work) load(); });
 })();

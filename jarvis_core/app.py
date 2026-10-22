@@ -62,6 +62,9 @@ RESTART_LOG_DELAY = 5.0
 WORK_MAX_TOKENS = 1024
 # Készenlétben a háttérmunka egy-egy modellkérdése után a modell csak ennyi ideig marad a videókártyán.
 STANDBY_KEEP_ALIVE = "5m"
+# Amíg az automata kereskedés fut, a modell készenlétben is tovább marad betöltve: a friss hirdetések felmérésénél
+# (azonnali figyelő, böngészés) így nem kell minden kérdés előtt 10–20 másodpercig betölteni.
+TRADING_KEEP_ALIVE = "30m"
 # Ha a modell egy része a processzorra került: ezekkel a KV-gyorsítótár-típusokkal a kontextus már kicsi.
 SMALL_KV_TYPES = {"q8_0", "q4_0"}
 KV_SETTING = "OLLAMA_KV_CACHE_TYPE"
@@ -411,7 +414,7 @@ class JarvisApp:
                 options={"temperature": float(self.cfg.work.temperature), "num_predict": WORK_MAX_TOKENS})
         if standby:
             self.paused = self.standby = True
-            self.llm.keep_alive_override = STANDBY_KEEP_ALIVE
+            self.llm.keep_alive_override = self._standby_keep_alive
             for warning in self.cfg.warnings:
                 self.ui.warn(warning)
             self._warned = True
@@ -520,6 +523,12 @@ class JarvisApp:
             instant.allowed = self._instant_allowed
             instant.model_ok = lambda: not self.busy   # amíg dolgozol a Jarvisszal, a modellre váró hirdetés vár
             instant.start()
+        trading = self.work.deals if self.work is not None else None
+        if trading is not None:
+            trading.journal.on_add = lambda text: self.ui.info(f"Kereskedés: {text}")   # a konzolon is lásd, mit csinál
+            # Párhuzamos böngészés: a Hardverapró és a Jófogás böngésző nélkül, a saját szálán, amíg a böngésző a
+            # Vintedet és a Vaterát nézi (a Szünet ezt is megállítja, a készenlét nem).
+            trading.start_fast_lane(self._instant_allowed, lambda: not self.busy, self._quick_notify)
         deals = self.work.deals if self.work is not None else None
         if deals is not None and deals.browser is not None:
             # Olcsó hirdetések keresése: modell nélkül (csak a kevés jelöltre egy rövid kérdés), a böngésző kell hozzá.
@@ -592,8 +601,10 @@ class JarvisApp:
                      check, ephemeral=True)
 
     def _stale_job(self, ctx: Any) -> str:
-        """Naponta egyszer: szól, ha egy hirdetés régóta fent van, de még nem kelt el."""
+        """Naponta egyszer: szól, ha egy hirdetés régóta fent van, de még nem kelt el (és ha a havi keret fogy, vagy túl
+        sok megvett tárgy vár eladásra)."""
         assert self.work is not None
+        self.work.deals.money_check(ctx.notify)
         days = int(self.cfg.scheduler.stale_days)
         stale = self.work.stale_items(days)
         if not stale:
@@ -670,6 +681,11 @@ class JarvisApp:
                 self.say(text)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _standby_keep_alive(self) -> str:
+        """Készenlétben ennyi ideig marad betöltve a modell egy kérdés után: amíg az automata kereskedés fut, tovább."""
+        trading = self.work.deals if self.work is not None else None
+        return TRADING_KEEP_ALIVE if trading is not None and trading.state_running() else STANDBY_KEEP_ALIVE
 
     def _instant_allowed(self) -> bool:
         """Az azonnali figyelő mehet-e most: a háttérmunka be van kapcsolva, nincs Szünet (a készenlét nem számít), az
@@ -885,6 +901,8 @@ class JarvisApp:
             self.scheduler.stop()
         if self.work is not None and getattr(self.work, "instant", None) is not None:
             self.work.instant.stop()
+        if self.work is not None:
+            self.work.deals.stop_fast_lane()
         if self.speech:
             self.speech.interrupt()
         if self.wake is not None:
@@ -1281,7 +1299,7 @@ class JarvisApp:
         self.standby = standby
         # Készenlétben a háttérmunka (pl. a napközbeni böngészés) néha kérdezi a modellt: utána ne maradjon a
         # videókártyán (a beállított keep_alive helyett csak STANDBY_KEEP_ALIVE ideig).
-        self.llm.keep_alive_override = STANDBY_KEEP_ALIVE if standby else None
+        self.llm.keep_alive_override = self._standby_keep_alive if standby else None
         if self.work is not None:
             self.work.current = None
         gc.collect()
@@ -1308,7 +1326,7 @@ class JarvisApp:
         self.llm.keep_alive_override = None      # ébren a beállítás szerint marad a videókártyán
         if not self.load_model():
             if self.standby:
-                self.llm.keep_alive_override = STANDBY_KEEP_ALIVE
+                self.llm.keep_alive_override = self._standby_keep_alive
             self._set_phase(self._rest_phase())
             self.ui.error("Nem sikerült betölteni a nyelvi modellt, ezért továbbra is szünetelek.")
             return

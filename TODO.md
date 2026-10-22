@@ -19,8 +19,16 @@
   modellre váró hirdetések megvárják, hogy ne zavarja a beszélgetést; sürgős push-értesítés.
 - Automata kereskedés: egy Indítás/Leállítás gomb (keresések, figyelt oldalak, böngészés, azonnali figyelő; napszak
   nélkül), közös max. vételár és min. haszon.
+- Két böngészési sor párhuzamosan (a Hardverapró és a Jófogás böngésző nélkül a saját szálán, a böngésző közben a Vinted
+  és a Vatera); az Indítás állapota minden ablakban élőben; a napló a konzolon is; a modell tovább marad betöltve.
+- Megérő találat ablaka (értesítésből, a listából): ár, mennyiért mennek, haszon; az eladónak szóló üzenet a vágólapra, és
+  a hirdetés megnyitása. Android: „Megérő hirdetés” csatorna, 2 perc rezgés/hang, 10 perc szünet, legfeljebb 6 kör.
+- Havi keret (a maradék limit), és szólás, ha felhalmozódnak az el nem adott tárgyak.
 
 ## Élesben kipróbálandó
+- Az Android-alkalmazás új része (a megérő hirdetés értesítése: rezgés, hang, ismétlés, a találat ablaka, a vágólap) a
+  GitHub Actions fordításában megy át, telefonon nincs kipróbálva; a rezgés a gyártói energiatakarékos módoktól is függ.
+- Néma módban az Android nem rezeg és nem csenget (a rendszer döntése); rezgő módban csak rezeg.
 - A Hardverapró és a Jófogás sima letöltéssel (feeds.py): a valódi oldalakon a kártyák kiolvasása (most a böngészős
   elemzés másolata, a tesztoldalak a két oldal szerkezetét utánozzák), hogy a Jófogás tényleg a szerveren rajzolja-e ki a
   találatokat (ha nem, háromszor üres után magától a böngészőre vált), és hogy a 8–16 másodperces szünet és az óránkénti

@@ -235,6 +235,7 @@ class WorkDesk:
                                 llm, default_every=float(cfg.scheduler.deal_minutes or 180), fetcher=self.fetcher)
         self.instant = (InstantWatch(self.root, self.platforms, self.fetcher, self.deals)
                         if self.fetcher is not None else None)
+        self.deals.items = self.store.all      # a havi kerethez: mennyit költöttél ebben a hónapban, mi vár eladásra
         # Begyakorolt lépések: a modell sikeres feltöltéseiből és levételeiből tanul (replay.py).
         self.flows = FlowStore(self.root / "folyamatok")
         # A Vinted-kitöltő (vinted.py) választásai, pl. egy tárgyfajta kategóriaútja: legközelebb modell nélkül.

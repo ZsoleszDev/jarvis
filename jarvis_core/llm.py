@@ -161,11 +161,15 @@ class OllamaClient:
         self.fit_memory: Path | None = None
         self.server_version = ""
         # Ha beáll (pl. készenlétben), a kérések ennyi ideig tartják a modellt a videókártyán (a beállítás helyett).
-        self.keep_alive_override: int | str | None = None
+        # Függvény is lehet (pl. amíg az automata kereskedés fut, tovább marad betöltve).
+        self.keep_alive_override: int | str | Callable[[], int | str] | None = None
 
     @property
     def keep_alive(self) -> int | str:
-        return self.cfg.keep_alive if self.keep_alive_override is None else self.keep_alive_override
+        value = self.keep_alive_override
+        if value is None:
+            return self.cfg.keep_alive
+        return value() if callable(value) else value
 
     # --- alacsony szint -------------------------------------------------
 

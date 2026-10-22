@@ -1174,6 +1174,57 @@ class StartAndLimitTests(HunterCase):
         self.assertEqual([d["price"] for d in self.hunter.state()["deals"]], [55000])
 
 
+class MoneyTests(HunterCase):
+    """Pénzügyi keret: a havi keret (ha fogy, csak a maradékba beleférő ajánlat jön), és szól, ha a keret nagy része
+    elment, ha elfogyott, vagy ha túl sok megvett tárgy vár eladásra."""
+
+    def setUp(self):
+        super().setUp()
+        from jarvis_core.selling import ItemStore
+        self.store = ItemStore(Path(self.tmp.name) / "eladas")
+        self.hunter.items = self.store.all
+
+    def test_budget_limits_the_deals_and_warns_once(self):
+        now = self.clock.now
+        self.store.create(title="RTX 3060 Ti", bought_price=40000, bought_shipping=1500, bought_at=now - 3600)
+        self.store.create(title="Régi vétel", bought_price=90000, bought_at=now - 60 * 86400)   # másik hónap
+        with self.assertRaises(DealError):
+            self.hunter.set_money(budget="sok")
+        state = self.hunter.set_money(budget="100 000")
+        self.assertEqual((state["money"]["spent"], state["money"]["remaining"]), (41500, 58500))
+        self.assertTrue(self.hunter._affordable(58000) and not self.hunter._affordable(59000),
+                        "a havi keret maradéka is limit")
+        self.ready()
+        self.hunter.run(notify=self.notify)
+        self.assertEqual([d["price"] for d in self.hunter.state()["deals"]], [55000], "az 55 000-es még belefér")
+        self.store.create(title="PS5 kontroller", bought_price=40000, bought_at=now - 60)
+        said = self.hunter.money_check(self.notify)
+        self.assertEqual(len(said), 1)
+        self.assertIn("A havi keret 82%-a elment: már csak 18 500 Ft maradt", said[0])
+        self.assertEqual(self.notices[-1][3]["actions"], [{"action": "ledger", "label": "Vételeim"}])
+        self.assertEqual(self.hunter.money_check(self.notify), [], "havonta egyszer")
+        self.store.create(title="Makita", bought_price=20000, bought_at=now - 30)
+        self.assertIn("Elfogyott a havi keret", self.hunter.money_check(self.notify)[0])
+        self.assertFalse(self.hunter._affordable(1000), "elfogyott: semmi nem fér bele")
+
+    def test_too_many_unsold_items(self):
+        now = self.clock.now
+        for n in range(3):
+            self.store.create(title=f"Tárgy {n}", bought_price=10000, bought_at=now - (10 - n) * 86400)
+        sold = self.store.create(title="Eladott", bought_price=5000, sold_price=9000)
+        self.store.mark(sold.id, sold=True)
+        self.hunter.set_money(stock_count="2")
+        self.assertTrue(self.hunter.money_status()["over_stock"])
+        [said] = self.hunter.money_check(self.notify)
+        self.assertIn("Felhalmozódtak a megvett tárgyak: 3 vár eladásra, 30 000 Ft van bennük", said)
+        self.assertIn("a legrégebbiek: Tárgy 0 (10 napja), Tárgy 1 (9 napja), Tárgy 2 (8 napja)", said)
+        self.assertEqual(self.hunter.money_check(self.notify), [], "naponta egyszer")
+        self.clock.now += 86400
+        self.assertEqual(len(self.hunter.money_check(self.notify)), 1, "másnap újra, ha még mindig így van")
+        self.hunter.set_money(stock_count="", stock_value="40000")
+        self.assertFalse(self.hunter.money_status()["over_stock"], "30 000 Ft még belefér")
+
+
 class ProfitTests(unittest.TestCase):
     def test_profit_month_total_days_and_money_still_in_items(self):
         from jarvis_core.deals import profit_report

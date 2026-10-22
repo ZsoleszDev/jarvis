@@ -17,7 +17,11 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
 - `NotifyService`: háttérszolgáltatás, a gép eseményeit kérdezi le (`/api/v1/events`, hosszú lekérdezéssel), és
   értesít. Firebase nem kell hozzá. Egy `sold` gombos értesítésnél (`notice.actions`) a gomb a `MainActivity`-t
   nyitja meg (`hu.jarvis.app.SOLD`, a tárggyal); a felület a `JarvisApp.pending()` `sold` részéből a tárgy Eladva
-  ablakát mutatja. Az értesítésből közvetlenül semmit nem jelöl meg és nem vesz le.
+  ablakát mutatja. Az értesítésből közvetlenül semmit nem jelöl meg és nem vesz le. Egy megérő hirdetés (`notice.deal`)
+  a „Megérő hirdetés” csatornán szól, akkor is, ha az alkalmazás nyitva van: `FLAG_INSISTENT`-tel két percig rezeg (és
+  csenget, ha van hang), aztán tíz percre a csendes csatornára vált, és ha addig nem nyitottad meg, újra (legfeljebb
+  hatszor). Rábökve a `MainActivity` nyílik (`hu.jarvis.app.DEAL`), és a felület a `pending()` `deal` részéből a
+  találat ablakát mutatja; az üzenetet a `JarvisApp.copy()` teszi a vágólapra.
 - `ActionReceiver`: a jóváhagyás gombjai az értesítésben (`/api/v1/confirm`), és az állandó értesítés Szünet /
   Folytatás gombja (`/api/v1/pause`, `/api/v1/resume`).
 - `VoiceTile`: gyorsbeállítás csempe a hangutasításhoz; `res/xml/shortcuts.xml`: parancsikonok (Hang, Új hirdetés).

@@ -7,6 +7,7 @@ import android.app.DownloadManager;
 import android.app.NotificationManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
@@ -58,6 +59,8 @@ import org.json.JSONObject;
  * - megosztás a Jarvisnak: fotók a galériából (az új hirdetéshez; a felület a /__jarvis_shared/ címről kéri le
  *   őket, ezt a WebView-ban mi szolgáljuk ki), vagy szöveg, link (a beszélgetésbe);
  * - párosító link a gép QR-kódjából (jarvis://pair): kitölti a beállító oldalt, a párosítást te indítod;
+ * - egy megérő hirdetés értesítése (NotifyService.dealAlert): a találat ablaka (ár, mennyiért mennek, mennyit
+ *   kereshetsz vele, és a gomb, ami kimásolja az eladónak szóló üzenetet a vágólapra és megnyitja a hirdetést);
  * - egy elkeltnek látszó hirdetés értesítésének gombja (NotifyService.soldAction): a hirdetés Eladva ablaka, előre
  *   kiválasztva; a levételt ott, a Rendben gombbal hagyod jóvá.
  */
@@ -68,6 +71,7 @@ public class MainActivity extends Activity {
     static final String ACTION_VOICE = "hu.jarvis.app.VOICE";
     static final String ACTION_NEW_LISTING = "hu.jarvis.app.NEW_LISTING";
     static final String ACTION_SOLD = "hu.jarvis.app.SOLD";
+    static final String ACTION_DEAL = "hu.jarvis.app.DEAL";
     private static final String SETUP = "file:///android_asset/setup.html";
     private static final String SHARED_PATH = "/__jarvis_shared/";
     private static final int MAX_SHARED = 20;
@@ -90,6 +94,7 @@ public class MainActivity extends Activity {
     private volatile String pairServer = "";
     private volatile String pairCode = "";
     private volatile String wantSold = "";
+    private volatile String wantDeal = "";
 
     @Override
     protected void onCreate(Bundle state) {
@@ -150,6 +155,15 @@ public class MainActivity extends Activity {
             case ACTION_SOLD:
                 wantSold = soldRequest(intent);
                 return false;
+            case ACTION_DEAL: {                           // egy megérő hirdetés értesítése: a találat ablaka
+                int notification = intent.getIntExtra("notification", 0);
+                if (notification != 0) {
+                    getSystemService(NotificationManager.class).cancel(notification);
+                }
+                String deal = intent.getStringExtra("deal");
+                wantDeal = deal == null ? "" : deal;
+                return false;
+            }
             case Intent.ACTION_SEND:
             case Intent.ACTION_SEND_MULTIPLE:
                 String type = intent.getType();
@@ -536,11 +550,15 @@ public class MainActivity extends Activity {
                 if (!wantSold.isEmpty()) {
                     result.put("sold", new JSONObject(wantSold));
                 }
+                if (!wantDeal.isEmpty()) {
+                    result.put("deal", wantDeal);
+                }
                 wantVoice = false;
                 wantListing = false;
                 sharedText = "";
                 photosNew = false;
                 wantSold = "";
+                wantDeal = "";
                 return result.toString();
             } catch (Exception e) {
                 return "{}";
@@ -573,6 +591,18 @@ public class MainActivity extends Activity {
                     }
                 });
             }, "jarvis-pair").start();
+        }
+
+        /** A felület egy szövege a vágólapra (pl. a megérő hirdetés ablakából az eladónak szóló üzenet). */
+        @JavascriptInterface
+        public void copy(String text) {
+            runOnUiThread(() -> {
+                ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Jarvis", text == null ? "" : text));
+                    Toast.makeText(MainActivity.this, "Kimásoltam az üzenetet.", Toast.LENGTH_SHORT).show();
+                }
+            });
         }
 
         @JavascriptInterface

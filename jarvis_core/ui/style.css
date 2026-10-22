@@ -783,3 +783,26 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
   .lform input, .lform textarea, #l-add input { font-size: 16px; }
   .runbar button { flex: 1 1 100%; }
 }
+
+/* --- egy megérő találat ablaka ----------------------------------------------------------------------------- */
+.dealbox { width: min(520px, 94vw); }
+.dealbox h2 { font-size: 18px; line-height: 1.3; overflow-wrap: anywhere; }
+.dealbox .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 4px 0 14px; }
+.dealbox .facts dt { color: var(--ash); font-size: 13.5px; }
+.dealbox .facts dd { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.dealbox p { font: 14px/1.45 var(--ui); margin: 0 0 10px; }
+.dealbox p.warn { color: var(--white); }
+.dealbox .msgpreview { margin: 0 0 16px; padding: 8px 10px; border: 1px solid var(--rule); border-radius: 6px;
+                       background: var(--graphite-hi); font: 14px/1.45 var(--ui); white-space: pre-wrap; }
+.dealbox .row { flex-wrap: wrap; }
+#deal-go { text-align: center; }
+@media (max-width: 640px) {
+  .dealbox .facts { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
+  .dealbox .facts dd { margin-bottom: 8px; }
+  #deal-go { flex: 1 1 100%; padding: 12px 16px; font-size: 15px; }
+}
+a.button.primary { background: var(--white); border-color: var(--white); color: var(--black); font-weight: 600; }
+a.button.primary:hover { background: var(--silver); border-color: var(--silver); }
+.ledger .budget { display: grid; gap: 6px; }
+.ledger .budget .row { gap: 10px; }
+.ledger > .warn, .deals .warn { color: var(--white); margin: 0; }

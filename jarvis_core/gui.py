@@ -273,6 +273,10 @@ class GuiUI:
         """Egy vevői beszélgetés megváltozott (új üzenet, vázlat, elküldve): a felület frissíti."""
         self.bus.publish({"type": "work_message", "conversation": conversation}, record=False)
 
+    def work_deals(self) -> None:
+        """Az Automata kereskedés állapota megváltozott (pl. a telefonról elindítottad): minden ablak újratölti."""
+        self.bus.publish({"type": "work_deals"}, record=False)
+
     def creative_event(self, event: dict[str, Any]) -> None:
         """A Kreatív menü eseménye (élő írás, egy történet változása); visszajátszani nem kell, a felület
         újracsatlakozáskor lekéri a történetet."""
@@ -764,7 +768,13 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(404, {"ok": False})
 
     def _deals_post(self, body: dict[str, Any], remote: bool = False) -> None:
-        """Az Automata kereskedés gombjai: be/ki, keresés hozzáadása és törlése, egy találat elrejtése, keresés most."""
+        """Az Automata kereskedés gombjai: be/ki, keresés hozzáadása és törlése, egy találat elrejtése, keresés most.
+        Ha valami megváltozott, a többi ablak (a gépen és a telefonon) is megtudja (work_deals)."""
+        self._deals_action(body, remote)
+        if str(body.get("action") or "") not in ("journal", "lookup", "offer", "run"):
+            self.gui.ui.work_deals()
+
+    def _deals_action(self, body: dict[str, Any], remote: bool = False) -> None:
         app, deals = self.gui.app, self._work().deals
         instant = self._work().instant
         action = str(body.get("action") or "")
@@ -795,6 +805,8 @@ class _Handler(BaseHTTPRequestHandler):
                         and "deals" in app.scheduler.jobs and deals.available():
                     app.run_job_now("deals", silent=remote)
                 return self._json(200, {"ok": True, **state, "instant": instant_state})
+            if action == "message":     # az eladónak szóló üzenet (a megérő találat ablakának gombja másolja ki)
+                return self._json(200, {"ok": True, **deals.set_message(body.get("text"))})
             if action == "limits":      # legfeljebb ennyiért vegyen, legalább ennyi haszonnal (minden keresésre)
                 return self._json(200, {"ok": True, **deals.set_limits(body.get("max_buy"), body.get("min_profit"))})
             if action == "enable":
@@ -846,7 +858,8 @@ class _Handler(BaseHTTPRequestHandler):
                                     in_transit=bool(body.get("in_transit", True)), market_price=median,
                                     target_price=round_price(median * SALE_RATIO) if median else None)
                 state = deals.mark_bought(deal["id"], item.id)
-                return self._json(200, {"ok": True, **state, "item": item.id, "profit": profit_report(store.all())})
+                self._money_check(self._work())
+                return self._json(200, {"ok": True, **deals.state(), "item": item.id, "profit": profit_report(store.all())})
             if action == "run":
                 if app is None or app.scheduler is None or "deals" not in app.scheduler.jobs:
                     return self._json(409, {"ok": False, "error": "A kereséshez Jarvis saját böngészője kell."})
@@ -862,7 +875,14 @@ class _Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _ledger(work: Any) -> dict[str, Any]:
         return {"ok": True, **profit_report(work.store.all(), book=work.deals.book),
-                "sites": [p.name for p in work.platforms.values()], "shipping": SHIPPING}
+                "sites": [p.name for p in work.platforms.values()], "shipping": SHIPPING,
+                "money": work.deals.money_status()}
+
+    def _money_check(self, work: Any) -> None:
+        """Vétel után (és a keret átírása után): ha a havi keret fogy, vagy túl sok tárgy vár eladásra, szól."""
+        app = self.gui.app
+        if app is not None:
+            work.deals.money_check(app.notify_event)
 
     def _ledger_post(self, body: dict[str, Any]) -> None:
         """Vételeim: egy vétel kézzel (nem az Automata kereskedésből: pl. bolhapiacon vetted), és egy tárgy vételi
@@ -879,7 +899,15 @@ class _Handler(BaseHTTPRequestHandler):
                                                 "trade_note") if body.get(k) not in (None, "")}
             item = work.store.create(prompt=name, bought_price=body.get("price"), bought_at=time.time(),
                                      in_transit=bool(body.get("in_transit")), **values)
+            self._money_check(work)
             return self._json(200, {**self._ledger(work), "item": item.id})
+        if action == "money":       # havi keret, és mikor szóljon, hogy túl sok megvett tárgy vár eladásra
+            try:
+                work.deals.set_money(body.get("budget"), body.get("stock_count"), body.get("stock_value"))
+            except ItemError as exc:
+                return self._json(400, {"ok": False, "error": str(exc)})
+            self._money_check(work)
+            return self._json(200, self._ledger(work))
         if action == "update":
             fields = body.get("fields") if isinstance(body.get("fields"), dict) else {}
             values = {k: v for k, v in fields.items() if k in EDITABLE}

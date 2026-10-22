@@ -9,10 +9,17 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.drawable.Icon;
+import android.media.AudioAttributes;
+import android.media.RingtoneManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.service.notification.StatusBarNotification;
 
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -26,11 +33,21 @@ import org.json.JSONObject;
  *
  * Az állandó értesítés mutatja, hogy éri-e el a gépet, és szünetel-e a Jarvis; a gombjaival hangutasítást adhatsz,
  * vagy szüneteltetheted (a gépen minden modell leáll, pl. játékhoz), és folytathatod.
+ *
+ * Egy megérő hirdetés (az Automata kereskedés találata) sürgős: akkor is szól, ha az alkalmazás nyitva van. A telefon
+ * ALERT_MS ideig újra és újra rezeg (és ha be van kapcsolva a hang, csenget is), aztán QUIET_MS szünet, és ha addig nem
+ * nyitottad meg vagy söpörted el, újra; legfeljebb ALERT_ROUNDS-szor. Rábökve az alkalmazás a találat ablakával nyílik
+ * meg (MainActivity.ACTION_DEAL): ára, mennyiért mennek, mennyit kereshetsz vele, és az üzenet az eladónak.
  */
 public class NotifyService extends Service {
     static final String CHANNEL_LINK = "kapcsolat";
     static final String CHANNEL_CONFIRM = "jovahagyas";
     static final String CHANNEL_NEWS = "ertesitesek";
+    static final String CHANNEL_DEAL = "megero-hirdetes";
+    static final String CHANNEL_DEAL_QUIET = "megero-hirdetes-csendes";
+    static final long ALERT_MS = 2 * 60 * 1000;     // ennyi ideig rezeg / csenget egyfolytában
+    static final long QUIET_MS = 10 * 60 * 1000;    // utána ennyi szünet
+    static final int ALERT_ROUNDS = 6;              // legfeljebb ennyiszer (kb. egy óra), ha addig nem nyitod meg
     static final int ONGOING_ID = 1;
     static final int REVOKED_ID = 2;
     static final int CONFIRM_BASE = 1000;
@@ -41,6 +58,9 @@ public class NotifyService extends Service {
     private volatile boolean paused;
     private String shown = "";
     private Thread worker;
+    private final Handler timers = new Handler(Looper.getMainLooper());
+    private final Map<Integer, Notification.Builder> deals = new HashMap<>();    // értesítés → a csendes változata
+    private final Map<Integer, Integer> rounds = new HashMap<>();
 
     /** Elindítja (ha párosítva van, és kérted a háttérértesítéseket), különben leállítja. */
     static void start(Context context, Prefs prefs) {
@@ -68,7 +88,20 @@ public class NotifyService extends Service {
         NotificationChannel news = new NotificationChannel(CHANNEL_NEWS, "Értesítések",
                 NotificationManager.IMPORTANCE_DEFAULT);
         news.setDescription("Kész vagy elakadt feladat, kérdés egy tárgyról, új találat egy figyelőben.");
-        context.getSystemService(NotificationManager.class).createNotificationChannels(Arrays.asList(link, confirm, news));
+        NotificationChannel deal = new NotificationChannel(CHANNEL_DEAL, "Megérő hirdetés",
+                NotificationManager.IMPORTANCE_HIGH);
+        deal.setDescription("Új hirdetés, ami megéri: két percig rezeg (és ha be van kapcsolva a hang, csenget), "
+                + "aztán tíz perc múlva újra, amíg meg nem nézed.");
+        deal.enableVibration(true);
+        deal.setVibrationPattern(new long[]{0, 900, 500, 900, 500});
+        deal.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
+                new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build());
+        NotificationChannel dealQuiet = new NotificationChannel(CHANNEL_DEAL_QUIET, "Megérő hirdetés (szünetben)",
+                NotificationManager.IMPORTANCE_LOW);
+        dealQuiet.setDescription("A megérő hirdetés értesítése a két riasztás közti szünetben (hang és rezgés nélkül).");
+        context.getSystemService(NotificationManager.class).createNotificationChannels(
+                Arrays.asList(link, confirm, news, deal, dealQuiet));
     }
 
     static PendingIntent openApp(Context context) {
@@ -182,6 +215,7 @@ public class NotifyService extends Service {
 
     @Override
     public void onDestroy() {
+        timers.removeCallbacksAndMessages(null);
         running = false;
         if (worker != null) {
             worker.interrupt();
@@ -247,6 +281,81 @@ public class NotifyService extends Service {
         }
     }
 
+    /** A megérő hirdetés értesítése: rábökve a találat ablaka nyílik meg (MainActivity.ACTION_DEAL). */
+    private Notification.Builder dealBuilder(String channel, int id, JSONObject notice) {
+        Intent intent = new Intent(this, MainActivity.class).setAction(MainActivity.ACTION_DEAL)
+                .putExtra("deal", notice.optString("deal")).putExtra("notification", id)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        PendingIntent open = PendingIntent.getActivity(this, id, intent,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        String text = notice.optString("text");
+        return new Notification.Builder(this, channel)
+                .setSmallIcon(R.drawable.ic_notify)
+                .setContentTitle(notice.optString("title", "Megéri"))
+                .setContentText(text)
+                .setStyle(new Notification.BigTextStyle().bigText(text))
+                .setContentIntent(open)
+                .setCategory(Notification.CATEGORY_RECOMMENDATION)
+                .setAutoCancel(true);
+    }
+
+    /** Riasztás: ALERT_MS ideig ismétlődő rezgés (és hang), aztán szünet (quiet). Fő szálon fut. */
+    private void dealAlert(int id, JSONObject notice) {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        deals.put(id, dealBuilder(CHANNEL_DEAL_QUIET, id, notice));
+        rounds.put(id, 1);
+        Notification loud = dealBuilder(CHANNEL_DEAL, id, notice).build();
+        loud.flags |= Notification.FLAG_INSISTENT;      // amíg nem állítjuk le, újra és újra rezeg és csenget
+        manager.notify(id, loud);
+        timers.postDelayed(() -> quiet(id, notice), ALERT_MS);
+    }
+
+    /** A két riasztás közti szünet: az értesítés marad, de csendben; QUIET_MS múlva újra, ha még nem nézted meg. */
+    private void quiet(int id, JSONObject notice) {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        Notification.Builder silent = deals.get(id);
+        if (silent == null || !showing(id)) {
+            forget(id);
+            return;
+        }
+        manager.cancel(id);                             // a folyamatos rezgés így áll le
+        manager.notify(id, silent.build());
+        int round = rounds.containsKey(id) ? rounds.get(id) : ALERT_ROUNDS;
+        if (round >= ALERT_ROUNDS) {
+            forget(id);
+            return;
+        }
+        timers.postDelayed(() -> again(id, notice), QUIET_MS);
+    }
+
+    private void again(int id, JSONObject notice) {
+        if (!deals.containsKey(id) || !showing(id)) {
+            forget(id);                                 // közben megnyitottad vagy elsöpörted
+            return;
+        }
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        rounds.put(id, (rounds.containsKey(id) ? rounds.get(id) : 0) + 1);
+        Notification loud = dealBuilder(CHANNEL_DEAL, id, notice).build();
+        loud.flags |= Notification.FLAG_INSISTENT;
+        manager.cancel(id);
+        manager.notify(id, loud);
+        timers.postDelayed(() -> quiet(id, notice), ALERT_MS);
+    }
+
+    private boolean showing(int id) {
+        for (StatusBarNotification shown : getSystemService(NotificationManager.class).getActiveNotifications()) {
+            if (shown.getId() == id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void forget(int id) {
+        deals.remove(id);
+        rounds.remove(id);
+    }
+
     private void handle(JSONObject event) {
         String type = event.optString("type");
         NotificationManager manager = getSystemService(NotificationManager.class);
@@ -275,6 +384,11 @@ public class NotifyService extends Service {
             manager.notify(CONFIRM_BASE + id, notification);
         } else if ("confirm_done".equals(type)) {
             manager.cancel(CONFIRM_BASE + event.optInt("id"));
+        } else if ("notification".equals(type) && event.optJSONObject("notice") != null
+                && !event.optJSONObject("notice").optString("deal").isEmpty()) {
+            JSONObject notice = event.optJSONObject("notice");
+            int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
+            timers.post(() -> dealAlert(id, notice));          // megérő hirdetés: akkor is, ha az ablak nyitva van
         } else if ("notification".equals(type) && !MainActivity.visible) {
             JSONObject notice = event.optJSONObject("notice");
             if (notice != null) {

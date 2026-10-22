@@ -11,12 +11,14 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_deals import Clock, FakeBrowser, FakeLlm  # noqa: E402
 
+from jarvis_core import deals as deals_module  # noqa: E402
 from jarvis_core.deals import DealHunter  # noqa: E402
 from jarvis_core.feeds import FeedError, SiteFetcher, parse_listings, parse_page  # noqa: E402
 from jarvis_core.instant import InstantError, InstantWatch  # noqa: E402
@@ -481,3 +483,60 @@ class ParallelRoundTests(InstantCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TwoLaneTests(InstantCase):
+    """Párhuzamos böngészés: a Hardverapró és a Jófogás a gyors sorban (böngésző nélkül, saját szálon), közben a böngésző
+    a Vintedet és a Vaterát nézi; mindkét sornak saját munkamenete van."""
+
+    def setUp(self):
+        super().setUp()
+        self.hunter.parallel = True            # amit a start_fast_lane állít be (a szálat itt kézzel léptetjük)
+        self.hunter.start()
+        self.net.pages["hardverapro.hu/aprok/hardver"] = (200, ha_page(HA_CARDS))
+        self.net.pages["jofogas.hu/magyarorszag"] = (200, "<html><body>" + jf_card(1, "iPhone 13 128GB", "185 000")
+                                                     + "</body></html>")
+        self.browser.results = [{"text": "Nike Air Max 90", "price": 20000, "url": "https://www.vinted.hu/items/1"}]
+
+    def test_both_lanes_work_at_the_same_time(self):
+        self.hunter.run()                      # a böngésző sora (az ágens-szálon)
+        self.assertIn("Böngészés:", self.hunter.run_fast())
+        self.assertTrue(self.browser.urls and all("vinted" in url for url in self.browser.urls),
+                        "a böngésző a Vintedet nézi, a Hardverapróhoz nem nyúl")
+        self.assertTrue(any("hardverapro.hu/aprok/hardver" in url for _t, url in self.net.asked))
+        status = self.hunter.state()["browse"]["status"]
+        self.assertIn("Most: Hardverapró", status)
+        self.assertIn("Most: Vinted", status)
+        self.assertEqual(self.hunter.run_fast(), "", "a gyors sor is tart szünetet két oldal között")
+
+    def test_the_fast_lane_never_touches_the_browser(self):
+        """Ha a gyors oldal most nem olvasható böngésző nélkül (pl. az óránkénti keret miatt), a gyors sor kihagyja, nem a
+        böngészőhöz nyúl (az a másik szálé); ha egy oldal tilt, azt a böngésző sora veszi át."""
+        self.fetcher.hourly = 1
+        self.hunter.run_fast()
+        self.clock.now += 120
+        self.hunter.run_fast()
+        self.assertEqual(self.browser.urls, [])
+        self.net.pages["hardverapro.hu/aprok/hardver"] = (403, "tiltva")
+        self.net.pages["jofogas.hu/magyarorszag"] = (403, "tiltva")
+        self.fetcher.hourly = 90
+        self.clock.now += 3600
+        for _ in range(6):                     # a régi munkamenet lezárul, pihenő, aztán egy új kezdődik
+            self.clock.now += 120
+            self.hunter.run_fast()
+        blocked = [site for site in ("hardverapro", "jofogas") if not self.fetcher.usable(site)]
+        self.assertTrue(blocked)
+        self.assertEqual({self.hunter._lane_of(site) for site in blocked}, {deals_module.LANE_BROWSER},
+                         "a tiltó oldalt a böngésző sora veszi át")
+        self.assertEqual(self.browser.urls, [], "a gyors sor akkor sem nyúlt a böngészőhöz")
+
+    def test_the_thread(self):
+        with mock.patch.object(deals_module, "FAST_TICK", 0.05):
+            self.hunter.start_fast_lane(lambda: True, lambda: True, lambda *a, **k: None)
+            try:
+                deadline = time.monotonic() + 10
+                while not self.net.asked and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            finally:
+                self.hunter.stop_fast_lane()
+        self.assertIn("jarvis-gyors-sor", self.net.threads)

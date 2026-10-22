@@ -25,6 +25,7 @@ class Journal:
     def __init__(self, path: Path, clock: Callable[[], float] = time.time):
         self.path = Path(path)
         self.clock = clock
+        self.on_add: Callable[[str], None] | None = None   # pl. a konzolra is kiírja (a JarvisApp állítja be)
         self._lock = threading.Lock()
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -48,6 +49,11 @@ class Journal:
             for old in sorted(self._days)[:-KEEP_DAYS]:
                 self._days.pop(old, None)
             self._save()
+        if self.on_add is not None:
+            try:
+                self.on_add(text)
+            except Exception:  # noqa: BLE001 - a kiírás hibája ne vesszen el a bejegyzéssel
+                pass
 
     def entries(self, day: str = "") -> list[dict[str, Any]]:
         """Egy nap bejegyzései (alapból a mai), a legújabb elöl."""

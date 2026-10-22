@@ -31,7 +31,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
-from .deals import DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, excluded, matches_query, parse_words
+from .deals import DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, deal_action, excluded, matches_query, parse_words
 from .feeds import FAST_SITES, FeedError
 from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price
 from .textutil import fold
@@ -231,7 +231,11 @@ class InstantWatch:
             self._thread.start()
 
     def stop(self) -> None:
+        """Leállítja a szálat, és megvárja (legfeljebb pár másodpercig), hogy a mostani letöltését befejezze."""
         self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5)
         try:
             self.hunter.book.save()
         except OSError:
@@ -467,7 +471,7 @@ class InstantWatch:
         checked = f" {hit['note']}" if hit.get("note") else ""
         self.notify("deal", "Megéri: " + hit["title"][:60], f"{self._line(hit)}.{checked}{warn} ({alert['name']})",
                     spoken=f"Megérő új hirdetés: {hit['title'][:50]}, {format_price(hit['price'])}.",
-                    url=hit["url"], actions=[DEALS_ACTION], urgent=True)
+                    url=hit["url"], actions=[deal_action(hit["deal"])], deal=hit["deal"], urgent=True)
 
     @staticmethod
     def _line(hit: dict[str, Any]) -> str:
