@@ -312,7 +312,7 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.later()
         self.results([ha_card(31, "Eladó zajszűrős Sony fejhallgató, alig használt", "30 000 Ft"),
-                      ha_card(32, "Bose fejhallgató szép állapotban", "20 000 Ft"),
+                      ha_card(32, "Bose fejhallgató szép állapotban", "40 000 Ft"),
                       ha_card(33, "Valami kábelcsomag", "3 000 Ft"), ha_card(1, "Régi fülhallgató", "2 000 Ft")],
                      "fejhallgato/index")
         self.net.pages["_31/friss"] = page_html("Hibátlan, dobozában.")
@@ -361,6 +361,30 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.assertEqual(self.watch.state()["waiting"], 0)
         self.assertEqual(self.notices[-1][1], "Megéri: Zajszűrős fejhallgató")
+
+    def test_suspicious_new_listings_are_never_sent(self):
+        """A gyanúsan olcsóról (az oldalát sem tölti le), az átverésre utalóról és az értékelés nélküli eladóéról nem
+        szól, a találatok közé sem kerül; a naplóba beírja, miért hagyta ki."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:1])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(5, "Zotac RTX 3060 Ti Twin Edge", "25 000 Ft"), ha_card(6, "PNY RTX 3060 Ti", "50 000 Ft"),
+                      ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:1])
+        self.net.pages["_6/friss"] = page_html("Hibátlan. Csak előre utalással, külföldről postázom.")
+        self.net.pages["_7/friss"] = page_html("Hibátlan, írj Telegramon.")
+        self.watch.tick()
+        self.assertEqual(self.notices, [])
+        self.assertEqual((self.watch.state()["hits"], self.hunter.state()["deals"]), ([], []))
+        self.assertNotIn("_5/friss", " ".join(url for _t, url in self.net.asked), "a gyanúsan olcsó oldalát sem nézi")
+        said = [e["text"] for e in self.hunter.journal.entries() if e["text"].startswith("Gyanús")]
+        self.assertEqual(len(said), 3)
+        for title, why in (("Zotac", "gyanúsan olcsó"), ("PNY", "átverésre utaló jel"),
+                           ("Palit", "az oldalon kívüli elérhetőséget ad meg")):
+            self.assertIn(why, next(line for line in said if title in line))
 
     def test_the_buy_limit(self):
         """A vételi limit fölött nem szól, és a modellhez sem küldi."""

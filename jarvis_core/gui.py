@@ -915,6 +915,19 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"ok": False, "error": "Nincs mit menteni."})
             work.store.update(str(body.get("id") or ""), user=True, **values)
             return self._json(200, self._ledger(work))
+        if action == "cancel":      # Visszamondva: mégsem vetted meg; mindenhonnan törlődik (a tárgy a _torolt mappába)
+            item = work.store.get(str(body.get("id") or ""))
+            if item.bought_price is None:
+                return self._json(400, {"ok": False, "error": "Ezt nem jelölted megvettnek."})
+            if item.sold:
+                return self._json(400, {"ok": False, "error": "Ez már elkelt: a visszamondás csak a még meg nem érkezett "
+                                                              "vagy el nem adott tárgyaknál van."})
+            deal = work.deals.cancel_bought(item.id, item.name)
+            if deal is not None and work.instant is not None:
+                work.instant.forget_deal(deal["id"])
+            work.store.delete(item.id)
+            self.gui.ui.work_deals()    # a találatok listája is frissül (a gépen és a telefonon)
+            return self._json(200, self._ledger(work))
         return self._json(400, {"ok": False, "error": "Ismeretlen művelet."})
 
     def _messages_post(self, path: str, body: dict[str, Any], remote: bool = False) -> None:

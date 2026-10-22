@@ -207,6 +207,33 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertEqual((status, self.h.store.get(item.id).sold_price), (200, 90000), "az eladási ár átírható")
         self.h.store.delete(item.id)
 
+    def test_a_cancelled_purchase_goes_away_everywhere(self):
+        """Vételeim › Visszamondva: a tárgy, a találat (és az azonnali figyelő friss hirdetései közül is) eltűnik, a havi
+        keretbe nem számít bele; az eladottat és a nem megvettet nem lehet visszamondani."""
+        deals, instant = self.h.app.work.deals, self.h.app.work.instant
+        url = "https://hardverapro.hu/apro/visszamondott/friss.html"
+        deals._remember({"id": "dv", "url": url, "text": "Makita DHP482", "site": "Hardverapró", "price": 20000,
+                         "median": 40000, "margin": 20000, "at": time.time()})
+        with instant._lock:
+            instant._data["hits"].insert(0, {"url": url, "text": "Makita DHP482", "price": 20000, "deal": "dv"})
+        status, data = self.post("/api/work/deals", {"action": "bought", "id": "dv"})
+        item_id = data["item"]
+        status, data = self.post("/api/work/ledger", {"action": "cancel", "id": item_id})
+        self.assertEqual(status, 200, data)
+        self.assertNotIn(item_id, [r["id"] for r in data["rows"]])
+        self.assertNotIn(item_id, [i.id for i in self.h.store.all()], "az eladandók közül is")
+        self.assertNotIn("dv", [d["id"] for d in deals.state()["deals"]], "a találatok közül is")
+        self.assertNotIn("dv", [h.get("deal") for h in instant.state()["hits"]], "a friss hirdetések közül is")
+        self.assertEqual(data["money"]["spent"], 0)
+        self.assertEqual(self.post("/api/work/ledger", {"action": "cancel", "id": item_id})[0], 400, "már nincs meg")
+        plain = self.h.store.create(prompt="Nem vett tárgy")
+        self.assertEqual(self.post("/api/work/ledger", {"action": "cancel", "id": plain.id})[0], 400)
+        sold = self.h.store.create(prompt="Eladott", bought_price=1000)
+        self.h.store.mark(sold.id, sold=True)
+        self.assertEqual(self.post("/api/work/ledger", {"action": "cancel", "id": sold.id})[0], 400)
+        for item in (plain, sold):
+            self.h.store.delete(item.id)
+
     def test_instant_watch_from_the_window(self):
         """Azonnali figyelő: egy keresőszó két oldalon, egy oldalcím, szünet és törlés; az Indítás és a Leállítás vele együtt
         mindent elindít és leállít; a vételi limit."""
@@ -607,6 +634,44 @@ class WorkBrowserTests(unittest.TestCase):
         page.click('.lcard:has-text("Makita DHP482") [data-open]')
         page.wait_for_selector("#f-title")
         self.assertTrue(page.is_hidden("#w-ledger"))
+
+    def test_cancel_a_purchase_from_the_ledger_and_the_deals_list(self):
+        """Visszamondva: a Vételeim kártyáján és a találatok között (Megvetted ✓ mellett) is; megerősítés után
+        mindenhonnan eltűnik. Az eladott tárgynál nincs ilyen gomb."""
+        deals, store = self.h.app.work.deals, self.h.store
+        for n, name in enumerate(("Makita DHP482", "Bosch GSR 18V")):
+            deals._remember({"id": f"d{n}", "url": f"https://hardverapro.hu/apro/{n}/friss.html", "text": name,
+                             "site": "Hardverapró", "price": 20000, "median": 40000, "margin": 20000, "at": time.time()})
+            item = store.create(prompt=name, bought_price=20000, bought_at=time.time())
+            deals.mark_bought(f"d{n}", item.id)
+        sold = store.create(title="Nike Air Max 90", bought_price=15000, sold_price=24000)
+        store.mark(sold.id, sold=True)
+        page = self.page
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.click("#job-ledger")
+        page.wait_for_selector('.lcard:has-text("Makita DHP482")')
+        self.assertEqual(page.locator('.lcard:has-text("Nike Air Max 90") [data-cancel-bought]').count(), 0,
+                         "az eladottnál nincs Visszamondva")
+        page.click('.lcard:has-text("Makita DHP482") [data-cancel-bought]')
+        page.wait_for_selector("#ask-dialog[open]")
+        self.assertIn("Visszamondtad a vételt: Makita DHP482?", page.inner_text("#ask-text"))
+        page.click("#ask-no")
+        self.assertEqual(len([i for i in store.all() if i.bought_price]), 3, "Mégse: semmi nem változott")
+        page.click('.lcard:has-text("Makita DHP482") [data-cancel-bought]')
+        page.click("#ask-yes")
+        page.wait_for_selector('.toast:has-text("Visszamondva")')
+        page.wait_for_selector('.lcard:has-text("Makita DHP482")', state="detached")
+        self.assertNotIn("Makita DHP482", [i.name for i in store.all()])
+        self.assertEqual([d["text"] for d in deals.state()["deals"]], ["Bosch GSR 18V"])
+        page.click("#job-deals")
+        row = '.dealist li:has([data-deal-open="d1"])'      # a találat sora (a napló sorai nem)
+        page.wait_for_selector(f"{row} [data-cancel-bought]")
+        self.assertIn("Megvetted ✓", page.inner_text(row))
+        page.click(f"{row} [data-cancel-bought]")
+        page.click("#ask-yes")
+        page.wait_for_selector(row, state="detached")
+        self.wait_for(lambda: deals.state()["deals"] == [])
+        self.assertEqual([i.name for i in store.all()], ["Nike Air Max 90"])
 
     def test_start_button_limits_and_instant_watch_on_a_phone(self):
         """Az Automata kereskedés fülön egy gomb: Indítás (minden elindul), utána Leállítás; a vételi limit; az azonnali

@@ -391,6 +391,10 @@
   // --- Automata kereskedés: olcsó hirdetések keresése (deals.py) ---
   let job = "sales";
   let deals = { enabled: false, searches: [], deals: [], sites: [], browser: false, profit: null };
+  // a megvett találat (a tárgy azonosítójával): Megvetted ✓, és a Visszamondva gomb (cancelBought)
+  const boughtOf = (dealId) => (deals.deals.find((d) => d.id === dealId && d.bought) || {}).bought || "";
+  const cancelButton = (itemId, name) => `<small class="muted">Megvetted ✓</small>
+    <button type="button" class="small quiet" data-cancel-bought="${esc(itemId)}" data-name="${esc(name)}">Visszamondva</button>`;
   let buying = null;      // a találat, aminél épp a vételárat írod (Megvettem)
   async function loadDeals() {
     try {
@@ -507,7 +511,8 @@
         <small class="muted">${esc(h.site)} · <b>${esc(price(h.price))}</b>${h.drop ? ` (leárazta: ${esc(price(h.drop))})` : ""} · ${esc(ago(h.at))} · ${esc(h.alert_name)}</small>
         ${h.reference ? `<small class="${h.cheap ? "" : "muted"}">${h.cheap ? "<b>Megéri:</b> " : ""}szokásos ár kb. ${esc(price(h.reference))}${h.profit > 0 ? ` · kb. ${esc(price(h.profit))} haszon` : ""}</small>` : ""}
         ${(h.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}</span>
-        ${h.deal ? `<span class="row"><button type="button" class="small" data-deal-buy="${esc(h.deal)}">Megvettem</button></span>` : ""}</li>`).join("");
+        ${h.deal ? `<span class="row">${boughtOf(h.deal) ? cancelButton(boughtOf(h.deal), h.title || h.text)
+          : `<button type="button" class="small" data-deal-buy="${esc(h.deal)}">Megvettem</button>`}</span>` : ""}</li>`).join("");
     const presets = (I.presets || []).map((p) => `<button type="button" class="small" data-ipreset="${esc(p.url)}">${esc(p.name)}</button>`).join("");
     return `<h3 class="section-title">Azonnali figyelő: Hardverapró, Jófogás</h3>
       <p class="muted">A jó vételek többnyire a friss hirdetésekből jönnek. Pár percenként megnézem a figyelt keresések és
@@ -623,7 +628,7 @@
         ${p.open.count ? ` · bent van ${esc(price(p.open.spent))} (${p.open.count} tárgy még nem kelt el)` : ""}</p>
       <div class="row"><button type="button" class="small" data-job="ledger">Vételeim részletesen</button></div>` : "";
     // Megvettem: a vételár (alapból a hirdetés ára), a posta, és hogy postán jön-e (akkor „úton” a Vételeim fülön)
-    const buyButton = (d) => d.bought ? '<small class="muted">Megvetted ✓</small>'
+    const buyButton = (d) => d.bought ? cancelButton(d.bought, d.text)
       : buying === d.id ? `<span class="row buyform">
           <label>Vételár <input id="d-paid" type="number" inputmode="numeric" min="1" value="${esc(d.price)}" aria-label="Vételár (Ft)"></label>
           <label>Posta <input id="d-ship" type="number" inputmode="numeric" min="0" placeholder="0" aria-label="Posta (Ft)"></label>
@@ -700,7 +705,9 @@
       <details class="setup"><summary>Indulóoldalak, és mit hoztak eddig</summary><ul class="dealist">${laneRows}</ul></details>
       <p class="muted">Egy új keresésnél először felmérem, mennyiért adják most (egy modellhívás), és ha jóváhagyod, ahhoz
         az árhoz mérem a legújabb hirdetéseket, modell nélkül. Ami jóval olcsóbb, annak az oldalát is átnézem (elkelt-e,
-        hibás-e, gyanús-e), és csak utána kérdezem meg a modellt. Csak olvasok: semmit nem veszek meg, és nem írok senkinek.
+        hibás-e, gyanús-e), és csak utána kérdezem meg a modellt. A gyanúsról (a szokásos ár 40%-a alatt, előre utalást
+        vagy WhatsAppot kér, az eladónak nincs értékelése, hamisítványnak látszik) nem szólok, csak a naplóba írom.
+        Csak olvasok: semmit nem veszek meg, és nem írok senkinek.
         A Vintedet legfeljebb kétóránként nézem.
         ${deals.browser ? "" : "<b>Ehhez Jarvis saját böngészője kell.</b>"}</p>
       ${profitBox}
@@ -852,6 +859,7 @@
       $("d-paid").scrollIntoView({ block: "center" });
       $("d-paid").focus();
     });
+    for (const b of box.querySelectorAll("[data-cancel-bought]")) b.addEventListener("click", () => cancelBought(b.dataset.cancelBought, b.dataset.name));
     for (const b of box.querySelectorAll("[data-deal-paid]")) b.addEventListener("click", async () => {
       const result = await dealAction({ action: "bought", id: b.dataset.dealPaid, price: $("d-paid").value,
                                         shipping: $("d-ship").value, in_transit: $("d-transit").checked });
@@ -864,6 +872,24 @@
     });
     for (const b of box.querySelectorAll("[data-open]")) b.addEventListener("click", () => { openId = b.dataset.open; setJob("sales"); });
     for (const b of box.querySelectorAll("[data-job]")) b.addEventListener("click", () => setJob(b.dataset.job));
+  }
+
+  // Megvetted, de visszamondtad (vagy az eladó visszamondta): a tárgy mindenhonnan törlődik (Vételeim, eladandók,
+  // találatok, havi keret), és erről a hirdetésről többé nem szólok.
+  async function cancelBought(id, name) {
+    const ok = await ask("Visszamondva", `Visszamondtad a vételt: ${name}?\nTörlöm a Vételeim, az eladandók és a ` +
+      "találatok közül, a havi keretbe sem számít bele, és erről a hirdetésről többé nem szólok. (A munka mappán belül " +
+      "a _torolt mappába kerül.)", "Visszamondva");
+    if (!ok) return;
+    const result = await J.postJson("/api/work/ledger", { action: "cancel", id });
+    if (!result.ok) { J.toast(result.error || "Nem sikerült."); return; }
+    ledger = result;
+    items.delete(id);
+    if (openId === id) openId = null;
+    if (ledgerOpen === id) ledgerOpen = null;
+    J.toast("Visszamondva: mindenhonnan töröltem.");
+    await loadDeals();
+    render();
   }
 
   // --- Vételeim: a megvett tárgyak költségei (vételár, posta, egyéb), mennyiért adnád tovább, és a haszon ---
@@ -935,6 +961,7 @@
           <button type="button" class="small" data-lopen="${esc(r.id)}" aria-expanded="${ledgerOpen === r.id}">${ledgerOpen === r.id ? "Bezárás" : "Részletek"}</button>
           ${r.stage === "úton" ? `<button type="button" class="small" data-larrived="${esc(r.id)}">Megérkezett</button>` : ""}
           <button type="button" class="small quiet" data-open="${esc(r.id)}">A tárgy lapja</button>
+          ${sold ? "" : `<button type="button" class="small quiet" data-cancel-bought="${esc(r.id)}" data-name="${esc(r.name)}">Visszamondva</button>`}
         </div>
       </div>
       ${ledgerOpen === r.id ? ledgerForm(r) : ""}</article>`;
@@ -1063,6 +1090,7 @@
       if (await ledgerAction({ action: "update", id: b.dataset.larrived, fields: { in_transit: false } })) J.toast("Megérkezett: most már nálad van.");
     });
     for (const b of box.querySelectorAll("[data-open]")) b.addEventListener("click", () => { openId = b.dataset.open; setJob("sales"); });
+    for (const b of box.querySelectorAll("[data-cancel-bought]")) b.addEventListener("click", () => cancelBought(b.dataset.cancelBought, b.dataset.name));
     for (const form of box.querySelectorAll("[data-lsave]")) form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const fields = {};

@@ -13,10 +13,12 @@ felmérés közben talál jóval olcsóbbat, arról is szól.
 Utána modell nélkül keres, ehhez a rögzített árhoz mérve: jelölt az a még nem látott (vagy azóta leárazott) hirdetés,
 ami a megadott %-kal olcsóbb, vagy legalább a megadott forinttal hoz hasznot (a hirdetési ár 90%-áért eladva, a postával
 együtt, SALE_RATIO, SHIPPING). A jelölt hirdetés oldalát megnyitja (csak olvasva), és modell nélkül megnézi: elkelt-e
-már, van-e benne hibára utaló szó, vagy átverésre utaló jel (előre utalás, külföldről küldi, a Vinteden kívüli
-elérhetőség). Csak az átment jelöltekre kérdez rá röviden a modellel. Ami átmegy, arról szól (kind: deal), a hirdetés
-linkjével és a várható haszonnal. Ha a hirdetésekben napokig jóval más az ár, mint a jóváhagyott, szól, hogy mérje fel
-újra.
+már, van-e benne hibára utaló szó. A gyanús hirdetésről egyáltalán nem szól (csak a naplóba írja, miért hagyta ki):
+gyanúsan olcsó (SUSPECT_RATIO; egy gyakran hamisított márkánál FAKE_RATIO), átverésre utaló jel (előre utalás,
+külföldről küldi, az oldalon kívüli elérhetőség), az eladónak még nincs értékelése, vagy a modell szerint átverésnek
+vagy hamisítványnak látszik. Csak az átment jelöltekre kérdez rá röviden a modellel. Ami átmegy, arról szól (kind:
+deal), a hirdetés linkjével és a várható haszonnal. Ha a hirdetésekben napokig jóval más az ár, mint a jóváhagyott,
+szól, hogy mérje fel újra.
 
 Felfedező (figyelt oldalak): keresőszó nélkül, egy kategória- vagy találati oldal friss hirdetései (bármelyik oldalon; a
 Vaterán a licitek is). Modell nélkül az árbázishoz méri őket (pricebook.py: minden látott hirdetés ára, termékenként, a
@@ -110,9 +112,11 @@ WATCH_PROFIT = 5000
 EXPLORE_ROWS = 20
 EXPLORE_PICKS = 3
 # Felfedező (figyelt oldalak, keresőszó nélkül): az árbázishoz (vagy a máshol talált árhoz) mérve legalább ennyivel
-# olcsóbb, és legalább a megadott haszon jön ki belőle. A gyakran hamisított márkáknál a szokásos ár FAKE_RATIO-ja alatt
-# figyelmeztet.
+# olcsóbb, és legalább a megadott haszon jön ki belőle.
 EXPLORE_CUT = 0.15
+# Gyanúsan olcsó: a szokásos ár SUSPECT_RATIO-ja alatt (a gyakran hamisított márkáknál FAKE_RATIO-ja alatt) többnyire
+# átverés, hamisítvány vagy hibás; ezekről nem szól. (A FLOOR alatti ár nem is valódi ár: azt meg sem nézi.)
+SUSPECT_RATIO = 0.4
 FAKE_RATIO = 0.6
 SPEED_CHECKS = 2           # egy körben ennyi régebben látott hirdetést néz meg újra (elkelt-e; a Vintedet nem)
 DEFAULT_DAY = (7, 23)      # a gép általában ekkor megy (óra): a licitekről még az esti leállás előtt szól
@@ -172,7 +176,8 @@ PAGE_TEXT = 2000           # a hirdetés oldalának eleje (a cím, a leírás, a
 _SCAM_RE = re.compile(r"\b(csak (elore )?utal\w*|elore (kell )?utal\w*|utalas elore|elore fizet\w*|western union|"
                       r"moneygram|paypal (baratnak|friends)|kulfoldon (vagyok|elek|dolgozom)|kulfoldrol (kuldom|postazom)|"
                       r"ajandekkartya|gift ?card)\b")
-# A Vinteden kívüli elérhetőség: ott a fizetés és a vevővédelem az oldalon megy, a máshová hívás átverés jele.
+# Az oldalon kívüli elérhetőség (csevegőalkalmazás, e-mail): a máshová hívás átverés jele (ott nincs vevővédelem, és
+# onnan jön a hamis futár- vagy fizetési link).
 _OFFSITE_RE = re.compile(r"\b(whatsapp\w*|telegram\w*|viber\w*)\b|[\w.+-]+@[\w-]+\.[a-z]{2,}")
 # Hibára utaló szó a leírásban (a „nem hibás”, „nem törött” nem számít).
 _DEFECT_RE = re.compile(r"(?<!nem )\b(repedt|repedes\w*|beegett|beeges|nem kapcsol be|nem indul|javitasra szorul|"
@@ -195,7 +200,9 @@ _NO_REVIEWS_RE = re.compile(r"nincs(enek)? (meg )?ertekeles\w*|meg nincs ertekel
 CHECK_SYSTEM = (
     "Egy használtcikk-kereskedőnek segítesz. Megkapod, mit keres, és egy hirdetés címét, szövegét és árát. "
     "Döntsd el, megéri-e megnézni: ok=true, ha ez tényleg a keresett termék (nem kiegészítő, nem alkatrész, nem "
-    "más típus), egy darab, eladó (nem keres vagy cserél), és nem hibás vagy hiányos. reason: egy rövid mondat "
+    "más típus), egy darab, eladó (nem keres vagy cserél), és nem hibás vagy hiányos. suspicious=true, ha átverésnek "
+    "vagy hamisítványnak látszik: túl szép, hogy igaz legyen, előre fizetést, más oldalon vagy alkalmazásban való "
+    "kapcsolatfelvételt vagy futárcéget kér, sürget, vagy a leírás nem illik a termékhez. reason: egy rövid mondat "
     "magyarul. " + UNTRUSTED_NOTE)
 JUDGE_SYSTEM = (
     "Egy használtcikk-kereskedőnek segítesz felmérni, mennyiért adják most a keresett terméket. Megkapod a keresett "
@@ -226,8 +233,8 @@ EXPLORE_SCHEMA: dict[str, Any] = {
 }
 CHECK_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"ok": {"type": "boolean"}, "reason": {"type": "string"}},
-    "required": ["ok", "reason"],
+    "properties": {"ok": {"type": "boolean"}, "suspicious": {"type": "boolean"}, "reason": {"type": "string"}},
+    "required": ["ok", "suspicious", "reason"],
 }
 
 
@@ -680,6 +687,7 @@ class DealHunter:
                 "watches": [w for w in data.get("watches") or [] if isinstance(w, dict) and w.get("url")],
                 "deals": [d for d in data.get("deals") or [] if isinstance(d, dict) and d.get("url")],
                 "seen": numbers("seen"),       # hirdetés → mikor néztük meg utoljára (egy keresés ehhez igazodik)
+                "cancelled": numbers("cancelled"),   # visszamondott vétel hirdetése → mikor: többé nem szól róla
                 "prices": {k: int(v) for k, v in numbers("prices").items()},   # hirdetés → az ára akkor (leárazás)
                 "last": numbers("last")}       # keresés:oldal → mikor néztük meg (gyakoriság)
 
@@ -1175,6 +1183,32 @@ class DealHunter:
             self.journal.add(f"Megvetted: „{found['text'][:60]}” ({format_price(found['price'])}).")
         return self.state()
 
+    def cancel_bought(self, item_id: str, name: str = "") -> dict[str, Any] | None:
+        """Visszamondtad a vételt (a tárgyat a hívó törli): a találat, amiből lett, kikerül a találatok közül, a jó pontja
+        (a termék, az indulóoldal) visszavonódik, a havi keret maradéka rögtön újraszámolódik, és erről a hirdetésről
+        többé nem szól. Visszaadja a találatot (None, ha kézzel felvett vétel volt)."""
+        with self._lock:
+            found = next((d for d in self._data["deals"] if d.get("bought") == item_id), None)
+            if found is not None:
+                self._data["deals"].remove(found)
+                feedback = self._data["feedback"].get(found.get("product_key") or "")
+                if feedback and feedback.get("bought"):
+                    feedback["bought"] = int(feedback["bought"]) - 1
+                lane = self._data["lanes"].get(found.get("lane") or "")
+                if lane and lane.get("bought"):
+                    lane["bought"] = int(lane["bought"]) - 1
+                cancelled = self._data["cancelled"]
+                cancelled[listing_key(found["url"])] = self.clock()
+                for key, _at in sorted(cancelled.items(), key=lambda kv: kv[1])[:max(0, len(cancelled) - MAX_SEEN)]:
+                    cancelled.pop(key, None)
+                self._save()
+            self._remaining = (0.0, None)
+        what = found["text"][:60] if found is not None else name[:60]
+        self.journal.add(f"Visszamondtad a vételt: „{what}”" + (f" ({format_price(found['price'])})" if found else "")
+                         + "; töröltem a Vételeim és az eladandók közül" + (", és a találatok közül" if found else "")
+                         + ".")
+        return found
+
     def dismiss(self, deal_id: str) -> dict[str, Any]:
         """Elrejtés. Öntanulás: amit MUTE_AFTER-szer elrejtettél (és nem vettél meg), arról MUTE_DAYS napig nem szól."""
         muted = ""
@@ -1456,8 +1490,8 @@ class DealHunter:
         return pays(search, price, reference)
 
     def _deal(self, search: dict[str, Any], row: dict[str, Any], reference: int, **extra: Any) -> dict[str, Any]:
-        """Egy jelölt. Az árbázisból hozzáteszi, milyen gyorsan kel el az ilyen (ha tudjuk), és ha egy gyakran hamisított
-        márka feltűnően olcsó, figyelmeztet."""
+        """Egy jelölt. Az árbázisból hozzáteszi, milyen gyorsan kel el az ilyen (ha tudjuk), és a termékkulcsát (a
+        gyakran hamisított márkákhoz, _suspect)."""
         deal = {**row, "id": secrets.token_hex(5), "search": search["id"], "query": search["query"],
                 "median": reference, "margin": reference - row["price"],
                 "profit": expected_profit(reference, row["price"]), "at": self.clock(),
@@ -1469,14 +1503,32 @@ class DealHunter:
             deal["speed"] = speed_text(self.book.speed(found[0])) or None
             if not deal["speed"]:
                 deal.pop("speed")
-            if fake_prone(found[0]) and not row.get("auction") and row["price"] < reference * FAKE_RATIO:
-                deal.setdefault("warnings", []).append("ezt a márkát gyakran hamisítják, és feltűnően olcsó: nézd meg "
-                                                       "alaposan a fotókat és az eladót")
         deal.pop("product", None)
         return deal
 
+    @staticmethod
+    def _suspect(deal: dict[str, Any]) -> str:
+        """Modell és oldalbetöltés nélkül: gyanúsan olcsó-e (miért; „” = nem). A licit mostani ára nem ilyen."""
+        reference, price = int(deal.get("median") or 0), int(deal["price"])
+        if deal.get("auction") or reference <= 0:
+            return ""
+        if price < reference * SUSPECT_RATIO:
+            return (f"gyanúsan olcsó: a szokásos ára (kb. {format_price(reference)}) {round(price * 100 / reference)}%-a "
+                    "(átverés, hamisítvány vagy hibás szokott lenni)")
+        if fake_prone(str(deal.get("product_key") or "")) and price < reference * FAKE_RATIO:
+            return "ezt a márkát gyakran hamisítják, és feltűnően olcsó"
+        return ""
+
+    def _suspicious(self, deal: dict[str, Any]) -> None:
+        """Gyanús hirdetés: nem szól róla, és a találatok közé sem kerül; látottnak jegyzi, és a naplóba írja, miért
+        hagyta ki."""
+        self._mark(deal)
+        self.journal.add(f"Gyanús, nem szóltam róla: „{deal['text'][:60]}” {format_price(deal['price'])} "
+                         f"({deal.get('site') or deal.get('platform') or '?'}) – {deal.get('suspect') or 'gyanús'}.")
+
     def _deal_keys(self) -> set[str]:
-        return {listing_key(d["url"]) for d in self._data["deals"] if d.get("url")}
+        """A hirdetések, amelyekről már szóltunk (vagy visszamondtad a vételt): ezekről többé nem szól."""
+        return {listing_key(d["url"]) for d in self._data["deals"] if d.get("url")} | set(self._data["cancelled"])
 
     def _hunt(self, search: dict[str, Any], kept: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Modell nélkül, a jóváhagyott szokásos árhoz mérve: a még nem látott (vagy azóta leárazott) hirdetések
@@ -1487,6 +1539,7 @@ class DealHunter:
         out = []
         with self._lock:
             seen, prices, deals = self._data["seen"], self._data["prices"], self._deal_keys()
+            cancelled = self._data["cancelled"]    # visszamondott vétel: leárazva sem szól róla
             for row in kept:
                 key = listing_key(row["url"]) if row["url"] else ""
                 if not key:
@@ -1494,7 +1547,7 @@ class DealHunter:
                 old = prices.get(key)
                 new = key not in seen or seen[key] < since
                 drop = old is not None and row["price"] <= old * (1 - DROP)
-                if not (new or drop) or (key in deals and not drop):
+                if not (new or drop) or (key in deals and not drop) or key in cancelled:
                     prices[key] = row["price"]
                     continue
                 offer = offer_price(search, row["price"], reference) if row.get("platform") == "vinted" else None
@@ -1598,6 +1651,10 @@ class DealHunter:
         modellkérdés a modell-sorban. Ha a kör keretébe már nem fér bele, nem jegyzi látottnak: a következő körben
         újra jelölt."""
         self._lane_count(deal.get("lane"), "candidates")
+        if why := self._suspect(deal):
+            deal["suspect"] = why
+            self._suspicious(deal)             # gyanúsan olcsó: az oldalát sem nyitja meg
+            return
         if game.blocked and page is None:
             deal.setdefault("warnings", []).append("a hirdetés oldalát nem néztem meg (robot-ellenőrzés)")
         else:
@@ -1609,8 +1666,11 @@ class DealHunter:
             verdict = self._inspect(deal, page, game)
             if verdict == "captcha":
                 game.blocked = True            # ebben a körben több hirdetést nem nyit meg
+            elif verdict == "gyanús":
+                self._suspicious(deal)
+                return
             elif verdict:
-                self._mark(deal)               # elkelt, hibás vagy gyanús: nem szól róla
+                self._mark(deal)               # elkelt vagy hibás: nem szól róla
                 return
         if game.lane is None:
             self._conclude(game, search, deal, None)
@@ -1623,9 +1683,13 @@ class DealHunter:
     def _conclude(self, game: _Round, search: dict[str, Any], deal: dict[str, Any], ok: bool | None) -> None:
         """A modell válasza után (a böngésző szálán): ha nem mondott nemet, szól róla (kivéve, ha az ilyen terméket
         többször elrejtetted: arról egy ideig nem szól). A naplóba is beírja."""
-        self._mark(deal)
         if ok is False:
+            if deal.get("suspect"):
+                self._suspicious(deal)
+            else:
+                self._mark(deal)
             return
+        self._mark(deal)
         if self._muted(deal.get("product_key"), self.clock()):
             game.notes.append(f"„{deal['text'][:40]}”: az ilyet elrejtetted, nem szóltam")
             return
@@ -1715,11 +1779,12 @@ class DealHunter:
         unknown, found, skip = [], [], []
         with self._lock:
             seen, prices, deals = dict(self._data["seen"]), dict(self._data["prices"]), self._deal_keys()
+            cancelled = set(self._data["cancelled"])
         for row in rows:
             key = listing_key(row["url"])
             old = prices.get(key)
             drop = old is not None and not row.get("auction") and row["price"] <= old * (1 - DROP)
-            if (key in seen and not drop) or (key in deals and not drop):
+            if (key in seen and not drop) or (key in deals and not drop) or key in cancelled:
                 continue
             if not usable(row["text"]):
                 skip.append(row)               # nem eladási ár (kereső, csere, csomag, alkatrész…)
@@ -2461,18 +2526,19 @@ class DealHunter:
             return "elkelt"
         text = fold(str(page.get("text") or "")[:PAGE_TEXT])
         deal["details"] = " ".join(str(page.get("text") or "").split())[:PAGE_TEXT]
-        if _SCAM_RE.search(text) or (deal.get("platform") == "vinted" and _OFFSITE_RE.search(text)):
-            return "gyanús"
+        for pattern, why in ((_SCAM_RE, "átverésre utaló jel a hirdetésben (előre fizetés, külföldről küldi…)"),
+                             (_OFFSITE_RE, "az oldalon kívüli elérhetőséget ad meg (WhatsApp, Telegram, e-mail…)"),
+                             (_NO_REVIEWS_RE, "az eladónak még nincs értékelése")):
+            if pattern.search(text):
+                deal["suspect"] = why
+                return "gyanús"
         if _PARTS_RE.search(text) or _DEFECT_RE.search(text):
             return "hibás"
-        if _NO_REVIEWS_RE.search(text):
-            deal.setdefault("warnings", []).append("az eladónak még nincs értékelése")
-        if _OFFSITE_RE.search(text):
-            deal.setdefault("warnings", []).append("az oldalon kívüli elérhetőséget ad meg")
         return ""
 
     def _confirm(self, search: dict[str, Any], deal: dict[str, Any]) -> bool | None:
-        """Egy rövid modellkérdés egy jelöltről. None: nem sikerült megkérdezni (ilyenkor szól, de nem ellenőrzött)."""
+        """Egy rövid modellkérdés egy jelöltről. None: nem sikerült megkérdezni (ilyenkor szól, de nem ellenőrzött);
+        False: nem ez, vagy gyanús (akkor a deal["suspect"]-ben, miért)."""
         messages = [{"role": "system", "content": CHECK_SYSTEM},
                     {"role": "user", "content": f"Keresett termék: {search['query']}\nHirdetés ({deal['site']}): "
                                                 f"{deal['text']}\nÁr: {format_price(deal['price'])} (a szokásos ára "
@@ -2485,6 +2551,9 @@ class DealHunter:
             return None
         deal["checked"] = True
         deal["note"] = str(data.get("reason") or "")[:200]
+        if data.get("suspicious"):
+            deal["suspect"] = "a modell szerint gyanús" + (f": {deal['note']}" if deal["note"] else "")
+            return False
         return bool(data.get("ok"))
 
     def _remember(self, deal: dict[str, Any]) -> None:
@@ -2618,15 +2687,25 @@ class DealHunter:
         with self._lock:
             if listing_key(row["url"]) in self._deal_keys():
                 return
+        if why := self._suspect(deal):
+            deal["suspect"] = why
+            self._suspicious(deal)             # gyanúsan olcsó: az oldalát sem nyitja meg
+            return
         page = look(row)
         verdict = self._inspect(deal, page) if page is not None else ""
         if page is None:
             deal.setdefault("warnings", []).append("a hirdetés oldalát nem tudtam megnyitni")
+        if verdict == "gyanús":
+            self._suspicious(deal)
+            return
         if verdict not in ("", "captcha") or self._muted(deal.get("product_key"), self.clock()):
             self._mark(deal)
             return
         if self.llm is not None and can_ask() and self._confirm(probe, deal) is False:
-            self._mark(deal)
+            if deal.get("suspect"):
+                self._suspicious(deal)
+            else:
+                self._mark(deal)
             return
         self._mark(deal)
         self._remember(deal)

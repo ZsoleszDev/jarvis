@@ -120,6 +120,7 @@ class FakeLlm:
 
     def __init__(self, ok: bool = True, pick=None):
         self.ok, self.pick, self.calls, self.judged = ok, pick, [], []
+        self.suspicious = False               # a jelöltnél: átverésnek látszik
         self.explore: list[dict] = []
         self.threads: set[str] = set()
         self.running = self.most = 0
@@ -149,7 +150,9 @@ class FakeLlm:
             self.judged.append(lines)
             return {"similar": [int(line.split(".")[0]) for line in lines if self.pick is None or self.pick(line)],
                     "reason": "A valódi kártyák."}
-        return {"ok": self.ok, "reason": "Ugyanaz a kártya." if self.ok else "Csak a doboza."}
+        if self.suspicious:
+            return {"ok": True, "suspicious": True, "reason": "Előre utalást kér, és túl olcsó."}
+        return {"ok": self.ok, "suspicious": False, "reason": "Ugyanaz a kártya." if self.ok else "Csak a doboza."}
 
     def checks(self) -> int:
         return len(self.calls) - len(self.judged)
@@ -291,7 +294,7 @@ class DealTests(HunterCase):
         self.assertEqual(len(self.notices), 1, "modell nélkül is szól (nem ellenőrzött)")
 
     def test_minimum_price_and_excluded_words(self):
-        self.browser.results = RESULTS + [listing(20, "RTX 3060 Ti doboz, üres", 20000),
+        self.browser.results = RESULTS + [listing(20, "RTX 3060 Ti doboz, üres", 45000),
                                           listing(21, "RTX 3060 Ti backplate", 9000)]
         self.ready(min_price=15000, exclude="doboz, backplate")
         self.hunter.run(notify=self.notify)
@@ -399,13 +402,14 @@ class DealTests(HunterCase):
     # --- a jelölt hirdetés oldala ---
 
     def test_the_listing_page_is_checked_before_the_model(self):
+        """A hibásról és a gyanúsról nem szól (a modellt sem kérdezi); a gyanúsat a naplóba írja, hogy miért."""
         cases = {
-            "Csak előre utalással, külföldön vagyok, postázom.": None,
+            "Csak előre utalással, külföldön vagyok, postázom.": "átverésre utaló jel",
             "A kártya működik, de a hűtő ventilátora repedt.": None,
             "Szia, írj WhatsAppon: +36 30 123 4567": "az oldalon kívüli elérhetőséget ad meg",
             "Hibátlan. Az eladónak még nincs értékelése.": "az eladónak még nincs értékelése",
         }
-        for n, (page, warning) in enumerate(cases.items()):
+        for n, (page, why) in enumerate(cases.items()):
             with self.subTest(page=page):
                 self.notices.clear()
                 self.llm.calls.clear()
@@ -413,12 +417,36 @@ class DealTests(HunterCase):
                 hunter = self.make(str(n))
                 self.ready(hunter)
                 hunter.run(notify=self.notify)
-                if warning is None:
-                    self.assertEqual((self.notices, self.llm.calls), ([], []), "gyanús vagy hibás: modell sem kell")
+                self.assertEqual((self.notices, self.llm.calls), ([], []), "nem szól róla, modell sem kell")
+                self.assertEqual(hunter.state()["deals"], [], "a találatok közé sem kerül")
+                said = [e["text"] for e in hunter.journal.entries() if e["text"].startswith("Gyanús")]
+                if why is None:
+                    self.assertEqual(said, [], "a hibás nem gyanús, csak nem éri meg")
                 else:
-                    [notice] = self.notices
-                    self.assertIn(f"Figyelj: {warning}.", notice[2])
-                    self.assertEqual(hunter.state()["deals"][0]["warnings"], [warning])
+                    [line] = said
+                    self.assertIn("„Gigabyte RTX 3060 Ti Gaming OC” 55 000 Ft (Hardverapró)", line)
+                    self.assertIn(why, line)
+
+    def test_suspiciously_cheap_or_suspicious_to_the_model_is_never_sent(self):
+        self.browser.results = NORMAL + [listing(10, "Gigabyte RTX 3060 Ti Gaming OC", 35000)]
+        self.ready()
+        self.hunter.run(notify=self.notify)
+        self.assertEqual((self.notices, self.browser.looked), ([], []), "nem szól róla, az oldalát sem nyitja meg")
+        self.assertEqual(self.hunter.state()["deals"], [])
+        [line] = [e["text"] for e in self.hunter.journal.entries() if e["text"].startswith("Gyanús")]
+        self.assertIn("gyanúsan olcsó: a szokásos ára (kb. 100 000 Ft) 35%-a", line)
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual(len([e for e in self.hunter.journal.entries() if e["text"].startswith("Gyanús")]), 1,
+                         "látottnak jegyezte: egyszer írja be")
+        # amit a modell gyanúsnak lát (előre utalás, túl szép, hogy igaz legyen…), arról sem szól
+        self.browser.results = RESULTS
+        self.llm.suspicious = True
+        other = self.make("modell")
+        self.ready(other)
+        other.run(notify=self.notify)
+        self.assertEqual((self.notices, other.state()["deals"]), ([], []))
+        self.assertIn("a modell szerint gyanús: Előre utalást kér",
+                      " ".join(e["text"] for e in other.journal.entries()))
 
     def test_sold_listing_is_skipped_and_a_captcha_stops_the_page_reads(self):
         self.browser.pages = {CHEAP: {"short": ["Eladva"], "text": "Gigabyte RTX 3060 Ti"}}
@@ -589,7 +617,8 @@ class ExploreTests(HunterCase):
         deals = {d["price"]: d for d in self.hunter.state()["deals"]}
         self.assertEqual(deals[45000]["offer"], 38500)
         self.assertIn("Ajánlatot tegyek?", [t for _k, _t, t, _e in self.notices if "45 000" in t][0])
-        self.assertIn("gyakran hamisítják", deals[25000]["warnings"][0])
+        self.assertNotIn(25000, deals, "a gyakran hamisított márka feltűnően olcsón gyanús: nem szól róla")
+        self.assertIn("ezt a márkát gyakran hamisítják", " ".join(e["text"] for e in self.hunter.journal.entries()))
         self.assertNotIn("warnings", deals[45000])
         self.assertEqual(explore_top(50000, 5000), 38500)
         self.clock.now += 3600
@@ -1206,6 +1235,35 @@ class MoneyTests(HunterCase):
         self.store.create(title="Makita", bought_price=20000, bought_at=now - 30)
         self.assertIn("Elfogyott a havi keret", self.hunter.money_check(self.notify)[0])
         self.assertFalse(self.hunter._affordable(1000), "elfogyott: semmi nem fér bele")
+
+    def test_a_cancelled_purchase_is_removed_everywhere(self):
+        """Visszamondva: a találat kikerül, a jó pontja visszavonódik, a havi keretbe nem számít bele, és erről a
+        hirdetésről (akkor sem, ha leárazzák) többé nem szól."""
+        self.hunter.set_money(budget="100 000")
+        self.ready()
+        self.hunter.run(notify=self.notify)
+        [deal] = self.hunter.state()["deals"]
+        item = self.store.create(title=deal["text"], bought_price=deal["price"], bought_at=self.clock.now)
+        self.hunter.mark_bought(deal["id"], item.id)
+        self.hunter.money_check(lambda *a, **k: None)      # a vétel után (a felület is így hívja)
+        self.assertEqual((self.hunter.money_status()["spent"], self.hunter._budget_left()), (55000, 45000))
+        key = deal["product_key"]
+        self.assertEqual(self.hunter._data["feedback"][key]["bought"], 1)
+        found = self.hunter.cancel_bought(item.id, item.name)
+        self.store.delete(item.id)
+        self.assertEqual(found["id"], deal["id"])
+        self.assertEqual(self.hunter.state()["deals"], [], "a találatok közül is kikerült")
+        self.assertEqual(self.hunter._data["feedback"][key]["bought"], 0)
+        self.assertEqual((self.hunter.money_status()["spent"], self.hunter._budget_left()), (0, 100000),
+                         "a havi keretből sem fogy")
+        self.assertIn("Visszamondtad a vételt: „Gigabyte RTX 3060 Ti Gaming OC” (55 000 Ft)",
+                      self.hunter.journal.entries()[0]["text"])
+        self.notices.clear()
+        self.browser.results = NORMAL + [listing(10, "Gigabyte RTX 3060 Ti Gaming OC", 50000)]   # leárazta
+        self.clock.now += 3 * 3600
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual(self.notices, [], "a visszamondott hirdetésről többé nem szól")
+        self.assertIsNone(self.hunter.cancel_bought("nincs-ilyen", "Kézzel felvett"), "kézzel felvett vétel")
 
     def test_too_many_unsold_items(self):
         now = self.clock.now

@@ -81,8 +81,11 @@
 - Az azonnali figyelő egy letöltésből legfeljebb három, az árbázis által nem ismert hirdetés árát nézi meg máshol (a modell
   szerint megérők elöl); ha egy kategóriában egyszerre sok ismeretlen új jön, a többi kimarad (`deals.EXPLORE_PICKS`).
 - A régi napszak-beállítás (`set_day`, „day” művelet) a háttérben megvan, az Indítás 0–24 órára állítja; a felületen nincs.
-- A napközbeni böngészés hardverapró/jófogás munkamenetei böngésző nélkül mennek, de továbbra is egymás után a Vinted- és
-  Vatera-munkamenetekkel; a két sor párhuzamosan is futhatna (a böngésző közben a Vintedet nézné).
+- A gyanús hirdetések szűrője (`deals.SUSPECT_RATIO`, értékelés nélküli eladó, oldalon kívüli elérhetőség) valódi
+  oldalakon nincs kipróbálva: ha egy oldal minden hirdetésénél kiír valamit, ami „nincs értékelés”-nek vagy e-mail-címnek
+  látszik, ott minden jelölt kiesne. A napló („Gyanús, nem szóltam róla…”) mutatja; akkor az oldalszöveg-mintán kell
+  szűkíteni (`_NO_REVIEWS_RE`, `_OFFSITE_RE`).
+- A Visszamondva a már feltöltött hirdetést az oldalakról nem veszi le (a tárgy törlése sem).
 - A „most kb.” ár (Vételeim) a tárgy címéből vagy termékéből keres kulcsot; a csak leírással (prompt) felvett tárgynál
   az első kiolvasás után jelenik meg.
 - Az azonnali figyelő ütemezése (mikor jön a következő) a memóriában van: újraindítás után rögtön néz egyet.

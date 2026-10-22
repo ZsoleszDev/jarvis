@@ -211,6 +211,14 @@ class InstantWatch:
             self._save()
         return self.state()
 
+    def forget_deal(self, deal_id: str) -> None:
+        """Visszamondtad a vételt: a friss hirdetések közül is kikerül (a hirdetést látottnak tudja, nem szól újra)."""
+        with self._lock:
+            hits = [h for h in self._data["hits"] if h.get("deal") != deal_id]
+            if len(hits) != len(self._data["hits"]):
+                self._data["hits"] = hits
+                self._save()
+
     def pause(self, alert_id: str, off: bool) -> dict[str, Any]:
         """Egy figyelő szüneteltetése (a beállításai és amit már látott, megmarad)."""
         with self._lock:
