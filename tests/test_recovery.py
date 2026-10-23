@@ -346,7 +346,7 @@ class AppRecoveryTests(unittest.TestCase):
         cfg.api.enabled = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
-        self.app = JarvisApp(cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(cfg, self.ui)
         self.assertTrue(self.app.start())
         self.pause = mock.patch.object(llm, "RESTART_PAUSE", 0.01)
         self.pause.start()

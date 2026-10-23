@@ -13,8 +13,10 @@ from typing import Any, Callable
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = PROJECT_DIR / "config.toml"
-# Régi beállítások, amiket már nem használunk: csendben kihagyjuk őket (nem hiba).
-RETIRED_KEYS = {("work", "vision_photos")}
+# Régi beállítások, amiket már nem használunk: csendben kihagyjuk őket (nem hiba). A beszédfelismerés, a
+# felolvasás és az ébresztőszó kikerült a Jarvisból: a régi config.toml ezekről szóló részei sem hibák.
+RETIRED_KEYS = {("work", "vision_photos"), ("assistant", "fillers"), ("scheduler", "speak")}
+RETIRED_SECTIONS = {"stt", "audio", "tts", "wake_word"}
 
 
 @dataclass
@@ -27,7 +29,6 @@ class AssistantCfg:
     keep_page_views: int = 1
     show_timings: bool = True
     stream: bool = True
-    fillers: bool = True
 
 
 @dataclass
@@ -43,42 +44,6 @@ class LlmCfg:
     request_timeout: float = 180.0
     warm_up: bool = True       # induláskor előre feldolgozza a rendszerpromptot (gyorsabb első válasz)
     parallel: int = 2          # ennyi modellhívás mehet egyszerre (ha az Ollama is engedi: OLLAMA_NUM_PARALLEL)
-
-
-@dataclass
-class SttCfg:
-    enabled: bool = True   # false: nincs mikrofon és beszédfelismerés (mint a --text), csak gépelés
-    device: str = "auto"
-    language: str = "hu"
-    gpu_model: str = "turbo"
-    gpu_compute_type: str = "int8_float16"
-    gpu_device_index: int = 1
-    cpu_model: str = "small"
-    cpu_compute_type: str = "int8"
-    cpu_threads: int = 8
-    beam_size: int = 1
-    initial_prompt: str = ""
-
-
-@dataclass
-class AudioCfg:
-    input_device: str | int = ""
-    output_device: str | int = ""
-    silence_seconds: float = 0.8
-    no_speech_timeout: float = 6.0
-    follow_up_seconds: float = 4.0
-    max_record_seconds: float = 30.0
-    min_threshold: float = 0.01
-    threshold_multiplier: float = 3.0
-
-
-@dataclass
-class TtsCfg:
-    engine: str = "piper"
-    voice: str = "hu_HU-imre-medium"
-    voices_dir: str = "voices"
-    length_scale: float = 1.0
-    volume: float = 1.0
 
 
 @dataclass
@@ -135,15 +100,6 @@ class GuiCfg:
 
 
 @dataclass
-class WakeWordCfg:
-    enabled: bool = True
-    model: str = "hey_jarvis"
-    threshold: float = 0.5
-    chime: bool = True
-    cooldown: float = 2.0
-
-
-@dataclass
 class WorkCfg:
     enabled: bool = True
     dir: str = ""              # üres = az adatmappában (lásd data_dir)
@@ -188,9 +144,8 @@ class SchedulerCfg:
     stale_days: int = 14           # ennyi nap után szól, ha egy hirdetés nem kelt el (0 = soha)
     listing_checks: int = 5        # naponta ennyi fent lévő hirdetést néz meg: elkelt-e, eltűnt-e (0 = soha)
     message_minutes: float = 120.0  # ilyen sűrűn nézi meg a vevői üzeneteket, csak olvasva (0 = soha)
-    deal_minutes: float = 180.0    # automata kereskedés: az új keresések gyakorisága (0 = a háttérben soha)
+    deal_minutes: float = 60.0     # automata kereskedés: az új keresések gyakorisága (0 = a háttérben soha)
     message_reads: int = 3         # egy körben legfeljebb ennyi olvasatlan beszélgetést nyit meg
-    speak: bool = True             # a háttérmunka eredményét fel is olvassa
 
 
 @dataclass
@@ -207,15 +162,11 @@ class ApiCfg:
 class Config:
     assistant: AssistantCfg = field(default_factory=AssistantCfg)
     llm: LlmCfg = field(default_factory=LlmCfg)
-    stt: SttCfg = field(default_factory=SttCfg)
-    audio: AudioCfg = field(default_factory=AudioCfg)
-    tts: TtsCfg = field(default_factory=TtsCfg)
     tools: ToolsCfg = field(default_factory=ToolsCfg)
     web: WebCfg = field(default_factory=WebCfg)
     browser: BrowserCfg = field(default_factory=BrowserCfg)
     screen: ScreenCfg = field(default_factory=ScreenCfg)
     gui: GuiCfg = field(default_factory=GuiCfg)
-    wake_word: WakeWordCfg = field(default_factory=WakeWordCfg)
     work: WorkCfg = field(default_factory=WorkCfg)
     creative: CreativeCfg = field(default_factory=CreativeCfg)
     scheduler: SchedulerCfg = field(default_factory=SchedulerCfg)
@@ -232,15 +183,11 @@ class Config:
 _SECTIONS: dict[str, type] = {
     "assistant": AssistantCfg,
     "llm": LlmCfg,
-    "stt": SttCfg,
-    "audio": AudioCfg,
-    "tts": TtsCfg,
     "tools": ToolsCfg,
     "web": WebCfg,
     "browser": BrowserCfg,
     "screen": ScreenCfg,
     "gui": GuiCfg,
-    "wake_word": WakeWordCfg,
     "work": WorkCfg,
     "creative": CreativeCfg,
     "scheduler": SchedulerCfg,
@@ -284,7 +231,7 @@ def load_config(path: str | Path | None = None) -> Config:
         cfg.apps = {str(k): str(v) for k, v in apps.items()}
 
     for key in data:
-        if key not in _SECTIONS and key != "apps":
+        if key not in _SECTIONS and key != "apps" and key not in RETIRED_SECTIONS:
             warnings.append(f"Ismeretlen szakasz: [{key}] (kihagyva)")
     return cfg
 

@@ -456,7 +456,7 @@ class SellNoteTests(unittest.TestCase):
         cfg.assistant.show_timings = False
         cfg.assistant.fillers = False
         self.ui = RecordingUI()
-        self.app = JarvisApp(cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(cfg, self.ui)
         self.assertTrue(self.app.start())
         if not self.app.work.browser_ready:
             self.skipTest("a Munka menü feltöltéséhez böngésző kell (Playwright)")

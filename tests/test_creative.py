@@ -486,7 +486,7 @@ class AppTests(unittest.TestCase):
         self.ui = GuiUI(self.bus, "Jarvis")
         self.seen: list[dict] = []
         self.bus.add_listener(self.seen.append)
-        self.app = JarvisApp(cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(cfg, self.ui)
         self.assertTrue(self.app.start())
         self.app.start_agent()
         self.desk = self.app.creative
@@ -565,7 +565,7 @@ class EndpointTests(unittest.TestCase):
         cfg.api.enabled = False
         cls.bus = EventBus()
         cls.ui = GuiUI(cls.bus, "Jarvis")
-        cls.app = JarvisApp(cfg, cls.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        cls.app = JarvisApp(cfg, cls.ui)
         assert cls.app.start()
         cls.app.start_agent()
         cls.server = GuiServer(cls.app, cls.ui, cls.bus)
@@ -673,7 +673,7 @@ class CreativeBrowserTests(unittest.TestCase):
         cfg.browser.enabled = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
-        self.app = JarvisApp(cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(cfg, self.ui)
         self.assertTrue(self.app.start())
         self.app.start_agent()
         self.server = GuiServer(self.app, self.ui, self.bus)

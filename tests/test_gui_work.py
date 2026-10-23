@@ -46,7 +46,7 @@ class WorkHarness:
         cfg.assistant.fillers = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
-        self.app = JarvisApp(cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(cfg, self.ui)
         assert self.app.start()
         self.app.start_agent()
         self.server = GuiServer(self.app, self.ui, self.bus)
@@ -757,6 +757,67 @@ class WorkBrowserTests(unittest.TestCase):
         self.wait_for(lambda: deals.state()["deals"] == [])
         self.assertEqual([i.name for i in store.all()], ["Nike Air Max 90"])
 
+    def test_the_start_screen_tiles(self):
+        """A Beszélgetés elején csempék: a kereskedés indítása (és leállítása), egy új tárgy (a Munka menü űrlapjára
+        visz), és ha van, a legutóbbi találatok. Az első üzenet után eltűnnek, az Új beszélgetéssel visszajönnek."""
+        deals, instant = self.h.app.work.deals, self.h.app.work.instant
+        instant.allowed = lambda: False          # a teszt alatt ne töltsön le semmit
+        deals._remember({"id": "q1", "url": "https://hardverapro.hu/apro/palit/friss.html", "text": "Palit RTX 3060 Ti",
+                         "site": "Hardverapró", "platform": "hardverapro", "price": 52000, "median": 100000,
+                         "profit": 36500, "at": time.time(), "quick": True})
+        page = self.page
+        page.click("#tab-chat")
+        page.reload()
+        page.wait_for_selector("#tile-trade", timeout=15000)
+        self.assertEqual(page.inner_text("#tile-trade .hometile-title"), "Kereskedés indítása")
+        self.assertIn("Találatok (1)", page.inner_text("#home-tiles"))
+        page.click("#tile-trade")
+        page.wait_for_selector('#tile-trade:has-text("A kereskedés fut")')
+        self.assertTrue(deals.state()["running"] and instant.state()["enabled"])
+        self.assertIn("Elindítottad az automata kereskedést", page.inner_text("#w-log"),
+                      "a kereskedés naplója a Munka menübe megy, a Beszélgetés tiszta marad")
+        self.assertNotIn("Elindítottad", page.inner_text("#log"))
+        page.click("#tile-trade")
+        page.wait_for_selector('#tile-trade:has-text("Kereskedés indítása")')
+        self.assertFalse(deals.state()["running"])
+        page.click("#tile-new")
+        page.wait_for_selector('body[data-mode="work"]', state="attached")
+        self.assertTrue(page.locator("#w-compose").is_visible())
+        self.assertEqual(page.get_attribute("#job-sales", "aria-selected"), "true")
+        page.click("#tab-chat")
+        page.click("#tile-hits")
+        page.wait_for_selector("#d-run-toggle")
+        self.assertIn("Palit RTX 3060 Ti", page.inner_text("#w-deals .dealist"))
+        page.click("#tab-chat")
+        self.h.fake.chat_script = [reply("Szia!")]
+        page.fill("#text", "Szia")
+        page.press("#text", "Enter")
+        page.wait_for_selector("#log .msg.jarvis")
+        self.assertTrue(page.locator("#home-tiles").is_hidden(), "az első üzenet után nem takarják a beszélgetést")
+        page.click("#reset")
+        page.wait_for_selector("#home-tiles", state="visible")
+
+    def test_trading_sections_are_folded_except_the_finds(self):
+        """Az Automata kereskedés fülön az Indítás és a legutóbbi találatok látszanak, a többi blokk (beállítások,
+        keresések, azonnali figyelő, böngészés, figyelt oldalak, Mennyit ér?, napló) össze van csukva, magyarázó
+        szövegek nélkül; egy blokk kinyitva a következő megnyitáskor is nyitva marad."""
+        page = self.page
+        page.click("#job-deals")
+        page.wait_for_selector("#d-run-toggle")
+        self.assertTrue(page.locator("text=Legutóbbi találatok").is_visible())
+        titles = [t.strip() for t in page.locator("#w-deals details.fold > summary").all_inner_texts()]
+        self.assertEqual([t.split(" (")[0] for t in titles],
+                         ["Beállítások", "Keresések", "Azonnali figyelő", "Böngészés", "Figyelt oldalak", "Mennyit ér?",
+                          "Napló"])
+        self.assertEqual(page.locator("#w-deals details.fold[open]").count(), 0)
+        for hidden in ("#d-maxbuy", "#d-query", "#dl-query"):
+            self.assertTrue(page.locator(hidden).is_hidden(), hidden)
+        self.assertNotIn("Ahogy egy ember", page.inner_text("#w-deals"), "a hosszú magyarázat kikerült")
+        page.click('summary:has-text("Keresések")')
+        page.click("#job-sales")
+        page.click("#job-deals")
+        page.wait_for_selector("#d-query", state="visible")
+
     def test_start_button_limits_and_instant_watch_on_a_phone(self):
         """Az Automata kereskedés fülön egy gomb: Indítás (minden elindul), utána Leállítás; a vételi limit; az azonnali
         figyelő felvétele, és a friss, megérő hirdetéseknél a Megvettem a találathoz visz."""
@@ -782,16 +843,21 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector('#d-run-toggle:has-text("Leállítás")')
         self.assertTrue(deals.state()["running"] and deals.state()["browse"]["on"] and instant.state()["enabled"])
         self.assertIn("Fut", page.inner_text(".runstate"))
+        self.assertTrue(page.locator("#d-maxbuy").is_hidden(), "a beállítások alapból össze vannak csukva")
+        page.click('summary:has-text("Beállítások")')
         page.fill("#d-maxbuy", "30000")
         page.click("#d-limits")
         page.wait_for_selector('.toast:has-text("30 000 Ft fölött nem keresek")')
         self.assertEqual(deals.state()["max_buy"], 30000)
+        self.assertTrue(page.locator("#d-maxbuy").is_visible(), "ami nyitva volt, a frissítés után is nyitva marad")
+        page.click('details[data-fold="instant"] > summary')
         page.fill("#di-target", "RTX 3080 Ti")
         page.fill("#di-max", "250000")
         page.click('#di-add button[type="submit"]')
         page.wait_for_selector('.dealist li:has-text("RTX 3080 Ti")')
         alert = instant.state()["alerts"][0]
         self.assertEqual((alert["query"], alert["max_price"]), ("RTX 3080 Ti", 250000))
+        page.click('summary:has-text("Friss hirdetések")')
         hits = page.inner_text("details:has-text('Friss hirdetések')")
         self.assertIn("Palit RTX 3060 Ti", hits)
         self.assertIn("2 perce", hits)
@@ -878,7 +944,8 @@ class WorkBrowserTests(unittest.TestCase):
         page.click("#deal-bought")
         page.wait_for_selector("#d-paid")
         self.assertEqual(page.input_value("#d-paid"), "52000")
-        page.click('summary:has-text("Üzenet az eladónak")')
+        if not page.locator("#d-message").is_visible():
+            page.click('summary:has-text("Beállítások")')
         page.fill("#d-message", "Szia! Megvan még?")
         page.click("#d-message-save")
         page.wait_for_selector('.toast:has-text("ezt másolom ki")')
@@ -1070,6 +1137,8 @@ class WorkBrowserTests(unittest.TestCase):
 
     def test_work_chat_and_mode_memory(self):
         self.h.fake.chat_script = [reply("Még nincs tárgyad.")]
+        self.assertTrue(self.page.locator("#text").is_hidden(), "a Munka menüben a kérdezősor alapból rejtve")
+        self.page.click("#ask-toggle")
         self.page.fill("#text", "Hány tárgyam van?")
         self.page.press("#text", "Enter")
         self.page.wait_for_selector("#w-log .msg.jarvis")

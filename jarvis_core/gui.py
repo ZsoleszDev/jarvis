@@ -46,7 +46,6 @@ STATIC = {"style.css": "text/css; charset=utf-8", "app.js": "text/javascript; ch
           "work.js": "text/javascript; charset=utf-8", "creative.js": "text/javascript; charset=utf-8"}
 PHOTO_GET_RE = re.compile(r"^/api/work/photo/([0-9a-f]{8})/(\d{2}\.jpg)$")
 PHOTO_POST_RE = re.compile(r"^/api/work/items/([0-9a-f]{8})/photo$")
-MAX_VOICE_BYTES = 15 * 1024 * 1024    # a telefon vagy a laptop mikrofonjával felvett kérdés (távoli ablak)
 # Az Automata kereskedés egy keresésének beállításai (deals.DealHunter.add_search, update_search).
 DEAL_FIELDS = ("query", "sites", "max_price", "min_price", "discount", "min_profit", "every", "exclude", "reference")
 # Amit a felületről át lehet írni egy tárgyon, és amit el lehet indítani.
@@ -304,9 +303,6 @@ class GuiUI:
         újracsatlakozáskor lekéri a történetet."""
         self.bus.publish(event, record=False)
 
-    def level(self, value: float) -> None:
-        self.bus.publish({"type": "level", "value": round(float(value), 3)}, record=False)
-
     def confirm(self, prompt: str, stop_event: threading.Event) -> bool:
         confirm_id = next(self._confirm_ids)
         done = threading.Event()
@@ -560,13 +556,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(400, {"ok": False})
         parsed = urlparse(self.path)
         path = parsed.path
-        # A távoli ablakból (telefon, laptop) jött: a gép ne olvassa fel a választ (aki kérte, nincs itt).
+        # A távoli ablakból (telefon, laptop) jött: a naplóban így jelenik meg.
         remote = self.headers.get("X-Jarvis-Remote") == "1"
         upload = PHOTO_POST_RE.match(path)
         if upload:   # fotó: nyers képadat, nem JSON
             return self._work_photo(upload.group(1), length)
-        if path == "/api/voice":   # hangfelvétel a távoli ablakból: nyers hangadat, nem JSON
-            return self._voice(length, parse_qs(parsed.query).get("mode", ["chat"])[0], remote)
         if length > 262144:
             return self._json(413, {"ok": False})
         try:
@@ -613,11 +607,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "marked": app.notices.mark_read(ids) if app.notices else 0})
         mode = str(body.get("mode") or "chat")
         if path == "/api/send":
-            app.submit_text(str(body.get("text", ""))[:4000], mode=mode, silent=remote,
-                            via="remote" if remote else "text")
-        elif path == "/api/listen":
-            if not app.submit_voice("button"):
-                return self._json(409, {"ok": False, "error": "Nincs mikrofon."})
+            app.submit_text(str(body.get("text", ""))[:4000], mode=mode, via="remote" if remote else "text")
         elif path == "/api/stop":
             app.stop_current()
         elif path == "/api/reset":
@@ -626,19 +616,6 @@ class _Handler(BaseHTTPRequestHandler):
             app.set_mode(mode)
         else:
             return self._json(404, {"ok": False})
-        self._json(202, {"ok": True})
-
-    def _voice(self, length: int, mode: str, remote: bool) -> None:
-        app = self.gui.app
-        if app is None or app.assistant is None:
-            return self._json(503, {"ok": False, "error": "A Jarvis még indul."})
-        if length <= 0:
-            return self._json(400, {"ok": False, "error": "Üres hangfelvétel."})
-        if length > MAX_VOICE_BYTES:
-            return self._json(413, {"ok": False, "error": "Túl hosszú a hangfelvétel."})
-        if app.stt is None and not app.paused:
-            return self._json(409, {"ok": False, "error": "A beszédfelismerés nem fut; írd be a kérdést."})
-        app.submit_audio(self.rfile.read(length), mode=mode if mode in ("chat", "work") else "chat", silent=remote)
         self._json(202, {"ok": True})
 
     def _phone_post(self, path: str, body: dict[str, Any]) -> None:
@@ -768,8 +745,6 @@ class _Handler(BaseHTTPRequestHandler):
                 if action == "sold":
                     extra["where"] = str(body.get("where") or "") if str(body.get("where") or "") in work.platforms else ""
                     extra["delist"] = bool(body.get("delist"))
-                if remote:
-                    extra["silent"] = True    # aki távolról indította, nincs a gép előtt: a gép ne beszéljen
                 app.submit_work(action, ids, platform, **extra)
                 return self._json(202, {"ok": True})
             if path == "/api/work/dossier":
@@ -828,7 +803,7 @@ class _Handler(BaseHTTPRequestHandler):
                 instant_state = instant.set_enabled(action == "start") if instant is not None else None
                 if action == "start" and app is not None and app.scheduler is not None \
                         and "deals" in app.scheduler.jobs and deals.available():
-                    app.run_job_now("deals", silent=remote)
+                    app.run_job_now("deals")
                 return self._json(200, {"ok": True, **state, "instant": instant_state})
             if action == "message":     # az eladónak szóló üzenet (a megérő találat ablakának gombja másolja ki)
                 return self._json(200, {"ok": True, **deals.set_message(body.get("text"))})
@@ -850,7 +825,7 @@ class _Handler(BaseHTTPRequestHandler):
                 deal = deals.get(str(body.get("id") or ""))
                 if app is None or not self._work().browser_ready:
                     return self._json(409, {"ok": False, "error": "Az ajánlattételhez Jarvis saját böngészője kell."})
-                app.submit_work("deal_offer", deal=deal["id"], price=body.get("price"), **({"silent": True} if remote else {}))
+                app.submit_work("deal_offer", deal=deal["id"], price=body.get("price"))
                 return self._json(202, {"ok": True})
             if action == "watch_add":
                 return self._json(200, {"ok": True, **deals.add_watch(str(body.get("target") or ""), body.get("min_profit"),
@@ -860,7 +835,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # bekapcsoláskor rögtön kezd (nem várja meg az ütemező csendes perceit)
                 if body.get("on") and app is not None and app.scheduler is not None and "deals" in app.scheduler.jobs \
                         and deals.available():
-                    app.run_job_now("deals", silent=remote)
+                    app.run_job_now("deals")
                 return self._json(200, {"ok": True, **state})
             if action == "journal":     # a napló egy napja (alapból a mai)
                 return self._json(200, {"ok": True, "entries": deals.journal_entries(str(body.get("day") or ""))})
@@ -897,7 +872,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if not deals.available():
                     return self._json(409, {"ok": False, "error": "Most nincs esedékes keresés vagy figyelt oldal (a "
                                                                   "böngészés is pihen, vagy ki van kapcsolva)."})
-                app.run_job_now("deals", silent=remote)    # a telefonról indítva a gép ne beszéljen
+                app.run_job_now("deals")
                 return self._json(202, {"ok": True})
         except (DealError, ItemError) as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
@@ -965,11 +940,10 @@ class _Handler(BaseHTTPRequestHandler):
         """A vevői üzenetek gombjai: vázlat kérése, a vázlat mentése, megnézve, küldés (jóváhagyással), frissítés."""
         app = self.gui.app
         desk = self._work().messages
-        silent = {"silent": True} if remote else {}   # aki távolról indította, nincs a gép előtt
         if path == "/api/work/messages/check":
             if app.scheduler is None or "messages" not in app.scheduler.jobs:
                 return self._json(409, {"ok": False, "error": "Az üzenetek olvasásához Jarvis saját böngészője kell."})
-            app.run_job_now("messages", silent=remote)
+            app.run_job_now("messages")
             return self._json(202, {"ok": True})
         conv_id = str(body.get("id") or "")
         if not CONV_ID_RE.match(conv_id):
@@ -981,7 +955,7 @@ class _Handler(BaseHTTPRequestHandler):
             draft = desk.store.set_draft(conv_id, str(body.get("draft") or "")[:MAX_MESSAGE])
             return self._json(200, {"ok": True, "conversation": desk.public(draft)})
         if path == "/api/work/messages/draft":
-            app.submit_work("message_draft", conversation=conv_id, **silent)
+            app.submit_work("message_draft", conversation=conv_id)
             return self._json(202, {"ok": True})
         if path == "/api/work/messages/send":
             text = str(body.get("text") or "").strip()[:MAX_MESSAGE]
@@ -990,7 +964,7 @@ class _Handler(BaseHTTPRequestHandler):
             if conv["platform"] not in desk.platforms or desk.browser is None:
                 return self._json(409, {"ok": False, "error": "Ezt az üzenetet most nem tudom elküldeni (nincs böngésző, "
                                                               "vagy ennek az oldalnak az üzeneteit nem kezelem)."})
-            app.submit_work("message_send", conversation=conv_id, text=text, **silent)
+            app.submit_work("message_send", conversation=conv_id, text=text)
             return self._json(202, {"ok": True})
         self._json(404, {"ok": False})
 
@@ -1109,8 +1083,7 @@ def run_gui(app: JarvisApp, ui: GuiUI, bus: EventBus, cfg: GuiCfg, open_window: 
     server.start()
     if info_path is not None:
         instance.write_info(info_path, server.url, standby)
-    bus.set_hello({"name": app.name, "model": app.cfg.llm.model, "stt": None, "voice": False,
-                   "speech": False, "wake_word": None, "examples": []})
+    bus.set_hello({"name": app.name, "model": app.cfg.llm.model})
     console.info(f"A felület címe (ha nem nyílna meg magától): {server.url}")
     phone = None
     if app.cfg.api.enabled:
@@ -1154,8 +1127,6 @@ def run_gui(app: JarvisApp, ui: GuiUI, bus: EventBus, cfg: GuiCfg, open_window: 
                     and time.monotonic() - bus.last_disconnect > 4):
                 console.info("Az ablak bezárult, a Jarvis leáll.")
                 break
-        if app.exit_requested.is_set():
-            app.say_goodbye()
     finally:
         if phone is not None:
             phone.stop()

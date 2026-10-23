@@ -1,3 +1,0 @@
-# "Hey Jarvis" ébresztőszó (openWakeWord). Külön fájlban, mert 2024 óta nem frissült;
-# ha nálad nem települ, a Jarvis nélküle is működik (Enterrel vagy a gombbal szólhatsz).
-openwakeword>=0.6

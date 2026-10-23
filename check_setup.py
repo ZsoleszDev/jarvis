@@ -2,8 +2,8 @@
 """Jarvis telepítés-ellenőrző.
 
 Futtatás:
-    python check_setup.py               minden teszt (a végén mikrofon- és hangszóróteszt)
-    python check_setup.py --no-audio    mikrofon- és hangszóróteszt nélkül
+    python check_setup.py               minden teszt
+    python check_setup.py --no-llm      az Ollama-teszt nélkül
 """
 from __future__ import annotations
 
@@ -15,10 +15,7 @@ import shutil
 import sys
 import time
 
-from jarvis_core import console, cuda_libs
-
-# A GPU-könyvtárak keresési útját még a faster-whisper importja előtt be kell állítani.
-cuda_libs.prepare()
+from jarvis_core import console
 
 results: list[tuple[str, bool, str]] = []
 
@@ -48,19 +45,13 @@ PACKAGES = [
     ("numpy", "numpy"),
     ("requests", "requests"),
     ("psutil", "psutil"),
-    ("sounddevice", "sounddevice"),
-    ("faster_whisper", "faster-whisper"),
-    ("ctranslate2", "ctranslate2"),
-    ("piper", "piper-tts"),
-    ("onnxruntime", "onnxruntime"),
     ("ddgs", "ddgs"),
     ("trafilatura", "trafilatura"),
     ("playwright", "playwright"),
     ("mss", "mss"),
     ("PIL", "pillow"),
 ]
-OPTIONAL_PACKAGES = [("openwakeword", "openwakeword", "pip install -r requirements-wakeword.txt"),
-                     ("cryptography", "cryptography", "a laptopos értesítésekhez bezárt ablaknál: pip install cryptography")]
+OPTIONAL_PACKAGES = [("cryptography", "cryptography", "a laptopos értesítésekhez bezárt ablaknál: pip install cryptography")]
 
 
 def check_packages() -> None:
@@ -93,7 +84,6 @@ def check_gpu() -> None:
     gpus = gpu.query_gpus(timeout=10)
     for line in gpu.memory_lines(gpus):
         console.info("  " + line)
-    console.info("  (A config.toml stt.gpu_device_index értéke ezt a sorszámot használja.)")
     record("nvidia-smi", bool(gpus), "" if gpus else "nem adott vissza adatot")
 
 
@@ -305,122 +295,8 @@ def check_screen(cfg) -> None:
         record("Képernyőkép", False, f"{type(exc).__name__}: {exc}")
 
 
-def check_wake_word(cfg) -> None:
-    from jarvis_core.wakeword import WakeWordError, best_score, load_model
-
-    console.heading("Ébresztőszó („Hey Jarvis”)")
-    if not cfg.wake_word.enabled:
-        record("Ébresztőszó", True, "kikapcsolva ([wake_word] enabled = false)")
-        return
-    try:
-        import numpy as np
-
-        t0 = time.perf_counter()
-        model = load_model(cfg.wake_word)
-        silence = np.zeros(1280, dtype=np.int16)
-        score = max(best_score(model.predict(silence)) for _ in range(10))
-        record("Ébresztőszó", score < cfg.wake_word.threshold,
-               f"modell betöltve ({time.perf_counter() - t0:.1f} mp), csendre {score:.2f} pont "
-               f"(küszöb: {cfg.wake_word.threshold})", optional=True)
-    except WakeWordError as exc:
-        record("Ébresztőszó", False, str(exc), optional=True)
-    except Exception as exc:  # noqa: BLE001 - a régi openWakeWord új Pythonnal elhasalhat
-        record("Ébresztőszó", False, f"{type(exc).__name__}: {exc}", optional=True)
-
-
-def check_stt(cfg):
-    from jarvis_core.stt import SpeechToText
-
-    console.heading("Beszédfelismerés (faster-whisper)")
-    usable, reason = cuda_libs.status()
-    record("CUDA-könyvtárak", usable, reason)
-    if not usable:
-        console.info("  GPU nélkül is működik, csak lassabb és pontatlanabb (CPU-s 'small' modell).")
-    try:
-        t0 = time.perf_counter()
-        stt = SpeechToText(cfg.stt, log=console.warn)
-        record("Felismerő modell", True, f"{stt.describe()}, betöltés {time.perf_counter() - t0:.1f} mp")
-        return stt
-    except Exception as exc:  # noqa: BLE001
-        record("Felismerő modell", False, f"{type(exc).__name__}: {exc}")
-        return None
-
-
-def list_audio_devices():
-    console.heading("Hangeszközök")
-    try:
-        import sounddevice as sd
-    except Exception as exc:  # noqa: BLE001
-        record("sounddevice", False, str(exc))
-        return None
-    devices = sd.query_devices()
-    default_in, default_out = sd.default.device
-    for idx, dev in enumerate(devices):
-        roles = []
-        if dev["max_input_channels"] > 0:
-            roles.append("BE" + ("*" if idx == default_in else ""))
-        if dev["max_output_channels"] > 0:
-            roles.append("KI" + ("*" if idx == default_out else ""))
-        console.info(f"  [{idx:2}] {'/'.join(roles):7} {dev['name']}")
-    console.info("  (* = alapértelmezett. A config.toml [audio] részében sorszámmal vagy névvel választhatsz.)")
-    return sd
-
-
-def check_tts(cfg) -> None:
-    from jarvis_core.tts import Speaker
-
-    console.heading("Felolvasás (Piper)")
-    if cfg.tts.engine.strip().lower() == "none":
-        record("Felolvasás", True, "kikapcsolva (tts.engine = none)")
-        return
-    try:
-        speaker = Speaker(cfg.tts, cfg.audio, log=console.info)
-        t0 = time.perf_counter()
-        audio = speaker.synthesize("Minden rendszer működik. Jó estét kívánok!")
-        record("Hangszintézis", audio.size > 0,
-               f"{cfg.tts.voice}, {audio.size / speaker.sample_rate:.1f} mp hang "
-               f"{time.perf_counter() - t0:.2f} mp alatt")
-        console.info("  Lejátszás... (hallod?)")
-        speaker.say("Minden rendszer működik. Jó estét kívánok!")
-    except Exception as exc:  # noqa: BLE001
-        record("Felolvasás", False, f"{type(exc).__name__}: {exc}")
-
-
-def check_microphone(cfg, stt) -> None:
-    import numpy as np
-
-    from jarvis_core.recorder import Recorder
-
-    console.heading("Mikrofon")
-    try:
-        recorder = Recorder(cfg.audio)
-        console.info(f"  Eszköz: {recorder.device_name()} ({recorder.rate} Hz)")
-        console.info("  Zajszint mérése, maradj csendben egy másodpercig...")
-        noise, threshold = recorder.calibrate()
-        console.info(f"  zajszint {noise:.4f}, beszédküszöb {threshold:.4f}")
-        input("  Nyomj Entert, majd mondj egy mondatot (pl. „Jarvis, nyisd meg a jegyzettömböt”)... ")
-        audio = recorder.record(on_speech=lambda: console.info("  ...beszéd észlelve"))
-    except Exception as exc:  # noqa: BLE001
-        record("Mikrofon", False, f"{type(exc).__name__}: {exc}")
-        return
-    if audio is None:
-        record("Mikrofon", False, "nem érzékelt beszédet – jó eszköz van beállítva? "
-                                  "Próbáld csökkenteni a min_threshold értékét.")
-        return
-    peak = float(np.max(np.abs(audio)))
-    record("Mikrofon", True, f"{audio.size / 16000:.1f} mp felvétel, csúcsszint {peak:.2f}")
-    if peak > 0.98:
-        console.warn("  A hang túlvezérelt, vedd lejjebb a mikrofon erősítését a Windows hangbeállításaiban.")
-    if stt is not None:
-        t0 = time.perf_counter()
-        text = stt.transcribe(audio)
-        record("Felismert szöveg", bool(text), f"„{text}” ({time.perf_counter() - t0:.1f} mp)"
-               if text else "üres")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Jarvis telepítés-ellenőrző")
-    parser.add_argument("--no-audio", action="store_true", help="mikrofon- és hangszóróteszt kihagyása")
     parser.add_argument("--no-llm", action="store_true", help="az Ollama-teszt kihagyása")
     parser.add_argument("--config", default=None, help="a config.toml elérési útja")
     args = parser.parse_args()
@@ -451,12 +327,6 @@ def main() -> int:
     check_browser(cfg)
     check_phone(cfg)
     check_screen(cfg)
-    check_wake_word(cfg)
-    stt = check_stt(cfg)
-    sd = list_audio_devices()
-    if not args.no_audio and sd is not None:
-        check_tts(cfg)
-        check_microphone(cfg, stt)
 
     if llm is not None and cfg.llm.unload_on_exit:
         try:

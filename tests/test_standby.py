@@ -72,7 +72,7 @@ class StandbyAppTests(unittest.TestCase):
         self.cfg.assistant.fillers = False
         self.cfg.standby.idle_minutes = 0
         self.ui = RecordingUI()
-        self.app = JarvisApp(self.cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(self.cfg, self.ui)
         self.app.STANDBY_CHECK_SECONDS = 0.05
 
     def tearDown(self):
@@ -265,7 +265,7 @@ class PhoneStandbyTests(unittest.TestCase):
         cfg.assistant.fillers = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
-        self.app = JarvisApp(cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(cfg, self.ui)
         self.assertTrue(self.app.start(standby=True))
         self.api = start_api(self.app, self.ui, self.bus, cfg.data_root)
         self.app.start_agent()
@@ -323,7 +323,7 @@ class GuiStandbyTests(unittest.TestCase):
         cfg.api.enabled = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
-        self.app = JarvisApp(cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(cfg, self.ui)
         self.assertTrue(self.app.start(standby=True))
         self.server = GuiServer(self.app, self.ui, self.bus)
         self.server.start()
@@ -519,7 +519,7 @@ class EndToEndStandbyTests(unittest.TestCase):
 
     def test_standby_start_second_launch_and_quit(self):
         proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "jarvis.py"), "--standby", "--text", "--mute", "--config", str(self.cfg_path)],
+            [sys.executable, str(ROOT / "jarvis.py"), "--standby", "--config", str(self.cfg_path)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", env=self.env,
             cwd=str(ROOT))
         output: list[str] = []
@@ -535,7 +535,7 @@ class EndToEndStandbyTests(unittest.TestCase):
             wait_for(lambda: any("Készenlétben indultam" in line for line in output), 30)
             self.assertEqual(loads(self.fake), [], "készenlétben nem tölt be modellt")
 
-            second = self.cli("--no-window", "--text", "--mute")
+            second = self.cli("--no-window")
             self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
             self.assertIn("A Jarvis már fut", second.stdout)
             self.assertIn(info["url"], second.stdout)
@@ -584,7 +584,7 @@ class EndToEndStandbyTests(unittest.TestCase):
         self.assertTrue(lock.acquire())
         try:
             instance.write_info(self.data / instance.INFO_FILE, f"http://127.0.0.1:{free_port()}/?t=x", False)
-            result = self.cli("--no-window", "--text", "--mute")
+            result = self.cli("--no-window")
         finally:
             lock.release()
         self.assertEqual(result.returncode, 1)

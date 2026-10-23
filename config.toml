@@ -12,12 +12,10 @@ max_tool_rounds = 20
 # Hány legutóbbi oldalnézetet tartson meg teljes egészében. A régebbiek helyén egy rövid sor marad (mi
 # történt, melyik oldalon), rögtön, ahogy új jön: így az Ollama gyorsítótára megmarad, és gyorsabb a válasz
 keep_page_views = 1
-# Kiírja, mennyi ideig tartott a felismerés és a válasz
+# Kiírja, mennyi ideig tartott a válasz
 show_timings = true
-# Folyamatos válasz: már az első mondatnál megszólal, nem várja meg a teljes választ
+# Folyamatos válasz: a szöveg menet közben jelenik meg, nem várja meg a teljes választ
 stream = true
-# Lassú lépés (keresés, böngészés) előtt rögtön mond valamit ("Egy pillanat.")
-fillers = true
 
 [llm]
 host = "http://localhost:11434"
@@ -44,56 +42,6 @@ warm_up = true
 # „setx OLLAMA_NUM_PARALLEL 2”, majd az Ollama újraindítása (a kontextus memóriája így kétszer kell). Amíg az
 # Ollama csak egyet enged, egyesével mennek, de a feltöltés és a beszélgetés akkor is előbb jön. 1 = egyesével.
 parallel = 2
-
-[stt]
-# false: csak gépelés (mint a --text kapcsoló): nem tölti be a beszédfelismerőt és a mikrofont, így gyorsabban
-# indul, és a videókártyán is több hely marad a nyelvi modellnek. A telefonról küldött hangüzenet ilyenkor nem
-# megy, írásban igen. Az ébresztőszó is a mikrofonra épül, az sem fut.
-enabled = true
-# "auto": GPU, ha a CUDA-könyvtárak telepítve vannak (requirements-gpu.txt), különben CPU
-# "cuda": mindenképp GPU    "cpu": mindenképp CPU
-device = "auto"
-language = "hu"
-# GPU-n: a "turbo" (large-v3-turbo) magyarul sokkal pontosabb, mint a kis modellek
-gpu_model = "turbo"
-gpu_compute_type = "int8_float16"
-# Melyik videókártyán fusson, az nvidia-smi sorszáma szerint.
-# A te gépeden: 0 = RTX 3060 Ti, 1 = RTX 5060 Ti (ezen van több szabad VRAM)
-gpu_device_index = 1
-# CPU-n: "small" (gyors) vagy "medium" (pontosabb, de pár másodperc)
-cpu_model = "small"
-cpu_compute_type = "int8"
-cpu_threads = 8
-beam_size = 1
-# Segíti a felismerést: ide írhatsz gyakran használt szavakat, neveket
-initial_prompt = "Jarvis, nyisd meg a Visual Studio Code-ot. Mennyi az idő? Keresd meg a számlát."
-
-[audio]
-# Mikrofon és hangszóró: üresen az alapértelmezett eszköz.
-# Lehet sorszám ("3") vagy névrészlet ("Headset"). A check_setup.py kilistázza őket.
-input_device = ""
-output_device = ""
-# Ennyi másodperc csend után áll le a felvétel (kisebb = gyorsabb, de mondat közben is levághat)
-silence_seconds = 0.8
-# Ha ennyi ideig nem szólalsz meg, a felvétel megszakad
-no_speech_timeout = 6.0
-# Válasz után ennyi másodpercig Enter nélkül is figyel, ha folytatnád (0 = kikapcsolva)
-follow_up_seconds = 4.0
-max_record_seconds = 30.0
-# A beszéd küszöbszintjének alsó határa. Ha nem veszi észre, hogy beszélsz, csökkentsd (pl. 0.005).
-min_threshold = 0.01
-# A háttérzaj hányszorosa számít beszédnek
-threshold_multiplier = 3.0
-
-[tts]
-# "piper" = magyar neurális hang, "none" = nincs felolvasás
-engine = "piper"
-# Magyar hangok: hu_HU-imre-medium (férfi), hu_HU-anna-medium, hu_HU-berta-medium (női)
-voice = "hu_HU-imre-medium"
-voices_dir = "voices"
-# Beszédtempó: 1.0 = normál, 0.9 = kicsit gyorsabb, 1.1 = lassabb
-length_scale = 1.0
-volume = 1.0
 
 [tools]
 # A fájlkereső, -olvasó és -megnyitó csak ezekben a mappákban dolgozhat.
@@ -164,17 +112,6 @@ exit_on_close = true
 # (fölé víve az egeret: terhelés, VRAM, hőmérséklet)
 gpu_bars = true
 
-[wake_word]
-# "Hey Jarvis" ébresztőszó. Telepítés: pip install -r requirements-wakeword.txt
-enabled = true
-model = "hey_jarvis"
-# 0–1: nagyobb = kevesebb téves ébredés, de lehet, hogy hangosabban kell mondanod
-threshold = 0.5
-# Rövid csengés, amikor felébred
-chime = true
-# Ennyi másodpercig nem ébred fel újra
-cooldown = 2.0
-
 [work]
 # A Munka menü. Első munkája az Adás/Vétel: kipipálod, hova kerüljön, feltöltöd a fotókat, leírod,
 # mit adsz el, és Jarvis feltölti (ha valami hiányzik, visszakérdez).
@@ -242,13 +179,12 @@ listing_checks = 5
 # szól. Válaszvázlatot csak kérésre ír, üzenetet csak a te jóváhagyásoddal küld (0 = soha)
 message_minutes = 120
 # Automata kereskedés (Munka › Automata kereskedés): az új keresések gyakorisága percben (keresésenként a fülön
-# átállíthatod: 30, 60, 180 vagy 360; a Vintedet legfeljebb kétóránként nézi). Csak olvas, semmit nem vesz és
-# nem ír senkinek; 0 = a háttérben soha nem keres (és napközben sem böngészik; azt a fülön kapcsolod be)
-deal_minutes = 180
+# átállíthatod: 30, 60, 180 vagy 360; a Vintedet legfeljebb kétóránként nézi; a Hardverapró és a Jófogás új
+# hirdetéseit az azonnali figyelő pár percenként is megnézi). Csak olvas, semmit nem vesz és nem ír senkinek;
+# 0 = a háttérben soha nem keres (és napközben sem böngészik; azt a fülön kapcsolod be)
+deal_minutes = 60
 # Egy körben legfeljebb ennyi olvasatlan beszélgetést nyit meg (a többi a következő körre marad)
 message_reads = 3
-# A háttérmunka eredményét fel is olvassa
-speak = true
 
 [api]
 # Telefonos kapcsolat a saját appodnak (lásd docs/telefon-api.md). A host maradjon 127.0.0.1:

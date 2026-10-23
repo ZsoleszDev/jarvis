@@ -42,9 +42,10 @@
   </section>
 
   <main id="log" class="log" role="tabpanel" aria-labelledby="tab-chat" aria-live="polite">
+    <!-- a beszélgetés eleje: a kereskedés indítása és egy új tárgy (work.js); az első üzenet után eltűnik -->
     <div id="empty" class="empty">
-      <p>Kérdezz bármit.</p>
-      <div id="examples" class="examples"></div>
+      <div id="home-tiles" class="home-tiles" hidden></div>
+      <p id="empty-hint">Kérdezz bármit.</p>
     </div>
   </main>
 
@@ -168,11 +169,11 @@
     <form id="ask" autocomplete="off">
       <label for="text" hidden>Kérés</label>
       <input id="text" name="text" placeholder="Írd ide a kérdésed" enterkeyhint="send">
-      <button type="submit" class="primary">Küldés</button>
+      <button id="send" type="submit" class="primary">Küldés</button>
+      <button id="stop" type="button" title="Leállítja, amin Jarvis épp dolgozik (Esc)" hidden>Állj</button>
     </form>
     <div class="row">
-      <button id="listen" type="button" disabled>Hallgass meg</button>
-      <button id="stop" type="button" title="Esc">Állj</button>
+      <button id="ask-toggle" type="button" aria-expanded="false" aria-controls="ask">Kérdezz Jarvistól</button>
       <button id="reset" type="button">Új beszélgetés</button>
       <span class="spacer"></span>
       <button id="notify" type="button" class="quiet" hidden

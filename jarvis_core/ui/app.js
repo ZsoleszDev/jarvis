@@ -6,10 +6,9 @@
 const token = new URLSearchParams(location.search).get("t") || "";
 const $ = (id) => document.getElementById(id);
 // Távoli ablak: a telefonon vagy a laptopon nyitották meg (a gép a Tailscale-en át adja, lásd remote.py).
-// Ilyenkor a mikrofon a telefoné vagy a laptopé, és a fontos dolgokról értesítés jön.
+// Ilyenkor a fontos dolgokról értesítés jön.
 const remote = !!document.querySelector('meta[name="jarvis-remote"]');
 const inAndroid = /JarvisAndroid/.test(navigator.userAgent);   // az Android-alkalmazás maga értesít
-const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
 
 const logs = { chat: $("log"), work: $("w-log"), creative: $("c-notes") };
 const openSeg = { chat: null, work: null, creative: null };   // a most íródó Jarvis-üzenet menünként
@@ -23,7 +22,6 @@ let workAvailable = false;
 let creativeAvailable = false;
 let paused = false;
 let standby = false;          // készenlét: szünet, amiből egy kérés magától felébreszti
-let voiceAvailable = false;
 let live = true;              // a visszajátszott régi események után igaz: csak az újakról jön értesítés
 const extraHandlers = {};
 const helloHooks = [];
@@ -68,7 +66,7 @@ function nearBottom(log) { return log.scrollHeight - log.scrollTop - log.clientH
 function add(kind, text, channel = "chat") {
   const log = logs[channel];
   const stick = nearBottom(log);
-  if (channel === "chat") $("empty").hidden = true;
+  if (channel === "chat" && kind === "you") $("empty").hidden = true;   // a csempék az első kérdésedig látszanak
   if (channel === "work" && log.hidden && kind !== "timing") {
     unread += 1;
     $("w-unread").textContent = unread + " új";
@@ -99,43 +97,25 @@ function clearLog(channel) {
   if (channel === "chat") $("empty").hidden = false;
 }
 
-function renderExamples(examples) {
-  const box = $("examples");
-  box.replaceChildren();
-  for (const example of examples) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = example;
-    button.addEventListener("click", () => post("/api/send", { text: example, mode: "chat" }));
-    box.appendChild(button);
-  }
-}
-
 function setState(event) {
   current = event;
   document.body.dataset.state = event.state;
   $("state").textContent = event.text;
   let detail = event.detail || "";
-  if (detail === "folytatás") detail = "Ha van még kérdésed, mondhatod";
   if (!detail && event.state === "idle") detail = hintText;
   if (!detail && event.state === "standby") detail = "Írj, és felébredek (10–20 másodperc)";
   $("detail").textContent = detail;
-  $("stop").classList.toggle("active", !["idle", "starting", "error", "paused", "standby"].includes(event.state));
+  // Az Állj a Küldés mellett csak akkor látszik, amikor Jarvis épp dolgozik (Esc is leállítja).
+  $("stop").hidden = ["idle", "starting", "error", "paused", "standby"].includes(event.state);
 }
 
 const handlers = {
   hello(e) {
     if (e.replay) { clearLog("chat"); clearLog("work"); live = false; }
     $("name").textContent = e.name || "Jarvis";
-    const parts = [];
-    if (e.model) parts.push(e.model);
-    if (e.stt) parts.push("beszédfelismerés: " + e.stt);
-    $("meta").textContent = parts.join(", ");
-    voiceAvailable = remote ? !!e.stt && canRecord : !!e.voice;
+    $("meta").textContent = e.model || "";
     setPaused(!!e.paused, !!e.standby);
-    hintText = e.wake_word ? "Szólíts meg így: „" + e.wake_word + "”"
-             : e.voice ? "Nyomd meg a Hallgass meg gombot, vagy írj" : "Írd be, mit szeretnél";
-    renderExamples(e.examples || []);
+    hintText = "Írd be, mit szeretnél";
     workAvailable = !!e.work;
     $("tab-work").hidden = !workAvailable;
     if (!workAvailable && mode === "work") setMode("chat");
@@ -198,7 +178,6 @@ const handlers = {
     systemNotify(notice.title || "Jarvis", notice.text || "", "notice-" + (notice.id || ""));
     addNotice(notice);
   },
-  level(e) { eye.level = Math.max(eye.level, e.value); },
   confirm(e) {
     pendingConfirm = e.id;
     $("confirm-text").textContent = e.prompt;
@@ -287,7 +266,6 @@ function setPaused(value, isStandby = false) {
   $("pause").title = standby ? "Készenlétben vagyok: betölti a modelleket (10–20 másodperc). Ha írsz, magamtól is felébredek."
     : paused ? "Újra betölti a modelleket (10–20 másodperc)"
     : "Minden modellt leállít, bezárja a böngészőt, és felszabadítja a videókártyát és a memóriát (pl. játékhoz)";
-  $("listen").disabled = paused || !voiceAvailable;
 }
 $("pause").addEventListener("click", () => {
   if (current.state === "starting" && !paused) return;
@@ -615,83 +593,6 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-$("listen").addEventListener("click", () => (remote ? toggleRecording() : post("/api/listen")));
-
-// --- távoli ablak: hang a telefon (vagy a laptop) mikrofonjával, értesítések -------------------------
-// A felvételt a gép ismeri fel (ugyanaz a beszédfelismerő), és úgy válaszol, mintha ott mondtad volna.
-
-let recorder = null;
-
-async function toggleRecording() {
-  if (recorder) { recorder.stop(); return; }
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch {
-    toast("Nem kaptam engedélyt a mikrofonhoz.");
-    return;
-  }
-  const chunks = [];
-  const started = Date.now();
-  recorder = new MediaRecorder(stream);
-  recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
-  recorder.onstop = async () => {
-    stream.getTracks().forEach((track) => track.stop());
-    recorder = null;
-    $("listen").textContent = "Hallgass meg";
-    $("listen").classList.remove("recording");
-    const blob = new Blob(chunks, { type: chunks[0]?.type || "audio/webm" });
-    if (Date.now() - started < 600 || blob.size < 1000) { toast("Túl rövid volt, próbáld újra."); return; }
-    const response = await fetch("/api/voice?mode=" + mode, {
-      method: "POST", headers: { "Content-Type": blob.type, "X-Jarvis-Token": token }, body: blob,
-    }).catch(() => null);
-    if (!response || !response.ok) {
-      const result = response ? await response.json().catch(() => ({})) : {};
-      toast(result.error || "Nem sikerült elküldeni a felvételt.");
-    }
-  };
-  recorder.start();
-  $("listen").textContent = "Kész, küldöm";
-  $("listen").classList.add("recording");
-  watchLevel(stream);
-}
-
-// A varázsszem a hangod erejével mozog, amíg itt veszed fel (ugyanúgy, mint a gépen). A felvétel magától
-// leáll, ha a beszéd után kb. két másodpercig csend van (vagy 45 másodperc után); a gombbal előbb is leállíthatod.
-const SILENCE_MS = 1800;
-const MAX_RECORD_MS = 45000;
-
-function watchLevel(stream) {
-  const Context = window.AudioContext || window.webkitAudioContext;
-  if (!Context) return;
-  const context = new Context();
-  const analyser = context.createAnalyser();
-  context.createMediaStreamSource(stream).connect(analyser);
-  const samples = new Uint8Array(analyser.fftSize);
-  const started = performance.now();
-  let noise = 0;
-  let heard = false;
-  let quietSince = 0;
-  const tick = () => {
-    if (!recorder) { context.close(); return; }
-    analyser.getByteTimeDomainData(samples);
-    let peak = 0;
-    for (const value of samples) peak = Math.max(peak, Math.abs(value - 128) / 128);
-    eye.level = Math.max(eye.level, Math.min(1, peak * 2));
-    const now = performance.now();
-    if (now - started < 300) {
-      noise = Math.max(noise, peak);                        // az első pillanat: a háttérzaj
-    } else if (peak > Math.max(0.08, noise * 2.5)) {
-      heard = true;
-      quietSince = now;
-    }
-    const silent = heard && now - quietSince > SILENCE_MS;
-    if ((silent || now - started > MAX_RECORD_MS) && recorder.state === "recording") recorder.stop();
-    requestAnimationFrame(tick);
-  };
-  tick();
-}
-
 // Rendszerértesítés, ha az ablak épp nem látszik (a laptopon; az Android-alkalmazás maga értesít).
 const notifiable = remote && !inAndroid && "Notification" in window;
 
@@ -768,6 +669,13 @@ if (remote) {
   enablePush(false);          // ha már engedélyezted: a feliratkozás frissítése (pl. a gép új kulcsa után)
 }
 $("stop").addEventListener("click", () => post("/api/stop"));
+// A Munka menüben a kérdezősor alapból rejtve (a kártyákon úgyis válaszolhatsz): a gombbal nyílik.
+$("ask-toggle").addEventListener("click", () => {
+  const open = !document.body.classList.contains("ask-open");
+  document.body.classList.toggle("ask-open", open);
+  $("ask-toggle").setAttribute("aria-expanded", String(open));
+  if (open) $("text").focus();
+});
 $("reset").addEventListener("click", () => { post("/api/reset", { mode }); clearLog(mode); });
 
 function answerConfirm(approved) {
@@ -801,10 +709,10 @@ function toast(text) {
 
 // --- a varázsszem ----------------------------------------------------------------------
 // A régi rádiók hangolószeme: a sötét cikk annál keskenyebb, minél erősebb a jel.
-// Itt a jel az, amit Jarvis éppen csinál; hallgatás közben a hangod ereje.
+// Itt a jel az, amit Jarvis éppen csinál.
 
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-const eye = { angle: 118, glow: 0.2, level: 0 };
+const eye = { angle: 118, glow: 0.2 };
 const shadow = $("shadow");
 const disk = $("disk");
 const glass = $("glass");
@@ -836,14 +744,10 @@ function wedge(angle) {
 function target(t) {
   const wave = (period, amp) => (reduceMotion ? 0 : amp * Math.sin(t / period));
   if (linkDown) return [170, 0.06];
-  if (recorder) return [Math.max(10, 118 - 112 * eye.level), 0.55];   // itt, a telefonon veszi fel
   switch (current.state) {
-    case "listening": return [Math.max(10, 118 - 112 * eye.level), 0.55];
-    case "transcribing": return [55, 0.5];
     case "thinking": return [72 + wave(420, 30), 0.45];
     case "writing": return [48 + wave(300, 18), 0.52];
     case "working": return [58 + wave(220, 26), 0.5];
-    case "speaking": return [28 + (reduceMotion ? 0 : 22 * Math.abs(Math.sin(t / 130))), 0.62];
     case "starting": return [96 + wave(700, 34), 0.18];
     case "paused": return [176, 0.04];
     case "standby": return [160 + wave(2400, 8), 0.07];
@@ -857,7 +761,6 @@ function frame(t) {
   const ease = reduceMotion ? 1 : 0.16;
   eye.angle += (angle - eye.angle) * ease;
   eye.glow += (glow - eye.glow) * (reduceMotion ? 1 : 0.08);
-  eye.level *= 0.88;
   shadow.setAttribute("d", wedge(eye.angle));
   disk.style.opacity = (0.32 + eye.glow).toFixed(3);
   glass.style.filter = `drop-shadow(0 0 ${(5 + eye.glow * 22).toFixed(1)}px rgba(255, 255, 255, ${(eye.glow * 0.6).toFixed(3)}))`;
@@ -1068,11 +971,6 @@ function takePending() {
   if (wanted.deal) noticeAction({ action: "deal", deal: wanted.deal });   // egy megérő hirdetés értesítése: a találat ablaka
   // egy tárgy értesítése: a kérdése (item), vagy a Pro feltöltés Nézd át ablaka (review)
   if (wanted.item && wanted.item.id) noticeAction({ action: wanted.item.open === "review" ? "review" : "item", item: wanted.item.id });
-  if (wanted.voice) {
-    if (paused) toast("Szünetelek: előbb nyomd meg a Folytatás gombot.");
-    else if (!voiceAvailable) toast("A gépen most nem fut beszédfelismerés; írd be, mit szeretnél.");
-    else if (!recorder) toggleRecording();
-  }
 }
 window.JarvisPending = takePending;
 

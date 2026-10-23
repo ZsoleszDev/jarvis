@@ -1,17 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Az alkalmazás ikonját hosszan nyomva (vagy a kezdőképernyőre húzva): hangutasítás, új hirdetés. -->
+<!-- Az alkalmazás ikonját hosszan nyomva (vagy a kezdőképernyőre húzva): új hirdetés. -->
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
-    <shortcut
-        android:enabled="true"
-        android:icon="@drawable/ic_shortcut_voice"
-        android:shortcutId="voice"
-        android:shortcutLongLabel="@string/shortcut_voice_long"
-        android:shortcutShortLabel="@string/shortcut_voice_short">
-        <intent
-            android:action="hu.jarvis.app.VOICE"
-            android:targetClass="hu.jarvis.app.MainActivity"
-            android:targetPackage="hu.jarvis.app" />
-    </shortcut>
     <shortcut
         android:enabled="true"
         android:icon="@drawable/ic_shortcut_listing"

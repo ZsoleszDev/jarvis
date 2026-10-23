@@ -180,14 +180,6 @@ public class NotifyService extends Service {
         channels(this);
     }
 
-    /** Hangutasítás: megnyitja az ablakot, és a gép felülete azonnal felvesz (MainActivity.ACTION_VOICE). */
-    static PendingIntent voice(Context context) {
-        Intent intent = new Intent(context, MainActivity.class).setAction(MainActivity.ACTION_VOICE)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        return PendingIntent.getActivity(context, 1, intent,
-                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-    }
-
     private Notification ongoing() {
         String text = !connected ? "Nem érem el a gépet (újrapróbálom)"
                 : paused ? "Szünetel (a háttérmunka is)" : "Kapcsolatban a géppel";
@@ -197,8 +189,6 @@ public class NotifyService extends Service {
                 .setContentText(text)
                 .setContentIntent(openApp(this))
                 .setOngoing(true)
-                .addAction(new Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_mic), "Hang",
-                        voice(this)).build())
                 .addAction(new Notification.Action.Builder(
                         Icon.createWithResource(this, paused ? R.drawable.ic_play : R.drawable.ic_pause),
                         paused ? "Folytatás" : "Szünet",

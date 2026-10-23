@@ -44,7 +44,7 @@ from jarvis_core.selling import (DESCRIPTION_FOOTERS, FAILED, NOT_POSTED, POSTED
                                  ItemStore, ListingExtractor, NeedsBrowser,
                                  Platform, PriceResearcher, compose_description, missing_needs, needs_for,
                                  parse_price, price_verdict, question_for, round_price, tidy_title)
-from jarvis_core.textutil import clean_for_speech, hu_amounts, parse_hu_amount  # noqa: E402
+from jarvis_core.textutil import hu_amounts, parse_hu_amount  # noqa: E402
 from jarvis_core.tools import Toolbox  # noqa: E402
 from jarvis_core.work import WorkDesk, interpret_price_reply, research_summary  # noqa: E402
 
@@ -213,7 +213,6 @@ class ItemStoreTests(unittest.TestCase):
         self.assertEqual(round_price(4321), 4300)
         self.assertEqual(round_price(260), 250)
         self.assertEqual(selling.format_price(12990), "12 990 Ft")
-        self.assertEqual(clean_for_speech("Javasolt ár: 4 500 Ft."), "Javasolt ár: 4500 forint.")
 
     def test_hungarian_prices(self):
         for text, value in (("ötezer", 5000), ("4,5 ezer", 4500), ("3 és fél ezer", 3500), ("4.5k", 4500),
@@ -1525,7 +1524,7 @@ class SellFlowTests(unittest.TestCase):
         self.patch.start()
         self.ui = RecordingUI()
         self.ui.confirm_answer = True
-        self.app = JarvisApp(cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(cfg, self.ui)
         self.fake.vram_fit = lambda ctx: 1.0
         self.assertTrue(self.app.start())
         self.store = self.app.work.store

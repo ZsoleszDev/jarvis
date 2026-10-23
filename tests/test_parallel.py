@@ -158,7 +158,7 @@ class AppParallelTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = make_cfg(Path(self.tmp.name))
         self.ui = RecordingUI()
-        self.app = JarvisApp(self.cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(self.cfg, self.ui)
 
     def tearDown(self):
         self.tmp.cleanup()

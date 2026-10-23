@@ -14,25 +14,20 @@ import sys
 import tempfile
 import threading
 import time
-import types
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-import numpy as np
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from jarvis_core import cuda_libs, textutil  # noqa: E402
+from jarvis_core import textutil  # noqa: E402
 from jarvis_core.assistant import FALLBACK_REPLY, TOO_LONG_REPLY, TOO_MANY_STEPS, Assistant  # noqa: E402
 from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.config import Config, load_config  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, normalize_message  # noqa: E402
-from jarvis_core.recorder import Recorder, resample  # noqa: E402
 from jarvis_core.tools import Toolbox  # noqa: E402
-from jarvis_core.tts import Speaker, voice_urls  # noqa: E402
 
 
 # --- segédek ---------------------------------------------------------------------
@@ -205,24 +200,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.llm.model, "qwen3.8:27b")
         self.assertEqual(cfg.llm.keep_alive, -1)
         self.assertIn("jegyzettömb", cfg.apps)
-        self.assertIsInstance(cfg.stt.gpu_device_index, int)
-        self.assertEqual(cfg.tts.voice, "hu_HU-imre-medium")
 
-    def test_speech_recognition_can_be_switched_off(self):
+    def test_the_old_speech_settings_are_not_errors(self):
+        """A beszédfelismerés, a felolvasás és az ébresztőszó kikerült: a régi config.toml ezekről szóló részei
+        csendben kimaradnak (nem figyelmeztetés)."""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "c.toml"
-            path.write_text("[stt]\nenabled = false\n", encoding="utf-8")
+            path.write_text('[assistant]\nfillers = true\n[stt]\nenabled = false\n[audio]\ninput_device = ""\n'
+                            '[tts]\nengine = "piper"\n[wake_word]\nenabled = true\n[scheduler]\nspeak = true\n',
+                            encoding="utf-8")
             loaded = load_config(path)
-            self.assertFalse(loaded.stt.enabled)
-            self.assertFalse(any("enabled" in w for w in loaded.warnings))
-            cfg = make_cfg(Path(tmp))
-            cfg.stt.enabled = False
-            app = JarvisApp(cfg, mock.Mock(), use_voice=True, use_speech=False, use_wake_word=False)
-            self.assertFalse(app.use_voice, "mint a --text: a beszédfelismerő be sem töltődik")
+        self.assertEqual(loaded.warnings, [])
+        self.assertFalse(hasattr(loaded, "stt"))
 
     def test_browser_calls_run_on_the_agent_thread(self):
         with tempfile.TemporaryDirectory() as tmp:
-            app = JarvisApp(make_cfg(Path(tmp)), mock.Mock(), use_voice=False, use_speech=False, use_wake_word=False)
+            app = JarvisApp(make_cfg(Path(tmp)), mock.Mock())
             with self.assertRaises(Exception):
                 app.call_browser(lambda browser: 1, timeout=0.5)     # nem fut a böngésző
             app.toolbox, app.work = mock.Mock(), mock.Mock(browser_ready=True)
@@ -239,14 +232,6 @@ class ConfigTests(unittest.TestCase):
                 app.requests.put(("quit", None))
                 agent.join(5)
 
-    def test_a_job_started_from_the_phone_is_silent_on_the_pc(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            app = JarvisApp(make_cfg(Path(tmp)), mock.Mock(), use_voice=False, use_speech=False, use_wake_word=False)
-            app.run_job_now("deals", silent=True)
-            app.run_job_now("deals")
-            payloads = [app.requests.get_nowait()[1] for _ in range(2)]
-        self.assertEqual([p["silent"] for p in payloads], [True, False])
-
     def test_unknown_keys_produce_warnings(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "c.toml"
@@ -262,16 +247,10 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(cfg.warnings)
 
 
-# --- szövegtisztítás -----------------------------------------------------------------
+# --- szövegsegédek -----------------------------------------------------------------
 
 class TextUtilTests(unittest.TestCase):
-    def test_clean_for_speech(self):
-        raw = "**Szia!** Ez egy [link](http://x.y) és `kód`.\n- első\n- második 😀 50%"
-        self.assertEqual(textutil.clean_for_speech(raw),
-                         "Szia! Ez egy link és kód. első. második 50 százalék.")
-
-    def test_urls_and_think(self):
-        self.assertEqual(textutil.clean_for_speech("Nézd meg: https://idokep.hu/ma"), "Nézd meg: a link.")
+    def test_think(self):
         self.assertEqual(textutil.strip_think("<think>hmm</think>Válasz"), "Válasz")
 
     def test_fold(self):
@@ -590,239 +569,7 @@ class ToolboxTests(unittest.TestCase):
         self.assertIn("nem engedélyezte", result)
 
 
-# --- mikrofon (hamis hangkártyával) ---------------------------------------------------
-
-class FakeInputStream:
-    def __init__(self, sd, callback, blocksize):
-        self.sd, self.callback, self.blocksize = sd, callback, blocksize
-        self._stop = threading.Event()
-
-    def __enter__(self):
-        def run():
-            for block in self.sd.source(self.blocksize):
-                if self._stop.is_set():
-                    break
-                self.callback(block.reshape(-1, 1), len(block), None, None)
-                time.sleep(0.0003)
-
-        self.thread = threading.Thread(target=run, daemon=True)
-        self.thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._stop.set()
-        self.thread.join(1)
-
-
-class FakeSoundDevice:
-    """(másodperc, zajszint) szakaszok, utána végtelen csend."""
-
-    def __init__(self, segments, supports_16k=True):
-        self.segments = segments
-        self.supports_16k = supports_16k
-        self.rate = 16000
-
-    def check_input_settings(self, **kwargs):
-        if not self.supports_16k:
-            raise ValueError("nem támogatott mintavétel")
-
-    def query_devices(self, device=None, kind=None):
-        return {"name": "Teszt mikrofon", "default_samplerate": 48000}
-
-    def InputStream(self, samplerate, channels, dtype, blocksize, device, callback):
-        self.rate = samplerate
-        return FakeInputStream(self, callback, blocksize)
-
-    def source(self, blocksize):
-        rng = np.random.default_rng(1)
-        for seconds, level in self.segments:
-            for _ in range(int(round(seconds * self.rate / blocksize))):
-                yield rng.normal(0, level, blocksize).astype(np.float32)
-        while True:
-            yield rng.normal(0, 0.001, blocksize).astype(np.float32)
-
-
-class RecorderTests(unittest.TestCase):
-    def setUp(self):
-        self.cfg = load_config(ROOT / "config.toml").audio
-
-    def test_records_until_silence(self):
-        rec = Recorder(self.cfg, backend=FakeSoundDevice([(0.5, 0.001), (1.0, 0.2)]))
-        audio = rec.record()
-        self.assertIsNotNone(audio)
-        expected = 0.5 + 1.0 + self.cfg.silence_seconds   # csend + beszéd + a lezáró csend
-        self.assertAlmostEqual(audio.size / 16000, expected, delta=0.15)
-
-    def test_no_speech_returns_none(self):
-        rec = Recorder(self.cfg, backend=FakeSoundDevice([]))
-        self.assertIsNone(rec.record())
-
-    def test_click_is_not_speech(self):
-        rec = Recorder(self.cfg, backend=FakeSoundDevice([(0.5, 0.001), (0.05, 0.5)]))
-        self.assertIsNone(rec.record())
-
-    def test_calibrate(self):
-        rec = Recorder(self.cfg, backend=FakeSoundDevice([(1.5, 0.006)]))
-        noise, threshold = rec.calibrate()
-        self.assertAlmostEqual(noise, 0.006, delta=0.001)
-        self.assertAlmostEqual(threshold, noise * 3, delta=1e-9)
-
-    def test_resamples_when_16k_unsupported(self):
-        rec = Recorder(self.cfg, backend=FakeSoundDevice([(0.5, 0.001), (1.0, 0.2)], supports_16k=False))
-        self.assertEqual(rec.rate, 48000)
-        audio = rec.record()
-        self.assertAlmostEqual(audio.size / 16000, 1.5 + self.cfg.silence_seconds, delta=0.15)
-
-    def test_resample_function(self):
-        self.assertEqual(resample(np.zeros(48000, dtype=np.float32), 48000, 16000).size, 16000)
-
-
-# --- felolvasás (hamis Piperrel) -------------------------------------------------------
-
-class TtsTests(unittest.TestCase):
-    def test_voice_urls(self):
-        model, config = voice_urls("hu_HU-imre-medium")
-        self.assertEqual(model, "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
-                                "hu/hu_HU/imre/medium/hu_HU-imre-medium.onnx?download=true")
-        self.assertTrue(config.endswith("hu_HU-imre-medium.onnx.json?download=true"))
-        with self.assertRaises(ValueError):
-            voice_urls("imre")
-
-    def test_speaker_cleans_text_and_plays(self):
-        received: list[str] = []
-
-        class FakeChunk:
-            sample_rate = 22050
-            audio_int16_array = np.ones(100, dtype=np.int16)
-
-        class FakeVoice:
-            config = types.SimpleNamespace(sample_rate=22050)
-
-            @staticmethod
-            def load(model_path, config_path=None):
-                return FakeVoice()
-
-            def synthesize(self, text, syn_config=None):
-                received.append(text)
-                yield FakeChunk()
-                yield FakeChunk()
-
-        class FakeOut:
-            def __init__(self):
-                self.played = []
-
-            def play(self, data, samplerate, device=None):
-                self.played.append((data, samplerate))
-
-            def get_stream(self):
-                return types.SimpleNamespace(active=False)
-
-            def stop(self):
-                pass
-
-        fake_piper = types.ModuleType("piper")
-        fake_piper.PiperVoice = FakeVoice
-        fake_piper.SynthesisConfig = lambda **kw: kw
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"piper": fake_piper}):
-            cfg = load_config(ROOT / "config.toml")
-            cfg.tts.voices_dir = tmp
-            (Path(tmp) / "hu_HU-imre-medium.onnx").write_bytes(b"x")
-            (Path(tmp) / "hu_HU-imre-medium.onnx.json").write_text("{}")
-            out = FakeOut()
-            speaker = Speaker(cfg.tts, cfg.audio, backend=out)
-            speaker.say("**Szia!** 50%")
-        self.assertEqual(received, ["Szia! 50 százalék."])
-        data, rate = out.played[0]
-        self.assertEqual(rate, 22050)
-        self.assertEqual(data.dtype, np.int16)
-        self.assertEqual(data.size, 200 + int(22050 * 0.12))  # két mondat és köztük szünet
-
-
-class CudaLibsTests(unittest.TestCase):
-    def test_status_never_crashes(self):
-        usable, reason = cuda_libs.status()
-        self.assertIsInstance(usable, bool)
-        self.assertTrue(reason)
-
-
-# --- beszédfelismerés (hamis faster-whisperrel) -------------------------------------------
-
-class FakeSegment:
-    def __init__(self, text):
-        self.text = text
-
-
-class FakeWhisperModel:
-    fail_on_cuda = False
-    text = " Szia Jarvis, mennyi az idő?"
-
-    def __init__(self, name, device="cpu", **kwargs):
-        if device == "cuda" and FakeWhisperModel.fail_on_cuda:
-            raise RuntimeError("no kernel image is available for execution on the device")
-        self.name, self.device, self.kwargs = name, device, kwargs
-        self.last_kwargs = {}
-
-    def transcribe(self, audio, **kwargs):
-        self.last_kwargs = kwargs
-        return iter([FakeSegment(FakeWhisperModel.text)]), None
-
-
-class SpeechToTextTests(unittest.TestCase):
-    def setUp(self):
-        from jarvis_core import stt as stt_module
-
-        self.stt_module = stt_module
-        fake = types.ModuleType("faster_whisper")
-        fake.WhisperModel = FakeWhisperModel
-        self.patches = [mock.patch.dict(sys.modules, {"faster_whisper": fake})]
-        for p in self.patches:
-            p.start()
-        FakeWhisperModel.fail_on_cuda = False
-        FakeWhisperModel.text = " Szia Jarvis, mennyi az idő?"
-        self.cfg = load_config(ROOT / "config.toml").stt
-        self.log: list[str] = []
-
-    def tearDown(self):
-        for p in self.patches:
-            p.stop()
-
-    def make(self, status):
-        with mock.patch.object(self.stt_module.cuda_libs, "status", return_value=status):
-            return self.stt_module.SpeechToText(self.cfg, log=self.log.append)
-
-    def test_uses_gpu_when_available(self):
-        stt = self.make((True, "2 CUDA-eszköz"))
-        self.assertEqual(stt.describe(), "turbo (GPU)")
-        self.assertEqual(stt.model.kwargs["device_index"], 1)
-        self.assertEqual(stt.model.kwargs["compute_type"], "int8_float16")
-
-    def test_falls_back_to_cpu_when_gpu_fails(self):
-        FakeWhisperModel.fail_on_cuda = True
-        stt = self.make((True, "2 CUDA-eszköz"))
-        self.assertEqual(stt.describe(), "small (CPU)")
-        self.assertTrue(any("CPU-ra váltok" in line for line in self.log))
-
-    def test_cpu_when_libraries_missing(self):
-        stt = self.make((False, "hiányzó CUDA-könyvtár: cudnn64_9.dll"))
-        self.assertEqual(stt.device, "cpu")
-        self.assertTrue(any("cudnn64_9.dll" in line for line in self.log))
-
-    def test_forced_cuda_raises_when_unavailable(self):
-        self.cfg.device = "cuda"
-        with self.assertRaises(RuntimeError):
-            self.make((False, "nincs GPU"))
-
-    def test_transcribe_and_hallucination_filter(self):
-        stt = self.make((False, "nincs GPU"))
-        audio = np.zeros(16000, dtype=np.float32)
-        self.assertEqual(stt.transcribe(audio), "Szia Jarvis, mennyi az idő?")
-        self.assertEqual(stt.model.last_kwargs["language"], "hu")
-        self.assertTrue(stt.model.last_kwargs["vad_filter"])
-        FakeWhisperModel.text = " Feliratozta: valaki"
-        self.assertEqual(stt.transcribe(audio), "")
-
-
-# --- teljes indítás gépelős módban --------------------------------------------------------
+# --- teljes indítás konzolos módban --------------------------------------------------------
 
 class EndToEndTests(unittest.TestCase):
     def test_text_mode_session(self):
@@ -842,8 +589,7 @@ class EndToEndTests(unittest.TestCase):
                 )
                 env = dict(os.environ, PYTHONUTF8="1", NO_COLOR="1", JARVIS_DATA_DIR=str(Path(tmp) / "adat"))
                 proc = subprocess.run(
-                    [sys.executable, str(ROOT / "jarvis.py"), "--console", "--text", "--mute",
-                     "--config", str(cfg_path)],
+                    [sys.executable, str(ROOT / "jarvis.py"), "--console", "--config", str(cfg_path)],
                     input="Hány óra van?\nq\n", capture_output=True, text=True, encoding="utf-8",
                     timeout=60, env=env, cwd=str(ROOT),
                 )

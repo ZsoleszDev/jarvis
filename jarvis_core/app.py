@@ -13,7 +13,6 @@ import contextlib
 import gc
 import itertools
 import queue
-import random
 import re
 import secrets
 import threading
@@ -31,15 +30,11 @@ from .llm import FULL_GPU, Cancelled, OllamaClient, OllamaError, gpu_share, is_r
 from .notices import NoticeBoard
 from .ollama_log import (CACHE_SETTING, CHECKPOINT_SETTING, PARALLEL_SETTING, ServerLog, explain, find_cause,
                          pagefile_tip, server_parallel, user_setting)
-from .recorder import Recorder
 from .browser import BrowserError
 from .scheduler import Hooks, Job, Scheduler, standby_ok, within_hours
 from .selling import NOT_POSTED, POSTED, ItemError, format_price, parse_price, price_verdict
-from .stt import SpeechToText
-from .textutil import SentenceSplitter, fold
+from .textutil import fold
 from .tools import Toolbox, ToolError, params
-from .tts import Speaker, SpeechQueue
-from .wakeword import WakeWordError, WakeWordListener, chime
 from .watches import WatchError, WatchList
 from .work import (DELISTED_NOTE, PRICE_CHOICES, WORK_ONLY_TOOLS, WorkDesk, interpret_price_reply, load_work_prompt,
                    mmss)
@@ -48,7 +43,7 @@ MODES = ("chat", "work")
 # Az Adás/Vétel feladatai, amik egy tárgyon dolgoznak (a kártyán látszik, hogy épp mi történik)
 BUSY_ACTIONS = {"sell", "reply", "price", "post", "research", "delist", "sold", "approve", "upload"}
 # A felhasználó kérései (a háttérmunka és a belső lépések nem ilyenek): ezek szakítják meg a háttérmunkát.
-INTERACTIVE = {"text", "voice", "audio", "work", "creative"}
+INTERACTIVE = {"text", "work", "creative"}
 # Az eladás előkészítése (a fotók átnézése, az adatok, a visszakérdezés, az ár) böngésző nélkül megy: ezek a saját
 # szálukon rögtön indulnak, a kereskedéssel párhuzamosan; ami utána böngészőt kér (árkutatás egy böngészős oldalon,
 # a feltöltés), az elsőbbséggel kerül az ágens-szálra (a futó kereskedés a következő lépésénél átadja).
@@ -57,10 +52,9 @@ PREP_ACTIONS = {"sell", "approve", "reply", "price"}
 # [scheduler] quiet_minutes); ha közben újabb feltöltés jön, a kereskedés úgyis átadja a böngészőt.
 AFTER_WORK = 60.0
 
-VOICE_EXIT_PHRASES = {"viszlat jarvis", "kilepes", "kapcsolj ki", "kapcsold ki magad", "leallas"}
-# Szünet hanggal is (folytatni csak a gombbal vagy a telefonról lehet, mert a hangfelismerés is leáll)
-VOICE_PAUSE_PHRASES = {"pihenj", "szunet", "tarts szunetet", "szunetelj", "engedd el a videokartyat",
-                       "szabaditsd fel a videokartyat", "allits le mindent"}
+# Szünet beírva is („pihenj”); folytatni a gombbal vagy a telefonról lehet.
+PAUSE_PHRASES = {"pihenj", "szunet", "tarts szunetet", "szunetelj", "engedd el a videokartyat",
+                 "szabaditsd fel a videokartyat", "allits le mindent"}
 PAUSED_REPLY = "Szünetelek, minden modell le van állítva. A Folytatás gombbal (vagy a telefonról) újraindulok."
 WAKE_FAILED = "Most nem tudtam felébredni, mert a nyelvi modell nem töltődött be. Próbáld újra kicsit később."
 # A modell leállása után ennyi másodperc múlva nézzük meg az Ollama naplójában, miért (addigra beleírta).
@@ -77,21 +71,12 @@ TRADING_KEEP_ALIVE = "30m"
 SMALL_KV_TYPES = {"q8_0", "q4_0"}
 KV_SETTING = "OLLAMA_KV_CACHE_TYPE"
 
-# Ezeknél az eszközöknél pár másodperc is lehet a várakozás, ezért Jarvis rögtön szól valamit.
-SLOW_TOOLS = {"web_search", "read_webpage", "browser_open", "browser_click", "browser_type", "browser_fill",
-              "browser_choose", "browser_do", "browser_read", "browser_look", "look_at_screen", "find_files", "system_status",
-              "item_research", "item_post", "browser_upload_photos"}
-FILLERS = ["Egy pillanat.", "Máris megnézem.", "Utánanézek.", "Rajta vagyok.", "Egy pillanat, megnézem."]
-
 # Az állapotok, ahogy a felületen megjelennek.
 STATE_TEXT = {
     "starting": "Indulok",
     "idle": "Készen állok",
-    "listening": "Hallgatlak",
-    "transcribing": "Értelmezem",
     "thinking": "Gondolkodom",
     "working": "Dolgozom",
-    "speaking": "Beszélek",
     "paused": "Szünetelek",
     "standby": "Készenlétben",
     "writing": "Írok",
@@ -114,9 +99,6 @@ TOOL_ACTIVITY = {
     "watch_check": "Megnézem a figyelőket", "messages_list": "Átnézem az üzeneteket",
     "message_draft": "Válaszvázlatot írok",
 }
-EXAMPLES = ["Milyen idő lesz holnap?", "Mi ez a hibaüzenet a képernyőn?",
-            "Keress a Vinteden fekete L-es pólót 2500 forintig"]
-
 DEFAULT_SYSTEM_PROMPT = (
     "Te {name} vagy, egy magyarul beszélő személyi asszisztens. Röviden, természetesen "
     "válaszolj, markdown nélkül, és használd az eszközöket, ha a gépen kell valamit csinálni."
@@ -138,7 +120,6 @@ class UI(Protocol):
     def warn(self, text: str) -> None: ...
     def error(self, text: str) -> None: ...
     def timing(self, text: str) -> None: ...
-    def level(self, value: float) -> None: ...
     def confirm(self, prompt: str, stop_event: threading.Event) -> bool: ...
 
 
@@ -159,20 +140,15 @@ def load_system_prompt(cfg: Config, ui: UI | None = None) -> str:
 
 
 def _words(text: str) -> str:
-    """A Whisper írásjelekkel adja vissza ("Viszlát, Jarvis!"), ezeket figyelmen kívül hagyjuk."""
+    """Az írásjelek és a megszólítás nélkül ("Jarvis, pihenj!" → "pihenj")."""
     words = re.sub(r"[^\w\s]", " ", fold(text)).split()
-    if words and words[0] == "jarvis":   # "Jarvis, pihenj!"
+    if words and words[0] == "jarvis":
         words = words[1:]
     return " ".join(words)
 
 
-def is_voice_exit(text: str) -> bool:
-    words = re.sub(r"[^\w\s]", " ", fold(text)).split()
-    return " ".join(words) in VOICE_EXIT_PHRASES
-
-
 def is_pause_request(text: str) -> bool:
-    return _words(text) in VOICE_PAUSE_PHRASES
+    return _words(text) in PAUSE_PHRASES
 
 
 def model_problem(exc: BaseException, short: bool = False) -> str:
@@ -240,14 +216,10 @@ def tool_label(name: str, args: dict[str, Any]) -> str:
 class JarvisApp:
     STANDBY_CHECK_SECONDS = 20.0     # ilyen sűrűn nézi meg, visszaállhat-e készenlétbe
 
-    def __init__(self, cfg: Config, ui: UI, use_voice: bool = True, use_speech: bool = True,
-                 use_wake_word: bool = True):
+    def __init__(self, cfg: Config, ui: UI):
         self.cfg = cfg
         self.ui = ui
         self.name = cfg.assistant.name
-        self.use_voice = use_voice and cfg.stt.enabled   # [stt] enabled = false: mint a --text
-        self.use_speech = use_speech
-        self.use_wake_word = use_wake_word
         self.llm = OllamaClient(cfg.llm)
         self.stop_event = threading.Event()
         self.llm.stop_event = self.stop_event
@@ -258,11 +230,6 @@ class JarvisApp:
         self.model_restarts: list[dict[str, str]] = []   # a leállások okai (a hibacsomagba is bekerülnek)
         self._restart_advice: set[str] = set()           # amelyik okról már részletesen szóltunk
         self.exit_requested = threading.Event()
-        self.speaker: Speaker | None = None
-        self.speech: SpeechQueue | None = None
-        self.recorder: Recorder | None = None
-        self.stt: SpeechToText | None = None
-        self.wake: WakeWordListener | None = None
         self.toolbox: Toolbox | None = None
         self.assistant: Assistant | None = None          # a Beszélgetés menü (bármit kérhetsz)
         self.work: WorkDesk | None = None                # a Munka menü tárgyai és eszközei
@@ -278,18 +245,14 @@ class JarvisApp:
         self._state_lock = threading.Lock()
         self._phase, self._detail = "starting", ""
         self._shown_state: tuple[str, str] | None = None
-        self._splitter: SentenceSplitter | None = None
-        self._spoken_this_turn = False
         self._tool_ids = itertools.count(1)
         self._current_tool_id = 0
-        self._level_at = 0.0
         # Szünet: minden modell leállítva, a videókártya és a memória szabad (Szünet gomb).
         self.paused = False
         # Készenlét: szünet, amiből egy kérés magától felébreszti (a Szünet gombos szünetből nem).
         # standby_mode: készenlétben indult (gépindításkor); tétlenség után oda tér vissza.
         self.standby = False
         self.standby_mode = False
-        self._calibrated = False
         self._closing = threading.Event()
         # egy kérésen belül oldalanként és módonként egy hibacsomag
         self._dossiers_made: set[tuple[str, str, str, str]] = set()
@@ -305,27 +268,11 @@ class JarvisApp:
         self.prepping = ""
         self._handoffs: dict[str, dict[str, Any]] = {}  # tárgy → amit az előkészítés után az ágens-szál folytat
         self._current_kind = ""                          # amin az ágens-szál épp dolgozik
-        self._own_silent = threading.local()            # az eladás-előkészítő szál saját kérése (_silent)
-        self._silent = False                             # a telefonról jött kérés: a gépen ne szóljon
         self._done_events: dict[str, threading.Event] = {}
         self._done_lock = threading.Lock()              # a telefonos szálak is hozzányúlnak
         self.notices: NoticeBoard | None = None
         self.watches: WatchList | None = None
         self.scheduler: Scheduler | None = None
-
-    @property
-    def _silent(self) -> bool:
-        """A mostani kérés a telefonról jött: a gépen ne szóljon. Az eladás-előkészítő szálon a saját kéréséé."""
-        own = getattr(self._own_silent, "value", None)
-        return self._agent_silent if own is None else own
-
-    @_silent.setter
-    def _silent(self, value: bool) -> None:
-        self._agent_silent = value
-
-    @property
-    def voice_ready(self) -> bool:
-        return self.recorder is not None and self.stt is not None
 
     @property
     def busy(self) -> bool:
@@ -336,11 +283,6 @@ class JarvisApp:
         return {
             "name": self.name,
             "model": self.cfg.llm.model,
-            "stt": self.stt.describe() if self.stt else None,
-            "voice": self.voice_ready,
-            "speech": self.speech is not None and self.speaker is not None and self.speaker.enabled,
-            "wake_word": "Hey Jarvis" if self.wake else None,
-            "examples": EXAMPLES,
             "work": self.work is not None and self.work_assistant is not None,
             "creative": self.creative is not None,
             "paused": self.paused,
@@ -427,18 +369,12 @@ class JarvisApp:
     def start(self, standby: bool = False) -> bool:
         """Betölt mindent. Hamissal tér vissza, ha a nyelvi modell nem indítható.
 
-        `standby`: készenléti indulás (pl. a gép bekapcsolásakor): a modellek (nyelvi modell,
-        beszédfelismerés, hang) nem töltődnek be, csak az első kérésnél; addig a videókártya szabad."""
+        `standby`: készenléti indulás (pl. a gép bekapcsolásakor): a nyelvi modell nem töltődik be, csak az
+        első kérésnél; addig a videókártya szabad."""
         if standby:
             self.standby_mode = True
-        else:
-            if not self.load_model():
-                return False
-            self._load_speech()
-            # A beszédfelismerés a nyelvi modell UTÁN töltődik, hogy az Ollama megkapja a
-            # szükséges VRAM-ot, és ne kerüljön a modell egy része a CPU-ra.
-            self._load_voice(calibrate=True)
-            self._load_wake()
+        elif not self.load_model():
+            return False
 
         # A böngészőprofil (bejelentkezések) és a Munka menü adatai a projektmappán kívül vannak,
         # hogy egy új verzió kicsomagolása után is megmaradjanak; a régieket egyszer áthozzuk.
@@ -477,55 +413,6 @@ class JarvisApp:
             for assistant in (self.assistant, self.work_assistant):
                 if assistant is not None:
                     assistant.context_tokens = self.context_length
-
-    # --- a betöltés részei (a Szünet után a Folytatás is ezeket hívja) -------------------------
-
-    def _load_speech(self) -> None:
-        if not (self.use_speech and self.cfg.tts.engine.strip().lower() != "none"):
-            return
-        try:
-            self.ui.info("Hang betöltése...")
-            speaker = Speaker(self.cfg.tts, self.cfg.audio, log=self.ui.info)
-        except Exception as exc:  # noqa: BLE001
-            self.ui.warn(f"A felolvasás nem indult el ({exc}). Csak szövegesen válaszolok.")
-            if self.speech is None:
-                self.speaker = None
-            return
-        self.speaker = speaker
-        if self.speech is None:
-            self.speech = SpeechQueue(speaker, on_change=lambda _busy: self._refresh_state())
-        else:   # Folytatáskor a régi sor marad (a szálai élnek), csak új hangot kap
-            self.speech.speaker = speaker
-
-    def _load_voice(self, calibrate: bool = False) -> None:
-        if not self.use_voice:
-            return
-        try:
-            if self.recorder is None:
-                self.recorder = Recorder(self.cfg.audio)
-                self.ui.info(f"Mikrofon: {self.recorder.device_name()}")
-            if calibrate:
-                self.ui.info("Zajszint mérése, egy másodpercig maradj csendben...")
-                noise, threshold = self.recorder.calibrate()
-                self.ui.info(f"  zajszint {noise:.4f}, beszédküszöb {threshold:.4f}")
-                self._calibrated = True
-            self.ui.info("Beszédfelismerés betöltése (első indításkor letölti a modellt)...")
-            t0 = time.perf_counter()
-            self.stt = SpeechToText(self.cfg.stt, log=self.ui.warn)
-            self.ui.info(f"  kész: {self.stt.describe()} ({secs(time.perf_counter() - t0)})")
-        except Exception as exc:  # noqa: BLE001
-            self.ui.warn(f"A hangbemenet nem indult el ({exc}). Gépelős módban folytatom.")
-            self.recorder = self.stt = None
-
-    def _load_wake(self) -> None:
-        if self.voice_ready and self.use_wake_word and self.cfg.wake_word.enabled:
-            try:
-                self.wake = WakeWordListener(self.cfg.wake_word, self.cfg.audio, self._on_wake,
-                                             log=self.ui.warn)
-                self.ui.info("Ébresztőszó: mondd, hogy „Hey Jarvis”.")
-            except WakeWordError as exc:
-                self.ui.warn(f"Ébresztőszó nem elérhető ({exc}). Gombbal vagy Enterrel szólhatsz.")
-                self.wake = None
 
     # --- háttérmunka, figyelők, értesítések -------------------------------------------------------
 
@@ -576,7 +463,7 @@ class JarvisApp:
             instant.start()
         trading = self.work.deals if self.work is not None else None
         if trading is not None:
-            trading.journal.on_add = lambda text: self.ui.info(f"Kereskedés: {text}")   # a konzolon is lásd, mit csinál
+            trading.journal.on_add = self._trading_note   # a Munka menü naplójába (és a konzolra) is
             # Párhuzamos böngészés: a Hardverapró és a Jófogás böngésző nélkül, a saját szálán, amíg a böngésző a
             # Vintedet és a Vaterát nézi (a Szünet ezt is megállítja, a készenlét nem).
             trading.start_fast_lane(self._instant_allowed, self.llm.gate.background_ok, self._quick_notify)
@@ -723,21 +610,23 @@ class JarvisApp:
                 pass
 
     def notify_event(self, kind: str, title: str, text: str, **extra: Any) -> None:
-        """A háttérmunka üzenete: értesítés (a telefonnak is), a naplóba, és ha szabad, fel is olvassa."""
+        """A háttérmunka üzenete: értesítés (a telefonnak is) és a naplóba: a figyelőké a Beszélgetésbe, a többi
+        (kereskedés, hirdetések, vevői üzenetek) a Munka menü naplójába."""
         if self.notices is not None:
             self.notices.add(kind, title, text, **extra)
-        self.ui.notice(text)
-        if self.cfg.scheduler.speak and not self.paused and not extra.get("quiet"):   # a nem fontosat nem olvassa fel
-            try:
-                self.say(text)
-            except Exception:  # noqa: BLE001
-                pass
+        with self._log_channel("chat" if kind == "watch" else "work"):
+            self.ui.notice(text)
 
     def _quiet_since(self) -> float:
         """Mióta csendes a Jarvis a háttérmunkának: a beszélgetés után [scheduler] quiet_minutes kell, egy eladási
         lépés (feltöltés, Pro adatlap) után csak AFTER_WORK másodperc; utána a kereskedés folytatódhat."""
         quiet = float(self.cfg.scheduler.quiet_minutes or 0) * 60
         return max(self.last_activity, self.last_work - max(0.0, quiet - AFTER_WORK))
+
+    def _trading_note(self, text: str) -> None:
+        """A kereskedés naplójának egy sora a Munka menü naplójába (bármelyik szálról): a Beszélgetés tiszta marad."""
+        with self._log_channel("work"):
+            self.ui.info(f"Kereskedés: {text}")
 
     def _standby_keep_alive(self) -> str:
         """Készenlétben ennyi ideig marad betöltve a modell egy kérdés után: amíg az automata kereskedés fut, tovább."""
@@ -755,17 +644,23 @@ class JarvisApp:
         scheduler = self.scheduler
         return scheduler is None or float(scheduler.state.get("snoozed_until") or 0) <= now
 
-    def _quick_notify(self, kind: str, title: str, text: str, spoken: str = "", **extra: Any) -> None:
-        """Az azonnali figyelő értesítése (a saját szálán): a telefonra is, és ha szabad, röviden fel is olvassa (csak a
-        címét: ha épp beszélgetsz vagy dolgozol a Jarvisszal, akkor sem)."""
+    def _quick_notify(self, kind: str, title: str, text: str, **extra: Any) -> None:
+        """Az azonnali figyelő és a gyors sor értesítése (a saját szálukon): a Munka menü naplójába és a telefonra is."""
         if self.notices is not None:
             self.notices.add(kind, title, text, **extra)
-        self.ui.notice(text)
-        if self.cfg.scheduler.speak and not self.paused and not self.busy and spoken:
-            try:
-                self.say(spoken)
-            except Exception:  # noqa: BLE001
-                pass
+        with self._log_channel("work"):
+            self.ui.notice(text)
+
+    @contextlib.contextmanager
+    def _log_channel(self, mode: str):
+        """Ezen a szálon az üzenetek ebbe a menübe kerüljenek (a felület szálanként tudja: own_channel), a többi szál
+        beszélgetése marad, ahol volt. A konzolos felületnek nincs menüje: ott mindegy."""
+        own = getattr(type(self.ui), "own_channel", None)
+        if callable(own):
+            with own(self.ui, mode):
+                yield
+        else:
+            yield
 
     def _make_assistant(self, prompt: str, tools: set[str], max_rounds: int | None = None,
                         options: dict[str, Any] | None = None) -> Assistant:
@@ -892,8 +787,6 @@ class JarvisApp:
             self._prep = threading.Thread(target=self._prep_loop, name="jarvis-eladas", daemon=True)
             self._prep.start()
         self._set_phase(self._rest_phase())
-        if self.wake is not None:
-            self.wake.start()
         if self.scheduler is not None:
             self.scheduler.start()
         if self.standby_mode and float(self.cfg.standby.idle_minutes or 0) > 0:
@@ -947,13 +840,6 @@ class JarvisApp:
 
     def greet(self) -> None:
         self.ui.notice(self.cfg.assistant.greeting)
-        self.say(self.cfg.assistant.greeting)
-
-    def say_goodbye(self) -> None:
-        if self.speech:
-            self.speech.interrupt()
-            self.say("Viszlát!")
-            self.speech.wait(timeout=4)
 
     def shutdown(self) -> None:
         self._closing.set()
@@ -964,10 +850,6 @@ class JarvisApp:
             self.work.instant.stop()
         if self.work is not None:
             self.work.deals.stop_fast_lane()
-        if self.speech:
-            self.speech.interrupt()
-        if self.wake is not None:
-            self.wake.stop()
         if self._prep is not None:
             self._prep_requests.put(None)
         if self._agent is not None and self._agent.is_alive():
@@ -1029,24 +911,10 @@ class JarvisApp:
                 for key in [k for k, e in self._done_events.items() if e.is_set()][:100]:
                     self._done_events.pop(key, None)
 
-    def submit_text(self, text: str, mode: str = "chat", request_id: str | None = None,
-                    silent: bool = False, via: str = "text") -> None:
+    def submit_text(self, text: str, mode: str = "chat", request_id: str | None = None, via: str = "text") -> None:
         text = (text or "").strip()
         if text:
-            self._submit(("text", {"text": text, "mode": self._mode(mode), "request_id": request_id,
-                                   "silent": silent, "via": via}))
-
-    def submit_audio(self, data: bytes, mode: str = "chat", request_id: str | None = None,
-                     silent: bool = True) -> None:
-        """Hangfelvétel a telefonról: a Jarvis szöveggé alakítja, és úgy válaszol, mintha mondtad volna."""
-        self._submit(("audio", {"data": data, "mode": self._mode(mode), "request_id": request_id,
-                                "silent": silent}))
-
-    def submit_voice(self, source: str = "button") -> bool:
-        if not self.voice_ready:
-            return False
-        self._submit(("voice", source))
-        return True
+            self._submit(("text", {"text": text, "mode": self._mode(mode), "request_id": request_id, "via": via}))
 
     def submit_reset(self, mode: str = "chat") -> None:
         self._submit(("reset", self._mode(mode)))
@@ -1077,10 +945,9 @@ class JarvisApp:
         """Háttérmunka (az ütemező hívja, ha Jarvis ráér)."""
         self._submit(("job", {"key": key, "forced": False}))
 
-    def run_job_now(self, key: str, silent: bool = False) -> None:
-        """Háttérmunka azonnal (a telefonról vagy a felületről kérve), a csendes időszakot nem várja meg. silent: a
-        telefonról kérted, a gép ne olvassa fel az eredményét (az értesítés megy a telefonra)."""
-        self._submit(("job", {"key": key, "forced": True, "silent": silent}))
+    def run_job_now(self, key: str) -> None:
+        """Háttérmunka azonnal (a telefonról vagy a felületről kérve), a csendes időszakot nem várja meg."""
+        self._submit(("job", {"key": key, "forced": True}))
 
     def submit_pause(self) -> None:
         """Szünet: abbahagy mindent, és leállít minden modellt, hogy a videókártya, a memória és a
@@ -1173,20 +1040,11 @@ class JarvisApp:
         """Állj: megszakítja a felvételt, a modellt, a következő lépést és a beszédet."""
         self.stop_event.set()
         self._prep_stop.set()
-        if self.speech:
-            self.speech.interrupt()
 
     def _check_stop(self) -> None:
         """A modell nélküli lépéssorok (visszajátszás) is megállnak az Állj gombra."""
         if self.stop_event.is_set():
             raise Cancelled()
-
-    def _on_wake(self) -> None:
-        # Háttérmunka közben is meghall: az abbahagyja, és a kérésed jön.
-        if not self.busy or (self._current_kind == "job" and self._outstanding <= 1):
-            self.submit_voice("wake")
-        elif self.wake is not None:
-            self.wake.resume()
 
     # --- ágens-szál ------------------------------------------------------------------
 
@@ -1203,10 +1061,7 @@ class JarvisApp:
                 self._current_kind = kind
                 if kind in INTERACTIVE:
                     self.preempt.clear()      # a kérésed most sorra került
-                if self.wake is not None and kind != "job":
-                    self.wake.pause()
                 request_id = payload.get("request_id") if isinstance(payload, dict) else None
-                self._silent = bool(payload.get("silent")) if isinstance(payload, dict) else False
                 self._dossiers_made.clear()
                 if hasattr(self.ui, "request_id"):
                     self.ui.request_id = request_id   # a felület ezzel jelöli meg a kérés üzeneteit
@@ -1242,10 +1097,6 @@ class JarvisApp:
                         else:
                             self.respond(payload["text"], via=payload.get("via", "text"),
                                          mode=payload.get("mode", "chat"))
-                    elif kind == "audio":
-                        self._respond_audio(payload)
-                    elif kind == "voice":
-                        self.voice_conversation(source=payload)
                     elif kind == "reset":
                         mode = payload or "chat"
                         self._assistant_for(mode).reset()
@@ -1262,8 +1113,6 @@ class JarvisApp:
                     elif kind == "resume":
                         self._do_resume()
                 except Cancelled:
-                    if self.speech:
-                        self.speech.interrupt()
                     self.ui.info("Megszakítva.")
                 except OllamaError as exc:
                     self.ui.error(model_problem(exc))
@@ -1273,7 +1122,6 @@ class JarvisApp:
                 finally:
                     with self._outstanding_lock:
                         self._outstanding -= 1
-                    self._silent = False
                     self._current_kind = ""
                     if self.work is not None and kind not in ("job",):
                         self.work.end_request()
@@ -1288,7 +1136,6 @@ class JarvisApp:
                     if hasattr(self.ui, "request_id"):
                         self.ui.request_id = None
                     self._finish_request(request_id)
-                self._after_request()
         finally:
             if self.toolbox is not None:
                 self.toolbox.close()  # a böngészőt ugyanabban a szálban kell bezárni
@@ -1316,7 +1163,7 @@ class JarvisApp:
         """Melyik menü beszélgetése válaszol a kérésre (a Kreatív menünek nincs ilyen)."""
         if kind in ("work", "creative"):
             return kind
-        if kind in ("text", "audio") and isinstance(payload, dict):
+        if kind == "text" and isinstance(payload, dict):
             return self._mode(str(payload.get("mode") or "chat"))
         return self.mode
 
@@ -1330,33 +1177,11 @@ class JarvisApp:
         if payload.get("forced"):
             self.ui.info(f"{job.title if job else key}: {result}")
 
-    def _respond_audio(self, payload: dict[str, Any]) -> None:
-        """A telefonról jött hangfelvétel: szöveggé alakítja, és megválaszolja."""
-        if self.stt is None:
-            self.ui.notice("A beszédfelismerés most nem fut, írd be inkább, mit szeretnél.")
-            return
-        self._set_phase("transcribing")
-        try:
-            text = self.stt.transcribe_file(payload["data"])
-        except Exception as exc:  # noqa: BLE001 - pl. ismeretlen hangformátum
-            self.ui.error(f"Nem tudtam lejátszani a felvételt ({type(exc).__name__}: {exc}).")
-            return
-        if not text:
-            self.ui.notice("Nem értettem a felvételt, próbáld újra.")
-            return
-        mode = payload.get("mode", "chat")
-        if is_pause_request(text):
-            self.ui.user(text, "phone")
-            self._do_pause()
-            return
-        self.respond(text, via="phone", mode=mode)
-
     # --- Szünet és Folytatás ---------------------------------------------------------------
 
     def _do_pause(self, standby: bool = False) -> None:
-        """Minden modell leáll: a nyelvi modell (az Ollamában minden betöltött), a beszédfelismerés,
-        a hang és az ébresztőszó, és a böngésző is bezárul. A Jarvis ablaka (és a telefonos
-        kapcsolat) megmarad, így a Folytatás gombbal vissza lehet hozni.
+        """A nyelvi modell leáll (az Ollamában minden betöltött), és a böngésző is bezárul. A Jarvis ablaka (és a
+        telefonos kapcsolat) megmarad, így a Folytatás gombbal vissza lehet hozni.
 
         `standby`: készenlét (tétlenség után magától): ebből egy kérés felébreszti. A Szünet gombos
         szünetből nem ébred fel magától (pl. mert épp játszol a gépen)."""
@@ -1370,23 +1195,10 @@ class JarvisApp:
                 self.ui.info("Már szünetelek.")
             return
         self._set_phase("working", "Leállítom a modelleket")
-        if self.speech is not None:
-            self.speech.interrupt()
         before = {g.index: g.used_mb for g in gpu.query_gpus()}
         freed = []
-        if self.wake is not None:
-            self.wake.stop()
-            self.wake = None
-            freed.append("ébresztőszó")
         if self.toolbox is not None and self.toolbox.close_browser():
             freed.append("böngésző")
-        if self.stt is not None:
-            self.stt.close()
-            self.stt = None
-            freed.append("beszédfelismerés")
-        if self.speaker is not None and self.speaker.enabled:
-            self.speaker.close()
-            freed.append("felolvasás")
         try:
             unloaded = self.llm.unload_all()
             if unloaded:
@@ -1405,7 +1217,7 @@ class JarvisApp:
         self._set_phase(self._rest_phase())
         if standby:
             self.ui.info("Egy ideje nem használtál, készenlétbe álltam (leállítottam: " +
-                         (", ".join(freed) or "semmi nem futott") + "). Ha írsz vagy szólsz, felébredek.")
+                         (", ".join(freed) or "semmi nem futott") + "). Ha írsz, felébredek.")
         else:
             self.ui.notice("Szünetelek. Leállítottam: " + (", ".join(freed) or "nem futott semmi") +
                            ". A Folytatás gombbal (vagy a telefonról) újraindulok.")
@@ -1430,12 +1242,6 @@ class JarvisApp:
             self.ui.error("Nem sikerült betölteni a nyelvi modellt, ezért továbbra is szünetelek.")
             return
         self._sync_context()
-        self._load_speech()
-        self._load_voice(calibrate=not self._calibrated)
-        self._load_wake()
-        if self.wake is not None:
-            self.wake.start()
-            self.wake.pause(wait=False)   # a kérés végén (_after_request) indul újra
         self.paused = False
         self.standby = False
         self.last_activity = time.time()
@@ -1445,37 +1251,14 @@ class JarvisApp:
         self._hello()
         if announce:
             self.ui.notice("Újra itt vagyok.")
-            self.say("Újra itt vagyok.")
 
-    def _after_request(self) -> None:
-        """Megvárja, hogy Jarvis befejezze a beszédet; utána újra figyel az ébresztőszóra."""
-        while (self.speech is not None and self.speech.busy and self.requests.empty()
-               and not self.stop_event.is_set()):
-            time.sleep(0.05)
-        if self.wake is not None and self.requests.empty():
-            self.wake.resume()
-
-    # --- beszéd, jóváhagyás, értesítés -----------------------------------------------------
-
-    def say(self, text: str) -> None:
-        """Felolvasásra küldi (nem vár a végére; a mondatok sorban hangzanak el)."""
-        if self._silent:   # a telefonról jött kérés: a gépen ne szóljon, a telefon felolvashatja
-            return
-        if self.speech is not None and text.strip():
-            self._spoken_this_turn = True
-            self.speech.say(text)
+    # --- jóváhagyás, értesítés ------------------------------------------------------------------
 
     def notify(self, message: str) -> None:
         """Időzítő vagy más háttéresemény üzenete (másik szálról is jöhet)."""
         self.ui.notice(message)
-        try:
-            self.say(message)
-        except Exception:  # noqa: BLE001 - a háttérszál ne álljon le hang miatt
-            pass
 
     def confirm(self, prompt: str) -> bool:
-        self._flush_sentences()
-        self.say("Ehhez a jóváhagyásod kell.")
         self._set_phase("working", "Jóváhagyásra várok")
         context = self.work.confirm_context() if self.work is not None else ""
         if context:   # feltöltés közben: melyik oldal, melyik tárgy, mennyiért
@@ -1485,53 +1268,7 @@ class JarvisApp:
             self.work.approved = True
         return approved
 
-    def _flush_sentences(self) -> None:
-        if self._splitter is not None:
-            for sentence in self._splitter.flush():
-                self.say(sentence)
-
-    # --- hallgatás és válasz -----------------------------------------------------------
-
-    def _wait_speech(self) -> None:
-        """Amíg Jarvis beszél, nem hallgatunk (különben magát hallaná)."""
-        if self.speech is None:
-            return
-        while self.speech.busy:
-            if self.stop_event.is_set():
-                raise Cancelled()
-            time.sleep(0.05)
-        time.sleep(0.15)
-
-    def _on_level(self, level: float) -> None:
-        now = time.monotonic()
-        if now - self._level_at >= 0.08:
-            self._level_at = now
-            self.ui.level(level)
-
-    def listen(self, timeout: float | None = None, follow_up: bool = False, ring: bool = False) -> str:
-        assert self.recorder is not None and self.stt is not None
-        if self.wake is not None:
-            self.wake.pause()
-        self._wait_speech()
-        if ring and self.cfg.wake_word.chime:
-            chime(self.recorder.sd, self.speaker.device if self.speaker else None)
-        self._set_phase("listening", "folytatás" if follow_up else "")
-        audio = self.recorder.record(no_speech_timeout=timeout, cancel=self.stop_event,
-                                     on_level=self._on_level)
-        if self.stop_event.is_set():
-            raise Cancelled()
-        if audio is None:
-            if not follow_up:
-                self.ui.info("Nem hallottam semmit.")
-            return ""
-        self._set_phase("transcribing")
-        t0 = time.perf_counter()
-        text = self.stt.transcribe(audio)
-        if self.cfg.assistant.show_timings:
-            self.ui.timing(f"felismerés: {secs(time.perf_counter() - t0)}")
-        if not text and not follow_up:
-            self.ui.info("Nem értettem, próbáld újra.")
-        return text
+    # --- válasz ------------------------------------------------------------------------------
 
     def answer(self, text: str, via: str = "text", mode: str = "chat", shown: str | None = None,
                tools: set[str] | None = None) -> None:
@@ -1545,36 +1282,19 @@ class JarvisApp:
 
     def _answer(self, assistant: Assistant, text: str, via: str, shown: str | None = None,
                 tools: set[str] | None = None) -> None:
-        """A válasz kiírása és felolvasása már menet közben indul."""
+        """A válasz kiírása már menet közben indul (a modell válaszának minden darabja rögtön megjelenik)."""
         if shown is None:
             self.ui.user(text, via)
         else:
             self.ui.info(shown)
         self._set_phase("thinking")
-        splitter = self._splitter = SentenceSplitter()
-        self._spoken_this_turn = False
-        if self.speech:
-            self.speech.mark_turn()
-        started = time.perf_counter()
-
-        def on_text(delta: str) -> None:   # a modell válaszának minden darabjánál lefut
-            self.ui.delta(delta)
-            for sentence in splitter.feed(delta):
-                self.say(sentence)
-
         try:
-            reply = assistant.ask(text, on_text=on_text if self.cfg.assistant.stream else None, tool_names=tools)
-            self._flush_sentences()
+            reply = assistant.ask(text, on_text=self.ui.delta if self.cfg.assistant.stream else None,
+                                  tool_names=tools)
         except BaseException:
             self.ui.assistant_abort()
             raise
-        finally:
-            self._splitter = None
-
-        streamed = assistant.last_reply_streamed
-        self.ui.assistant_end(reply, streamed)
-        if not streamed:
-            self.say(reply)
+        self.ui.assistant_end(reply, assistant.last_reply_streamed)
         if self.cfg.assistant.show_timings:
             stats = assistant.last_stats
             speed = stats.tokens_per_second()
@@ -1583,33 +1303,12 @@ class JarvisApp:
                 parts.append(f"{stats.tool_calls} eszközhívás")
             if speed:
                 parts.append(f"~{speed:.0f} token/mp")
-            first = self.speech.first_audio_at if self.speech else None
-            if first:
-                parts.append(f"első hang: {secs(first - started)}")
             self.ui.timing(", ".join(parts))
-
-    def voice_conversation(self, source: str = "button") -> bool:
-        """Egy hangos kérés; utána pár másodpercig gomb nélkül is hallgat a folytatásra.
-
-        Igazzal tér vissza, ha a felhasználó kilépést kért.
-        """
-        text = self.listen(ring=(source == "wake"))
-        follow_up = float(self.cfg.audio.follow_up_seconds)
-        while text:
-            if is_voice_exit(text):
-                self.ui.user(text, "voice")
-                self.exit_requested.set()
-                return True
-            self.respond(text, via="voice", mode=self.mode)
-            if follow_up <= 0:
-                return False
-            text = self.listen(timeout=follow_up, follow_up=True)
-        return False
 
     # --- Munka menü ------------------------------------------------------------------------
 
     def respond(self, text: str, via: str = "text", mode: str = "chat") -> None:
-        """A felhasználó szövege vagy hangja. Ha a Munka menüben Jarvis épp visszakérdezett,
+        """A felhasználó szövege. Ha a Munka menüben Jarvis épp visszakérdezett,
         ez a válasz arra (és megy tovább az eladás); különben a menü beszélgetése válaszol."""
         if mode == "work" and self.work is not None and self.work_assistant is not None:
             pending = self.work.pending_item()
@@ -1680,12 +1379,10 @@ class JarvisApp:
                     self.ui.error(f"Ismeretlen feladat: {action}")
             except ItemError as exc:
                 self.ui.error(str(exc))
-                self.say(str(exc))
                 self._tell("error", "Munka: hiba", str(exc), item=item_id)
             except OllamaError as exc:   # a Munka naplójába kerüljön, ne a Beszélgetésbe
                 text = model_problem(exc)
                 self.ui.error(text)
-                self.say(text)
                 self._tell("error", "Munka: hiba", text, item=item_id)
             finally:
                 if item_id and action in BUSY_ACTIONS:
@@ -1734,14 +1431,12 @@ class JarvisApp:
             return
         if step.kind in ("ask", "price"):
             self.ui.notice(step.text)
-            self.say(step.text)
             self._tell("question", f"Kérdés: {store.get(item_id).name}", step.text, item=item_id, open="item",
                        actions=[{"action": "item", "label": "Megnyitom"}])
             return
         if step.kind == "review":      # Pro: a fotókról kiolvasott adatok és az ár, átírhatóan; a Mehet után tölt fel
             name = store.get(item_id).name
             self.ui.notice(step.text)
-            self.say(f"{name}: kész az adatlap az árral. Nézd át, és ha jó, mehet a feltöltés.")
             self._tell("question", f"Nézd át: {name}", step.text, item=item_id, open="review",
                        actions=[{"action": "review", "label": "Átnézem"}])
             return
@@ -1777,7 +1472,6 @@ class JarvisApp:
                 continue
             self.prepping = item_id or "?"
             self._prep_stop.clear()
-            self._own_silent.value = bool(payload.get("silent"))
             try:
                 with self.llm.gate.session(), self.llm.stopped_by(self._prep_stop):
                     self.run_work(payload, browser=False)
@@ -1791,13 +1485,10 @@ class JarvisApp:
             finally:
                 self.prepping = ""
                 self.last_prep = time.time()
-                self._own_silent.value = None
             handoff = self._handoffs.pop(item_id, None)
             if handoff is not None and self.work is not None:
                 self.work.store.set_busy(item_id, "Feltöltésre vár (a kereskedés átadja a böngészőt)…"
                                          if handoff["action"] == "upload" else "Árkutatásra vár (a böngészőben)…")
-                if payload.get("silent"):
-                    handoff["silent"] = True     # a telefonról indítottad: a gép a feltöltésnél se beszéljen
                 self._submit(("work", handoff))
 
     def _reply(self, item_id: str, text: str, via: str, browser: bool = True) -> None:
@@ -1818,7 +1509,6 @@ class JarvisApp:
                     rest = {k: v for k, v in item.pending.items() if k != "confirm"}
                     self.work.store.set_pending(item_id, {**rest, "question": question})
                 self.ui.notice(question)
-                self.say(question)
                 return
             self.work.decide_price(item_id, choice)
             if self._price_question(item_id):
@@ -1835,7 +1525,6 @@ class JarvisApp:
             return False
         question = str(item.pending.get("question") or "")
         self.ui.notice(question)
-        self.say(question)
         self._tell("question", f"Kérdés: {item.name}", question, item=item_id, open="item",
                    actions=[{"action": "item", "label": "Megnyitom"}])
         return True
@@ -1847,7 +1536,6 @@ class JarvisApp:
         if not targets:
             text = f"{self.work.store.get(item_id).name}: már fent van mindenhol, ahova kérted."
             self.ui.notice(text)
-            self.say(text)
             return
         done, failed = [], []
         while targets:
@@ -1868,7 +1556,6 @@ class JarvisApp:
         if parts:
             summary = f"{item.name}: " + " ".join(parts)
             self.ui.notice(summary)
-            self.say(summary)
             self._tell("post", f"Feltöltés: {item.name}", summary, item=item_id)
 
     def _replay(self, item_id: str, key: str, task: str) -> bool | None:
@@ -2084,7 +1771,6 @@ class JarvisApp:
         jelenik meg, mintha a modell mondta volna: a naplóban, felolvasva, és a kártyán ez lesz a megjegyzés."""
         self.ui.info(shown)
         self.ui.assistant_end(text, False)
-        self.say(text)
         return text
 
     def _last_work_reply(self) -> str:
@@ -2160,7 +1846,6 @@ class JarvisApp:
         if not others:
             text = f"{item.name}: megjelöltem, hogy elkelt."
             self.ui.notice(text)
-            self.say(text)
             return
         if delist:
             self._delist(item_id, others, confirmed=True)
@@ -2168,7 +1853,6 @@ class JarvisApp:
         names = ", ".join(self.work.platforms[k].name for k in others)
         text = f"{item.name}: megjelöltem, hogy elkelt. Még fent van itt: {names}."
         self.ui.notice(text)
-        self.say(text)
 
     def _delist(self, item_id: str, keys: list[str] | None = None, confirmed: bool = False) -> None:
         """Leveszi a hirdetést a megadott oldalakról (alapból mindenhonnan, ahol fent van)."""
@@ -2179,7 +1863,6 @@ class JarvisApp:
         if not keys:
             text = f"{item.name}: a nyilvántartásom szerint sehol nincs fent, nincs mit levenni."
             self.ui.notice(text)
-            self.say(text)
             return
         names = ", ".join(self.work.platforms[k].name for k in keys)
         if not confirmed and not self.confirm(f"Jarvis levenné a(z) „{item.name}” hirdetést innen: {names}."):
@@ -2197,7 +1880,6 @@ class JarvisApp:
             parts.append(f"Nem sikerült: {', '.join(failed)}; a hirdetés lapján látod, miért.")
         text = f"{item.name}: " + " ".join(parts)
         self.ui.notice(text)
-        self.say(text)
         if self.notices is not None:
             self.notices.add("delist", f"Levétel: {item.name}", text, item=item_id)
 
@@ -2297,7 +1979,6 @@ class JarvisApp:
         if conv["draft_note"]:
             text += " " + conv["draft_note"]
         self.ui.notice(text + " Az Üzenetek résznél átírhatod, és a Küldés gombbal küldheted el.")
-        self.say("Elkészült a válaszvázlat. Átírhatod, és a Küldés gombbal küldheted el.")
 
     def _message_send(self, conv_id: str, text: str) -> None:
         """A felület Küldés gombja: beírja a választ a beszélgetésbe, és a küldés gombja előtt jóváhagyást kér (a
@@ -2307,7 +1988,6 @@ class JarvisApp:
         partner = messages.store.get(conv_id)["partner"] or "vevő"
         result = messages.send(conv_id, text, progress=lambda detail: self._set_phase("working", f"Üzenet: {detail}"))
         self.ui.notice(result)
-        self.say(result)
         self._tell("message", f"Üzenet: {partner}", result, conversation=conv_id)
 
     def _deal_offer(self, deal_id: str, price: Any) -> None:
@@ -2317,7 +1997,6 @@ class JarvisApp:
         result = self.work.deals.make_offer(deal_id, price, confirm=self.confirm,
                                             progress=lambda detail: self._set_phase("working", f"Ajánlat: {detail}"))
         self.ui.notice(result)
-        self.say(result)
         self._tell("deal", "Ajánlat a Vinteden", result)
 
     def _research(self, item_id: str) -> None:
@@ -2331,7 +2010,6 @@ class JarvisApp:
             store.set_busy(item_id, "")
         text = price_verdict(item).text
         self.ui.notice(text)
-        self.say(text)
 
     def _login(self, platform: str) -> None:
         """Megnyitja az oldalt Jarvis böngészőjében, hogy egyszer bejelentkezhess."""
@@ -2348,7 +2026,6 @@ class JarvisApp:
         text = (f"Megnyitottam a(z) {site.name} oldalt a böngészőmben. Jelentkezz be, és pipáld be, hogy "
                 "maradj bejelentkezve; utána a bejelentkezés megmarad.")
         self.ui.notice(text)
-        self.say(f"Megnyitottam a(z) {site.name} oldalt. Jelentkezz be a böngészőablakomban.")
 
     def _shown_args(self, args: dict[str, Any]) -> dict[str, Any]:
         """A felületen a tárgy neve jelenjen meg, ne az azonosítója."""
@@ -2362,13 +2039,9 @@ class JarvisApp:
     # --- eszközök és állapot ------------------------------------------------------------
 
     def _on_tool_start(self, name: str, args: dict[str, Any]) -> None:
-        self._flush_sentences()
         self._current_tool_id = next(self._tool_ids)
         self.ui.tool_start(self._current_tool_id, name, self._shown_args(args))
         self._set_phase("working", TOOL_ACTIVITY.get(name, "Dolgozom"))
-        if (self.cfg.assistant.fillers and self.speech is not None and name in SLOW_TOOLS
-                and not self._spoken_this_turn):
-            self.say(random.choice(FILLERS))
 
     def _on_tool_done(self, name: str, args: dict[str, Any], result: str) -> None:
         self.ui.tool_done(self._current_tool_id, name, self._shown_args(args), result)
@@ -2381,15 +2054,8 @@ class JarvisApp:
 
     def _refresh_state(self) -> None:
         with self._state_lock:
-            speaking = self.speech is not None and self.speech.busy
-            phase, detail = self._phase, self._detail
-            if phase in ("listening", "transcribing", "working", "starting", "error"):
-                state = phase
-            elif speaking:
-                state, detail = "speaking", ""
-            else:
-                state = phase
-            if (state, detail) == self._shown_state:
+            state = (self._phase, self._detail)
+            if state == self._shown_state:
                 return
-            self._shown_state = (state, detail)
-        self.ui.state(state, detail)
+            self._shown_state = state
+        self.ui.state(*state)

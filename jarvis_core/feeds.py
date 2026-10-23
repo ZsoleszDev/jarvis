@@ -30,8 +30,13 @@ import requests
 from .web import MAX_DOWNLOAD_BYTES, USER_AGENT, _decode
 
 FAST_SITES = ("hardverapro", "jofogas")
-GAP = (8.0, 16.0)          # két kérés között ugyanazon az oldalon (másodperc, véletlenszerűen)
-HOURLY = 90                # óránként legfeljebb ennyi kérés oldalanként
+GAP = (6.0, 13.0)          # két kérés között ugyanazon az oldalon (másodperc, véletlenszerűen)
+HOURLY = 120               # óránként legfeljebb ennyi kérés oldalanként
+# Ha az oldal lassan válaszol (terhelt, vagy fékez minket), a szünetek hosszabbak lesznek (legfeljebb SLOW_MAX-szor),
+# és a gyors válaszokkal fokozatosan visszaállnak: így annyira gyors, amennyit az oldal szívesen kiszolgál.
+SLOW_RESPONSE = 5.0        # másodperc
+SLOW_STEP, SLOW_EASE, SLOW_MAX = 1.5, 0.9, 4.0
+CACHE_MAX = 64             # ennyi találati oldalt jegyez meg (listings max_age)
 TIMEOUT = 15.0
 BLOCK_FIRST = 3600         # tiltás után ennyi szünet (másodperc); ismétlésnél a duplája, legfeljebb BLOCK_MAX
 BLOCK_MAX = 86400
@@ -413,6 +418,8 @@ class SiteFetcher:
         self._blocked: dict[str, dict[str, Any]] = {}   # oldal → {until, reason, strikes}
         self._empty: dict[str, int] = {}             # oldal → hányszor egymás után nem talált hirdetést
         self._empty_until: dict[str, float] = {}
+        self._slow: dict[str, float] = {}            # oldal → a szünetek szorzója (lassú válasz után nagyobb)
+        self._cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}   # cím → (mikor, hirdetések)
         self.requests = 0                            # összesen (a felületnek)
 
     def handles(self, platform: str) -> bool:
@@ -447,13 +454,29 @@ class SiteFetcher:
                 out[site] = {"blocked_until": blocked.get("until") if float(blocked.get("until") or 0) > now else None,
                              "reason": blocked.get("reason", "") if float(blocked.get("until") or 0) > now else "",
                              "browser_only": self._empty_until.get(site, 0.0) > now,
-                             "last_hour": sum(1 for t in self._recent[site] if now - t <= 3600)}
+                             "last_hour": sum(1 for t in self._recent[site] if now - t <= 3600),
+                             "slow": round(self._slow.get(site, 1.0), 2)}
             return out
 
-    def listings(self, url: str, platform: str, check: Callable[[], None] = lambda: None) -> list[dict[str, Any]]:
-        """Egy találati oldal hirdetései böngésző nélkül. FeedError, ha nem sikerült (a hívó a böngészővel próbálja)."""
+    def listings(self, url: str, platform: str, check: Callable[[], None] = lambda: None,
+                 max_age: float = 0.0) -> list[dict[str, Any]]:
+        """Egy találati oldal hirdetései böngésző nélkül. FeedError, ha nem sikerült (a hívó a böngészővel próbálja).
+        max_age: ha ezt az oldalt legfeljebb ennyi másodperce már letöltötte (pl. az azonnali figyelő), azt adja vissza,
+        nem kéri le újra (a kereskedés köre így nem tölti le kétszer ugyanazt)."""
+        now = self.clock()
+        if max_age > 0:
+            with self._state_lock:
+                cached = self._cache.get(url)
+            if cached is not None and now - cached[0] <= max_age:
+                return [dict(row) for row in cached[1]]
         final, html = self._fetch(url, platform, check)
         rows = parse_listings(html, final, platform)
+        if rows:
+            with self._state_lock:
+                self._cache[url] = (self.clock(), [dict(row) for row in rows])
+                if len(self._cache) > CACHE_MAX:
+                    for old in sorted(self._cache, key=lambda key: self._cache[key][0])[:len(self._cache) - CACHE_MAX]:
+                        self._cache.pop(old, None)
         with self._state_lock:
             if rows:
                 self._empty.pop(platform, None)
@@ -494,11 +517,16 @@ class SiteFetcher:
             with self._state_lock:
                 self._recent[platform].append(self.clock())
                 self.requests += 1
+            started = time.monotonic()
             try:
                 final, status, html = self._download(url, platform)
             finally:
                 with self._state_lock:
-                    self._next[platform] = self.clock() + self.rng.uniform(*self.gap)
+                    slow = self._slow.get(platform, 1.0)
+                    slow = min(SLOW_MAX, slow * SLOW_STEP) if time.monotonic() - started > SLOW_RESPONSE \
+                        else max(1.0, slow * SLOW_EASE)
+                    self._slow[platform] = slow
+                    self._next[platform] = self.clock() + self.rng.uniform(*self.gap) * slow
         if status in BLOCKED_STATUS or (status < 400 and len(html) < 20000 and CHALLENGE_RE.search(html[:20000])
                                         and not PRICE_RE.search(html)):
             self._block(platform, f"robot-ellenőrzés vagy tiltás ({status})")

@@ -248,7 +248,7 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(self.watches.all(), [])
         self.assertEqual(normalize_url("https://A.hu/x/?utm_source=y&id=2#top"), "https://a.hu/x?id=2")
 
-    def test_background_run_notifies_and_stops_when_you_speak(self):
+    def test_background_run_notifies_and_stops_when_you_interrupt(self):
         a = self.watches.add("első")
         b = self.watches.add("második")
         for watch in (a, b):     # mindkettő már látott egyszer
@@ -581,7 +581,7 @@ class PauseTests(unittest.TestCase):
         self.cfg = make_cfg(Path(self.tmp.name), self.fake.url)
         self.cfg.assistant.show_timings = False
         self.ui = RecordingUI()
-        self.app = JarvisApp(self.cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(self.cfg, self.ui)
         self.assertTrue(self.app.start())
 
     def tearDown(self):
@@ -642,7 +642,7 @@ class PauseTests(unittest.TestCase):
         self.app.submit_pause()                            # …de jön a Szünet, és eldobja
         self.assertIsNone(self.app.scheduler.submitted, "később újra sorra kerülhet")
 
-    def test_voice_and_typed_pause_phrases(self):
+    def test_typed_pause_phrases(self):
         for text in ("Pihenj!", "Jarvis, szünet.", "engedd el a videókártyát"):
             self.assertTrue(is_pause_request(text), text)
         for text in ("pihenj egy kicsit és mondd meg az időt", "Mi a szünet a futballban?"):
@@ -700,7 +700,6 @@ class PauseTests(unittest.TestCase):
         self.assertEqual(self.fake.warm_ups, 1)
         self.assertEqual(self.app._request_mode("text", {"text": "x", "mode": "work"}), "work")
         self.assertEqual(self.app._request_mode("work", {}), "work")
-        self.assertEqual(self.app._request_mode("voice", "wake"), "work", "a hang az elöl lévő menübe megy")
 
     def test_stale_listings_are_mentioned_once_a_week(self):
         work = self.app.work
@@ -799,7 +798,7 @@ class SearchTests(unittest.TestCase):
         fake.vram_fit = lambda ctx: 1.0
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_cfg(Path(tmp), fake.url)
-            app = JarvisApp(cfg, RecordingUI(), use_voice=False, use_speech=False, use_wake_word=False)
+            app = JarvisApp(cfg, RecordingUI())
             try:
                 self.assertTrue(app.start())
                 names = set(app.toolbox.names())

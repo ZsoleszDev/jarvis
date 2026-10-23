@@ -46,7 +46,7 @@ class Harness:
         self.cfg.assistant.fillers = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
-        self.app = JarvisApp(self.cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(self.cfg, self.ui)
         assert self.app.start()
         self.api = start_api(self.app, self.ui, self.bus, self.cfg.data_root)
         self.gui = GuiServer(self.app, self.ui, self.bus)
@@ -286,12 +286,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(h.request("POST", "/api/v1/notifications/read", {})[1]["marked"], 1)
         self.assertEqual(h.request("GET", "/api/v1/status")[1]["unread"], 0)
 
-    def test_voice_tts_and_bad_requests(self):
+    def test_bad_requests_and_no_voice_any_more(self):
         h = self.h
-        status, data, _ = h.request("POST", "/api/v1/voice", raw=b"RIFF....", content_type="audio/wav")
-        self.assertEqual((status, data["code"]), (409, "no_voice"))
-        status, data, _ = h.request("GET", "/api/v1/tts?text=Szia")
-        self.assertEqual((status, data["code"]), (503, "no_speech"))
+        self.assertEqual(h.request("POST", "/api/v1/voice", raw=b"RIFF....", content_type="audio/wav")[0], 404,
+                         "a hangüzenet (beszédfelismerés) kikerült")
+        self.assertEqual(h.request("GET", "/api/v1/tts?text=Szia")[0], 404, "a felolvasás is")
         self.assertEqual(h.request("GET", "/api/v1/nincs-ilyen")[0], 404)
         status, data, _ = h.request("POST", "/api/v1/chat", raw=b"{nem json", content_type="application/json")
         self.assertEqual(status, 400)
@@ -382,7 +381,6 @@ class RemoteWindowTests(unittest.TestCase):
         self.assertFalse(h.app.exit_requested.is_set(), "távolról nem lehet kilépni")
         self.assertEqual(self.post("/api/phone/code", {})[0], 403, "új eszközt csak a gép előtt ülve")
         self.assertEqual(self.get(f"/api/phone?t={h.token}")[0], 403)
-        self.assertEqual(self.post("/api/listen", {})[0], 403, "a gép mikrofonját nem")
         self.assertEqual(self.post("/api/send", {"text": "szia"}, token="rossz")[0], 401)
 
     def test_live_events_stream_through(self):
@@ -399,17 +397,8 @@ class RemoteWindowTests(unittest.TestCase):
             seen += response.read1(65536)
         conn.close()
 
-    def test_voice_and_photos_from_the_phone(self):
+    def test_photos_from_the_phone(self):
         h = self.h
-        status, data, _ = self.post("/api/voice?mode=chat", raw=b"\x1aE\xdf\xa3" + b"0" * 4000,
-                                    content_type="audio/webm")
-        self.assertEqual(status, 409, "beszédfelismerés nélkül szól")
-        self.assertIn("beszédfelismerés", data["error"])
-        calls = []
-        h.app.stt = object()
-        h.app.submit_audio = lambda data, mode="chat", request_id=None, silent=True: calls.append((len(data), mode, silent))
-        self.assertEqual(self.post("/api/voice?mode=work", raw=b"0" * 5000, content_type="audio/webm")[0], 202)
-        self.assertEqual(calls, [(5000, "work", True)])
         item = h.app.work.store.create(targets=["vinted"], prompt="póló")
         status, data, _ = self.post(f"/api/work/items/{item.id}/photo", raw=jpeg(), content_type="application/octet-stream")
         self.assertEqual(status, 200)
@@ -584,22 +573,15 @@ class RemoteWindowBrowserTests(unittest.TestCase):
 
 
 
-class FakeStt:
-    def describe(self) -> str:
-        return "teszt"
-
-
 @unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
 class AndroidAppRequestsBrowserTests(unittest.TestCase):
     """A távoli ablak az Android-alkalmazásban (Chromium, az alkalmazás hídja helyett egy hamis JarvisApp): a
-    galériából megosztott fotók az új hirdetéshez kerülnek, a megosztott link a beszélgetésbe, a hangutasítás
-    (parancsikon, csempe, értesítés) azonnal felvesz."""
+    galériából megosztott fotók az új hirdetéshez kerülnek, a megosztott link a beszélgetésbe."""
 
     UA = ANDROID_CHROME + " JarvisAndroid/1"
 
-    def open(self, pw, h, pending: dict, fake_mic: bool = False):
-        browser = pw.chromium.launch(headless=True, args=["--use-fake-ui-for-media-stream",
-                                                          "--use-fake-device-for-media-stream"] if fake_mic else [])
+    def open(self, pw, h, pending: dict):
+        browser = pw.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True,
                                       user_agent=self.UA)
         context.add_init_script("""(() => {
@@ -620,7 +602,7 @@ class AndroidAppRequestsBrowserTests(unittest.TestCase):
         try:
             self.assertTrue(h.app.describe()["work"])
             with sync_playwright() as pw:
-                browser, page, errors = self.open(pw, h, {"photos": 2, "batch": 3, "voice": False, "text": ""})
+                browser, page, errors = self.open(pw, h, {"photos": 2, "batch": 3, "text": ""})
                 served = []
 
                 def shared(route):
@@ -652,37 +634,25 @@ class AndroidAppRequestsBrowserTests(unittest.TestCase):
         finally:
             h.close()
 
-    def test_shared_link_and_voice_request(self):
+    def test_a_shared_link_goes_to_the_chat(self):
         from playwright.sync_api import sync_playwright
 
         h = Harness()
         try:
-            h.app.stt = FakeStt()
-            h.bus.set_hello(h.app.describe())
-            calls = []
-            h.app.submit_audio = lambda data, mode="chat", request_id=None, silent=True: calls.append((len(data), mode))
             with sync_playwright() as pw:
-                browser, page, errors = self.open(pw, h, {"text": "https://www.vinted.hu/items/123", "voice": True},
-                                                  fake_mic=True)
+                browser, page, errors = self.open(pw, h, {"text": "https://www.vinted.hu/items/123"})
                 page.goto(f"http://127.0.0.1:{h.api.port}/?t={h.token}")
-                page.wait_for_selector("#listen.recording", timeout=15000)
+                page.wait_for_function("document.getElementById('text').value !== ''", timeout=15000)
                 self.assertEqual(page.input_value("#text"), "https://www.vinted.hu/items/123")
                 self.assertEqual(page.get_attribute("body", "data-mode"), "chat")
-                page.wait_for_timeout(900)
-                page.click("#listen")                     # kész: a felvétel a gépre megy
-                deadline = time.monotonic() + 10
-                while not calls and time.monotonic() < deadline:
-                    time.sleep(0.1)
-                self.assertEqual([mode for _, mode in calls], ["chat"])
-                self.assertGreater(calls[0][0], 1000)
-                # Az alkalmazás szól, hogy új kérés jött (pl. a csempéről), és a felület lekérdezi.
+                self.assertEqual(page.locator("#listen").count(), 0, "nincs Hallgass meg gomb")
+                # Az alkalmazás szól, hogy új kérés jött (pl. egy értesítésről), és a felület lekérdezi.
                 page.evaluate("window.JarvisPending()")
                 self.assertGreaterEqual(page.evaluate("window.__asked"), 2)
                 self.assertEqual(errors, [])
                 browser.close()
         finally:
             h.close()
-
 
     def test_sold_button_of_a_notification_opens_the_sold_dialog(self):
         """Az Android-alkalmazás értesítésének „Eladva itt, vedd le a többiről” gombja: az alkalmazás megnyílik, és
@@ -716,51 +686,6 @@ class AndroidAppRequestsBrowserTests(unittest.TestCase):
                 self.assertTrue(found.sold)
                 self.assertEqual(found.platforms["vinted"]["note"], "Itt kelt el.")
                 self.assertEqual(errors, [])
-                browser.close()
-        finally:
-            h.close()
-
-    def test_recording_stops_after_silence(self):
-        """A felvétel magától leáll a beszéd utáni csendnél: a mikrofon helyett egy hangfájl (csend, 1 mp hang,
-        csend), és senki sem nyomja meg a gombot."""
-        import math
-        import struct
-        import wave
-        from playwright.sync_api import sync_playwright
-
-        h = Harness()
-        try:
-            rate = 48000
-            frames = [0] * int(0.6 * rate) + [int(16000 * math.sin(2 * math.pi * 440 * i / rate))
-                                              for i in range(rate)] + [0] * int(10 * rate)
-            wav = Path(h.tmp.name) / "beszed.wav"
-            with wave.open(str(wav), "wb") as out:
-                out.setnchannels(1)
-                out.setsampwidth(2)
-                out.setframerate(rate)
-                out.writeframes(struct.pack(f"<{len(frames)}h", *frames))
-            h.app.stt = FakeStt()
-            h.bus.set_hello(h.app.describe())
-            calls = []
-            h.app.submit_audio = lambda data, mode="chat", request_id=None, silent=True: calls.append(len(data))
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True, args=[
-                    "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
-                    f"--use-file-for-fake-audio-capture={wav}%noloop"])
-                page = browser.new_page()
-                page.goto(f"http://127.0.0.1:{h.api.port}/?t={h.token}")
-                page.wait_for_selector("#listen:not([disabled])", timeout=15000)
-                started = time.monotonic()
-                page.click("#listen")
-                page.wait_for_selector("#listen.recording")
-                page.wait_for_selector("#listen:not(.recording)", timeout=12000)
-                took = time.monotonic() - started
-                deadline = time.monotonic() + 10
-                while not calls and time.monotonic() < deadline:
-                    time.sleep(0.1)
-                self.assertEqual(len(calls), 1, "magától elküldte")
-                self.assertGreater(took, 2.0, "a hang alatt nem állt le")
-                self.assertLess(took, 6.5, "a csend után leállt (nem a fájl végén, és nem a 45 másodperces határnál)")
                 browser.close()
         finally:
             h.close()
