@@ -1440,6 +1440,18 @@ def price_stats(prices: list[int] | list[float]) -> dict[str, Any]:
             "p75": int(round(p75)), "n": len(values), "confidence": confidence}
 
 
+_AMOUNT_RE = re.compile(r"\d[\d\s.,]*\s*(?:ft|huf|forint)\b", re.IGNORECASE)
+
+
+def prompt_query(text: str) -> str:
+    """Keresőszó a leírásból, modell nélkül (ha még nincs kiolvasva, és a modell sem segített): az első sor eleje az
+    első vesszőig vagy árig, legfeljebb öt szó (pl. „Sony WH-1000XM4 fejhallgató, 71000 Ft” → „Sony WH-1000XM4
+    fejhallgató”)."""
+    first = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    first = re.split(r"[,;|(]", _AMOUNT_RE.split(first)[0])[0]
+    return " ".join(first.split()[:5])
+
+
 class PriceResearcher:
     """Megnézi a hirdetési oldalakon, mennyiért kínálnak hasonlót."""
 
@@ -1453,7 +1465,7 @@ class PriceResearcher:
         if item.search_query:
             return item.search_query
         words = " ".join(p for p in (item.brand, item.product or item.title) if p).split()
-        return " ".join(words[:5])
+        return " ".join(words[:5]) or prompt_query(item.prompt)
 
     def research(self, item_id: str, progress: Callable[[str], None] | None = None,
                  only: list[str] | None = None) -> Item:

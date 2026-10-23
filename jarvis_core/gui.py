@@ -855,7 +855,12 @@ class _Handler(BaseHTTPRequestHandler):
                 deal = deals.get(str(body.get("id") or ""))
                 store = self._work().store
                 median = int(deal.get("median") or 0) or None
-                item = store.create(prompt=f"{deal['text']}, {deal['median']} Ft", source=deal["url"],
+                # a cím (a kártya szövegében a város, a dátum és az eladó is ott van), és amire az árkutatás keressen:
+                # a keresésed, vagy a cím termékkulcsa („Sony WH-1000XM4”)
+                name = str(deal.get("title") or deal["text"])
+                query = ((deal.get("query") if not deal.get("explore") else "") or deals.book.query(name)
+                         or str(deal.get("query") or ""))
+                item = store.create(prompt=f"{name}, {deal['median']} Ft", source=deal["url"], search_query=query,
                                     bought_price=body.get("price") or deal["price"], bought_at=time.time(),
                                     bought_shipping=body.get("shipping"), bought_from=str(deal.get("site") or ""),
                                     in_transit=bool(body.get("in_transit", True)), market_price=median,

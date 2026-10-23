@@ -2164,13 +2164,10 @@ class JarvisApp:
     def _research(self, item_id: str) -> None:
         """Árkutatás külön kérésre (csak ajánlás, nem állítja meg az eladást)."""
         assert self.work is not None
-        if self.work.researcher is None:
-            raise ItemError("Az árkutatáshoz Jarvis saját böngészője kell.")
         store = self.work.store
         store.set_busy(item_id, "Árkutatás…")
         try:
-            item = self.work.researcher.research(item_id, self._progress(item_id),
-                                                 only=store.get(item_id).targets)
+            item = self.work.research(item_id, self._progress(item_id))
         finally:
             store.set_busy(item_id, "")
         text = price_verdict(item).text

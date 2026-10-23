@@ -30,6 +30,7 @@ from .browser import BrowserError
 from .config import Config, data_path, resolve_path
 from .dossier import Dossiers
 from .listings import CHECK_WORDS, GONE, SOLD, ListingChecker
+from .llm import OllamaError
 from .deals import DealHunter
 from .feeds import FAST_SITES, SiteFetcher
 from .instant import InstantWatch
@@ -1234,11 +1235,27 @@ class WorkDesk:
         return ("Csak itt írtam át; " + ", ".join(parts) + ". A fent lévő hirdetést magamtól nem szerkesztem: "
                 "ott kézzel kell átírni (vagy levenni, és újra feltölteni).")
 
+    def research(self, item_id: str, progress: Callable[[str], None] | None = None) -> Item:
+        """Árkutatás (csak ajánlás). Ha még nem tudni, mi ez (pl. a Megvettem gombbal vagy a Vételeim Új vételével
+        felvett tárgynál a leírásból még nem olvasta ki), előbb kiolvassa a leírásból (egy modellhívás); ha a modell
+        nem válaszol, a leírás elejével keres."""
+        item = self.store.get(item_id)
+        if self.researcher is None:
+            raise ItemError("Az árkutatáshoz Jarvis saját böngészője kell.")
+        if not (item.search_query or item.product or item.title) and item.prompt.strip() and self.llm is not None:
+            if progress is not None:
+                progress("a leírásod értelmezése")
+            try:
+                item = self.extractor.extract(item_id)
+            except (ItemError, OllamaError):
+                pass
+        return self.researcher.research(item_id, progress, only=item.targets)
+
     def tool_research(self, item: str) -> str:
         found = self._item(item)
         self.store.set_busy(found.id, "Árkutatás…")
         try:
-            found = self.researcher.research(found.id, only=found.targets)
+            found = self.research(found.id)
         except ItemError as exc:
             raise ToolError(str(exc)) from None
         finally:

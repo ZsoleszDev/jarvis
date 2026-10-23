@@ -520,6 +520,16 @@ class PriceResearchTests(unittest.TestCase):
         item = PriceResearcher(self.llm, self.store, lambda: browser, sites).research(item.id, only=only)
         return item, browser
 
+    def test_the_search_word_from_the_description_when_nothing_is_read_yet(self):
+        """Ha a leírásból még nem olvasta ki, mi ez (pl. a Megvettem gombbal felvett tárgy), a leírás elejével keres."""
+        query = PriceResearcher(self.llm, self.store, lambda: None, []).query_for
+        for prompt, expected in (("Sony WH-1000XM4 fejhallgató, 71000 Ft", "Sony WH-1000XM4 fejhallgató"),
+                                 ("Sony WH-1000XM4 fejhallgató Budapest 30 000 Ft ma 14:01 eladó31", "Sony WH-1000XM4 fejhallgató Budapest"),
+                                 ("Makita DHP482 | eladó, hibátlan", "Makita DHP482"), ("", "")):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(query(Item(id="x", created=0, updated=0, prompt=prompt)), expected)
+        self.assertEqual(query(Item(id="x", created=0, updated=0, prompt="valami", title="Zara blézer")), "Zara blézer")
+
     def test_picks_similar_listings_and_suggests(self):
         vinted = [{"text": "Zara blézer M", "price": 4000, "url": "https://www.vinted.hu/items/1"},
                   {"text": "Zara blézer S", "price": 6000, "url": "https://www.vinted.hu/items/2"},
@@ -929,6 +939,31 @@ class WorkDeskTests(unittest.TestCase):
         step = self.desk.prepare(other.id, self.steps.append)
         self.assertEqual(self.store.get(other.id).price, 16500)
         self.assertIn("az árbázisból: a hasonlók most kb. 17 000 Ft-ért mennek (5 ár alapján)", step.text)
+
+    def test_research_on_a_bought_item_reads_the_description_first(self):
+        """Egy megvett tárgy (Megvettem, vagy a Vételeim Új vétele): a leírásából még nem olvasta ki, mi ez. Az
+        árkutatás előtt kiolvassa (egy modellhívás), és azzal keres; ha a modell nem válaszol, a leírás elejével."""
+        class FakeResearcher:
+            def __init__(self, store):
+                self.store, self.queries = store, []
+
+            def research(self, item_id, progress=None, only=None):
+                self.queries.append(PriceResearcher.query_for(self, self.store.get(item_id)))
+                return self.store.get(item_id)
+
+        researcher = self.desk.researcher = FakeResearcher(self.store)
+        item = self.store.create(prompt="Sony WH-1000XM4 fejhallgató, 71000 Ft", bought_price=30000)
+        self.fake.chat_script = [extracted(product="zajszűrős fejhallgató", kind="elektronika",
+                                           title="Sony WH-1000XM4 fejhallgató", search_query="Sony WH-1000XM4",
+                                           price=71000)]
+        self.desk.research(item.id, self.steps.append)
+        self.assertEqual((researcher.queries, self.steps), (["Sony WH-1000XM4"], ["a leírásod értelmezése"]))
+        self.desk.research(item.id)
+        self.assertEqual(len(self.fake.chat_bodies()), 1, "ha már tudja, mi ez, nem olvassa ki újra")
+        other = self.store.create(prompt="Makita DHP482 fúró, 25000 Ft")
+        self.fake.chat_script = [lambda body: (500, {"error": "a modell elszállt"})]
+        self.desk.research(other.id)
+        self.assertEqual(researcher.queries[-1], "Makita DHP482 fúró", "a modell nélkül a leírás elejével")
 
     def test_needs_sites_and_photos(self):
         bare = self.store.create(prompt="póló")

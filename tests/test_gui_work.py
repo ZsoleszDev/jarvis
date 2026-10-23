@@ -179,8 +179,9 @@ class WorkSecurityTests(unittest.TestCase):
                                                      "shipping": "1500", "in_transit": True})
         self.assertEqual(status, 200, data)
         item = self.h.store.get(data["item"])
-        self.assertEqual((item.bought_price, item.source, item.prompt),
-                         (52000, "https://hardverapro.hu/apro/1.html", "RTX 3060 Ti, 100000 Ft"))
+        self.assertEqual((item.bought_price, item.source, item.prompt, item.search_query),
+                         (52000, "https://hardverapro.hu/apro/1.html", "RTX 3060 Ti, 100000 Ft", "RTX 3060 Ti"),
+                         "az árkutatás tudja, mit keressen")
         self.assertEqual((item.bought_shipping, item.bought_from, item.in_transit, item.market_price, item.target_price),
                          (1500, "Hardverapró", True, 100000, 90000), "a találatból: honnan, a szokásos ár és a 90%-a")
         self.assertEqual(data["deals"][0]["bought"], item.id)
@@ -233,6 +234,15 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertEqual(self.post("/api/work/ledger", {"action": "cancel", "id": sold.id})[0], 400)
         for item in (plain, sold):
             self.h.store.delete(item.id)
+        # böngésző nélkül olvasott kártya: a cím kerül a leírásba (a város, az eladó nélkül)
+        deals._remember({"id": "d2", "url": "https://hardverapro.hu/apro/2.html", "site": "Hardverapró",
+                         "text": "Sony WH-1000XM4 fejhallgató Budapest 30 000 Ft ma 14:01 eladó31",
+                         "title": "Sony WH-1000XM4 fejhallgató", "explore": "azonnali figyelő: Fejhallgatók",
+                         "query": "sony wh1000xm4", "price": 30000, "median": 71000, "at": time.time()})
+        status, data = self.post("/api/work/deals", {"action": "bought", "id": "d2"})
+        item = self.h.store.get(data["item"])
+        self.assertEqual((item.prompt, item.search_query), ("Sony WH-1000XM4 fejhallgató, 71000 Ft", "Sony WH-1000XM4"))
+        self.h.store.delete(item.id)
 
     def test_instant_watch_from_the_window(self):
         """Azonnali figyelő: egy keresőszó két oldalon, egy oldalcím, szünet és törlés; az Indítás és a Leállítás vele együtt
