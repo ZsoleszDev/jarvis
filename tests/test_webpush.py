@@ -186,6 +186,18 @@ class WebPushTests(unittest.TestCase):
         self.assertEqual((message["item"], message["actions"]), ("a1b2c3d4", [sold]),
                          "csak az ismert gombok (a böngésző az ablakot nyitja meg, a döntés ott a tiéd)")
 
+    def test_a_question_or_a_review_opens_its_item(self):
+        """Jarvis kérdez egy tárgyról, vagy a Pro feltöltés Nézd át ablaka vár: a kattintás azt nyitja meg."""
+        browser = Browser()
+        self.push.subscribe("aaaa1111", browser.subscription())
+        self.push.on_event({"type": "notification", "notice": {
+            "id": "n5", "kind": "question", "title": "Nézd át: Zara farmerdzseki", "text": "Ár: 6 300 Ft",
+            "item": "a1b2c3d4", "open": "review", "actions": [{"action": "review", "label": "Átnézem"}]}})
+        self.service.wait()
+        message = json.loads(browser.decrypt(self.service.calls[0][1]))
+        self.assertEqual((message["open"], message["item"], message["actions"]),
+                         ("review", "a1b2c3d4", [{"action": "review", "label": "Átnézem"}]))
+
     def test_a_fresh_listing_is_urgent(self):
         """Az azonnali figyelő értesítése sürgős: a telefon alvó állapotban is rögtön megkapja; a többi normál."""
         browser = Browser()

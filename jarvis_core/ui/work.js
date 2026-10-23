@@ -32,7 +32,7 @@
 
   const POSTED = "feltöltve";
   const FAILED = "hiba";
-  const STATUS_CLASS = { "vázlat": "vazlat", "kérdés": "kerdes", "árdöntés": "kerdes",
+  const STATUS_CLASS = { "vázlat": "vazlat", "kérdés": "kerdes", "árdöntés": "kerdes", "átnézésre vár": "kerdes",
                          "részben fent": "kesz", "fent": "feltoltve", "eladva": "eladva" };
   const FILTERS = [["all", "Mind"], ["todo", "Teendő"], ["up", "Fent van"], ["check", "Nézd meg"], ["sold", "Eladva"]];
   const CHECKED = { sold: "Elkeltnek látszik", gone: "Már nincs fent?" };   // a háttérellenőrzés jelzései
@@ -221,6 +221,31 @@
     return [...document.querySelectorAll('#w-sites input[type="checkbox"]:checked')].map((el) => el.value);
   }
 
+  // Egyszerű: fotók és egy-két mondat. Pro: elég a fotó (telefonon a kamerával is), az adatokat és az árat Jarvis
+  // olvassa ki, a leírás csak megjegyzés (nem kötelező), és feltöltés előtt mindent megmutat (Nézd át).
+  let composeMode = recall("jarvis-compose-mode") === "pro" ? "pro" : "simple";
+  const touchPhone = /JarvisAndroid/.test(navigator.userAgent) || window.matchMedia("(pointer: coarse)").matches;
+  function applyMode() {
+    const pro = composeMode === "pro";
+    $("w-mode-simple").setAttribute("aria-selected", String(!pro));
+    $("w-mode-pro").setAttribute("aria-selected", String(pro));
+    $("w-pro-help").hidden = !pro;
+    $("w-camera-row").hidden = !(pro && touchPhone);
+    $("w-research-row").hidden = pro;            // Pro: az árat a hasonlókból úgyis megnézi
+    $("w-prompt-label").textContent = pro ? "Megjegyzés (nem kötelező)" : "Mit adsz el?";
+    $("w-prompt").placeholder = pro ? "Pl. egy kis folt van az ujján; dobozzal együtt adom"
+      : "Pl. Zara L-es fekete póló, egyszer hordott, 500 Ft";
+  }
+  for (const [id, mode] of [["w-mode-simple", "simple"], ["w-mode-pro", "pro"]]) {
+    $(id).addEventListener("click", () => { composeMode = mode; store("jarvis-compose-mode", mode); applyMode(); });
+  }
+  $("w-camera-btn").addEventListener("click", () => $("w-camera").click());
+  $("w-camera").addEventListener("change", () => {
+    const files = [...$("w-camera").files];
+    $("w-camera").value = "";
+    if (files.length) addComposePhotos(files);
+  });
+
   function renderCompose() {
     let saved = [];
     try { saved = JSON.parse(recall("jarvis-sites") || "[]"); } catch { saved = []; }
@@ -230,6 +255,7 @@
       ` ${esc(p.name)}</label>`).join("");
     $("w-research").checked = recall("jarvis-research") === "1";
     $("w-research").disabled = !researchOn;
+    applyMode();
     renderNeeds();
     renderComposePhotos();
   }
@@ -276,17 +302,18 @@
     event.preventDefault();
     const targets = selectedSites();
     const prompt = $("w-prompt").value.trim();
+    const pro = composeMode === "pro";
     const say = (text) => { $("w-compose-msg").textContent = text; };
     if (!targets.length) return say("Pipáld be, hova töltsem fel.");
     if (!composePhotos.length) return say("Adj hozzá legalább egy fotót.");
-    if (!prompt) return say("Írd le röviden, mit adsz el.");
+    if (!prompt && !pro) return say("Írd le röviden, mit adsz el.");
     if (!browserOn) return say("A feltöltéshez Jarvis saját böngészője kell (Playwright).");
     if (!(await acknowledge(targets))) return;
     $("w-go").disabled = true;
     say("Küldöm a fotókat…");
     try {
       const created = await J.postJson("/api/work/new",
-        { targets, prompt, research_wanted: $("w-research").checked });
+        { targets, prompt, pro, research_wanted: !pro && $("w-research").checked });
       if (!created.ok) { say(created.error || "Nem sikerült."); return; }
       items.set(created.item.id, created.item);
       const files = composePhotos;
@@ -297,12 +324,77 @@
       await upload(created.item.id, files);
       if (await action("sell", created.item.id)) {
         say("");
-        J.toast("Jarvis dolgozik rajta. Ha kérdése van, a hirdetésnél látod.");
+        J.toast(pro ? "Átnézem a fotókat. Ha valami nem látszik, rákérdezek; feltöltés előtt mindent megmutatok."
+          : "Jarvis dolgozik rajta. Ha kérdése van, a hirdetésnél látod.");
       }
     } finally {
       $("w-go").disabled = false;
     }
   }
+
+  // --- Pro feltöltés: Nézd át (a fotókról kiolvasott adatok és az ár, átírhatóan) --------------------------------
+
+  let reviewOpen = null;
+  const GENDERS = ["", "női", "férfi", "gyerek", "uniszex"];
+  function openReview(id) {
+    const item = items.get(id);
+    if (!item) { J.toast("Ez a hirdetés már nincs meg."); return; }
+    reviewOpen = id;
+    const text = (name, label, extra = "") => `<div class="field"><label for="r-${name}">${label}</label>` +
+      `<input id="r-${name}" data-rfield="${name}" value="${esc(item[name] ?? "")}" ${extra}></div>`;
+    const choose = (name, label, options) => {
+      const value = item[name] || "";
+      const all = options.includes(value) ? options : [...options, value];
+      return `<div class="field"><label for="r-${name}">${label}</label><select id="r-${name}" data-rfield="${name}">` +
+        all.map((o) => `<option value="${esc(o)}"${o === value ? " selected" : ""}>${esc(o || "–")}</option>`).join("") +
+        "</select></div>";
+    };
+    const clothing = ["ruha", "cipő", "kiegészítő"].includes(item.kind);
+    $("review-photos").innerHTML = item.photos.slice(0, 8)
+      .map((n) => `<img src="${photoUrl(item.id, esc(n), true)}" alt="">`).join("");
+    const basis = (item.pending || {}).basis;
+    $("review-basis").textContent = basis ? `Az ár: ${basis}.` : "";
+    $("review-fields").innerHTML = [
+      `<div class="field wide"><label for="r-title">Cím</label><input id="r-title" data-rfield="title" value="${esc(item.title)}"></div>`,
+      text("price", "Ár (Ft)", 'type="number" inputmode="numeric" min="1"'),
+      choose("condition", "Állapot", ["", ...conditions]),
+      text("brand", "Márka"), text("size", "Méret"), text("color", "Szín"),
+      clothing ? choose("gender", "Kinek", GENDERS) : "",
+      text("material", "Anyag"),
+      `<div class="field wide"><label for="r-category">Kategória</label><input id="r-category" data-rfield="category" value="${esc(item.category)}"></div>`,
+      `<div class="field wide"><label for="r-description">Leírás</label><textarea id="r-description" data-rfield="description" rows="4">${esc(item.description)}</textarea></div>`,
+    ].join("");
+    $("review-msg").textContent = "";
+    if (!$("review-dialog").open) $("review-dialog").showModal();
+  }
+  async function saveReview() {
+    const item = items.get(reviewOpen);
+    if (!item) return false;
+    const fields = {};
+    for (const el of $("review-fields").querySelectorAll("[data-rfield]")) {
+      if (String(el.value) !== String(item[el.dataset.rfield] ?? "")) fields[el.dataset.rfield] = el.value;
+    }
+    if (!Object.keys(fields).length) return true;
+    const result = await J.postJson("/api/work/update", { id: item.id, fields });
+    if (!result.ok) { $("review-msg").textContent = result.error || "Nem sikerült menteni."; return false; }
+    items.set(result.item.id, result.item);
+    render();
+    return true;
+  }
+  $("review-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!(await saveReview())) return;
+    const item = items.get(reviewOpen);
+    if (!(await acknowledge(item.targets))) return;
+    const result = await J.postJson("/api/work/action", { action: "approve", ids: [item.id] });
+    if (!result.ok) { $("review-msg").textContent = result.error || "Nem sikerült elindítani."; return; }
+    $("review-dialog").close();
+    J.toast("Mehet: feltöltöm. A közzététel előtt még egyszer rákérdezek.");
+  });
+  $("review-save").addEventListener("click", async () => {
+    if (await saveReview()) { $("review-dialog").close(); J.toast("Mentve. Ha jó, az Átnézem gombbal mehet a feltöltés."); }
+  });
+  $("review-close").addEventListener("click", () => $("review-dialog").close());
 
   // --- alapadatok és bejelentkezés --------------------------------------------------------------
 
@@ -1205,6 +1297,11 @@
           <button type="submit" class="small primary">Küldés</button>
           <button type="button" class="small quiet" data-cancel="${item.id}">Mégse</button></div></form>`;
     }
+    if (p.kind === "review") {     // Pro: kész az adatlap az árral
+      return `<div class="ask"><p>Kész az adatlap az árral (${esc(price(item.price))}): nézd át, és ha jó, mehet a feltöltés.</p>
+        <div class="row"><button type="button" class="small primary" data-review="${item.id}">Átnézem</button>
+        <button type="button" class="small quiet" data-cancel="${item.id}">Mégse</button></div></div>`;
+    }
     if (p.kind === "price") {
       // „3 Ft-ra gondoltál?”: az Igen a visszakérdezett összeg (a Marad és a Legyen ugyanúgy választható)
       const yes = p.confirm ? `<button type="button" class="small primary" data-price="confirmed" data-id="${item.id}">` +
@@ -1646,6 +1743,16 @@
     const wanted = event.detail || {};
     await loaded;
     if (wanted.action === "deals") { setJob("deals"); return; }   // pl. a szokásos ár jóváhagyása
+    if (wanted.action === "item" || wanted.action === "review") {   // egy tárgy kérdése, vagy a Pro Nézd át ablaka
+      if (!items.has(wanted.item)) await load();
+      const item = items.get(wanted.item);
+      if (!item) { J.toast("Ez a hirdetés már nincs meg."); return; }
+      openId = item.id;
+      setJob("sales");
+      area.scrollTop = 0;
+      if (wanted.action === "review") openReview(item.id);
+      return;
+    }
     if (wanted.action === "deal") { await openDeal(wanted.deal); return; }   // egy megérő hirdetés: a találat ablaka
     if (wanted.action === "ledger") { setJob("ledger"); return; }   // a havi keret vagy a felhalmozódott tárgyak
     if (wanted.action === "offer") { setJob("deals"); await makeOffer(wanted.deal, ""); return; }   // a javasolt összeggel
@@ -1726,6 +1833,8 @@
       area.scrollTop = 0;
       return;
     }
+    const review = event.target.closest("[data-review]");
+    if (review) { openReview(review.dataset.review); return; }
     const cancel = event.target.closest("[data-cancel]");
     if (cancel) { action("cancel", cancel.dataset.cancel); return; }
     const decide = event.target.closest("[data-price]");
@@ -1750,7 +1859,7 @@
   $("w-detail").addEventListener("click", async (event) => {
     const item = items.get(openId);
     if (!item) return;
-    if (event.target.closest("[data-cancel]") || event.target.closest("[data-price]")) {
+    if (event.target.closest("[data-cancel]") || event.target.closest("[data-price]") || event.target.closest("[data-review]")) {
       onCardsClick(event);
       return;
     }

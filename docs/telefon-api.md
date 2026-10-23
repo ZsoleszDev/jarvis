@@ -108,7 +108,7 @@ fent lévő hirdetések) fut, szünetben semmi.
 | Módszer | Útvonal | Törzs | Megjegyzés |
 |---|---|---|---|
 | GET | `/work` | | `{items, platforms, needs, settings, acknowledged, conditions, max_photos, research, browser, messages}` (`messages`: van-e oldal, ahol a vevői üzeneteket olvassa) |
-| POST | `/work/items` | `{targets: ["vinted", …], prompt, research_wanted?}` | új tárgy (201) |
+| POST | `/work/items` | `{targets: ["vinted", …], prompt, research_wanted?, pro?}` | új tárgy (201); `pro`: elég a fotó, az adatokat és az árat Jarvis a fotókról adja meg (a `prompt` csak megjegyzés) |
 | GET | `/work/items/{id}` | | egy tárgy |
 | PATCH | `/work/items/{id}` | `{fields: {title?, description?, price?, …}}` | amit itt átírsz, azt Jarvis már nem írja felül; a válaszban `drift_note` (lásd lent) |
 | DELETE | `/work/items/{id}` | | a `_torolt` mappába kerül |
@@ -120,6 +120,7 @@ fent lévő hirdetések) fut, szünetben semmi.
 | POST | `/work/items/{id}/reply` | `{text}` | válasz Jarvis kérdésére (a tárgy `pending` mezője) |
 | POST | `/work/items/{id}/price` | `{choice: "keep" \| "suggested" \| "confirmed" \| 4500}` | árdöntés; `confirmed`: igen a visszakérdezett összegre (`pending.confirm`) |
 | POST | `/work/items/{id}/cancel` | | a függő kérdés elvetése |
+| POST | `/work/items/{id}/approve` | | Pro: átnézted az adatokat (`pending.kind` = `review`; előtte a `PATCH`-csel átírhatod), mehet a feltöltés (202; 409, ha még hiányzik az ár vagy egy adat) |
 | POST | `/work/items/{id}/post` | `{platform}` | egy oldalra (újra) |
 | POST | `/work/items/{id}/research` | | „Mennyit ér?” |
 | POST | `/work/items/{id}/sold` | `{where?: "vinted", delist?: true}` vagy `{sold: false}` | Eladva; `delist`-tel a többi oldalról Jarvis leveszi |
@@ -131,7 +132,8 @@ fent lévő hirdetések) fut, szünetben semmi.
 
 A tárgy fontos mezői:
 
-- `status` (`vázlat`, `kérdés`, `árdöntés`, `részben fent`, `fent`, `eladva`), `busy` (min dolgozik épp), `photos`,
+- `status` (`vázlat`, `kérdés`, `árdöntés`, `átnézésre vár`, `részben fent`, `fent`, `eladva`), `busy` (min dolgozik
+  épp), `photos`, `pro` (Pro feltöltés), `reviewed` (Pro: jóváhagytad), `price_estimate` (a modell becslése a fotókról),
   `price`, `min_price` (alkunál ennél kevesebbet a válaszvázlat nem fogad el; üres: az ár), `sold`.
 - `pending`: `{kind: "info" | "price", question, suggested?, confirm?}`. A `confirm` egy furcsa összeg, amire Jarvis
   visszakérdezett („3 Ft-ra gondoltál?”): ilyenkor a `price` `{choice: "confirmed"}` az igen.
@@ -267,7 +269,7 @@ Ha nincs új esemény, a kérés legfeljebb `wait` másodpercig vár, aztán ür
 | `confirm` / `confirm_done` | `id, prompt` / `id, approved` | jóváhagyás kell / megvolt |
 | `work_item` / `work_removed` | `item` / `id` | egy tárgy változott / törölve |
 | `work_message` | `conversation` | egy vevői beszélgetés változott (új üzenet, vázlat, elküldve) |
-| `notification` | `notice` | értesítés (figyelő, régóta fent lévő hirdetés, elkeltnek látszó hirdetés, levétel), a gombjaival (`actions`) |
+| `notification` | `notice` | értesítés (figyelő, régóta fent lévő hirdetés, elkeltnek látszó hirdetés, levétel), a gombjaival (`actions`); egy tárgy kérdésénél és a Pro feltöltés Nézd át értesítésénél `item` és `open` (`item` vagy `review`): erre bökve az a tárgy, illetve a Nézd át ablak nyíljon meg |
 | `request_done` | `request_id` | a kérésed feldolgozása véget ért |
 
 A `channel` mondja meg, melyik menühöz tartozik (`chat` = Beszélgetés, `work` = Munka). A telefonról

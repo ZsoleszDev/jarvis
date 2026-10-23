@@ -16,6 +16,9 @@
     <!-- A Szakértői tipp gomb a ChatGPT alkalmazást nyitja meg (Android 11-től csak így látja, telepítve van-e). -->
     <queries>
         <package android:name="com.openai.chatgpt" />
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
     </queries>
 
     <application
@@ -86,6 +89,13 @@
         <receiver
             android:name=".ActionReceiver"
             android:exported="false" />
+
+        <!-- A Pro feltöltés Kamera gombja: a kamera-alkalmazás ide írja a fotót (csak az intenttel kapott joggal). -->
+        <provider
+            android:name=".PhotoProvider"
+            android:authorities="hu.jarvis.app.photos"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <receiver
             android:name=".BootReceiver"

@@ -23,7 +23,13 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
   hatszor). Rábökve a `MainActivity` nyílik (`hu.jarvis.app.DEAL`), és a felület a `pending()` `deal` részéből a
   találat ablakát mutatja; az üzenetet a `JarvisApp.copy()` teszi a vágólapra. A Szakértői tipp gomb a kérdést
   szintén így másolja ki, és a `JarvisApp.openChatGpt()` megnyitja a ChatGPT alkalmazást (`com.openai.chatgpt`; a
-  manifest `<queries>` része miatt látja, telepítve van-e), vagy ha nincs, a chatgpt.com-ot a böngészőben.
+  manifest `<queries>` része miatt látja, telepítve van-e), vagy ha nincs, a chatgpt.com-ot a böngészőben. Egy
+  tárgy kérdésének és a Pro feltöltés Nézd át értesítésének (`notice.item`, `notice.open`) rábökve a `MainActivity`
+  `hu.jarvis.app.ITEM` szándékkal nyílik, és a felület a `pending()` `item` részéből a tárgyat, illetve a Nézd át
+  ablakot mutatja.
+- Kamera (Pro feltöltés): a felület `<input capture>` mezőjére a `MainActivity` a kamera-alkalmazást indítja
+  (`ACTION_IMAGE_CAPTURE`); a fotó a `PhotoProvider`-en át az alkalmazás gyorsítótárába kerül (nem a galériába), onnan
+  olvassa be a WebView. Kamera-engedély nem kell hozzá (a kamera-alkalmazás fényképez).
 - `ActionReceiver`: a jóváhagyás gombjai az értesítésben (`/api/v1/confirm`), és az állandó értesítés Szünet /
   Folytatás gombja (`/api/v1/pause`, `/api/v1/resume`).
 - `VoiceTile`: gyorsbeállítás csempe a hangutasításhoz; `res/xml/shortcuts.xml`: parancsikonok (Hang, Új hirdetés).

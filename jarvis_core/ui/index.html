@@ -61,16 +61,27 @@
       <div id="w-list-view">
         <form id="w-compose" class="compose" autocomplete="off" aria-labelledby="w-compose-title">
           <h2 id="w-compose-title" class="section-title">Új hirdetés</h2>
+          <!-- Egyszerű: fotók és egy-két mondat; Pro: elég a fotó, az adatokat és az árat Jarvis olvassa ki -->
+          <div class="modetabs" role="tablist" aria-label="A feltöltés módja">
+            <button type="button" role="tab" id="w-mode-simple" aria-selected="true">Egyszerű</button>
+            <button type="button" role="tab" id="w-mode-pro" aria-selected="false">Pro</button>
+          </div>
+          <p id="w-pro-help" class="muted" hidden>Elég a fotó (a címkéről is egy, ha van rajta méret vagy márka).
+            A márkát, a méretet, az állapotot és a többit a fotókról olvasom ki, az árat a hasonló hirdetésekből
+            adom meg. Ha valami nem látszik, értesítésben rákérdezek, és feltöltés előtt mindent megmutatok,
+            átírhatóan.</p>
           <fieldset class="sites">
             <legend>Hova töltsem fel?</legend>
             <div id="w-sites" class="checks"></div>
           </fieldset>
           <div id="w-needs" class="needs" aria-live="polite"></div>
           <div id="w-new-photos" class="photos"></div>
-          <label for="w-prompt" class="field-label">Mit adsz el?</label>
+          <div id="w-camera-row" class="row" hidden>
+            <button type="button" id="w-camera-btn" class="small">Fotó a kamerával</button></div>
+          <label for="w-prompt" id="w-prompt-label" class="field-label">Mit adsz el?</label>
           <textarea id="w-prompt" rows="3"
             placeholder="Pl. Zara L-es fekete póló, egyszer hordott, 500 Ft"></textarea>
-          <label class="check"><input id="w-research" type="checkbox">
+          <label class="check" id="w-research-row"><input id="w-research" type="checkbox">
             Nézz utána, mennyiért adják máshol (csak ajánlás)</label>
           <div class="row">
             <button id="w-go" type="submit" class="primary">Mehet</button>
@@ -92,6 +103,8 @@
       <article id="w-ledger" class="detail ledger" hidden></article>
       <!-- állandó fájlválasztó: a lap frissítése közben se vesszen el, amit kiválasztottál -->
       <input id="w-file" type="file" accept="image/*" multiple hidden>
+      <!-- a telefon kamerája (Pro feltöltés): az Android-alkalmazásban és a telefonos böngészőben a kamera nyílik meg -->
+      <input id="w-camera" type="file" accept="image/*" capture="environment" hidden>
     </div>
     <aside id="w-logbox" class="worklog">
       <button id="w-logtoggle" type="button" class="logtoggle" aria-expanded="true" aria-controls="w-log">
@@ -229,6 +242,21 @@
       <button type="button" id="deal-bought">Megvettem</button>
       <button type="button" id="deal-close" class="quiet">Bezárás</button>
     </div>
+  </dialog>
+  <!-- Pro feltöltés: a fotókról kiolvasott adatok és az ár, átírhatóan; a Mehet után tölt fel (work.js) -->
+  <dialog id="review-dialog" class="reviewbox" aria-labelledby="review-title">
+    <h2 id="review-title">Nézd át, mielőtt feltöltöm</h2>
+    <div id="review-photos" class="reviewphotos"></div>
+    <p id="review-basis" class="muted"></p>
+    <form id="review-form" autocomplete="off">
+      <div id="review-fields" class="fields"></div>
+      <p id="review-msg" class="warn" role="status"></p>
+      <div class="row">
+        <button type="submit" class="primary">Mehet a feltöltés</button>
+        <button type="button" id="review-save">Mentés, később</button>
+        <button type="button" id="review-close" class="quiet">Bezárás</button>
+      </div>
+    </form>
   </dialog>
   <dialog id="sold-dialog" aria-labelledby="sold-title">
     <h2 id="sold-title">Eladva</h2>

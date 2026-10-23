@@ -115,12 +115,17 @@ public class NotifyService extends Service {
     }
 
     static void show(Context context, String channel, int id, String title, String text, Notification.Action action) {
+        show(context, channel, id, title, text, action, openApp(context));
+    }
+
+    static void show(Context context, String channel, int id, String title, String text, Notification.Action action,
+                     PendingIntent content) {
         Notification.Builder builder = new Notification.Builder(context, channel)
                 .setSmallIcon(R.drawable.ic_notify)
                 .setContentTitle(title)
                 .setContentText(text)
                 .setStyle(new Notification.BigTextStyle().bigText(text))
-                .setContentIntent(openApp(context))
+                .setContentIntent(content)
                 .setAutoCancel(true);
         if (action != null) {
             builder.addAction(action);
@@ -150,6 +155,23 @@ public class NotifyService extends Service {
             return new Notification.Action.Builder((Icon) null, action.optString("label", "Eladva itt"), open).build();
         }
         return null;
+    }
+
+    /**
+     * Egy tárgyhoz tartozó értesítés (a notice "open" mezője: "item" = Jarvis kérdez róla, "review" = a Pro feltöltés
+     * Nézd át ablaka): rábökve az alkalmazás ezzel nyílik meg (MainActivity.ACTION_ITEM). Különben csak megnyitja.
+     */
+    static PendingIntent itemIntent(Context context, JSONObject notice, int id) {
+        String item = notice.optString("item");
+        String open = notice.optString("open");
+        if (item.isEmpty() || !("item".equals(open) || "review".equals(open))) {
+            return openApp(context);
+        }
+        Intent intent = new Intent(context, MainActivity.class).setAction(MainActivity.ACTION_ITEM)
+                .putExtra("item", item).putExtra("open", open).putExtra("notification", id)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        return PendingIntent.getActivity(context, id, intent,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
     @Override
@@ -394,7 +416,7 @@ public class NotifyService extends Service {
             if (notice != null) {
                 int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
                 show(this, CHANNEL_NEWS, id, notice.optString("title", "Jarvis"), notice.optString("text"),
-                        soldAction(this, notice, id));
+                        soldAction(this, notice, id), itemIntent(this, notice, id));
             }
         }
     }

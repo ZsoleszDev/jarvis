@@ -38,7 +38,8 @@ from .replay import (FlowRecorder, FlowStore, Replayer, ReplayOutcome, entry_for
                      url_shape)
 from .selling import (CONDITIONS, MAX_PRICE, NEEDS, NOT_POSTED, ON_SITE, PARCEL_SIZES, PLATFORMS, POSTED, FAILED,
                       RESEARCH_MAX_AGE, Item, ItemError, ItemStore, ListingExtractor, Platform, PriceResearcher,
-                      format_price, missing_needs, price_verdict, question_for, research_fresh)
+                      format_price, missing_needs, photo_signature, price_verdict, question_for,
+                      research_fresh, review_text, round_price, vision_images)
 from .textutil import fold, hu_amounts
 from .tools import Toolbox, ToolError, params
 from .vinted import ChoiceMemory, FillOutcome, VintedDelister, VintedFiller
@@ -178,7 +179,7 @@ def interpret_price_reply(text: str, confirming: bool = False) -> str | int | No
 
 @dataclass
 class Step:
-    kind: str          # "ask" (visszakérdez), "price" (árdöntésre vár), "post" (mehet a feltöltés)
+    kind: str          # "ask" (visszakérdez), "price" (árdöntésre vár), "review" (Pro: átnézésre vár), "post"
     text: str = ""
     note: str = ""     # a fotókról, a feltöltés elején (csak jelzés: a feltöltés ettől megy tovább)
 
@@ -331,6 +332,8 @@ class WorkDesk:
         if not item.photos:
             raise ItemError("Ehhez a tárgyhoz még nincs fotó.")
         answered = self._answered.pop(item_id, None)
+        if item.pro:
+            return self._prepare_pro(item, answered, progress)
         if not self.extractor.up_to_date(item):   # ugyanabból a leírásból nem olvassa ki újra
             progress("a leírásod értelmezése")
             # a visszakérdezésre adott válaszból csak a hiányzó adatok (rövidebb séma, gyorsabb válasz)
@@ -359,6 +362,85 @@ class WorkDesk:
         self.store.set_pending(item_id, None)
         return Step("post", note=self.photo_note(item_id))
 
+    def _prepare_pro(self, item: Item, answered: list[str] | None, progress: Callable[[str], None]) -> Step:
+        """Pro feltöltés: az adatok a fotókról (ha új fotó jött, újra megnézi), amit nem látott, arra egy kérdés (a
+        válaszodból csak azt olvassa ki), az ár magától (_pro_price), végül a Nézd át: amíg nem hagytad jóvá (a
+        Mehet gombbal, ahol mindent átírhatsz), nem tölt fel."""
+        if item.pro_sig != photo_signature(item):    # új (vagy más) fotók: újra megnézi, és újra átnézed
+            progress("a fotók átnézése")
+            item, _estimate = self.extractor.from_photos(item.id, vision_images(self.store, item.id))
+            item = self.store.update(item.id, reviewed=False)
+        if answered and item.prompt.strip():
+            progress("a válaszod értelmezése")
+            item = self.extractor.extract(item.id, only=answered)
+        missing = self._pro_missing(item)
+        if missing:
+            question = question_for(item, missing)
+            self.store.set_pending(item.id, {"kind": "info", "question": question})
+            return Step("ask", question)
+        basis = str(item.pending.get("basis") or "") if item.pending.get("kind") == "review" else ""
+        if not item.price:
+            item, basis = self._pro_price(item, progress)
+        if not item.reviewed:
+            text = review_text(item, basis)
+            self.store.set_pending(item.id, {"kind": "review", "question": text, "basis": basis})
+            return Step("review", text)
+        self.store.set_pending(item.id, None)
+        return Step("post", note=self.photo_note(item.id))
+
+    def _pro_missing(self, item: Item) -> list[tuple[Any, list[str]]]:
+        """Ami a fotókról nem derült ki, és a kiválasztott oldalak kérik (az árat Jarvis maga adja meg)."""
+        return [(need, sites) for need, sites in missing_needs(item, self.settings) if need.field != "price"]
+
+    def _pro_price(self, item: Item, progress: Callable[[str], None]) -> tuple[Item, str]:
+        """Az ár magától, amennyiért jó áron elkel: a hasonló hirdetések alapján (árkutatás a kiválasztott oldalakon;
+        a modell a hasonlók közül választ, és a középérték körül javasol), ha kevés a hasonló, az árbázisból (az
+        Automata kereskedés árai: a középérték és az alsó negyed között), végül a modell becslése a fotókról.
+        Visszaadja a tárgyat és hogy honnan az ár (a Nézd át ablakba)."""
+        price, basis = None, ""
+        if self.researcher is not None:
+            try:
+                item = self.researcher.research(item.id, lambda detail: progress("árkutatás – " + detail),
+                                                only=item.targets)
+            except ItemError:
+                pass                       # ha az árkutatás nem megy, a többi forrás jön
+            found = item.research or {}
+            similar = found.get("similar") or []
+            if found.get("suggested") and len(similar) >= 3:
+                price = int(found["suggested"])
+                span = (f", többnyire {format_price(found['p25'])}–{format_price(found['p75'])}"
+                        if found.get("p25") and found.get("p75") and found["p25"] < found["p75"] else "")
+                basis = f"{len(similar)} hasonló hirdetés alapján{span}"
+        if price is None:
+            key = self.deals.book.key(item.search_query or item.title or item.product)
+            reference = self.deals.book.reference(key[0]) if key else None
+            if reference is not None:
+                price = round_price((int(reference["price"]) + int(reference["p25"])) / 2)
+                basis = (f"az árbázisból: a hasonlók most kb. {format_price(reference['price'])}-ért mennek "
+                         f"({reference['n']} ár alapján)")
+        if price is None and item.price_estimate:
+            price = round_price(item.price_estimate)
+            basis = "becslés a fotók alapján (nem találtam elég hasonló hirdetést): nézd meg"
+        if price:
+            item = self.store.update(item.id, price=price)
+        return item, basis
+
+    def approve_problem(self, item_id: str) -> str:
+        """Mi hiányzik még a Mehet előtt (üres, ha semmi): az ár, vagy egy adat, amit a kiválasztott oldal kér."""
+        item = self.store.get(item_id)
+        if not item.price:
+            return "Add meg az árat, és utána mehet a feltöltés."
+        missing = self._pro_missing(item)
+        return ("Még hiányzik: " + ", ".join(need.label for need, _sites in missing) + ".") if missing else ""
+
+    def approve(self, item_id: str) -> Item:
+        """Pro: átnézted az adatokat (és amit kellett, átírtad), mehet a feltöltés."""
+        problem = self.approve_problem(item_id)
+        if problem:
+            raise ItemError(problem)
+        self.store.update(item_id, reviewed=True)
+        return self.store.set_pending(item_id, None)
+
     def photo_note(self, item_id: str) -> str:
         """A fotókról egy rövid jelzés a feltöltés elejére (homályos, sötét, majdnem ugyanaz, egy másik tárgy
         fotója), vagy üres, ha mind rendben van. A feltöltést nem állítja meg. Egy régebbi tárgynál előbb megméri
@@ -371,7 +453,8 @@ class WorkDesk:
         válaszból csak azt olvassa ki, amire rákérdezett)."""
         item = self.store.get(item_id)
         if item.pending.get("kind") == "info":
-            self._answered[item_id] = [need.field for need, _ in missing_needs(item, self.settings)]
+            missing = self._pro_missing(item) if item.pro else missing_needs(item, self.settings)
+            self._answered[item_id] = [need.field for need, _ in missing]
         self.store.update(item_id, prompt=(item.prompt + "\n" + text.strip()).strip())
         return self.store.set_pending(item_id, None)
 
@@ -401,8 +484,9 @@ class WorkDesk:
         return bool(references) and not any(0.2 * r <= amount <= 3 * r for r in references)
 
     def pending_item(self) -> Item | None:
-        """A legutóbb visszakérdezett tárgy (a Munka menüben írt válasz ehhez tartozik)."""
-        waiting = [i for i in self.store.all() if i.pending.get("kind")]
+        """A legutóbb visszakérdezett tárgy (a Munka menüben írt válasz ehhez tartozik). A Nézd át (Pro) nem ilyen:
+        azt a Mehet gombbal hagyod jóvá."""
+        waiting = [i for i in self.store.all() if i.pending.get("kind") in ("info", "price")]
         return max(waiting, key=lambda i: i.updated) if waiting else None
 
     def targets_left(self, item_id: str) -> list[str]:

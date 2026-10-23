@@ -626,7 +626,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
         work = self._work()
         body = self._body()
         item = work.store.create(targets=body.get("targets") or [], prompt=str(body.get("prompt") or ""),
-                                 research_wanted=bool(body.get("research_wanted")))
+                                 research_wanted=bool(body.get("research_wanted")), pro=bool(body.get("pro")))
         self._json(201, {"ok": True, "item": item.public()})
 
     def r_item_get(self, item_id: str, query: dict[str, list[str]]) -> None:
@@ -693,7 +693,9 @@ class _ApiHandler(BaseHTTPRequestHandler):
                 raise ApiError(400, "bad_request", f"Az állapot: {POSTED}, {NOT_POSTED} vagy {FAILED}.")
             item = work.store.mark(item_id, platform=platform, status=status, url=str(body.get("url") or ""))
             return self._json(200, {"ok": True, "item": item.public()})
-        if action in ("sell", "post"):
+        if action == "approve" and work.approve_problem(item_id):     # Pro: a Mehet előtt még kell valami
+            raise ApiError(409, "not_ready", work.approve_problem(item_id))
+        if action in ("sell", "post", "approve"):
             targets = [platform] if action == "post" else item.targets
             if action == "post" and platform not in work.platforms:
                 raise ApiError(400, "bad_request", "Ismeretlen hirdetési oldal (platform).")
@@ -877,7 +879,8 @@ ROUTES: list[tuple[str, re.Pattern[str], str]] = [(m, re.compile(p), n) for m, p
     ("POST", rf"/work/items/{_ID}/photos/order", "r_photo_order"),
     ("GET", rf"/work/items/{_ID}/photos/(\d{{2}}\.jpg)", "r_photo_get"),
     ("DELETE", rf"/work/items/{_ID}/photos/(\d{{2}}\.jpg)", "r_photo_delete"),
-    ("POST", rf"/work/items/{_ID}/(sell|reply|price|cancel|post|research|sold|delist|mark|dismiss)", "r_item_action"),
+    ("POST", rf"/work/items/{_ID}/(sell|reply|price|cancel|post|research|sold|delist|mark|dismiss|approve)",
+     "r_item_action"),
     ("PUT", r"/work/settings", "r_settings"),
     ("POST", r"/work/ack", "r_ack"),
     ("GET", r"/work/messages", "r_messages"),

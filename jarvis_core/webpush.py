@@ -41,7 +41,7 @@ PUSH_HOSTS = ("notify.windows.com", "fcm.googleapis.com", "android.googleapis.co
               "push.apple.com")
 INSTALL_HINT = "A laptopos értesítésekhez a gépen ez kell: pip install cryptography (utána indítsd újra a Jarvist)."
 # Az értesítések gombjai, amiket a push-üzenet is visz (a böngésző legfeljebb kettőt mutat).
-NOTICE_ACTIONS = ("sold", "login", "deal")
+NOTICE_ACTIONS = ("sold", "login", "deal", "item", "review")
 NOTICE_ACTION_FIELDS = ("action", "where", "platform", "delist", "label", "deal")
 
 
@@ -276,6 +276,9 @@ class WebPush:
                 message["actions"] = actions
                 if notice.get("item"):
                     message["item"] = str(notice["item"])[:16]
+            if notice.get("open") in ("item", "review") and notice.get("item"):
+                # egy tárgy kérdése vagy a Pro feltöltés Nézd át ablaka: a kattintás azt nyitja meg
+                message.update(open=str(notice["open"]), item=str(notice["item"])[:16])
             # egy friss hirdetésnél számít a perc: a telefon akkor is rögtön kapja meg, ha alszik
             self._enqueue(message, ttl=12 * 3600, urgency="high" if notice.get("urgent") else "normal")
 

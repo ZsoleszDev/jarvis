@@ -50,9 +50,9 @@ MAX_VOICE_BYTES = 15 * 1024 * 1024    # a telefon vagy a laptop mikrofonjával f
 DEAL_FIELDS = ("query", "sites", "max_price", "min_price", "discount", "min_profit", "every", "exclude", "reference")
 # Amit a felületről át lehet írni egy tárgyon, és amit el lehet indítani.
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
-            "size", "condition", "color", "material", "price", "min_price", "location", "shipping", "bought_price",
+            "size", "condition", "color", "gender", "material", "price", "min_price", "location", "shipping", "bought_price",
             "sold_price", *LEDGER_FIELDS}
-ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold"}
+ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold", "approve"}
 IS_WINDOWS = sys.platform == "win32"
 CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
        "connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'")
@@ -688,7 +688,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._ledger_post(body)
             if path == "/api/work/new":
                 values = {"targets": body.get("targets") or [], "prompt": str(body.get("prompt") or ""),
-                          "research_wanted": bool(body.get("research_wanted"))}
+                          "research_wanted": bool(body.get("research_wanted")),
+                          "pro": bool(body.get("pro"))}    # Pro: elég a fotó, az adatokat és az árat Jarvis adja
                 return self._json(200, {"ok": True, "item": work.store.create(**values).public()})
             if path == "/api/work/update":
                 fields = body.get("fields") if isinstance(body.get("fields"), dict) else {}
@@ -740,6 +741,8 @@ class _Handler(BaseHTTPRequestHandler):
                     extra["choice"] = choice if choice in PRICE_CHOICES else str(choice or "")[:20]
                 if action == "delist":
                     extra["platforms"] = [str(p) for p in body.get("platforms") or [] if str(p) in work.platforms]
+                if action == "approve" and work.approve_problem(ids[0]):     # Pro: a Mehet előtt még kell valami
+                    return self._json(400, {"ok": False, "error": work.approve_problem(ids[0])})
                 if action == "sold":
                     extra["where"] = str(body.get("where") or "") if str(body.get("where") or "") in work.platforms else ""
                     extra["delist"] = bool(body.get("delist"))

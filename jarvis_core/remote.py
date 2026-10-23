@@ -116,6 +116,10 @@ self.addEventListener("notificationclick", (event) => {
     event.waitUntil(openAction({ action: "deal", deal: message.deal }));
     return;
   }
+  if (message.open && message.item) {       // egy tárgy kérdése, vagy a Pro feltöltés Nézd át ablaka
+    event.waitUntil(openAction({ action: message.open, item: message.item }));
+    return;
+  }
   event.waitUntil(openWindow());
 });
 """

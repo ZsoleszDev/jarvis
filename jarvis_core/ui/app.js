@@ -495,7 +495,7 @@ $("jobs-body").addEventListener("change", async (event) => {
 
 let noticeList = [];
 let noticesUnread = 0;
-const NOTICE_ACTIONS = ["sold", "login", "captcha", "deals", "offer", "deal", "ledger"];
+const NOTICE_ACTIONS = ["sold", "login", "captcha", "deals", "offer", "deal", "ledger", "item", "review"];
 
 function setNoticesUnread(count) {
   noticesUnread = Math.max(0, count);
@@ -1066,6 +1066,8 @@ function takePending() {
   }
   if (wanted.sold) noticeAction({ action: "sold", ...wanted.sold });   // az értesítés „Eladva itt…” gombja
   if (wanted.deal) noticeAction({ action: "deal", deal: wanted.deal });   // egy megérő hirdetés értesítése: a találat ablaka
+  // egy tárgy értesítése: a kérdése (item), vagy a Pro feltöltés Nézd át ablaka (review)
+  if (wanted.item && wanted.item.id) noticeAction({ action: wanted.item.open === "review" ? "review" : "item", item: wanted.item.id });
   if (wanted.voice) {
     if (paused) toast("Szünetelek: előbb nyomd meg a Folytatás gombot.");
     else if (!voiceAvailable) toast("A gépen most nem fut beszédfelismerés; írd be, mit szeretnél.");

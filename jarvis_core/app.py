@@ -45,7 +45,7 @@ from .work import (DELISTED_NOTE, PRICE_CHOICES, WORK_ONLY_TOOLS, WorkDesk, inte
 
 MODES = ("chat", "work")
 # Az Adás/Vétel feladatai, amik egy tárgyon dolgoznak (a kártyán látszik, hogy épp mi történik)
-BUSY_ACTIONS = {"sell", "reply", "price", "post", "research", "delist", "sold"}
+BUSY_ACTIONS = {"sell", "reply", "price", "post", "research", "delist", "sold", "approve"}
 # A felhasználó kérései (a háttérmunka és a belső lépések nem ilyenek): ezek szakítják meg a háttérmunkát.
 INTERACTIVE = {"text", "voice", "audio", "work", "creative"}
 
@@ -1531,6 +1531,9 @@ class JarvisApp:
             try:
                 if action == "sell":
                     self._sell(item_id)
+                elif action == "approve":      # Pro: átnézted az adatokat (Nézd át), mehet a feltöltés
+                    self.work.approve(item_id)
+                    self._sell(item_id)
                 elif action == "reply":
                     self._reply(item_id, str(payload.get("text") or ""), str(payload.get("via") or "text"))
                 elif action == "price":
@@ -1622,7 +1625,15 @@ class JarvisApp:
         if step.kind in ("ask", "price"):
             self.ui.notice(step.text)
             self.say(step.text)
-            self._tell("question", f"Kérdés: {store.get(item_id).name}", step.text, item=item_id)
+            self._tell("question", f"Kérdés: {store.get(item_id).name}", step.text, item=item_id, open="item",
+                       actions=[{"action": "item", "label": "Megnyitom"}])
+            return
+        if step.kind == "review":      # Pro: a fotókról kiolvasott adatok és az ár, átírhatóan; a Mehet után tölt fel
+            name = store.get(item_id).name
+            self.ui.notice(step.text)
+            self.say(f"{name}: kész az adatlap az árral. Nézd át, és ha jó, mehet a feltöltés.")
+            self._tell("question", f"Nézd át: {name}", step.text, item=item_id, open="review",
+                       actions=[{"action": "review", "label": "Átnézem"}])
             return
         if step.text:
             self.ui.notice(step.text)
@@ -1666,7 +1677,8 @@ class JarvisApp:
         question = str(item.pending.get("question") or "")
         self.ui.notice(question)
         self.say(question)
-        self._tell("question", f"Kérdés: {item.name}", question, item=item_id)
+        self._tell("question", f"Kérdés: {item.name}", question, item=item_id, open="item",
+                   actions=[{"action": "item", "label": "Megnyitom"}])
         return True
 
     def _post_all(self, item_id: str) -> None:

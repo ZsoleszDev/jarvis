@@ -77,6 +77,13 @@
 - Az indulóoldalak súlya csak nő vagy csökken; ha egy oldal hetekig nem hoz semmit, a régi sikerei miatt még sokáig előre kerül.
 - Ami csak a termékcsaládot nevezi meg típus nélkül („PS5 konzol”, „Nintendo Switch”), nem kap kulcsot (a játékkal, kiegészítővel keveredne): ezeket csak a modell nevezi meg, vagy egy keresés méri.
 
+### Pro feltöltés
+- A fotókról való kiolvasás és az árbecslés valódi fotókkal és a valódi modellel nincs kipróbálva (a tesztek hamis
+  modellel futnak). A modell legfeljebb az első négy fotót kapja (`selling.PRO_PHOTOS`, 1024 px): ha a címke az ötödik
+  fotón van, a méretre rákérdez.
+- A Nézd át ablakban az oldalak (Vinted, Jófogás…) nem módosíthatók; a hirdetés lapján igen.
+- Az Android kamera gombja (PhotoProvider) egyszerre egy fotót ad; több fotóhoz többször kell megnyomni.
+
 ### Vételeim és azonnali figyelő
 - Az azonnali figyelő egy letöltésből legfeljebb három, az árbázis által nem ismert hirdetés árát nézi meg máshol (a modell
   szerint megérők elöl); ha egy kategóriában egyszerre sok ismeretlen új jön, a többi kimarad (`deals.EXPLORE_PICKS`).

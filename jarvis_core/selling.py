@@ -12,6 +12,7 @@ felvételkor modell nélkül megnézi (photos.py: homályos, sötét, kicsi, ism
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -64,7 +65,7 @@ TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200
 MULTILINE = {"description", "prompt", "trade_note"}
 # Forintösszegek (parse_price) és időpontok a tárgyon.
 AMOUNT_FIELDS = ("price", "min_price", "bought_price", "sold_price", "bought_shipping", "bought_extra",
-                 "market_price", "target_price", "sell_shipping", "sell_fee")
+                 "market_price", "target_price", "sell_shipping", "sell_fee", "price_estimate")
 TIME_FIELDS = ("bought_at", "sold_at")
 # A Vételeim fülön (és a telefonos API-ban) átírható vételi és eladási adatok (a vételár és az eladási ár mellett).
 LEDGER_FIELDS = ("bought_shipping", "bought_extra", "bought_from", "bought_at", "in_transit", "market_price",
@@ -194,6 +195,12 @@ class Item:
     targets: list[str] = field(default_factory=list)     # hova töltse fel
     prompt: str = ""                  # a leírásod, és ha visszakérdezett, a válaszaid
     research_wanted: bool = False     # nézzen utána, mennyiért adják máshol (csak ajánlás)
+    # Pro feltöltés: elég a fotó; az adatokat (márka, méret, állapot…) és az árat Jarvis a fotókról olvassa ki, és
+    # feltöltés előtt mindet megmutatja (Nézd át), átírhatóan.
+    pro: bool = False
+    pro_sig: str = ""                 # melyik fotókból olvasta ki (ha új fotót adsz hozzá, újra megnézi)
+    price_estimate: int | None = None   # a modell árbecslése a fotókról (ha nincs elég hasonló hirdetés)
+    reviewed: bool = False            # Pro: átnézted az adatokat, mehet a feltöltés
     product: str = ""                 # mi ez, röviden
     kind: str = ""                    # ruha, cipő, kiegészítő, elektronika, egyéb
     title: str = ""
@@ -258,6 +265,8 @@ class Item:
             return "kérdés"
         if self.pending.get("kind") == "price":
             return "árdöntés"
+        if self.pending.get("kind") == "review":
+            return "átnézésre vár"
         up = [t for t in self.targets if self.platforms.get(t, {}).get("status") == POSTED]
         if up and len(up) == len(self.targets):
             return "fent"
@@ -538,7 +547,7 @@ class ItemStore:
                     value = max(0.0, float(value or 0))
                 except (TypeError, ValueError):
                     raise ItemError("Az időpont nem érvényes.") from None
-            elif key in ("research_wanted", "in_transit"):
+            elif key in ("research_wanted", "in_transit", "pro", "reviewed"):
                 value = bool(value)
             elif key == "condition":
                 value = closest_condition(str(value or "")) if value else ""
@@ -552,7 +561,7 @@ class ItemStore:
                 if unknown:
                     raise ItemError(f"Ismeretlen hirdetési oldal: {', '.join(map(str, unknown))}")
                 value = [t for t in self.platform_keys if t in value]
-            elif key == "extracted_sig":
+            elif key in ("extracted_sig", "pro_sig"):
                 value = str(value or "")[:64]
             elif key in TEXT_LIMITS:
                 text = str(value or "")
@@ -944,6 +953,69 @@ EXTRACT_SCHEMA: dict[str, Any] = {
 }
 
 
+# Pro feltöltés: a hirdetés adatai a fotókról (a modell képet is ért). Legfeljebb PRO_PHOTOS fotót kap, PRO_SIDE
+# pixelesre kicsinyítve (a címke felirata még olvasható, de nem foglal túl sok helyet a modellben).
+PRO_PHOTOS = 4
+PRO_SIDE = 1024
+PRO_FIELDS = ("product", "title", "description", "category", "gender", "brand", "size", "condition", "color",
+              "material", "search_query")
+PRO_SYSTEM = (
+    "Egy eladásra szánt használt (vagy új) holmi fotóit kapod. A fotók alapján gyűjtsd ki a hirdetés adatait, "
+    "magyarul.\n"
+    "Szabályok:\n"
+    "- Csak azt írd, amit a fotókon biztosan látsz, vagy ami egyértelműen kiderül (címke, logó, felirat, a tárgy "
+    "formája). Amit nem látsz biztosan, hagyd üresen: arra rákérdezek, mert egy rossz adat a hirdetésben rosszabb, "
+    "mint egy kérdés.\n"
+    "- product: röviden, mi ez (pl. „farmerdzseki”, „RTX 3060 Ti videókártya”). kind: ezek egyike: "
+    + ", ".join(KINDS) + " (a táska, öv, sapka, ékszer: kiegészítő).\n"
+    "- brand: a márka a logóról, a címkéről vagy a feliratról; ha nem olvasható, üres.\n"
+    "- size: a méret a címkéről (pl. „M”, „38”, „42”, „W32 L34”); ha nem látszik, üres. A kinézetből ne becsüld.\n"
+    "- condition: ezek egyike: " + "; ".join(CONDITIONS) + ". A látható kopás, folt, sérülés alapján (rajta a bolti "
+    "címke: Új, címkével). Ha a fotókról nem ítélhető meg, üres.\n"
+    "- color: a szín magyarul. material: csak ha a címkén olvasható. gender: ruhánál, cipőnél, kiegészítőnél női, "
+    "férfi, gyerek vagy uniszex, ha a fazon vagy a címke egyértelművé teszi, különben üres.\n"
+    "- title: rövid, természetes cím, ahogy egy ember írná: a márka és hogy mi ez (pl. „Zara farmerdzseki”, „Nike "
+    "Air Max 90”), legfeljebb 40 karakter, a szín, a méret és az állapot nélkül.\n"
+    "- description: az eladó nevében, egyes szám első személyben, egy-két rövid mondat a fotón látható fontos "
+    "részletről (pl. egy kisebb folt, a hiányzó tartozék, eredeti doboz), különben üres. Ne találj ki használatot "
+    "(„egyszer hordtam”), és ne írj árat.\n"
+    "- keywords: 5–8 rövid kulcsszó vesszővel (márka, típus, szín, anyag, stílus), amire a vevők keresnek.\n"
+    "- category: a legvalószínűbb kategóriaút, pl. „Ruhák > Kabátok” vagy „Számítástechnika > Videókártyák”.\n"
+    "- search_query: 2–4 szó a hasonló hirdetések kereséséhez (márka és típus, méret nélkül).\n"
+    "- price_estimate: reális ár forintban, amennyiért a magyar használtpiacon (Vinted, Jófogás, Hardverapró) "
+    "gyorsan elkelne; ha nem tudod megítélni, 0."
+)
+PRO_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        **{key: {"type": "string"} for key in PRO_FIELDS},
+        "kind": {"type": "string", "enum": KINDS},
+        "condition": {"type": "string", "enum": [*CONDITIONS, ""]},
+        "gender": {"type": "string", "enum": ["női", "férfi", "gyerek", "uniszex", ""]},
+        "keywords": {"type": "string"},
+        "price_estimate": {"type": "integer"},
+    },
+    "required": [*PRO_FIELDS, "kind", "keywords", "price_estimate"],
+}
+
+
+def photo_signature(item: Item) -> str:
+    """Melyik fotókból készültek a Pro adatok (a fotók sorrendje és tartalma szerint)."""
+    parts = [f"{name}:{(item.photo_checks.get(name) or {}).get('hash', '')}" for name in item.photos]
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest() if parts else ""
+
+
+def vision_images(store: ItemStore, item_id: str, limit: int = PRO_PHOTOS, side: int = PRO_SIDE) -> list[str]:
+    """A tárgy első fotói a modellnek (base64 JPEG, kicsinyítve)."""
+    out = []
+    for path in store.photo_paths(item_id)[:limit]:
+        try:
+            out.append(base64.b64encode(_jpeg(_open_image(path.read_bytes()), side, 85)).decode("ascii"))
+        except (OSError, ItemError):
+            continue
+    return out
+
+
 # Ha az EXTRACT_SYSTEM vagy a séma érdemben változik, emeld: a régi kiolvasások egyszer újra lefutnak.
 EXTRACT_VERSION = "3"
 # Ha a hirdetés már fent van valahol, ezeket Jarvis magától nem írja át (a többi oldalon is ugyanaz a
@@ -1025,6 +1097,39 @@ class ListingExtractor:
         if any(e.get("status") == POSTED for e in item.platforms.values()):
             values = {k: v for k, v in values.items() if k not in FROZEN_WHEN_POSTED}
         return self.store.update(item_id, **values, extracted_sig=extract_signature(item.prompt))
+
+
+    def from_photos(self, item_id: str, images: list[str]) -> tuple[Item, int | None]:
+        """Pro feltöltés: a hirdetés adatai a fotókról (egy modellhívás, a képekkel); ha az eladó írt megjegyzést (a
+        leírás), azt is figyelembe veszi. Amit nem lát biztosan, üresen marad: arra a feltöltés rákérdez. A kézzel
+        átírt mezőket nem írja felül. Visszaadja a tárgyat és a modell árbecslését (None, ha nem tudta)."""
+        item = self.store.get(item_id)
+        if not images:
+            raise ItemError("Ehhez a tárgyhoz még nincs fotó.")
+        note = f"\nAz eladó megjegyzése: {item.prompt}" if item.prompt.strip() else ""
+        messages = [{"role": "system", "content": PRO_SYSTEM},
+                    {"role": "user", "content": f"Az eladásra szánt tárgy fotói ({len(images)} db).{note}",
+                     "images": images}]
+        data = self.llm.chat_json(messages, PRO_SCHEMA, temperature=0.1, max_tokens=EXTRACT_MAX_TOKENS)
+        values: dict[str, Any] = {key: str(data.get(key) or "").strip() for key in PRO_FIELDS}
+        values["kind"] = str(data.get("kind") or "").strip()
+        kind = values["kind"] or item.kind
+        values["description"] = compose_description(values["description"], str(data.get("keywords") or ""), kind,
+                                                    seed=item.id)
+        if values["title"]:
+            values["title"] = tidy_title(values["title"], values["brand"] or item.brand, kind,
+                                         values["size"] or item.size, values["color"] or item.color)
+        values = {k: v for k, v in values.items() if v}      # amit nem látott, nem törli
+        gender, category = values.get("gender") or item.gender, values.get("category") or item.category
+        if gender and category and kind in CLOTHING:
+            values["category"] = gendered_category(category, gender)
+        if any(e.get("status") == POSTED for e in item.platforms.values()):
+            values = {k: v for k, v in values.items() if k not in FROZEN_WHEN_POSTED}
+        try:
+            estimate = parse_price(data.get("price_estimate")) or None
+        except ItemError:
+            estimate = None
+        return self.store.update(item_id, **values, price_estimate=estimate, pro_sig=photo_signature(item)), estimate
 
 
 def compose_description(text: str, keywords: str, kind: str, seed: str = "") -> str:
@@ -1133,6 +1238,24 @@ def missing_needs(item: Item, settings: dict[str, Any]) -> list[tuple[Need, list
             sites = [PLATFORMS[s].name for s in need.sites if s in item.targets] if need.sites else []
             out.append((need, sites))
     return out
+
+
+def review_text(item: Item, basis: str = "") -> str:
+    """A Pro feltöltés Nézd át üzenete: a hirdetés adatai az árral (és hogy honnan az ár)."""
+    sites = ", ".join(PLATFORMS[t].name for t in item.targets if t in PLATFORMS)
+    facts = " · ".join(f"{label}: {value}" for label, value in (
+        ("Márka", item.brand), ("Méret", item.size), ("Állapot", item.condition), ("Szín", item.color),
+        ("Kinek", item.gender)) if value)
+    price = (f"Ár: {format_price(item.price)}" + (f" ({basis})" if basis else "") if item.price else
+             "Ár: nem tudtam megbecsülni, írd be")
+    lines = [f"Nézd át, mielőtt feltöltöm ({sites}):" if sites else "Nézd át, mielőtt feltöltöm:",
+             f"Cím: {item.title or item.product or '?'}", price]
+    if facts:
+        lines.append(facts)
+    if item.category:
+        lines.append(f"Kategória: {item.category}")
+    lines.append("Ha minden stimmel, nyomd meg a Mehet gombot; amit kell, előtte írd át.")
+    return "\n".join(lines)
 
 
 def question_for(item: Item, missing: list[tuple[Need, list[str]]]) -> str:

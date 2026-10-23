@@ -19,6 +19,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.PowerManager;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
@@ -72,6 +73,7 @@ public class MainActivity extends Activity {
     static final String ACTION_NEW_LISTING = "hu.jarvis.app.NEW_LISTING";
     static final String ACTION_SOLD = "hu.jarvis.app.SOLD";
     static final String ACTION_DEAL = "hu.jarvis.app.DEAL";
+    static final String ACTION_ITEM = "hu.jarvis.app.ITEM";
     /** A ChatGPT alkalmazás (a Szakértői tipp gombhoz); ha nincs telepítve, a weboldala a böngészőben. */
     static final String CHATGPT_PACKAGE = "com.openai.chatgpt";
     static final String CHATGPT_URL = "https://chatgpt.com/";
@@ -81,6 +83,7 @@ public class MainActivity extends Activity {
     private static final int PICK_FILES = 1;
     private static final int ASK_MIC = 2;
     private static final int ASK_NOTIFY = 3;
+    private static final int TAKE_PHOTO = 4;
 
     private WebView web;
     private Prefs prefs;
@@ -98,6 +101,8 @@ public class MainActivity extends Activity {
     private volatile String pairCode = "";
     private volatile String wantSold = "";
     private volatile String wantDeal = "";
+    private volatile String wantItem = "";                 // {"id", "open"}: egy tárgy értesítése (kérdés, Nézd át)
+    private Uri cameraShot;                                // a kamerával most készülő fotó helye (PhotoProvider)
 
     @Override
     protected void onCreate(Bundle state) {
@@ -158,6 +163,19 @@ public class MainActivity extends Activity {
             case ACTION_SOLD:
                 wantSold = soldRequest(intent);
                 return false;
+            case ACTION_ITEM: {                           // egy tárgy értesítése: a kérdése, vagy a Nézd át ablak
+                int notification = intent.getIntExtra("notification", 0);
+                if (notification != 0) {
+                    getSystemService(NotificationManager.class).cancel(notification);
+                }
+                try {
+                    wantItem = new JSONObject().put("id", String.valueOf(intent.getStringExtra("item")))
+                            .put("open", String.valueOf(intent.getStringExtra("open"))).toString();
+                } catch (Exception e) {
+                    wantItem = "";
+                }
+                return false;
+            }
             case ACTION_DEAL: {                           // egy megérő hirdetés értesítése: a találat ablaka
                 int notification = intent.getIntExtra("notification", 0);
                 if (notification != 0) {
@@ -408,6 +426,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == TAKE_PHOTO && filesCallback != null) {       // a kamerával készült fotó (Pro feltöltés)
+            filesCallback.onReceiveValue(resultCode == RESULT_OK && cameraShot != null ? new Uri[]{cameraShot} : null);
+            filesCallback = null;
+            cameraShot = null;
+            return;
+        }
         if (requestCode != PICK_FILES || filesCallback == null) {
             return;
         }
@@ -494,6 +518,18 @@ public class MainActivity extends Activity {
                 filesCallback.onReceiveValue(null);
             }
             filesCallback = callback;
+            if (params.isCaptureEnabled()) {              // <input capture>: a telefon kamerája (Pro feltöltés)
+                cameraShot = PhotoProvider.newShot(MainActivity.this);
+                Intent camera = new Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                        .putExtra(MediaStore.EXTRA_OUTPUT, cameraShot)
+                        .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                try {
+                    startActivityForResult(camera, TAKE_PHOTO);
+                    return true;
+                } catch (ActivityNotFoundException e) {
+                    cameraShot = null;                    // nincs kamera-alkalmazás: a sima fájlválasztó jön
+                }
+            }
             Intent intent = params.createIntent();
             intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
             try {
@@ -556,12 +592,16 @@ public class MainActivity extends Activity {
                 if (!wantDeal.isEmpty()) {
                     result.put("deal", wantDeal);
                 }
+                if (!wantItem.isEmpty()) {
+                    result.put("item", new JSONObject(wantItem));
+                }
                 wantVoice = false;
                 wantListing = false;
                 sharedText = "";
                 photosNew = false;
                 wantSold = "";
                 wantDeal = "";
+                wantItem = "";
                 return result.toString();
             } catch (Exception e) {
                 return "{}";

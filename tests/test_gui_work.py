@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_offline import FakeOllama, make_cfg, reply, tool_reply  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
-from test_work import SHIRT, Pages, extracted, jpeg, local_platforms  # noqa: E402
+from test_work import SHIRT, Pages, extracted, jpeg, local_platforms, seen  # noqa: E402
 
 from jarvis_core import selling  # noqa: E402
 from jarvis_core.app import JarvisApp  # noqa: E402
@@ -513,6 +513,76 @@ class WorkBrowserTests(unittest.TestCase):
         stored = self.h.store.get(item.id)
         self.assertEqual(stored.price, 4500)
         self.assertIn("price", stored.edited)
+
+    def test_pro_upload_from_photos_with_a_review_before_posting(self):
+        """Pro fül: elég a fotó; amit a fotókról nem lát, arra a kártyán rákérdez; utána a Nézd át ablakban minden
+        adat és az ár átírható, és a Mehet után kezd feltölteni. A telefonos értesítés ugyanezt az ablakot nyitja meg."""
+        page = self.page
+        self.h.app.work.researcher = None                      # az ár a fotók alapján (a teszt ne böngésszen)
+        page.click("#w-mode-pro")
+        self.assertTrue(page.is_visible("#w-pro-help") and page.is_hidden("#w-research-row"))
+        self.assertEqual(page.inner_text("#w-prompt-label"), "Megjegyzés (nem kötelező)")
+        self.assertTrue(page.is_hidden("#w-camera-row"), "a gépen nincs kamera gomb")
+        page.check('#w-sites input[value="vinted"]')
+        with page.expect_file_chooser() as chooser:
+            page.click('[data-pick="compose"]')
+        chooser.value.set_files(str(self.h.photo))
+        page.wait_for_selector("#w-new-photos .photo img")
+        jacket = dict(product="farmerdzseki", kind="ruha", title="Zara farmerdzseki", brand="Zara", condition="Jó",
+                      color="kék", gender="női", category="Ruhák > Kabátok", price_estimate=6300)
+        self.h.fake.chat_script = [seen(**jacket)]
+        page.click("#w-go")                                    # leírás nélkül is mehet
+        page.wait_for_selector("#ask-dialog[open]")
+        page.click("#ask-yes")
+        page.wait_for_selector('.card .ask p:has-text("még kell: méret")')
+        [item] = self.h.store.all()
+        self.assertTrue(item.pro)
+        self.h.fake.chat_script = [extracted(size="M")]
+        page.fill(f'[data-keep="reply-{item.id}"]', "M-es")
+        page.click(f'form[data-reply="{item.id}"] button[type="submit"]')
+        page.wait_for_selector(f'[data-review="{item.id}"]')
+        self.assertIn("átnézésre vár", page.inner_text(f'.card[data-id="{item.id}"]'))
+        page.click(f'[data-review="{item.id}"]')
+        page.wait_for_selector("#review-dialog[open]")
+        self.assertIn("becslés a fotók alapján", page.inner_text("#review-basis"))
+        self.assertEqual((page.input_value("#r-title"), page.input_value("#r-price"), page.input_value("#r-size"),
+                          page.input_value("#r-gender")), ("Zara farmerdzseki", "6300", "M", "női"))
+        page.fill("#r-price", "")
+        page.click('#review-form button[type="submit"]')
+        page.wait_for_selector('#review-msg:has-text("Add meg az árat")')
+        page.fill("#r-price", "5900")
+        page.fill("#r-description", "Alig hordtam.")
+        self.h.fake.chat_script = [reply("Be kell jelentkezned a Vintedre, utána az Újra gombbal folytatom.")]
+        page.click('#review-form button[type="submit"]')
+        page.wait_for_selector('.toast:has-text("Mehet: feltöltöm")')
+        self.wait_for(lambda: "vinted" in self.h.store.get(item.id).platforms)
+        item = self.h.store.get(item.id)
+        self.assertEqual((item.price, item.description, item.reviewed), (5900, "Alig hordtam.", True))
+        self.assertIn("price", item.edited)
+        # a telefonról: a Nézd át értesítésére bökve ugyanez az ablak nyílik meg
+        other = self.h.store.create(targets=["vinted"], pro=True, title="Nike Air Max 90", price=12500)
+        self.h.store.set_pending(other.id, {"kind": "review", "question": "Nézd át", "basis": "3 hasonló alapján"})
+        context = self.browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True,
+                                           user_agent="Mozilla/5.0 (Linux; Android 14) Chrome/141.0 Mobile JarvisAndroid/1")
+        context.add_init_script("""(() => {
+            let wanted = {item: {id: "%s", open: "review"}};
+            window.JarvisApp = { pending() { const out = JSON.stringify(wanted); wanted = {}; return out; } };
+          })();""" % other.id)
+        phone = context.new_page()
+        phone.goto(self.h.server.url)
+        phone.wait_for_selector("#review-dialog[open]", timeout=15000)
+        self.assertEqual(phone.input_value("#r-title"), "Nike Air Max 90")
+        self.assertIn("Az ár: 3 hasonló alapján.", phone.inner_text("#review-basis"))
+        wide = phone.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        self.assertFalse(wide, "telefonon nincs vízszintes görgetés")
+        phone.click("#review-close")
+        phone.click('[data-action="back"]')
+        if "folded" in (phone.get_attribute("#w-compose", "class") or ""):
+            phone.click("#w-compose-title")                     # telefonon a kész tárgyak mellett össze van csukva
+        phone.click("#w-mode-pro")
+        self.assertTrue(phone.is_visible("#w-camera-btn"), "a telefonon kamera gomb is van")
+        self.assertEqual(phone.get_attribute("#w-camera", "capture"), "environment")
+        context.close()
 
     def test_settings_and_login(self):
         page = self.page

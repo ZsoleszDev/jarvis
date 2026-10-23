@@ -94,6 +94,14 @@ def extracted(**values) -> dict:
     return reply(json.dumps(data, ensure_ascii=False))
 
 
+def seen(**values) -> dict:
+    """A modell válasza a Pro feltöltésnél (a fotókról kiolvasott adatok, JSON); amit nem adunk meg, az üres."""
+    data = {key: "" for key in selling.PRO_FIELDS}
+    data.update({"kind": "egyéb", "keywords": "", "price_estimate": 0})
+    data.update(values)
+    return reply(json.dumps(data, ensure_ascii=False))
+
+
 # Egy teljes ruhás hirdetés adatai (ezzel nincs visszakérdezés)
 SHIRT = dict(product="fekete póló", kind="ruha", title="Zara fekete póló, L",
              description="Zara fekete póló L-es méretben, egyszer hordtam.", category="Nők > Ruhák > Pólók",
@@ -834,6 +842,94 @@ class WorkDeskTests(unittest.TestCase):
         self.store.update(item.id, extracted_sig="régi")         # pl. új kiolvasó-változat után
         self.assertFalse(selling.ListingExtractor.up_to_date(self.store.get(item.id)))
 
+    def test_pro_reads_the_photos_asks_what_is_missing_prices_and_waits_for_review(self):
+        """Pro feltöltés: az adatok a fotókról (a képekkel együtt kérdezi a modellt); amit nem látott, arra rákérdez
+        (a válaszból csak azt olvassa ki); az árat magától adja meg; és amíg nem hagytad jóvá, nem tölt fel."""
+        item = self.store.create(targets=["vinted"], pro=True)
+        self.store.add_photo(item.id, jpeg())
+        item = self.store.add_photo(item.id, jpeg(color=(200, 30, 30)))
+        jacket = dict(product="farmerdzseki", kind="ruha", title="Zara farmerdzseki", brand="Zara",
+                      condition="Nagyon jó", color="kék", gender="női", category="Ruhák > Kabátok",
+                      search_query="Zara farmerdzseki", price_estimate=6300)
+        self.fake.chat_script = [seen(**jacket)]
+        step = self.desk.prepare(item.id, self.steps.append)
+        self.assertEqual(step.kind, "ask", "a méret nem látszott a fotókon")
+        self.assertIn("még kell: méret (Vinted)", step.text)
+        self.assertNotIn("ár", step.text.split("még kell:")[1], "az árat nem kérdezi: azt ő adja meg")
+        body = self.fake.chat_bodies()[0]
+        self.assertEqual(len(body["messages"][1]["images"]), 2, "a fotókat is megkapja a modell")
+        self.assertEqual(body["format"]["required"], selling.PRO_SCHEMA["required"])
+        self.assertEqual(self.steps, ["a fotók átnézése"])
+        item = self.store.get(item.id)
+        self.assertEqual((item.brand, item.category, item.price_estimate, item.price), ("Zara", "Nők > Ruhák > Kabátok",
+                                                                                        6300, None))
+        self.desk.answer(item.id, "M-es")
+        self.fake.chat_script = [extracted(size="M")]
+        step = self.desk.prepare(item.id, self.steps.append)
+        self.assertEqual(sorted(self.fake.chat_bodies()[-1]["format"]["properties"]), ["size"],
+                         "a válaszodból csak a méretet olvassa ki")
+        self.assertEqual(step.kind, "review")
+        item = self.store.get(item.id)
+        self.assertEqual((item.size, item.price, item.status), ("M", 6300, "átnézésre vár"))
+        for expected in ("Nézd át, mielőtt feltöltöm (Vinted):", "Cím: Zara farmerdzseki",
+                         "Ár: 6 300 Ft (becslés a fotók alapján", "Márka: Zara · Méret: M · Állapot: Nagyon jó",
+                         "Kategória: Nők > Ruhák > Kabátok", "Mehet gombot"):
+            self.assertIn(expected, step.text)
+        self.assertIsNone(self.desk.pending_item(), "a Munka menüben írt szöveg nem a Nézd át válasza")
+        calls = len(self.fake.chat_bodies())
+        self.assertEqual(self.desk.prepare(item.id, self.steps.append).kind, "review", "amíg nem hagytad jóvá")
+        self.assertEqual(len(self.fake.chat_bodies()), calls, "ugyanazokat a fotókat nem nézi meg újra")
+        self.store.update(item.id, user=True, price="")
+        self.assertEqual(self.desk.approve_problem(item.id), "Add meg az árat, és utána mehet a feltöltés.")
+        with self.assertRaises(ItemError):
+            self.desk.approve(item.id)
+        self.store.update(item.id, user=True, price=5900, title="Zara farmerdzseki, alig hordott")
+        item = self.desk.approve(item.id)
+        self.assertEqual((item.reviewed, item.pending), (True, {}))
+        self.assertEqual(self.desk.prepare(item.id, self.steps.append).kind, "post")
+        self.store.add_photo(item.id, jpeg(color=(30, 200, 30)))       # egy új fotó: újra megnézi és átnézed
+        self.fake.chat_script = [seen(**{**jacket, "title": "Más cím", "size": "M"})]
+        step = self.desk.prepare(item.id, self.steps.append)
+        item = self.store.get(item.id)
+        self.assertEqual((step.kind, item.title, item.price), ("review", "Zara farmerdzseki, alig hordott", 5900),
+                         "a kézzel átírtat nem írja felül")
+
+    def test_pro_price_from_similar_listings_then_the_price_book(self):
+        class FakeResearcher:
+            def __init__(self, store, prices):
+                self.store, self.prices, self.only = store, prices, None
+
+            def research(self, item_id, progress=None, only=None):
+                self.only = only
+                similar = [{"site": "Vinted", "text": "Nike Air Max 90", "price": p, "url": ""} for p in self.prices]
+                found = {"at": time.time(), "similar": similar, "count": len(similar), "errors": []}
+                if len(self.prices) >= 3:
+                    found.update(median=13000, p25=11000, p75=15000, suggested=12500)
+                return self.store.set_research(item_id, found)
+
+        shoes = dict(product="cipő", kind="cipő", title="Nike Air Max 90", brand="Nike", size="42", color="fehér",
+                     gender="férfi", condition="Jó", category="Cipők", search_query="Nike Air Max 90",
+                     price_estimate=20000)
+        researcher = self.desk.researcher = FakeResearcher(self.store, (11000, 13000, 15000))
+        item = self.store.create(targets=["vinted"], pro=True)
+        self.store.add_photo(item.id, jpeg())
+        self.fake.chat_script = [seen(**shoes)]
+        step = self.desk.prepare(item.id, self.steps.append)
+        self.assertEqual((step.kind, self.store.get(item.id).price, researcher.only), ("review", 12500, ["vinted"]))
+        self.assertIn("Ár: 12 500 Ft (3 hasonló hirdetés alapján, többnyire 11 000 Ft–15 000 Ft)", step.text)
+        self.assertEqual(self.store.get(item.id).pending["basis"],
+                         "3 hasonló hirdetés alapján, többnyire 11 000 Ft–15 000 Ft", "a Nézd át ablakba")
+        # kevés hasonló: az Automata kereskedés árbázisa (a középérték és az alsó negyed között)
+        self.desk.researcher = FakeResearcher(self.store, (14000,))
+        self.desk.deals.book.add([{"text": f"Nike Air Max 90 {n}", "price": p, "url": f"https://x.hu/{n}",
+                                   "platform": "vinted"} for n, p in enumerate((15000, 16000, 17000, 18000, 19000))])
+        other = self.store.create(targets=["vinted"], pro=True)
+        self.store.add_photo(other.id, jpeg())
+        self.fake.chat_script = [seen(**shoes)]
+        step = self.desk.prepare(other.id, self.steps.append)
+        self.assertEqual(self.store.get(other.id).price, 16500)
+        self.assertIn("az árbázisból: a hasonlók most kb. 17 000 Ft-ért mennek (5 ár alapján)", step.text)
+
     def test_needs_sites_and_photos(self):
         bare = self.store.create(prompt="póló")
         with self.assertRaisesRegex(ItemError, "Pipáld be"):
@@ -1452,6 +1548,29 @@ class SellFlowTests(unittest.TestCase):
         bodies = self.fake.chat_bodies()[calls:]
         self.assertEqual(len(bodies), 2, "se újabb kiolvasás, se külön item_post kör")
         self.assertEqual((self.store.get(item.id).title, self.store.get(item.id).status), (item.title, "fent"))
+
+    def test_pro_upload_waits_for_your_review_then_posts(self):
+        """Pro: a fotókról kiolvasott adatok és az ár után értesítés jön (Nézd át, a gomb az ablakot nyitja meg), és
+        csak a jóváhagyás (Mehet) után kezd feltölteni."""
+        item = self.store.create(targets=["vinted"], pro=True)
+        item = self.store.add_photo(item.id, jpeg())
+        self.fake.chat_script = [seen(**{**{k: v for k, v in SHIRT.items() if k in selling.PRO_FIELDS + ("kind",)},
+                                         "price_estimate": 2000})]
+        with mock.patch.object(self.app.work, "researcher", None):
+            self.app.run_work({"action": "sell", "ids": [item.id]})
+        item = self.store.get(item.id)
+        self.assertEqual((item.status, item.price), ("átnézésre vár", 2000))
+        [notice] = [n for n in self.app.notices.list() if n["title"].startswith("Nézd át:")]
+        self.assertEqual((notice["item"], notice["open"], notice["actions"]),
+                         (item.id, "review", [{"action": "review", "label": "Átnézem"}]))
+        self.assertIn("Ár: 2 000 Ft (becslés a fotók alapján", notice["text"])
+        self.assertNotIn("vinted", item.platforms, "még nem kezdett feltölteni")
+        self.fake.chat_script = [reply("Be kell jelentkezned a Vintedre, utána az Újra gombbal folytatom.")]
+        self.app.run_work({"action": "approve", "ids": [item.id]})
+        item = self.store.get(item.id)
+        self.assertEqual((item.reviewed, item.pending), (True, {}))
+        self.assertEqual(item.platforms["vinted"]["note"], "Be kell jelentkezned a Vintedre, utána az Újra gombbal folytatom.",
+                         "a jóváhagyás után feltöltésbe kezdett")
 
     def test_price_check_then_your_decision(self):
         item = self.new_item(["vinted"], prompt="Zara blézer, M, nagyon jó, 9000 Ft", research_wanted=True)
