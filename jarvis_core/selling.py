@@ -1005,12 +1005,17 @@ def photo_signature(item: Item) -> str:
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest() if parts else ""
 
 
+def vision_jpeg(data: bytes, side: int = PRO_SIDE) -> str:
+    """Egy kép a modellnek: kicsinyített JPEG, base64-ben. ItemError, ha nem kép."""
+    return base64.b64encode(_jpeg(_open_image(data), side, 85)).decode("ascii")
+
+
 def vision_images(store: ItemStore, item_id: str, limit: int = PRO_PHOTOS, side: int = PRO_SIDE) -> list[str]:
     """A tárgy első fotói a modellnek (base64 JPEG, kicsinyítve)."""
     out = []
     for path in store.photo_paths(item_id)[:limit]:
         try:
-            out.append(base64.b64encode(_jpeg(_open_image(path.read_bytes()), side, 85)).decode("ascii"))
+            out.append(vision_jpeg(path.read_bytes(), side))
         except (OSError, ItemError):
             continue
     return out

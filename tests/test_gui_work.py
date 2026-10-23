@@ -271,7 +271,11 @@ class WorkSecurityTests(unittest.TestCase):
                          (200, False, False, False))
         alerts = data["instant"]["alerts"]
         status, data = self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "min_profit": "4000"})
-        self.assertEqual((status, data["max_buy"], data["browse"]["min_profit"]), (200, 30000, 4000))
+        self.assertEqual((status, data["max_buy"], data["browse"]["min_profit"], data["safe_only"]),
+                         (200, 30000, 4000, True), "alapból csak a nyugodt szívvel megvehetőkről szól")
+        status, data = self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "safe_only": False})
+        self.assertFalse(data["safe_only"])
+        self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "safe_only": True})
         self.assertEqual(self.post("/api/work/deals", {"action": "limits", "max_buy": "sok"})[0], 400)
         self.post("/api/work/deals", {"action": "limits", "max_buy": ""})
         for stored in alerts:
@@ -830,7 +834,8 @@ class WorkBrowserTests(unittest.TestCase):
         deals._remember({"id": "q1", "url": listing, "text": "Palit RTX 3060 Ti Dual Budapest 52 000 Ft",
                          "title": "Palit RTX 3060 Ti Dual", "site": "Hardverapró", "platform": "hardverapro",
                          "price": 52000, "median": 100000, "similar": 12, "profit": 31500, "at": time.time() - 150,
-                         "low": 85000, "sites": ["Hardverapró", "Jófogás"],
+                         "low": 85000, "sites": ["Hardverapró", "Jófogás"], "sold": {"n": 4, "median": 88000},
+                         "safety": {"level": "biztos", "why": [], "good": ["61% haszon", "gyorsan kel el"]},
                          "quick": True, "note": "Ugyanaz a kártya.", "explore": "azonnali figyelő: Videókártyák"})
         context = self.browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True,
                                            user_agent="Mozilla/5.0 (Linux; Android 14) Chrome/141.0 Mobile JarvisAndroid/1")
@@ -846,7 +851,8 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertEqual(page.inner_text("#deal-title"), "Palit RTX 3060 Ti Dual")
         body = page.inner_text("#deal-body")
         for part in ("52 000 Ft", "Most ennyiért mennek", "kb. 100 000 Ft (12 hasonló alapján, Hardverapró és Jófogás)",
-                     "Ennyit kereshetsz vele", "kb. 31 500 Ft (ha kb. 85 000 Ft-ért eladod", "Ugyanaz a kártya.", "3 perce"):
+                     "Ennyit kereshetsz vele", "kb. 31 500 Ft (ha kb. 85 000 Ft-ért eladod", "Ugyanaz a kártya.", "3 perce",
+                     "Elkelt hasonlók", "kb. 88 000 Ft (4 db alapján)", "Biztos befektetés: 61% haszon; gyorsan kel el"):
             self.assertIn(part, body)
         self.assertEqual(page.inner_text(".msgpreview"), "Szia!\nMegvan még a termék?\nKöszi előre is\nÜdv, Zsolt")
         self.assertEqual(page.get_attribute("#deal-go", "href"), listing)

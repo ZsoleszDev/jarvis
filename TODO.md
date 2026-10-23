@@ -77,6 +77,14 @@
 - Az indulóoldalak súlya csak nő vagy csökken; ha egy oldal hetekig nem hoz semmit, a régi sikerei miatt még sokáig előre kerül.
 - Ami csak a termékcsaládot nevezi meg típus nélkül („PS5 konzol”, „Nintendo Switch”), nem kap kulcsot (a játékkal, kiegészítővel keveredne): ezeket csak a modell nevezi meg, vagy egy keresés méri.
 
+### Nyugodt szívvel (biztonsági értékelés, elkelt árak, fotók)
+- A határok (`deals.SAFE_ROI`, `RISKY_ROI`, `WIDE_SPREAD`, `SLOW_OK_ROI`) becslések, valódi eredményekkel nincsenek
+  hangolva; a Vételeim tényleges hasznából később tanulhatna.
+- Az elkelt ár az újranézéskor eltűnt hirdetésekből jön: a törölt (nem eladott) hirdetés is eltűnik, és körönként csak
+  két hirdetést néz újra, ezért lassan gyűlik.
+- A hirdetés fotóit az og:image és a fő tartalom képei adják; a valódi Hardverapró-, Jófogás- és Vinted-oldalakon nincs
+  kipróbálva, hogy melyik kép jön (lehet, hogy a Vinteden a képek csak bejelentkezve tölthetők le).
+
 ### Pro feltöltés
 - A fotókról való kiolvasás és az árbecslés valódi fotókkal és a valódi modellel nincs kipróbálva (a tesztek hamis
   modellel futnak). A modell legfeljebb az első négy fotót kapja (`selling.PRO_PHOTOS`, 1024 px): ha a címke az ötödik

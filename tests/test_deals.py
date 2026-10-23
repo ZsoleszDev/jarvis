@@ -20,10 +20,11 @@ from test_offline import make_cfg  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
 from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
-from jarvis_core.deals import (DealError, DealHunter, ModelLane, expected_profit, explore_top, highest_ok,  # noqa: E402
-                               last_chance, left_text, market, offer_price, parse_auction, safe_sale)
+from jarvis_core.deals import (DealError, DealHunter, ModelLane, assess, careful_low, expected_profit,  # noqa: E402
+                               explore_top, highest_ok, last_chance, left_text, market, offer_price, parse_auction,
+                               safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
-from jarvis_core.pricebook import PriceBook, product_key, usable  # noqa: E402
+from jarvis_core.pricebook import PriceBook, pace, product_key, usable  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
 
@@ -455,6 +456,44 @@ class DealTests(HunterCase):
         self.assertIn("a modell szerint gyanús: Előre utalást kér",
                       " ".join(e["text"] for e in other.journal.entries()))
 
+    def test_the_model_sees_the_listing_photos_too(self):
+        """A végső modellkérdés a hirdetés első két fotóját is megkapja (letöltve, kicsinyítve): a sérülés, a letöltött
+        kép és a más termék a fotón látszik. Ha a modell nem tud képet, fotók nélkül kérdez."""
+        import io
+        from PIL import Image
+        buffer = io.BytesIO()
+        Image.new("RGB", (900, 700), (40, 40, 40)).save(buffer, "JPEG")
+        asked = []
+        self.browser.pages = {CHEAP: {"text": "Gigabyte RTX 3060 Ti Gaming OC. Hibátlan. Eladó: Peti (12 értékelés)",
+                                      "images": [f"https://kep.example/{n}.jpg" for n in (1, 2, 3)]}}
+        self.hunter.image_get = lambda url: asked.append(url) or buffer.getvalue()
+        self.ready()
+        self.hunter.run(notify=self.notify)
+        [check] = [m for m in self.llm.calls if "images" in m[1]]
+        self.assertEqual((len(check[1]["images"]), asked), (2, ["https://kep.example/1.jpg", "https://kep.example/2.jpg"]))
+        self.assertIn("A hirdetés fotói (2 db) mellékelve.", check[1]["content"])
+        self.assertIn("ha a fotó letöltött (webshop- vagy katalógus-) képnek látszik", check[0]["content"])
+        self.assertEqual(len(self.notices), 1)
+        [deal] = self.hunter.state()["deals"]
+        self.assertEqual(deal["photos_checked"], 2)
+        self.assertNotIn("images", deal, "a fotók címe csak a modellkérdéshez kellett")
+        # egy modell, ami nem tud képet: fotók nélkül kérdez, és ugyanúgy szól
+        original = self.llm.chat_json
+
+        def blind(messages, schema, **kwargs):
+            if any("images" in m for m in messages):
+                raise RuntimeError("ez a modell nem lát képet")
+            return original(messages, schema, **kwargs)
+
+        self.llm.chat_json = blind
+        self.notices.clear()
+        other = self.make("vak")
+        other.image_get = lambda url: buffer.getvalue()
+        self.ready(other)
+        other.run(notify=self.notify)
+        self.assertEqual(len(self.notices), 1)
+        self.assertNotIn("photos_checked", other.state()["deals"][0])
+
     def test_sold_listing_is_skipped_and_a_captcha_stops_the_page_reads(self):
         self.browser.pages = {CHEAP: {"short": ["Eladva"], "text": "Gigabyte RTX 3060 Ti"}}
         self.ready()
@@ -642,6 +681,83 @@ class ExploreTests(HunterCase):
         self.assertFalse(market(list(zip((40000, 60000, 100000, 140000, 160000), ("vinted", "jofogas") * 3)))["sure"],
                          "nagyon szórnak az árak")
         self.assertIsNone(market([]))
+
+    def test_how_safe_an_investment_is(self):
+        """Nyugodt szívvel megvehető-e: a haszon a befektetett pénzhez képest, milyen gyorsan kel az ilyen, és mennyire
+        szórnak az árak."""
+        base = {"price": 50000, "profit": 15000, "similar": 12, "sites": ["Hardverapró", "Jófogás"]}
+        safe = assess(base)
+        self.assertEqual((safe["level"], safe["good"]), ("biztos", ["30% haszon", "12 hasonló, 2 oldalon"]))
+        self.assertEqual(safety_text(safe), "Biztos befektetés: 30% haszon, 12 hasonló, 2 oldalon.")
+        self.assertEqual(assess({**base, "profit": 7000})["level"], "jó", "14%: jó, de nem biztos")
+        thin = assess({**base, "profit": 4000})
+        self.assertEqual((thin["level"], thin["why"]), ("kockázatos", ["kicsi a haszon a befektetett pénzhez képest (8%)"]))
+        self.assertEqual(safety_text(thin), "Kockázatos: kicsi a haszon a befektetett pénzhez képest (8%).")
+        self.assertEqual(assess({**base, "pace": "lassú"})["level"], "kockázatos", "lassan kel, és csak 30% haszon")
+        slow_but_rich = assess({**base, "profit": 20000, "pace": "lassú"})
+        self.assertEqual((slow_but_rich["level"], slow_but_rich["why"]),
+                         ("jó", ["lassan kel el (a hasonlók sokáig fent maradnak)"]))
+        self.assertEqual(assess({**base, "spread": 0.6})["level"], "jó", "nagyon szórnak az árak")
+        self.assertIn("gyorsan kel el", assess({**base, "pace": "gyors"})["good"])
+        self.assertIn("4 elkelt hasonló alapján is", assess({**base, "sold": {"n": 4, "median": 60000}})["good"])
+        self.assertEqual(assess({"price": 9000, "profit": 40000, "auction": True, "max_bid": 30000})["level"], "biztos",
+                         "a licit mostani árán nem számol haszonrátát")
+        self.assertEqual(assess({**base, "offer": 45000, "profit": 4000})["level"], "kockázatos", "az ajánlat árán")
+
+    def test_sold_prices_and_how_fast_it_sells(self):
+        """Az újranézéskor eltűnt (elkelt) hirdetések ára: ha legalább 3 van, az óvatos eladási ár legfeljebb ennyi; és
+        hogy milyen gyorsan kel az ilyen."""
+        found = market([(p, s, gone) for p, s, gone in ((100000, "hardverapro", False), (105000, "jofogas", False),
+                                                       (98000, "hardverapro", False), (110000, "jofogas", False),
+                                                       (82000, "hardverapro", True), (85000, "jofogas", True),
+                                                       (80000, "hardverapro", True))])
+        self.assertEqual((found["sold"], found["p25"]), ({"n": 3, "median": 82000}, 83500))
+        self.assertEqual(careful_low(found), 82000, "az elkeltek ára az alacsonyabb")
+        self.assertEqual(careful_low({"p25": 70000, "sold": {"n": 3, "median": 82000}}), 70000)
+        self.assertNotIn("sold", market([(100000, "a", True), (100000, "b", True), (100000, "a", False)] * 1))
+        self.assertEqual(pace({"checked": 4, "sold": 3, "days": 4, "slow": 0}), "gyors")
+        self.assertEqual(pace({"checked": 4, "sold": 0, "days": None, "slow": 3}), "lassú")
+        self.assertEqual(pace({"checked": 4, "sold": 2, "days": 12, "slow": 1}), "")
+        self.assertEqual(pace({"checked": 1, "sold": 1, "days": 2, "slow": 0}), "", "egyből még nem tudni")
+        book = PriceBook(Path(self.tmp.name) / "elkelt", self.clock)
+        book.add([{"text": f"RTX 3060 Ti videókártya {n}", "price": p, "url": f"https://x.hu/{n}", "platform": site}
+                  for n, (p, site) in enumerate(zip((95000, 100000, 105000, 98000, 102000, 80000, 82000, 81000),
+                                                    ("hardverapro", "jofogas") * 4))])
+        for n in (5, 6, 7):
+            book.revisited("3060 rtx ti", f"https://x.hu/{n}", gone=True)
+        self.assertEqual(book.reference("3060 rtx ti")["sold"], {"n": 3, "median": 81000})
+
+    def test_a_risky_find_is_skipped_unless_you_want_those_too(self):
+        """Lassan kelő termék kis haszonnal: alapból nem szól róla (a naplóba írja, miért); ha a kockázatosakat is
+        kéred, szól, de megmondja, mi a kockázat."""
+        def ready(hunter):
+            hunter.book.add([{**listing(40 + n, f"RTX 3060 Ti videókártya {n}", p, f"www.{site}.hu"), "platform": site}
+                             for n, (p, site) in enumerate(zip((95000, 100000, 105000, 98000, 110000, 92000),
+                                                               ("hardverapro", "jofogas") * 3))])
+            self.clock.now += 15 * 86400                       # három két hét után is fent volt: lassan kel
+            for n in (0, 1, 2):
+                hunter.book.revisited("3060 rtx ti", f"https://www.{('hardverapro', 'jofogas')[n % 2]}.hu/apro/{100040 + n}.html",
+                                      gone=False)
+            hunter.add_watch(CATEGORY)
+            hunter.set_enabled(True)
+
+        self.browser.by_url = [("videokartya", [listing(20, "Gigabyte RTX 3060 Ti Gaming OC", 70000)])]
+        ready(self.hunter)
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(self.notices, [])
+        [line] = [e["text"] for e in self.hunter.journal.entries() if e["text"].startswith("Kockázatos")]
+        self.assertIn("„Gigabyte RTX 3060 Ti Gaming OC” 70 000 Ft", line)
+        self.assertIn("lassan kel el", line)
+        self.assertTrue(self.hunter.state()["safe_only"], "alapból csak a nyugodt szívvel megvehetőkről szól")
+        other = self.make("mind")
+        other.set_limits(safe_only=False)
+        ready(other)
+        other.run(notify=self.notify)
+        [(_kind, title, text, _extra)] = self.notices
+        self.assertEqual(title, "Olcsó: Gigabyte RTX 3060 Ti Gaming OC")
+        self.assertIn("Kockázatos: lassan kel el (a hasonlók sokáig fent maradnak).", text)
+        self.assertEqual(other.state()["deals"][0]["safety"]["level"], "kockázatos")
+        self.assertFalse(other.state()["safe_only"])
 
     def test_known_products_need_no_model_and_the_named_ones_teach_the_book(self):
         self.browser.by_url = [("videokartya", PAGE)]

@@ -586,7 +586,7 @@
     const I = deals.instant;
     if (!I) return "";
     const siteLine = (I.sites || []).map((s) => `${esc(s.name)}: ${s.blocked_until ? `tilt (${esc(s.reason)}), ${esc(hhmmOf(s.blocked_until))}-ig szünetel`
-      : s.browser_only ? "most nem olvasható böngésző nélkül (a böngésző nézi)" : `kb. ${s.per_hour} kérés óránként (keret: ${I.hourly})`}`).join(" · ");
+      : s.browser_only ? "most nem olvasható böngésző nélkül (a böngésző nézi)" : `kb. ${s.per_hour} kérés óránként (keret: ${I.hourly})${s.rhythm ? `, ${esc(s.rhythm)}` : ""}`}`).join(" · ");
     const alerts = (I.alerts || []).map((a) => {
       const sites = (a.sites || []).map((k) => (I.sites.find((s) => s.key === k) || { name: k }).name).join(", ");
       const range = a.min_price || a.max_price ? ` · ${a.min_price ? price(a.min_price) : "0"}–${a.max_price ? price(a.max_price) : "bármennyi"}` : "";
@@ -636,7 +636,14 @@
   // --- egy megérő találat ablaka (értesítésből vagy a listából) ---------------------------------------------------
   // Mennyibe kerül, mennyiért mennek most, mennyit kereshetsz vele; a gomb kimásolja az eladónak szóló üzenetet, és
   // megnyitja a hirdetést (a telefonon a hirdetési oldal alkalmazásában vagy a böngészőben), ahol rögtön elküldheted.
-  // Az óvatos eladási ár (deals.safe_sale): a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede.
+  // Nyugodt szívvel megvehető-e (deals.assess): biztos, jó (figyelmeztetéssel) vagy kockázatos.
+  const SAFETY = { "biztos": "Biztos befektetés", "jó": "Jó vétel", "kockázatos": "Kockázatos" };
+  function safetyLine(s) {
+    const details = s.level === "biztos" ? s.good : (s.why || []).length ? s.why : s.good;
+    return `<b>${esc(SAFETY[s.level] || s.level)}</b>${(details || []).length ? `: ${esc(details.join("; "))}` : ""}`;
+  }
+  // Az óvatos eladási ár (deals.safe_sale): a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede (és ha tudjuk,
+  // az elkelt hasonlók ára).
   function dealFacts(d) {
     const sale = d.median ? Math.round(Math.min(d.median * (deals.sale_ratio || 0.9), d.low || Infinity) / 100) * 100 : null;
     const where = (d.sites || []).length ? `, ${d.sites.join(" és ")}` : "";
@@ -645,10 +652,12 @@
     if (d.auction) rows.push(["Meddig licitálj", `legfeljebb <b>${esc(price(d.max_bid))}</b>-ig${d.left ? ` · ${esc(leftText(d))}` : ""}`]);
     else if (d.offer) rows.push(["Ajánlattal", `ha ${esc(price(d.offer))}-ért megkapod, kb. <b>${esc(price(d.profit))}</b> a haszon`]);
     else rows.push(["Ennyit kereshetsz vele", `<b>kb. ${esc(price(d.profit))}</b>${sale ? ` (ha kb. ${esc(price(sale))}-ért eladod; a posta benne van)` : ""}`]);
+    if (d.sold) rows.push(["Elkelt hasonlók", `kb. ${esc(price(d.sold.median))} (${esc(d.sold.n)} db alapján)`]);
     if (d.speed) rows.push(["Eladási sebesség", esc(d.speed)]);
+    if (d.safety) rows.push(["Biztonság", safetyLine(d.safety)]);
     return `<p class="muted">Megtaláltam: ${esc(ago(d.at))}${d.explore ? ` · ${esc(d.explore)}` : ""}</p>
       <dl class="facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
-      ${d.note ? `<p class="muted">${esc(d.note)}</p>` : ""}
+      ${d.note ? `<p class="muted">${esc(d.note)}${d.photos_checked ? " (a hirdetés fotói alapján is)" : ""}</p>` : ""}
       ${(d.warnings || []).map((w) => `<p class="warn">Figyelj: ${esc(w)}</p>`).join("")}
       <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(deals.message || "")}</pre>`;
   }
@@ -758,6 +767,7 @@
           : d.profit !== undefined ? ` · várható haszon kb. <b>${esc(price(d.profit))}</b>` : ` (kb. ${esc(price(d.margin))}-tal olcsóbb)`}
         ${d.calibration ? " · a felmérés közben" : ""}${d.explore ? " · " + esc(d.explore) : ""}${d.note ? " · " + esc(d.note) : ""}</small>
         ${d.speed ? `<small class="muted">Eladási sebesség: ${esc(d.speed)}</small>` : ""}
+        ${d.safety ? `<small class="${d.safety.level === "kockázatos" ? "warn" : "muted"}">${safetyLine(d.safety)}</small>` : ""}
         ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}
         ${offerBox(d)}</span>
         <span class="row"><button type="button" class="small" data-deal-open="${esc(d.id)}">Részletek</button>${buyButton(d)}
@@ -794,6 +804,8 @@
         <div class="field"><label for="d-minprofit">Min. haszon (Ft)</label>
           <input id="d-minprofit" type="number" inputmode="numeric" min="0" value="${esc(b.min_profit)}"></div>
       </div>
+      <label class="check"><input id="d-safeonly" type="checkbox" ${deals.safe_only !== false ? "checked" : ""}>
+        Csak a nyugodt szívvel megvehetőkről szólj (a kockázatosakat kihagyod: kicsi haszon, lassan kelő termék)</label>
       <div class="row"><button type="button" class="small" id="d-limits">Mentés</button>
         <small class="muted">Minden keresésre, figyelt oldalra, a böngészésre és az azonnali figyelőre is: ami a max. vételárnál drágább, azt meg sem nézem.</small></div>
       ${deals.money && deals.money.budget ? `<p><small>Havi keret: ${esc(price(deals.money.spent) || "0 Ft")} / ${esc(price(deals.money.budget))}
@@ -883,7 +895,8 @@
         J.toast(start ? "Elindítottam: keresek, és ha valami megéri, szólok." : "Leállítottam.");
     });
     $("d-limits").addEventListener("click", async () => {
-      if (await dealAction({ action: "limits", max_buy: $("d-maxbuy").value, min_profit: $("d-minprofit").value }))
+      if (await dealAction({ action: "limits", max_buy: $("d-maxbuy").value, min_profit: $("d-minprofit").value,
+                             safe_only: $("d-safeonly").checked }))
         J.toast($("d-maxbuy").value ? `Rendben: ${price($("d-maxbuy").value)} fölött nem keresek.` : "Rendben: bármilyen árban keresek.");
     });
     if ($("di-add")) {

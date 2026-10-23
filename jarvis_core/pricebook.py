@@ -35,6 +35,8 @@ REVISIT_AFTER = 2 * 86400  # egy hirdetést legkorábban ennyi idő múlva néz 
 REVISIT_AGAIN = 3 * 86400  # ha akkor még fent volt, ennyi múlva újra
 REVISIT_UNTIL = 30 * 86400 # ennyi után már nem nézi (ami egy hónapja fent van, az lassan kel)
 SLOW_DAYS = 14             # ennyi nap után is fent: lassan kel
+SOLD_MIN = 3               # ennyi elkelt (újranézéskor eltűnt) hirdetés ára kell az elkelt árhoz
+SLOW_RATE = 0.25           # ha az újranézett hirdetéseknek legfeljebb ennyi része tűnt el: lassan kel
 
 # Márkák (ékezet nélkül, kisbetűvel; a több szavasak egybeírva, lásd _ALIASES).
 BRANDS = {
@@ -278,23 +280,29 @@ class PriceBook:
         now = self.clock()
         skip = listing_key(exclude) if exclude else ""
         with self._lock:
-            return [{"p": int(s["p"]), "site": str(s.get("site") or ""), "url": str(s.get("url") or "")}
+            return [{"p": int(s["p"]), "site": str(s.get("site") or ""), "url": str(s.get("url") or ""),
+                     "gone": bool(s.get("gone"))}
                     for s in (self._keys.get(key) or {}).get("samples") or []
                     if now - float(s.get("last") or 0) <= MAX_AGE and not (skip and listing_key(s.get("url", "")) == skip)]
 
     def reference(self, key: str, exclude: str = "") -> dict[str, Any] | None:
         """A szokásos ár egy termékre: a friss árak középértéke (a kilógók nélkül), ha legalább MIN_SAMPLES van, és
         nem szórnak nagyon (price_stats: megbízható). Az exclude hirdetés (pl. maga a jelölt) nem számít bele. A sites:
-        melyik oldalakon láttuk ezeket az árakat."""
+        melyik oldalakon láttuk ezeket az árakat; a sold: az elkelt (újranézéskor eltűnt) hirdetések középára, ha
+        legalább SOLD_MIN van (a hirdetési árnál többnyire alacsonyabb: ennyiért kel el ténylegesen)."""
         samples = self.samples(key, exclude)
         with self._lock:
             name = (self._keys.get(key) or {}).get("name") or key
         stats = price_stats([s["p"] for s in samples])
         if not stats or stats["n"] < MIN_SAMPLES or stats["confidence"] != "megbízható":
             return None
-        kept = [s for s in samples if s["site"] and stats["min"] <= s["p"] <= stats["max"]]   # a kilógók oldala nem
-        return {"price": round_price(stats["median"]), "n": stats["n"], "p25": stats["p25"], "p75": stats["p75"],
-                "name": name, "key": key, "sites": sorted({s["site"] for s in kept})}
+        kept = [s for s in samples if stats["min"] <= s["p"] <= stats["max"]]   # a kilógók (és oldaluk) nem számít
+        found = {"price": round_price(stats["median"]), "n": stats["n"], "p25": stats["p25"], "p75": stats["p75"],
+                 "name": name, "key": key, "sites": sorted({s["site"] for s in kept if s["site"]})}
+        sold = [s["p"] for s in kept if s["gone"]]
+        if len(sold) >= SOLD_MIN:
+            found["sold"] = {"n": len(sold), "median": round_price(statistics.median(sold))}
+        return found
 
     def speed(self, key: str) -> dict[str, Any]:
         """Eladási sebesség az újranézett hirdetésekből: hányat néztünk meg (checked), hány tűnt el / kelt el (sold),
@@ -383,6 +391,19 @@ class PriceBook:
         with self._lock:
             return {"products": len(self._keys), "prices": sum(len(e["samples"]) for e in self._keys.values()),
                     "ready": sum(1 for k in self._keys if len(self._keys[k]["samples"]) >= MIN_SAMPLES)}
+
+
+def pace(speed: dict[str, Any]) -> str:
+    """Milyen gyorsan kel az ilyen: „gyors” (az újranézettek legalább fele egy héten belül eltűnt), „lassú” (legfeljebb
+    SLOW_RATE része tűnt el, és legalább kettő SLOW_DAYS nap után is fent volt), vagy „” (nem tudni, vagy átlagos)."""
+    checked, sold = int(speed.get("checked") or 0), int(speed.get("sold") or 0)
+    if checked < 2:
+        return ""
+    if sold and sold * 2 >= checked and (speed.get("days") or 0) <= 7:
+        return "gyors"
+    if sold <= checked * SLOW_RATE and int(speed.get("slow") or 0) >= 2:
+        return "lassú"
+    return ""
 
 
 def speed_text(speed: dict[str, Any]) -> str:

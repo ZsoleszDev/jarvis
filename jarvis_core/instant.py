@@ -32,7 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from .deals import DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, deal_action, excluded, matches_query, parse_words
+from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, deal_action, excluded, matches_query, parse_words,
+                    safety_text)
 from .feeds import FAST_SITES, FeedError
 from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price
 from .textutil import fold
@@ -49,6 +50,17 @@ WAIT_MAX = 1800            # ennyi ideig (másodperc); ami addig sem került sor
 TICK = 2.0
 BOOK_SAVE = 600            # az árbázist legfeljebb ennyi másodpercenként írja ki (nagy fájl; a körök is mentik)
 JITTER = (0.85, 1.15)
+# Tanult ritmus: oldalanként feljegyzi, a nap melyik órájában mennyi új (illő) hirdetés jön (a régebbiek súlya minden új
+# adatnál RHYTHM_DECAY-szeresére csökken). RHYTHM_MIN új hirdetés után a csúcsidőben (az óránkénti átlag PEAK-szerese
+# fölött) feleannyi, a csendes órákban (QUIET-szerese alatt) kétszer annyi időnként néz (legfeljebb MAX_EVERY perc);
+# az óránkénti keret (INSTANT_HOURLY) ugyanaz marad.
+RHYTHM_MIN = 20
+RHYTHM_DECAY = 0.99
+PEAK, QUIET = 1.5, 0.5
+MAX_EVERY = 30
+
+
+RHYTHM_TEXT = {0.5: "csúcsidő: sűrűbben nézem", 2.0: "csendes óra: ritkábban nézem"}
 
 
 class InstantError(DealError):
@@ -98,7 +110,9 @@ class InstantWatch:
         return {"enabled": bool(data.get("enabled")),
                 "alerts": [a for a in data.get("alerts") or [] if isinstance(a, dict) and a.get("id")],
                 "seen": {str(k): v for k, v in seen.items() if isinstance(v, dict)},
-                "hits": [h for h in data.get("hits") or [] if isinstance(h, dict) and h.get("url")]}
+                "hits": [h for h in data.get("hits") or [] if isinstance(h, dict) and h.get("url")],
+                "rhythm": {str(k): [float(x) for x in v][:24] for k, v in (data.get("rhythm") or {}).items()
+                           if isinstance(v, list) and len(v) == 24}}
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,7 +130,8 @@ class InstantWatch:
         status = self.fetcher.status() if self.fetcher is not None else {}
         load = self._load_per_hour(alerts)
         return {"enabled": enabled, "alerts": alerts, "hits": hits, "every_choices": list(EVERY_CHOICES),
-                "sites": [{"key": k, "name": p.name, **status.get(k, {}), "per_hour": load.get(k, 0)}
+                "sites": [{"key": k, "name": p.name, **status.get(k, {}), "per_hour": load.get(k, 0),
+                           "rhythm": RHYTHM_TEXT.get(self._factor(k, self.clock()), "")}
                           for k, p in self.platforms.items()],
                 "hourly": INSTANT_HOURLY, "presets": self.presets(), "working": self.working(),
                 "waiting": len(self._waiting)}
@@ -273,6 +288,30 @@ class InstantWatch:
         except Exception:  # noqa: BLE001
             return False
 
+    def _factor(self, site: str, now: float) -> float:
+        """A tanult ritmus szerint mennyiszer a beállított gyakoriság most: 0,5 (csúcsidő: sűrűbben), 2 (csendes óra:
+        ritkábban), vagy 1 (átlagos, vagy még kevés az adat)."""
+        with self._lock:
+            counts = list(self._data["rhythm"].get(site) or [])
+        if len(counts) != 24 or sum(counts) < RHYTHM_MIN:
+            return 1.0
+        hour = time.localtime(now).tm_hour
+        here = (counts[hour - 1] + 2 * counts[hour] + counts[(hour + 1) % 24]) / 4   # a szomszéd órák is számítanak
+        ratio = here / (sum(counts) / 24)
+        return 0.5 if ratio >= PEAK else 2.0 if ratio <= QUIET else 1.0
+
+    def _interval(self, alert: dict[str, Any], site: str, now: float) -> float:
+        """A következő letöltésig (másodperc): a beállított gyakoriság a tanult ritmus szerint, egy kis véletlennel."""
+        minutes = int(alert.get("every") or DEFAULT_EVERY) * self._factor(site, now)
+        return min(max(minutes, EVERY_CHOICES[0]), MAX_EVERY) * 60 * self.rng.uniform(*JITTER)
+
+    def _learn(self, site: str, fresh: int, now: float) -> None:
+        """A ritmushoz: ebben az órában ennyi új (illő) hirdetés jött ezen az oldalon (a hívó menti)."""
+        counts = self._data["rhythm"].setdefault(site, [0.0] * 24)
+        for hour in range(24):
+            counts[hour] = round(counts[hour] * RHYTHM_DECAY, 3)
+        counts[time.localtime(now).tm_hour] += fresh
+
     def due(self, now: float | None = None) -> list[tuple[dict[str, Any], str]]:
         """Az esedékes (figyelő, oldal) párok, a legrégebben esedékes elöl."""
         now = self.clock() if now is None else now
@@ -287,7 +326,7 @@ class InstantWatch:
                     at = self._next.get(f"{alert['id']}:{site}")
                     if at is None:
                         last = float((alert.get("last") or {}).get(site) or 0)
-                        at = last + int(alert.get("every") or DEFAULT_EVERY) * 60 * self.rng.uniform(*JITTER)
+                        at = last + self._interval(alert, site, now)
                         self._next[f"{alert['id']}:{site}"] = at
                     if at <= now:
                         out.append((at, alert, site))
@@ -325,8 +364,9 @@ class InstantWatch:
         letöltésnél csak megjegyzi, ami már fent van. Visszaadja az új, illő hirdetéseket."""
         now = self.clock()
         key = f"{alert['id']}:{site}"
+        interval = self._interval(alert, site, now)
         with self._lock:
-            self._next[key] = now + int(alert.get("every") or DEFAULT_EVERY) * 60 * self.rng.uniform(*JITTER)
+            self._next[key] = now + interval
             self._recent.setdefault(site, deque()).append(now)
         name = self.platforms[site].name
         try:
@@ -365,6 +405,8 @@ class InstantWatch:
             (stored.get("errors") or {}).pop(site, None)
             if first:
                 stored["baseline"] = sorted(set(stored.get("baseline") or []) | {site})
+            elif fresh:
+                self._learn(site, len(fresh), now)
             self._save()
         if first:
             self.hunter.journal.add(f"Azonnali figyelő: {alert['name']} ({name}): elindult, {len(rows)} hirdetést már "
@@ -419,7 +461,7 @@ class InstantWatch:
                    "deal": deal["id"], "cheap": True,
                    **{k: deal.get(k) for k in ("site", "platform", "text", "title", "price", "url", "drop", "note")},
                    "reference": deal["median"], "profit": deal["profit"], "n": deal.get("similar"),
-                   "sites": deal.get("sites") or [],
+                   "sites": deal.get("sites") or [], "safety": deal.get("safety"),
                    "warnings": deal.get("warnings") or []}
             hit["title"] = hit["title"] or hit["text"]
             hits.append(hit)
@@ -498,4 +540,6 @@ class InstantWatch:
             text += f". A szokásos ára kb. {format_price(hit['reference'])}{basis}"
             if hit.get("profit", 0) > 0:
                 text += f", kb. {format_price(hit['profit'])} haszon lehet"
+        if hit.get("safety"):
+            text += f". {safety_text(hit['safety']).rstrip('.')}"
         return text

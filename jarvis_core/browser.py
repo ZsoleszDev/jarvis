@@ -755,8 +755,19 @@ LISTING_PAGE_JS = r"""
     if (t && t.length <= 40) labels.push(t);
     if (labels.length >= 150) break;
   }
+  // a hirdetés fotói (a képellenőrzéshez): a megosztáskor mutatott kép, majd a fő tartalom nagy, látható képei
+  const images = [];
+  const shared = document.querySelector('meta[property="og:image"], meta[name="twitter:image"]');
+  if (shared && shared.content) images.push(shared.content);
+  for (const img of root.querySelectorAll('img')) {
+    const src = img.currentSrc || img.src || '';
+    if (!/^https?:/.test(src) || /logo|icon|avatar|sprite|placeholder|badge|flag/i.test(src)) continue;
+    if ((img.naturalWidth || img.width) < 200 || (img.naturalHeight || img.height) < 200) continue;
+    if (!images.includes(src)) images.push(src);
+    if (images.length >= 4) break;
+  }
   return {title: document.title, url: location.href, text: parts.join(' ').slice(0, 4000), short, labels,
-          captcha: """ + CAPTCHA_FRAME_JS + r"""};
+          images: images.slice(0, 4), captcha: """ + CAPTCHA_FRAME_JS + r"""};
 }
 """
 

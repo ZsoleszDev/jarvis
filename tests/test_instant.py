@@ -20,7 +20,7 @@ from test_deals import Clock, FakeBrowser, FakeLlm  # noqa: E402
 
 from jarvis_core import deals as deals_module  # noqa: E402
 from jarvis_core.deals import DealHunter  # noqa: E402
-from jarvis_core.feeds import FeedError, SiteFetcher, parse_listings, parse_page  # noqa: E402
+from jarvis_core.feeds import FeedError, SiteFetcher, fetch_image, parse_listings, parse_page, public_host  # noqa: E402
 from jarvis_core.instant import InstantError, InstantWatch  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
 
@@ -97,6 +97,43 @@ class ParseTests(unittest.TestCase):
         self.assertNotIn("Bejelentkezés", page["text"])
         self.assertIn("Eladva", page["short"])
         self.assertEqual(page["labels"], ["x"])
+
+    def test_listing_photos_for_the_check(self):
+        """A hirdetés fotói (a képellenőrzéshez): a megosztáskor mutatott kép, majd a fő tartalom képei, a logók,
+        ikonok, a kis képek és a rejtettek nélkül, teljes webcímmel."""
+        page = parse_page("""<html><head><meta property="og:image" content="https://cdn.example/1-nagy.jpg"></head>
+          <body><header><img src="/logo.png"></header><main>
+          <img src="https://cdn.example/1-nagy.jpg"><img data-src="/kep/2.jpg" src="data:image/gif;base64,R0">
+          <img src="/kep/ikon-avatar.jpg"><img src="/kep/kicsi.jpg" width="40" height="40">
+          <img src="/kep/rejtett.jpg" style="display:none"><img src="/kep/3.jpg"><img src="/kep/4.jpg">
+          <img src="/kep/5.jpg"></main></body></html>""", "https://hardverapro.hu/apro/a/friss.html")
+        self.assertEqual(page["images"], ["https://cdn.example/1-nagy.jpg", "https://hardverapro.hu/kep/2.jpg",
+                                          "https://hardverapro.hu/kep/3.jpg", "https://hardverapro.hu/kep/4.jpg"])
+
+    def test_a_photo_is_only_fetched_from_a_public_address(self):
+        class Photo:
+            def __init__(self, kind="image/jpeg", status=200, body=b"\xff\xd8jpeg"):
+                self.status_code, self.headers, self._body = status, {"Content-Type": kind}, body
+
+            def iter_content(self, size):
+                yield self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        asked = []
+        get = lambda url, **kw: asked.append(url) or Photo()          # noqa: E731
+        self.assertEqual(fetch_image("https://cdn.example/1.jpg", get), b"\xff\xd8jpeg")
+        for url in ("http://127.0.0.1/a.jpg", "http://192.168.1.10/a.jpg", "http://localhost/a.jpg",
+                    "file:///etc/passwd", "http://router.lan/a.jpg", "http://[::1]/a.jpg"):
+            self.assertIsNone(fetch_image(url, get), url)
+        self.assertEqual(asked, ["https://cdn.example/1.jpg"], "a helyi és belső címekhez nem is kérdez")
+        self.assertIsNone(fetch_image("https://cdn.example/oldal", lambda url, **kw: Photo("text/html")), "csak kép")
+        self.assertIsNone(fetch_image("https://cdn.example/1.jpg", lambda url, **kw: Photo(status=404)))
+        self.assertTrue(public_host("8.8.8.8") and not public_host("10.0.0.1") and public_host("cdn.example"))
 
 
 class FakeResponse:
@@ -289,7 +326,8 @@ class InstantTests(InstantCase):
         self.assertEqual((kind, title), ("deal", "Megéri: Palit RTX 3060 Ti Dual"),
                          "a drága Zotacról és a hibás EVGA-ról nem szól")
         self.assertIn("Hardverapró: „Palit RTX 3060 Ti Dual” 52 000 Ft, most került fel. A szokásos ára kb. 100 000 Ft", text)
-        self.assertIn("kb. 36 500 Ft haszon lehet. Ugyanaz a kártya.", text, "a modell is megnézte")
+        self.assertIn("kb. 36 500 Ft haszon lehet. Biztos befektetés: 70% haszon. Ugyanaz a kártya.", text,
+                      "mennyire biztos, és a modell is megnézte")
         self.assertTrue(extra["urgent"] and extra["url"].endswith("_7/friss.html"))
         self.assertEqual(extra["spoken"], "Megérő új hirdetés: Palit RTX 3060 Ti Dual, 52 000 Ft.")
         [hit] = self.watch.state()["hits"]
@@ -451,6 +489,42 @@ class InstantTests(InstantCase):
         self.results([ha_card(4, "MSI RTX 3080 Ventus", "155 000 Ft")])
         self.watch.tick()
         self.assertIn("leárazta: 185 000 Ft → 155 000 Ft", self.notices[0][2])
+
+    def test_it_looks_more_often_when_many_new_listings_come(self):
+        """Tanult ritmus: amikor (a nap melyik órájában) sok új hirdetés szokott jönni, sűrűbben néz; a csendes
+        órákban ritkábban; amíg kevés az adat, a beállított gyakorisággal."""
+        alert = {"id": "x", "every": 3}
+        hour = time.localtime(self.clock.now).tm_hour
+        self.assertTrue(3 * 60 * 0.85 <= self.watch._interval(alert, "hardverapro", self.clock.now) <= 3 * 60 * 1.15,
+                        "még nincs adat: 3 percenként")
+        self.assertEqual(self.watch._factor("hardverapro", self.clock.now), 1.0)
+        rhythm = [1.0] * 24
+        rhythm[hour] = 30.0                                     # ebben az órában jön a legtöbb
+        self.watch._data["rhythm"]["hardverapro"] = rhythm
+        self.assertEqual(self.watch._factor("hardverapro", self.clock.now), 0.5)
+        self.assertLessEqual(self.watch._interval(alert, "hardverapro", self.clock.now), 2 * 60 * 1.15,
+                             "csúcsidőben sűrűbben (de legalább 2 percenként)")
+        self.assertEqual({s["key"]: s["rhythm"] for s in self.watch.state()["sites"]}["hardverapro"],
+                         "csúcsidő: sűrűbben nézem")
+        rhythm = [2.0] * 24
+        rhythm[hour] = rhythm[hour - 1] = rhythm[(hour + 1) % 24] = 0.0
+        self.watch._data["rhythm"]["hardverapro"] = rhythm
+        self.assertGreaterEqual(self.watch._interval(alert, "hardverapro", self.clock.now), 6 * 60 * 0.85,
+                                "csendes órában ritkábban")
+        # a letöltésekből tanul: az új, illő hirdetések az aktuális órához kerülnek
+        self.watch._data["rhythm"].clear()
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.assertNotIn("hardverapro", self.watch._data["rhythm"], "az első letöltés csak megjegyez")
+        self.later()
+        self.results([ha_card(9, "Zotac RTX 3060 Ti Twin Edge", "99 000 Ft"), ha_card(8, "EVGA RTX 3060 Ti XC", "98 000 Ft")]
+                     + HA_CARDS[:2])
+        self.watch.tick()
+        self.assertEqual(self.watch._data["rhythm"]["hardverapro"][time.localtime(self.clock.now).tm_hour], 2.0)
 
     def test_off_paused_evening_and_limits(self):
         self.watch.add("RTX 3060 Ti", ["hardverapro"])

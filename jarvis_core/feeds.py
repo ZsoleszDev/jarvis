@@ -14,6 +14,7 @@ böngészőt használja, mint eddig. Csak olvas: nem küld űrlapot, nem jelentk
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import random
 import re
@@ -122,6 +123,8 @@ class _TreeBuilder(HTMLParser):
         self.root = Node("#document", {}, None)
         self.stack: list[Node] = [self.root]
         self.anchors: list[Node] = []
+        self.images: list[Node] = []           # <img> és a megosztáskor mutatott kép (og:image)
+        self.shared_images: list[str] = []
         self.ld_json: list[str] = []
         self.title = ""
         self._in_title = False
@@ -131,6 +134,10 @@ class _TreeBuilder(HTMLParser):
         self.stack[-1].children.append(node)
         if tag == "a" and node.attrs.get("href"):
             self.anchors.append(node)
+        if tag == "img":
+            self.images.append(node)
+        if tag == "meta" and (node.attrs.get("property") or node.attrs.get("name")) in ("og:image", "twitter:image"):
+            self.shared_images.append(node.attrs.get("content", ""))
         if tag == "title":
             self._in_title = True
         if tag not in VOID:
@@ -312,7 +319,62 @@ def parse_page(html: str, url: str) -> dict[str, Any]:
         if len(labels) >= 150:
             break
     return {"title": clean(tree.title), "url": url, "text": " ".join(parts)[:4000], "short": short, "labels": labels,
-            "captcha": False}
+            "captcha": False, "images": page_images(tree, root, url)}
+
+
+_ICON_RE = re.compile(r"(logo|icon|avatar|sprite|placeholder|badge|flag)", re.IGNORECASE)
+
+
+def page_images(tree: _TreeBuilder, root: Node, base_url: str, limit: int = 4) -> list[str]:
+    """A hirdetés fotói (a képellenőrzéshez): a megosztáskor mutatott kép (og:image), majd a fő tartalom látható,
+    nem túl kicsi képei, a logók, ikonok és profilképek nélkül; teljes webcímmel, legfeljebb limit."""
+    found = list(tree.shared_images)
+    for node in tree.images:
+        src = node.attrs.get("data-src") or node.attrs.get("src") or ""
+        small = any(node.attrs.get(side, "").isdigit() and int(node.attrs[side]) < 200 for side in ("width", "height"))
+        if (root is tree.root or root.contains(node)) and not node.hidden() and not small and not _ICON_RE.search(src):
+            found.append(src)
+    out: list[str] = []
+    for src in found:
+        url = urllib.parse.urljoin(base_url, src.strip())
+        if url.startswith(("http://", "https://")) and url not in out and not url.endswith(".svg"):
+            out.append(url)
+    return out[:limit]
+
+
+IMAGE_MAX_BYTES = 4 * 1024 * 1024
+
+
+def public_host(host: str) -> bool:
+    """Nyilvános cím-e (egy hirdetés képe nem lehet a helyi gépen vagy a belső hálózaton)."""
+    host = host.strip("[]").lower()
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return "." in host and not host.endswith((".local", ".lan", ".internal", ".localhost"))
+
+
+def fetch_image(url: str, get: Callable[..., Any] | None = None) -> bytes | None:
+    """Egy hirdetés fotója a képellenőrzéshez: csak http(s), nyilvános cím, kép típus, legfeljebb IMAGE_MAX_BYTES.
+    None, ha nem sikerült (a képellenőrzés ilyenkor kép nélkül megy)."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https") or not public_host(parts.hostname or ""):
+        return None
+    try:
+        response = (get or requests.get)(url, headers={"User-Agent": USER_AGENT, "Accept": "image/*"}, timeout=10,
+                                         stream=True)
+        with response:
+            if int(response.status_code) >= 400 or \
+                    not str(response.headers.get("Content-Type", "")).lower().startswith("image/"):
+                return None
+            body = b""
+            for chunk in response.iter_content(65536):
+                body += chunk
+                if len(body) > IMAGE_MAX_BYTES:
+                    return None
+            return body or None
+    except requests.RequestException:
+        return None
 
 
 def _find(node: Node, wanted: Callable[[Node], bool]) -> Node | None:
