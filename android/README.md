@@ -26,7 +26,9 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
   manifest `<queries>` része miatt látja, telepítve van-e), vagy ha nincs, a chatgpt.com-ot a böngészőben. Egy
   tárgy kérdésének és a Pro feltöltés Nézd át értesítésének (`notice.item`, `notice.open`) rábökve a `MainActivity`
   `hu.jarvis.app.ITEM` szándékkal nyílik, és a felület a `pending()` `item` részéből a tárgyat, illetve a Nézd át
-  ablakot mutatja.
+  ablakot mutatja. A nem fontos értesítést (`notice.quiet`, pl. egy oldal robot-ellenőrzést kért) nem mutatja: az
+  csak az alkalmazás Értesítések listájában van meg. A készenlét (`state` = `standby`) nem szünet: az állandó
+  értesítés ettől nem változik.
 - Kamera (Pro feltöltés): a felület `<input capture>` mezőjére a `MainActivity` a kamera-alkalmazást indítja
   (`ACTION_IMAGE_CAPTURE`); a fotó a `PhotoProvider`-en át az alkalmazás gyorsítótárába kerül (nem a galériába), onnan
   olvassa be a WebView. Kamera-engedély nem kell hozzá (a kamera-alkalmazás fényképez).

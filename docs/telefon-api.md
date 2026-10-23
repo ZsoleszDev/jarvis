@@ -269,7 +269,7 @@ Ha nincs új esemény, a kérés legfeljebb `wait` másodpercig vár, aztán ür
 | `confirm` / `confirm_done` | `id, prompt` / `id, approved` | jóváhagyás kell / megvolt |
 | `work_item` / `work_removed` | `item` / `id` | egy tárgy változott / törölve |
 | `work_message` | `conversation` | egy vevői beszélgetés változott (új üzenet, vázlat, elküldve) |
-| `notification` | `notice` | értesítés (figyelő, régóta fent lévő hirdetés, elkeltnek látszó hirdetés, levétel), a gombjaival (`actions`); egy tárgy kérdésénél és a Pro feltöltés Nézd át értesítésénél `item` és `open` (`item` vagy `review`): erre bökve az a tárgy, illetve a Nézd át ablak nyíljon meg |
+| `notification` | `notice` | értesítés (figyelő, régóta fent lévő hirdetés, elkeltnek látszó hirdetés, levétel), a gombjaival (`actions`); egy tárgy kérdésénél és a Pro feltöltés Nézd át értesítésénél `item` és `open` (`item` vagy `review`): erre bökve az a tárgy, illetve a Nézd át ablak nyíljon meg; `quiet: true`: nem fontos (pl. robot-ellenőrzés, emlékeztető), a telefon ne jelezzen miatta (a listában olvasottként jön) |
 | `request_done` | `request_id` | a kérésed feldolgozása véget ért |
 
 A `channel` mondja meg, melyik menühöz tartozik (`chat` = Beszélgetés, `work` = Munka). A telefonról

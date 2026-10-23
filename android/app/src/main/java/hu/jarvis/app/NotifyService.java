@@ -190,7 +190,7 @@ public class NotifyService extends Service {
 
     private Notification ongoing() {
         String text = !connected ? "Nem érem el a gépet (újrapróbálom)"
-                : paused ? "Szünetel: a modellek nem futnak" : "Kapcsolatban a géppel";
+                : paused ? "Szünetel (a háttérmunka is)" : "Kapcsolatban a géppel";
         return new Notification.Builder(this, CHANNEL_LINK)
                 .setSmallIcon(R.drawable.ic_notify)
                 .setContentTitle("Jarvis")
@@ -382,8 +382,9 @@ public class NotifyService extends Service {
         String type = event.optString("type");
         NotificationManager manager = getSystemService(NotificationManager.class);
         if ("state".equals(type)) {
-            String state = event.optString("state");
-            paused = "paused".equals(state) || "standby".equals(state);
+            // A készenlét nem szünet: a modellek ilyenkor nincsenek betöltve, de a háttérmunka (pl. a kereskedés) megy,
+            // és az első kérés felébreszti. Ezért az állandó értesítés sem változik tőle.
+            paused = "paused".equals(event.optString("state"));
             refresh();
         } else if ("confirm".equals(type)) {
             if (MainActivity.visible) {
@@ -413,7 +414,7 @@ public class NotifyService extends Service {
             timers.post(() -> dealAlert(id, notice));          // megérő hirdetés: akkor is, ha az ablak nyitva van
         } else if ("notification".equals(type) && !MainActivity.visible) {
             JSONObject notice = event.optJSONObject("notice");
-            if (notice != null) {
+            if (notice != null && !notice.optBoolean("quiet")) {   // a nem fontos csak az alkalmazás listájában
                 int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
                 show(this, CHANNEL_NEWS, id, notice.optString("title", "Jarvis"), notice.optString("text"),
                         soldAction(this, notice, id), itemIntent(this, notice, id));

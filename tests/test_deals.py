@@ -342,8 +342,9 @@ class DealTests(HunterCase):
         self.assertEqual(self.notices, [], "egy nap még nem elég")
         self.clock.now += 2 * 86400 + 60
         self.hunter.run(notify=self.notify, force=True)
-        [(_kind, title, text, _extra)] = self.notices
+        [(_kind, title, text, extra)] = self.notices
         self.assertEqual(title, "Változott az ár? RTX 3060 Ti")
+        self.assertTrue(extra["quiet"], "csak javaslat: a telefonra nem megy, a listában ott van")
         self.assertIn("inkább 100 000 Ft körül", text)
         self.hunter.run(notify=self.notify, force=True)
         self.assertEqual(len(self.notices), 1, "egyszer szól")
@@ -871,6 +872,7 @@ class BrowseTests(HunterCase):
         self.hunter.set_browse(on=True, sites=["vinted"])
         self.hunter.run(notify=self.notify)
         self.assertEqual([t for _k, t, _x, _e in self.notices], ["Vinted: robot-ellenőrzés"])
+        self.assertTrue(self.notices[0][3]["quiet"], "holnap magától folytatja: nem fontos értesítés")
         self.assertIn("Vinted: robot-ellenőrzést kért, ma már nem nézem (nem próbálom megkerülni).", self.journal())
         self.assertEqual(self.browser.looked, [], "a captchát nem próbálja megoldani, és nem nyit meg több oldalt")
         self.clock.now += 3 * 3600

@@ -517,7 +517,7 @@ function addNotice(notice) {
   if (!notice.id || noticeList.some((n) => n.id === notice.id)) return;
   window.dispatchEvent(new CustomEvent("jarvis-notice", { detail: notice }));   // pl. a Munka menü frissíti a listáját
   noticeList = [notice, ...noticeList].slice(0, 50);
-  setNoticesUnread(noticesUnread + 1);
+  if (!notice.read) setNoticesUnread(noticesUnread + 1);   // a nem fontos (quiet) olvasottként jön: nem jelez
   if ($("notices-dialog").open) renderNotices();
 }
 

@@ -289,6 +289,18 @@ class NoticeTests(unittest.TestCase):
             self.assertEqual([n["title"] for n in NoticeBoard(Path(tmp) / "e.json").list(unread_only=True)],
                              ["Régi"])
 
+    def test_a_quiet_notice_is_listed_but_does_not_signal(self):
+        """A nem fontos értesítés (pl. robot-ellenőrzés, holnap magától folytatja) a listában megvan, de olvasottként:
+        nem jelez, és a felületek (telefon, laptop) a quiet jelzés alapján nem mutatják."""
+        with tempfile.TemporaryDirectory() as tmp:
+            published = []
+            board = NoticeBoard(Path(tmp) / "e.json", publish=published.append)
+            board.add("deal", "Vinted: robot-ellenőrzés", "Holnap folytatom.", quiet=True)
+            board.add("watch", "Új találat", "Új állás")
+            self.assertEqual([n["title"] for n in board.list()], ["Új találat", "Vinted: robot-ellenőrzés"])
+            self.assertEqual(board.unread_count(), 1, "csak a fontos jelez")
+            self.assertEqual([n.get("quiet") for n in published], [True, None])
+
     def test_sold_notice_keeps_its_item_and_actions(self):
         with tempfile.TemporaryDirectory() as tmp:
             board = NoticeBoard(Path(tmp) / "e.json")

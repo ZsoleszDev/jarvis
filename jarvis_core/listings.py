@@ -125,7 +125,7 @@ class ListingChecker:
                 notify("error", f"Hirdetések ellenőrzése: {site.name}",
                        f"A hirdetéseid ellenőrzését abbahagytam: a(z) {site.name} {detail}. Nézd meg a "
                        "böngészőablakomban; holnap újra megpróbálom.", platform=key,
-                       actions=[{"action": "login", "platform": key, "label": label}])
+                       actions=[{"action": "login", "platform": key, "label": label}], quiet=True)
                 return f"Abbahagytam: {site.name} – {detail}."
             if (state in (SOLD, GONE) and entry.get("check_dismissed") == state
                     and entry.get("check_dismissed_note", detail) == detail):

@@ -613,7 +613,7 @@ class JarvisApp:
         more = f" és még {len(stale) - 5}" if len(stale) > 5 else ""
         ctx.notify("stale", "Régóta fent lévő hirdetések",
                    f"Ezek legalább {days} napja fent vannak, de még nem keltek el: {names}{more}. "
-                   "Ha olcsóbbra vennéd valamelyiket, szólj.", items=[i.id for i in stale])
+                   "Ha olcsóbbra vennéd valamelyiket, szólj.", items=[i.id for i in stale], quiet=True)
         self.work.mark_reminded([i.id for i in stale])
         return f"{len(stale)} régóta fent lévő hirdetés."
 
@@ -676,7 +676,7 @@ class JarvisApp:
         if self.notices is not None:
             self.notices.add(kind, title, text, **extra)
         self.ui.notice(text)
-        if self.cfg.scheduler.speak and not self.paused:
+        if self.cfg.scheduler.speak and not self.paused and not extra.get("quiet"):   # a nem fontosat nem olvassa fel
             try:
                 self.say(text)
             except Exception:  # noqa: BLE001

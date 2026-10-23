@@ -1678,7 +1678,7 @@ class DealHunter:
             notify("deal", f"Változott az ár? {search['query']}",
                    f"„{search['query']}”: szokásos árnak {format_price(reference)}-ot fogadtál el, de a hirdetésekben "
                    f"{DRIFT_DAYS} napja inkább {format_price(median)} körül van. Ha szeretnéd, mérd fel újra, vagy írd át "
-                   "az Automata kereskedés fülön.", actions=[DEALS_ACTION])
+                   "az Automata kereskedés fülön.", actions=[DEALS_ACTION], quiet=True)
             market["noted"] = now
         self._set(search["id"], market=market)
 
@@ -2315,7 +2315,7 @@ class DealHunter:
         self.journal.add(f"{name}: robot-ellenőrzést kért, ma már nem nézem (nem próbálom megkerülni).")
         game.notify("deal", f"{name}: robot-ellenőrzés",
                     f"A {name} robot-ellenőrzést kért böngészés közben. Ma már nem nézem; ha szeretnéd, oldd meg a "
-                    "böngészőablakomban, és holnap folytatom.", actions=[DEALS_ACTION])
+                    "böngészőablakomban, és holnap folytatom.", actions=[DEALS_ACTION], quiet=True)
         self._close_session(game)
 
     def _finish_session(self, game: _Round) -> str:

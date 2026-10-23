@@ -10,6 +10,9 @@ műveleteket (actions): pl. az elkeltnek látszó hirdetésnél [{"action": "sol
 Android-alkalmazásban) csak megnyitja a hirdetés Eladva ablakát, előre kiválasztva; a levétel ott is a te
 kattintásodra indul. Ha a háttérellenőrzés bejelentkezést vagy robot-ellenőrzést talált: [{"action": "login",
 "platform": "vinted", "label": "Bejelentkezés a böngészőmben"}], ez megnyitja az oldalt Jarvis böngészőjében.
+
+A kevésbé fontos értesítés (quiet: pl. egy oldal robot-ellenőrzést kért, és holnap magától folytatja, vagy egy
+emlékeztető) csak az Értesítések listájába kerül, olvasottként: a telefonra és a laptopra nem megy, és nem olvassa fel.
 """
 from __future__ import annotations
 
@@ -50,6 +53,8 @@ class NoticeBoard:
         notice = {"id": secrets.token_hex(5), "at": time.time(), "kind": kind if kind in KINDS else "info",
                   "title": str(title)[:120], "text": str(text)[:1500], "read": False}
         notice.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        if notice.get("quiet"):
+            notice["read"] = True         # nem fontos: a listában megvan, de nem jelez (és nem megy a telefonra)
         with self._lock:
             self._items.append(notice)
             del self._items[:-self.limit]

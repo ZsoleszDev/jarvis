@@ -266,6 +266,8 @@ class WebPush:
             self._enqueue(message, ttl=ANSWER_SECONDS, urgency="high")
         else:
             notice = event.get("notice") if isinstance(event.get("notice"), dict) else {}
+            if notice.get("quiet"):
+                return                             # nem fontos: csak az Értesítések listájában
             message = {"kind": "notice", "title": str(notice.get("title") or "Jarvis")[:80],
                        "text": str(notice.get("text") or "")[:300], "tag": f"notice-{notice.get('id') or ''}"}
             actions = notice_actions(notice)

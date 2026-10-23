@@ -186,6 +186,18 @@ class WebPushTests(unittest.TestCase):
         self.assertEqual((message["item"], message["actions"]), ("a1b2c3d4", [sold]),
                          "csak az ismert gombok (a böngésző az ablakot nyitja meg, a döntés ott a tiéd)")
 
+    def test_a_quiet_notice_is_not_pushed(self):
+        browser = Browser()
+        self.push.subscribe("aaaa1111", browser.subscription())
+        self.push.on_event({"type": "notification", "notice": {"id": "n6", "kind": "deal", "quiet": True,
+                                                              "title": "Vinted: robot-ellenőrzés", "text": "Holnap."}})
+        self.push.on_event({"type": "notification", "notice": {"id": "n7", "kind": "watch", "title": "Új találat",
+                                                              "text": "Új állás"}})
+        self.service.wait()
+        time.sleep(0.1)
+        tags = [json.loads(browser.decrypt(body))["tag"] for _u, body, _h in self.service.calls]
+        self.assertEqual(tags, ["notice-n7"], "a nem fontos nem megy a laptopra")
+
     def test_a_question_or_a_review_opens_its_item(self):
         """Jarvis kérdez egy tárgyról, vagy a Pro feltöltés Nézd át ablaka vár: a kattintás azt nyitja meg."""
         browser = Browser()

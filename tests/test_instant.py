@@ -483,6 +483,7 @@ class InstantTests(InstantCase):
         self.net.pages["jofogas"] = (429, "Too many requests")
         self.watch.tick()
         self.assertEqual([n[1] for n in self.notices], ["Jófogás: az azonnali figyelő szünetel"])
+        self.assertTrue(self.notices[0][3]["quiet"], "utána magától újra próbálja: nem fontos értesítés")
         self.assertIn("Jófogás: Az oldal robot-ellenőrzést kér", self.watch.state()["alerts"][0]["errors"]["jofogas"])
         self.assertNotIn("hardverapro", self.watch.state()["alerts"][0]["errors"], "a Hardverapró közben ment")
         sites = {site["key"]: site for site in self.watch.state()["sites"]}
