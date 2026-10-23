@@ -9,6 +9,7 @@ böngészője nyitott meg) nem tud parancsot küldeni a Jarvisnak.
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import os
@@ -161,19 +162,39 @@ class GuiUI:
     """A Jarvis üzeneteit eseményekké alakítja az ablaknak, és a konzolra is naplóz.
 
     A `channel` mondja meg, melyik menü naplójába kerül az üzenet (chat = Beszélgetés,
-    work = Munka); a JarvisApp állítja át, amíg egy Munka menüs kérésen dolgozik.
+    work = Munka); a JarvisApp állítja át, amíg egy Munka menüs kérésen dolgozik. Egy szálnak saját is lehet
+    (own_channel: pl. az eladás előkészítése a Munka menübe ír, közben az ágens-szál beszélgetése a helyén marad).
     """
 
     def __init__(self, bus: EventBus, name: str):
         self.bus = bus
         self.name = name
-        self.channel = "chat"
+        self._channel = "chat"
+        self._own = threading.local()
         self._segment: list[str] = []
         self._segment_channel = "chat"
         self._lock = threading.Lock()
         self._confirm_ids = itertools.count(1)
         self._confirms: dict[int, dict[str, Any]] = {}
         self.request_id: str | None = None   # a telefonról jött kérés azonosítója (amíg Jarvis rajta dolgozik)
+
+    @property
+    def channel(self) -> str:
+        return getattr(self._own, "channel", None) or self._channel
+
+    @channel.setter
+    def channel(self, value: str) -> None:
+        self._channel = value
+
+    @contextlib.contextmanager
+    def own_channel(self, channel: str):
+        """Ezen a szálon az üzenetek ebbe a menübe kerülnek (a többi szálé marad, ahol volt)."""
+        previous = getattr(self._own, "channel", None)
+        self._own.channel = channel
+        try:
+            yield
+        finally:
+            self._own.channel = previous
 
     def _publish(self, event: dict[str, Any], record: bool = True) -> None:
         event.setdefault("channel", self.channel)
@@ -243,7 +264,8 @@ class GuiUI:
         console.tool(f"{name} -> {summary}")
 
     def notice(self, text: str) -> None:
-        self._close_segment()
+        if getattr(self._own, "channel", None) is None:   # a saját menüjébe író szál ne vágja ketté a folyó választ
+            self._close_segment()
         self._publish({"type": "assistant", "text": text})
         console.assistant(self.name, text)
 

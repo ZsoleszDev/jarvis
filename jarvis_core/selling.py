@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import photos as photocheck
+from .feeds import FeedError
 from .textutil import fold, only_hu_amount
 
 ITEM_ID_RE = re.compile(r"^[0-9a-f]{8}$")
@@ -1457,14 +1458,42 @@ def prompt_query(text: str) -> str:
     return " ".join(first.split()[:5])
 
 
-class PriceResearcher:
-    """Megnézi a hirdetési oldalakon, mennyiért kínálnak hasonlót."""
+class NeedsBrowser(Exception):
+    """Ehhez a lépéshez a böngésző kell: az eladás az ágens-szálon folytatódik (az előkészítő szál nem nyúlhat hozzá)."""
 
-    def __init__(self, llm: Any, store: ItemStore, browser: Callable[[], Any], sites: list[Platform]):
+
+class PriceResearcher:
+    """Megnézi a hirdetési oldalakon, mennyiért kínálnak hasonlót. A Hardverapró és a Jófogás találati oldalát
+    böngésző nélkül tölti le (fetcher, ha van), a többit a böngészővel."""
+
+    def __init__(self, llm: Any, store: ItemStore, browser: Callable[[], Any], sites: list[Platform],
+                 fetcher: Any = None):
         self.llm = llm
         self.store = store
         self.browser = browser
         self.sites = [site for site in sites if site.search_url]
+        self.fetcher = fetcher
+
+    def _sites(self, only: list[str] | None) -> list[Platform]:
+        return [s for s in self.sites if not only or s.key in only] or self.sites
+
+    def _fast(self, site: Platform) -> bool:
+        return self.fetcher is not None and self.fetcher.handles(site.key) and self.fetcher.usable(site.key)
+
+    def needs_browser(self, only: list[str] | None = None) -> bool:
+        """Kell-e a böngésző az árkutatáshoz (van olyan oldal, ami böngésző nélkül most nem olvasható)."""
+        return any(not self._fast(site) for site in self._sites(only))
+
+    def _listings(self, site: Platform, url: str, browser: bool) -> list[dict[str, Any]]:
+        if self._fast(site):
+            try:
+                return self.fetcher.listings(url, site.key)
+            except FeedError:
+                if not browser:
+                    raise NeedsBrowser() from None
+        elif not browser:
+            raise NeedsBrowser()
+        return self.browser().extract_listings(url)
 
     def query_for(self, item: Item) -> str:
         if item.search_query:
@@ -1473,14 +1502,18 @@ class PriceResearcher:
         return " ".join(words[:5]) or prompt_query(item.prompt)
 
     def research(self, item_id: str, progress: Callable[[str], None] | None = None,
-                 only: list[str] | None = None) -> Item:
+                 only: list[str] | None = None, browser: bool = True) -> Item:
+        """Az árkutatás a kiválasztott oldalakon. browser=False: csak böngésző nélkül (az eladás-előkészítő szálon);
+        ha valamelyik oldalhoz böngésző kellene, NeedsBrowser."""
         item = self.store.get(item_id)
         query = self.query_for(item)
         if not query:
             raise ItemError("Az árkutatáshoz tudnom kell, mi ez (írd le röviden).")
-        sites = [s for s in self.sites if not only or s.key in only] or self.sites
+        sites = self._sites(only)
         if not sites:
             raise ItemError("Nincs beállítva oldal az árkutatáshoz ([work] research_sites).")
+        if not browser and self.needs_browser(only):
+            raise NeedsBrowser()
         results: list[dict[str, Any]] = []
         errors: list[str] = []
         for site in sites:
@@ -1488,7 +1521,9 @@ class PriceResearcher:
                 progress(f"{site.name}: „{query}”")
             url = site.search_url.format(q=urllib.parse.quote(query))
             try:
-                found = self.browser().extract_listings(url)
+                found = self._listings(site, url, browser)
+            except NeedsBrowser:
+                raise
             except Exception as exc:  # noqa: BLE001 - egy oldal hibája ne állítsa le a többit
                 errors.append(f"{site.name}: {str(exc).splitlines()[0][:160]}")
                 continue

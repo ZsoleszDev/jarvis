@@ -368,8 +368,7 @@ class RemoteWindowTests(unittest.TestCase):
         self.assertEqual(self.get(f"/nincs/ilyen?t={h.token}")[0], 404)
         h.fake.chat_script = [reply("Itt vagyok.")]
         self.assertEqual(self.post("/api/send", {"text": "Ott vagy?", "mode": "chat"})[0], 202)
-        h.wait(lambda: h.app.busy)
-        h.idle()
+        h.wait(lambda: not h.fake.chat_script and not h.app.busy)   # a válasz megjött (gyorsabb is lehet egy várásnál)
         client = h.bus.subscribe()                  # a visszajátszásban ott a teljes beszélgetés
         events = [client.get_nowait() for _ in range(client.qsize())]
         h.bus.unsubscribe(client)

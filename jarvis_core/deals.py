@@ -52,6 +52,7 @@ from typing import Any, Callable
 from .browser import DECLINED, LISTING_PAGE_JS, BrowserError, is_risky
 from .feeds import FeedError, fetch_image
 from .listings import BLOCKED, GONE, SOLD, classify
+from .llm import background_calls
 from .journal import Journal, day_of
 from .pricebook import SOLD_MIN, PriceBook, fake_prone, pace, speed_text, usable
 from .replay import norm_text
@@ -444,7 +445,8 @@ def offer_price(search: dict[str, Any], price: int, reference: int) -> int | Non
 class ModelLane:
     """Modell-sor: egy háttérszál, ami a modellfeladatokat egyenként végzi (egyszerre mindig csak egy modellhívás), amíg a
     böngésző a következő oldalt tölti. Az eredményt nem ő dolgozza fel: a kész feladat folytatása (then) a böngésző
-    szálán fut le (deliver), mert onnan kell továbbmenni (pl. egy hirdetés oldalát megnyitni, értesíteni)."""
+    szálán fut le (deliver), mert onnan kell továbbmenni (pl. egy hirdetés oldalát megnyitni, értesíteni). A hívásai
+    háttérhívások (llm.background_calls): a feltöltés és a beszélgetés előbb jön."""
 
     def __init__(self) -> None:
         self._tasks: queue.Queue = queue.Queue()
@@ -461,6 +463,10 @@ class ModelLane:
         self._tasks.put((call, then))
 
     def _loop(self) -> None:
+        with background_calls():
+            self._work()
+
+    def _work(self) -> None:
         while not self._closed.is_set():
             try:
                 call, then = self._tasks.get(timeout=0.2)
@@ -1382,6 +1388,11 @@ class DealHunter:
 
     def run(self, check: Callable[[], None] = lambda: None,
             notify: Callable[..., None] = lambda *a, **k: None, force: bool = False) -> str:
+        """Egy kör (a modellhívásai háttérhívások: a feltöltés és a beszélgetés előbb jön); lásd _run."""
+        with background_calls():
+            return self._run(check, notify, force)
+
+    def _run(self, check: Callable[[], None], notify: Callable[..., None], force: bool) -> str:
         """Egy kör: az esedékes keresések (force: mind) oldalain az első találati oldal, a legújabb elöl, modell
         nélkül. Ha egy keresésnek még nincs szokásos ára, felméri (egy modellhívás), különben ahhoz méri a
         hirdetéseket. A Vatera-licitfigyelők a hamarosan záruló liciteket nézik. A jelöltek oldalát megnyitja (csak
@@ -2509,6 +2520,10 @@ class DealHunter:
                 raise _FastStop()
 
         def loop() -> None:
+            with background_calls():
+                work()
+
+        def work() -> None:
             while not self._fast_stop.wait(FAST_TICK):
                 try:
                     if allowed():

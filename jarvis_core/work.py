@@ -38,8 +38,8 @@ from .messages import MessageDesk
 from .replay import (FlowRecorder, FlowStore, Replayer, ReplayOutcome, entry_for, entry_problem, flow_key, item_values,
                      url_shape)
 from .selling import (CONDITIONS, MAX_PRICE, NEEDS, NOT_POSTED, ON_SITE, PARCEL_SIZES, PLATFORMS, POSTED, FAILED,
-                      RESEARCH_MAX_AGE, Item, ItemError, ItemStore, ListingExtractor, Platform, PriceResearcher,
-                      format_price, missing_needs, photo_signature, price_verdict, question_for,
+                      RESEARCH_MAX_AGE, Item, ItemError, ItemStore, ListingExtractor, NeedsBrowser, Platform,
+                      PriceResearcher, format_price, missing_needs, photo_signature, price_verdict, question_for,
                       research_fresh, review_text, round_price, vision_images)
 from .textutil import fold, hu_amounts
 from .tools import Toolbox, ToolError, params
@@ -180,7 +180,9 @@ def interpret_price_reply(text: str, confirming: bool = False) -> str | int | No
 
 @dataclass
 class Step:
-    kind: str          # "ask" (visszakérdez), "price" (árdöntésre vár), "review" (Pro: átnézésre vár), "post"
+    # "ask" (visszakérdez), "price" (árdöntésre vár), "review" (Pro: átnézésre vár), "post", "browser" (a következő
+    # lépéshez, az árkutatáshoz böngésző kell: az ágens-szálon folytatódik; csak a prepare(browser=False) adja)
+    kind: str
     text: str = ""
     note: str = ""     # a fotókról, a feltöltés elején (csak jelzés: a feltöltés ettől megy tovább)
 
@@ -208,8 +210,7 @@ class WorkDesk:
         self.extractor = ListingExtractor(llm, self.store)
         self.browser_ready = toolbox.has("browser_open")
         sites = [catalog[key] for key in cfg.work.research_sites if key in catalog]
-        self.researcher = (PriceResearcher(llm, self.store, lambda: toolbox.browser, sites)
-                           if self.browser_ready and sites else None)
+        self.researcher: PriceResearcher | None = None
         # A fent lévő hirdetések háttérellenőrzése (elkelt-e, eltűnt-e): modell nélkül, csak olvasva.
         self.checker = (ListingChecker(self.store, self.platforms, lambda: toolbox.browser)
                         if self.browser_ready else None)
@@ -235,6 +236,9 @@ class WorkDesk:
                         if cfg.work.fast_fetch and fast else None)
         self.deals = DealHunter(self.root, self.platforms, (lambda: toolbox.browser) if self.browser_ready else None,
                                 llm, default_every=float(cfg.scheduler.deal_minutes or 180), fetcher=self.fetcher)
+        # Az árkutatás: a Hardverapró és a Jófogás böngésző nélkül (a gyors letöltővel), a többi a böngészővel.
+        if self.browser_ready and sites:
+            self.researcher = PriceResearcher(llm, self.store, lambda: toolbox.browser, sites, fetcher=self.fetcher)
         self.instant = (InstantWatch(self.root, self.platforms, self.fetcher, self.deals)
                         if self.fetcher is not None else None)
         self.deals.items = self.store.all      # a havi kerethez: mennyit költöttél ebben a hónapban, mi vár eladásra
@@ -324,9 +328,17 @@ class WorkDesk:
 
     # --- az eladás lépései (az ágens-szálon) ------------------------------------------------------
 
-    def prepare(self, item_id: str, progress: Callable[[str], None]) -> Step:
+    def prepare(self, item_id: str, progress: Callable[[str], None], browser: bool = True) -> Step:
         """Adatok a leírásból, hiányzó adatok, árellenőrzés. Megmondja, mi a következő lépés (feltöltésnél a
-        fotókról egy rövid jelzéssel, ha valamelyikkel gond van)."""
+        fotókról egy rövid jelzéssel, ha valamelyikkel gond van). browser=False: az eladás-előkészítő szálon, a
+        böngészőhöz nem nyúl; ha az árkutatáshoz böngésző kellene, Step("browser") (az ágens-szálon újra hívva a
+        már kész lépéseket nem ismétli: a kiolvasott adatok és a fotók megvannak)."""
+        try:
+            return self._prepare(item_id, progress, browser)
+        except NeedsBrowser:
+            return Step("browser")
+
+    def _prepare(self, item_id: str, progress: Callable[[str], None], browser: bool) -> Step:
         item = self.store.get(item_id)
         if not item.targets:
             raise ItemError("Pipáld be, hova töltsem fel.")
@@ -334,7 +346,7 @@ class WorkDesk:
             raise ItemError("Ehhez a tárgyhoz még nincs fotó.")
         answered = self._answered.pop(item_id, None)
         if item.pro:
-            return self._prepare_pro(item, answered, progress)
+            return self._prepare_pro(item, answered, progress, browser)
         if not self.extractor.up_to_date(item):   # ugyanabból a leírásból nem olvassa ki újra
             progress("a leírásod értelmezése")
             # a visszakérdezésre adott válaszból csak a hiányzó adatok (rövidebb séma, gyorsabb válasz)
@@ -349,7 +361,7 @@ class WorkDesk:
         if item.research_wanted and not research_fresh(item) and self.researcher is not None:
             try:
                 item = self.researcher.research(item_id, lambda detail: progress("árkutatás – " + detail),
-                                                only=item.targets)
+                                                only=item.targets, browser=browser)
             except ItemError as exc:   # az árkutatás csak ajánlás: ha nem megy, attól még feltöltjük
                 self.store.set_pending(item_id, None)
                 return Step("post", f"Az árkutatás nem sikerült ({exc}), marad az árad.", self.photo_note(item_id))
@@ -363,7 +375,8 @@ class WorkDesk:
         self.store.set_pending(item_id, None)
         return Step("post", note=self.photo_note(item_id))
 
-    def _prepare_pro(self, item: Item, answered: list[str] | None, progress: Callable[[str], None]) -> Step:
+    def _prepare_pro(self, item: Item, answered: list[str] | None, progress: Callable[[str], None],
+                     browser: bool = True) -> Step:
         """Pro feltöltés: az adatok a fotókról (ha új fotó jött, újra megnézi), amit nem látott, arra egy kérdés (a
         válaszodból csak azt olvassa ki), az ár magától (_pro_price), végül a Nézd át: amíg nem hagytad jóvá (a
         Mehet gombbal, ahol mindent átírhatsz), nem tölt fel."""
@@ -381,7 +394,7 @@ class WorkDesk:
             return Step("ask", question)
         basis = str(item.pending.get("basis") or "") if item.pending.get("kind") == "review" else ""
         if not item.price:
-            item, basis = self._pro_price(item, progress)
+            item, basis = self._pro_price(item, progress, browser)
         if not item.reviewed:
             text = review_text(item, basis)
             self.store.set_pending(item.id, {"kind": "review", "question": text, "basis": basis})
@@ -393,7 +406,7 @@ class WorkDesk:
         """Ami a fotókról nem derült ki, és a kiválasztott oldalak kérik (az árat Jarvis maga adja meg)."""
         return [(need, sites) for need, sites in missing_needs(item, self.settings) if need.field != "price"]
 
-    def _pro_price(self, item: Item, progress: Callable[[str], None]) -> tuple[Item, str]:
+    def _pro_price(self, item: Item, progress: Callable[[str], None], browser: bool = True) -> tuple[Item, str]:
         """Az ár magától, amennyiért jó áron elkel: a hasonló hirdetések alapján (árkutatás a kiválasztott oldalakon;
         a modell a hasonlók közül választ, és a középérték körül javasol), ha kevés a hasonló, az árbázisból (az
         Automata kereskedés árai: a középérték és az alsó negyed között), végül a modell becslése a fotókról.
@@ -402,7 +415,7 @@ class WorkDesk:
         if self.researcher is not None:
             try:
                 item = self.researcher.research(item.id, lambda detail: progress("árkutatás – " + detail),
-                                                only=item.targets)
+                                                only=item.targets, browser=browser)
             except ItemError:
                 pass                       # ha az árkutatás nem megy, a többi forrás jön
             found = item.research or {}

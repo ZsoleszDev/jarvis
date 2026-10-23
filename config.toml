@@ -39,6 +39,11 @@ request_timeout = 180
 # Induláskor, Szünet után és a Munka menüre váltáskor előre feldolgozza a menü rendszerpromptját és
 # eszközeit: gyorsabb az első válasz
 warm_up = true
+# Ennyi modellhívás mehet egyszerre: így a feltöltés (fotók átnézése, ár) és az automata kereskedés egyszerre
+# kérdezheti a modellt, és a feltöltés mindig elsőbbséget kap. Ehhez az Ollamának is engednie kell: PowerShellben
+# „setx OLLAMA_NUM_PARALLEL 2”, majd az Ollama újraindítása (a kontextus memóriája így kétszer kell). Amíg az
+# Ollama csak egyet enged, egyesével mennek, de a feltöltés és a beszélgetés akkor is előbb jön. 1 = egyesével.
+parallel = 2
 
 [stt]
 # false: csak gépelés (mint a --text kapcsoló): nem tölti be a beszédfelismerőt és a mikrofont, így gyorsabban

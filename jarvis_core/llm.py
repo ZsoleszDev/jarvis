@@ -1,6 +1,7 @@
 """Ollama REST API kliens a helyi nyelvi modellhez."""
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import threading
@@ -99,6 +100,101 @@ def run_interruptible(fn: Callable[[], T], poll: float = 0.1,
     return box["value"]
 
 
+# Ezen a szálon háttérmunka kérdezi a modellt (background_calls): az automata kereskedés, az azonnali figyelő.
+_lane = threading.local()
+
+
+@contextlib.contextmanager
+def background_calls():
+    """Ezen a szálon a modellhívások háttérmunkák (automata kereskedés, azonnali figyelő): elsőbbséget adnak a
+    beszélgetésnek és az eladásnak (ModelGate)."""
+    previous = getattr(_lane, "background", False)
+    _lane.background = True
+    try:
+        yield
+    finally:
+        _lane.background = previous
+
+
+def in_background() -> bool:
+    return bool(getattr(_lane, "background", False))
+
+
+class ModelGate:
+    """Hány modellhívás megy egyszerre az Ollamához (slots: a [llm] parallel és az Ollama OLLAMA_NUM_PARALLEL
+    beállítása közül a kisebb), és ki jön előbb. Az elsőbbségi hívás (beszélgetés, eladás) a következő szabad helyet
+    kapja. A háttérhívás (kereskedés) csak akkor indul, ha nem vár elsőbbségi; ha egynél több hely van, egy mindig
+    szabadon marad az elsőbbséginek (így a feltöltés nem vár a kereskedésre), ha csak egy, akkor a háttér addig nem
+    kérdez, amíg elsőbbségi munka folyik (session: a hívásai közti szünetekben sem, különben minden lépése egy
+    kereskedési hívást várna ki)."""
+
+    def __init__(self, slots: int = 1):
+        self.slots = max(1, int(slots or 1))
+        self._cond = threading.Condition()
+        self.active = 0          # most futó hívások
+        self.background = 0      # ebből háttérhívás
+        self.waiting = 0         # helyre váró elsőbbségi hívások
+        self.sessions = 0        # folyamatban lévő elsőbbségi munkák (beszélgetés, eladás)
+
+    def set_slots(self, slots: int) -> None:
+        with self._cond:
+            self.slots = max(1, int(slots or 1))
+            self._cond.notify_all()
+
+    def _free(self, background: bool) -> bool:
+        if self.active >= self.slots:
+            return False
+        if not background:
+            return True
+        if self.waiting or (self.slots == 1 and self.sessions):
+            return False
+        return self.background < self.slots - 1 or (self.slots == 1 and self.background == 0)
+
+    def background_ok(self) -> bool:
+        """Indulhatna-e most egy háttérhívás (várakozás nélkül): a háttér ebből dönti el, hogy most kérdezze-e a
+        modellt, vagy a hirdetés várjon (és közben nézze tovább az oldalakat)."""
+        with self._cond:
+            return self._free(True)
+
+    @contextlib.contextmanager
+    def session(self):
+        """Elsőbbségi munka folyik (egy beszélgetés vagy egy eladás az összes modellhívásával)."""
+        with self._cond:
+            self.sessions += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self.sessions -= 1
+                self._cond.notify_all()
+
+    @contextlib.contextmanager
+    def hold(self, background: bool | None = None, cancel: threading.Event | None = None):
+        """Egy modellhívás helye: megvárja, hogy sorra kerüljön (Cancelled, ha közben a cancel beáll)."""
+        background = in_background() if background is None else background
+        with self._cond:
+            if not background:
+                self.waiting += 1
+            try:
+                while not self._free(background):
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled()
+                    self._cond.wait(0.2)
+            finally:
+                if not background:
+                    self.waiting -= 1
+            self.active += 1
+            self.background += background
+            self._cond.notify_all()
+        try:
+            yield
+        finally:
+            with self._cond:
+                self.active -= 1
+                self.background -= background
+                self._cond.notify_all()
+
+
 def _with_tag(name: str) -> str:
     return name if ":" in name else name + ":latest"
 
@@ -153,8 +249,10 @@ class OllamaClient:
         # A ténylegesen használt kontextus. Betöltéskor csökkenhet (load_fitted), és utána minden
         # kérésnek ezt kell küldenie, különben az Ollama újratöltené a modellt.
         self.num_ctx = int(cfg.num_ctx or 0)
-        # Ha beáll (Állj gomb), a folyamatban lévő kérés Cancelled kivétellel megszakad.
-        self.stop_event: threading.Event | None = None
+        # Ha beáll (Állj gomb), a folyamatban lévő kérés Cancelled kivétellel megszakad. Egy szálnak saját is lehet
+        # (stopped_by: pl. az eladás előkészítése), a háttérhívásokat (background_calls) pedig nem állítja meg.
+        self._stop_event: threading.Event | None = None
+        self._stops = threading.local()
         # Ha az Ollama modellfolyamata leáll, és újrapróbáljuk: ezen szól a felületnek.
         self.on_runner_restart: Callable[[str], None] | None = None
         # A betöltés eredményének emléke (load_fitted): így legközelebb egyből jó kontextussal tölt be.
@@ -163,6 +261,29 @@ class OllamaClient:
         # Ha beáll (pl. készenlétben), a kérések ennyi ideig tartják a modellt a videókártyán (a beállítás helyett).
         # Függvény is lehet (pl. amíg az automata kereskedés fut, tovább marad betöltve).
         self.keep_alive_override: int | str | Callable[[], int | str] | None = None
+        # Hány modellhívás megy egyszerre, és ki jön előbb (a JarvisApp az Ollama beállításához igazítja).
+        self.gate = ModelGate(int(getattr(cfg, "parallel", 1) or 1))
+
+    @property
+    def stop_event(self) -> threading.Event | None:
+        if in_background():
+            return None                   # a háttérmunkának saját leállítása van; az Állj gomb nem neki szól
+        own = getattr(self._stops, "event", None)
+        return own if own is not None else self._stop_event
+
+    @stop_event.setter
+    def stop_event(self, value: threading.Event | None) -> None:
+        self._stop_event = value
+
+    @contextlib.contextmanager
+    def stopped_by(self, event: threading.Event):
+        """Ezen a szálon ez az esemény állítja meg a modellhívásokat (a közös Állj helyett)."""
+        previous = getattr(self._stops, "event", None)
+        self._stops.event = event
+        try:
+            yield
+        finally:
+            self._stops.event = previous
 
     @property
     def keep_alive(self) -> int | str:
@@ -410,7 +531,8 @@ class OllamaClient:
             payload["tools"] = tools
         if self._think_supported:
             payload["think"] = bool(self.cfg.think)
-        self._chat_request(payload)
+        with self.gate.hold(cancel=self.stop_event):
+            self._chat_request(payload)
 
     # --- beszélgetés --------------------------------------------------------
 
@@ -551,9 +673,10 @@ class OllamaClient:
             if not cancel.is_set() and on_text is not None:
                 on_text(text)
 
-        data = run_interruptible(
-            lambda: self._chat_request(payload, guarded if on_text else None, cancel),
-            cancel=cancel, external=self.stop_event)
+        with self.gate.hold(cancel=self.stop_event):
+            data = run_interruptible(
+                lambda: self._chat_request(payload, guarded if on_text else None, cancel),
+                cancel=cancel, external=self.stop_event)
         self.last_stats = {
             key: data.get(key)
             for key in ("total_duration", "load_duration", "prompt_eval_count",
@@ -580,13 +703,14 @@ class OllamaClient:
         }
         if self._think_supported:
             payload["think"] = False
-        try:
-            data = run_interruptible(lambda: self._chat_request(payload), external=self.stop_event)
-        except OllamaError as exc:
-            if schema is None or "format" not in str(exc).lower():
-                raise
-            payload["format"] = "json"   # régebbi Ollama: séma nélkül, csak "json"
-            data = run_interruptible(lambda: self._chat_request(payload), external=self.stop_event)
+        with self.gate.hold(cancel=self.stop_event):
+            try:
+                data = run_interruptible(lambda: self._chat_request(payload), external=self.stop_event)
+            except OllamaError as exc:
+                if schema is None or "format" not in str(exc).lower():
+                    raise
+                payload["format"] = "json"   # régebbi Ollama: séma nélkül, csak "json"
+                data = run_interruptible(lambda: self._chat_request(payload), external=self.stop_event)
         self.last_stats = {key: data.get(key) for key in ("total_duration", "prompt_eval_count",
                                                           "eval_count", "eval_duration")}
         return parse_json_object((data.get("message") or {}).get("content") or "")
@@ -634,7 +758,8 @@ class OllamaClient:
                 return self._chat_request(payload, collect, cancel)
 
         try:
-            data = run_interruptible(request, cancel=cancel, external=stop_event)
+            with self.gate.hold(cancel=stop_event):
+                data = run_interruptible(request, cancel=cancel, external=stop_event)
         except Cancelled:
             with lock:
                 text = "".join(parts)
@@ -672,7 +797,8 @@ class OllamaClient:
             payload["tools"] = conversation["tools"]
         if self._think_supported:
             payload["think"] = think
-        data = run_interruptible(lambda: self._chat_request(payload), external=self.stop_event)
+        with self.gate.hold(cancel=self.stop_event):
+            data = run_interruptible(lambda: self._chat_request(payload), external=self.stop_event)
         content = (data.get("message") or {}).get("content") or ""
         return content.replace("<think>", "").replace("</think>", "").strip()
 

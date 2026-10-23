@@ -77,6 +77,15 @@
 - Az indulóoldalak súlya csak nő vagy csökken; ha egy oldal hetekig nem hoz semmit, a régi sikerei miatt még sokáig előre kerül.
 - Ami csak a termékcsaládot nevezi meg típus nélkül („PS5 konzol”, „Nintendo Switch”), nem kap kulcsot (a játékkal, kiegészítővel keveredne): ezeket csak a modell nevezi meg, vagy egy keresés méri.
 
+### Párhuzamos munka (eladás-előkészítő szál, modellkapu)
+- A valódi Ollamával `OLLAMA_NUM_PARALLEL=2` mellett nincs kipróbálva: mennyit lassít a két egyszerre futó hívás
+  egymáson, és hogy a kétszeres kontextusmemória mellett a modell elfér-e a kártyákon (különben a Jarvis kisebb
+  kontextussal tölti be, ami a hosszú feltöltéseknél ronthat).
+- Ha az Ollama szolgáltatásként, másik felhasználóként fut, a környezete nem olvasható: ilyenkor a felhasználói
+  beállításból (setx) számol, ami nem biztos, hogy egyezik a futóval.
+- A kereskedés a böngészőt csak a következő lépésénél adja át (egy oldalbetöltés, legfeljebb fél perc); egy épp futó
+  kereskedési modellhívást nem lehet megszakítani, egy hellyel azt a feltöltés kivárja.
+
 ### Nyugodt szívvel (biztonsági értékelés, elkelt árak, fotók)
 - A határok (`deals.SAFE_ROI`, `RISKY_ROI`, `WIDE_SPREAD`, `SLOW_OK_ROI`) becslések, valódi eredményekkel nincsenek
   hangolva; a Vételeim tényleges hasznából később tanulhatna.

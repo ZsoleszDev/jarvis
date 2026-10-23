@@ -42,6 +42,7 @@ class LlmCfg:
     min_ctx: int = 8192
     request_timeout: float = 180.0
     warm_up: bool = True       # induláskor előre feldolgozza a rendszerpromptot (gyorsabb első válasz)
+    parallel: int = 2          # ennyi modellhívás mehet egyszerre (ha az Ollama is engedi: OLLAMA_NUM_PARALLEL)
 
 
 @dataclass

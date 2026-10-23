@@ -38,9 +38,10 @@ from jarvis_core import config, selling  # noqa: E402
 from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError, is_risky, navigates  # noqa: E402
 from jarvis_core.config import load_config  # noqa: E402
+from jarvis_core.feeds import FeedError  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, parse_json_object  # noqa: E402
 from jarvis_core.selling import (DESCRIPTION_FOOTERS, FAILED, NOT_POSTED, POSTED, Item, ItemError,  # noqa: E402
-                                 ItemStore, ListingExtractor,
+                                 ItemStore, ListingExtractor, NeedsBrowser,
                                  Platform, PriceResearcher, compose_description, missing_needs, needs_for,
                                  parse_price, price_verdict, question_for, round_price, tidy_title)
 from jarvis_core.textutil import clean_for_speech, hu_amounts, parse_hu_amount  # noqa: E402
@@ -544,6 +545,60 @@ class PriceResearchTests(unittest.TestCase):
         self.assertEqual((r["min"], r["median"], r["max"], r["suggested"]), (3000, 4000, 6000, 4500))
         self.assertIn("4 500 Ft", research_summary(r))
 
+    def test_jofogas_and_hardverapro_without_the_browser(self):
+        """A Jófogás és a Hardverapró találati oldala böngésző nélkül jön (a gyors letöltővel): az eladás-előkészítő
+        szál így böngésző nélkül is megnézi az árakat; ha valamelyik oldalhoz böngésző kellene, szól (NeedsBrowser),
+        és az ágens-szálon a böngészővel folytatódik."""
+        rows = [{"text": "Zara női blézer M", "price": 3000, "url": "https://www.jofogas.hu/x_1.htm"},
+                {"text": "Zara blézer, fekete", "price": 4000, "url": "https://www.jofogas.hu/x_2.htm"},
+                {"text": "Zara blézer S", "price": 5000, "url": "https://www.jofogas.hu/x_3.htm"}]
+
+        class FakeFetcher:
+            def __init__(self):
+                self.urls: list[str] = []
+                self.fail = False
+
+            def handles(self, platform):
+                return platform in ("jofogas", "hardverapro")
+
+            def usable(self, platform):
+                return True
+
+            def listings(self, url, platform, check=lambda: None):
+                self.urls.append(url)
+                if self.fail:
+                    raise FeedError("Az oldal robot-ellenőrzést kér.", "blocked")
+                return rows
+
+        class FakeBrowser:
+            def __init__(self):
+                self.urls: list[str] = []
+
+            def extract_listings(self, url):
+                self.urls.append(url)
+                return rows
+
+        fetcher, browser = FakeFetcher(), FakeBrowser()
+        item = self.store.create(price=5000)
+        self.store.update(item.id, title="Zara fekete blézer, M", brand="Zara", size="M", search_query="Zara blézer")
+        sites = [selling.PLATFORMS["vinted"], selling.PLATFORMS["jofogas"]]
+        researcher = PriceResearcher(self.llm, self.store, lambda: browser, sites, fetcher=fetcher)
+        self.assertFalse(researcher.needs_browser(["jofogas"]))
+        self.assertTrue(researcher.needs_browser(["vinted", "jofogas"]))
+        judgement = reply(json.dumps({"similar": [1, 2, 3], "suggested_price": 4000, "reason": "Ennyiért mennek."}))
+        self.fake.chat_script = [judgement]
+        found = researcher.research(item.id, only=["jofogas"], browser=False).research
+        self.assertEqual(([s["price"] for s in found["similar"]], found["suggested"]), ([3000, 4000, 5000], 4000))
+        self.assertEqual((len(fetcher.urls), browser.urls), (1, []))
+        with self.assertRaises(NeedsBrowser):
+            researcher.research(item.id, only=["vinted", "jofogas"], browser=False)
+        fetcher.fail = True
+        with self.assertRaises(NeedsBrowser):
+            researcher.research(item.id, only=["jofogas"], browser=False)
+        self.fake.chat_script = [judgement]
+        researcher.research(item.id, only=["jofogas"])
+        self.assertEqual(len(browser.urls), 1, "ha a letöltés nem megy, az ágens-szálon a böngésző olvassa")
+
     def test_only_on_the_chosen_sites(self):
         _, browser = self.research({}, None, only=["jofogas"])
         self.assertEqual(len(browser.urls), 1)
@@ -909,7 +964,7 @@ class WorkDeskTests(unittest.TestCase):
             def __init__(self, store, prices):
                 self.store, self.prices, self.only = store, prices, None
 
-            def research(self, item_id, progress=None, only=None):
+            def research(self, item_id, progress=None, only=None, browser=True):
                 self.only = only
                 similar = [{"site": "Vinted", "text": "Nike Air Max 90", "price": p, "url": ""} for p in self.prices]
                 found = {"at": time.time(), "similar": similar, "count": len(similar), "errors": []}
@@ -947,7 +1002,7 @@ class WorkDeskTests(unittest.TestCase):
             def __init__(self, store):
                 self.store, self.queries = store, []
 
-            def research(self, item_id, progress=None, only=None):
+            def research(self, item_id, progress=None, only=None, browser=True):
                 self.queries.append(PriceResearcher.query_for(self, self.store.get(item_id)))
                 return self.store.get(item_id)
 
@@ -999,7 +1054,7 @@ class WorkDeskTests(unittest.TestCase):
                 self.calls = 0
                 self.only = None
 
-            def research(self, item_id, progress=None, only=None):
+            def research(self, item_id, progress=None, only=None, browser=True):
                 self.calls += 1
                 self.only = only
                 similar = [{"site": "Vinted", "text": "Zara blézer", "price": p, "url": ""} for p in (4000, 4500, 5000)]
@@ -1606,6 +1661,70 @@ class SellFlowTests(unittest.TestCase):
         self.assertEqual((item.reviewed, item.pending), (True, {}))
         self.assertEqual(item.platforms["vinted"]["note"], "Be kell jelentkezned a Vintedre, utána az Újra gombbal folytatom.",
                          "a jóváhagyás után feltöltésbe kezdett")
+
+    def start_prep(self) -> None:
+        """Az eladás-előkészítő szál, az ágens-szál nélkül: amit böngészőnek kell folytatnia, az a sorban marad
+        (mintha az ágens-szál épp kereskedne), és a teszt adja tovább."""
+        app = self.app
+        app._prep = threading.Thread(target=app._prep_loop, name="jarvis-eladas", daemon=True)
+        app._prep.start()
+        self.addCleanup(app._prep_requests.put, None)
+
+    def wait_for(self, check, timeout: float = 20.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if check():
+                return
+            time.sleep(0.05)
+        self.fail("nem történt meg időben")
+
+    def test_pro_photos_are_read_while_trading_runs_and_the_upload_jumps_the_queue(self):
+        """Kereskedés közben (az ágens-szál foglalt) a Pro fotókat az eladás-előkészítő szál rögtön átnézi, és jön a
+        Nézd át; a Mehet után a feltöltés az ágens-szál sorába kerül, és megszakítja a futó kereskedést."""
+        self.start_prep()
+        app = self.app
+        app._outstanding, app._current_kind = 1, "job"      # az ágens-szál épp kereskedik
+        item = self.store.add_photo(self.store.create(targets=["vinted"], pro=True).id, jpeg())
+        self.fake.chat_script = [seen(**{**{k: v for k, v in SHIRT.items() if k in selling.PRO_FIELDS + ("kind",)},
+                                         "price_estimate": 2000})]
+        talked = app.last_activity
+        with mock.patch.object(app.work, "researcher", None):
+            app.submit_work("sell", [item.id])
+            self.wait_for(lambda: self.store.get(item.id).status == "átnézésre vár")
+        self.assertTrue(app.requests.empty(), "a fotókhoz és az árhoz nem kellett az ágens-szál")
+        self.assertFalse(app.preempt.is_set(), "a kereskedést ehhez nem kellett megszakítani")
+        self.assertTrue([n for n in app.notices.list() if n["title"].startswith("Nézd át:")])
+        app.submit_work("approve", [item.id])
+        kind, payload = app.requests.get(timeout=20)
+        self.assertEqual((kind, payload["action"], payload["ids"]), ("work", "upload", [item.id]))
+        self.assertTrue(app.preempt.is_set(), "a futó kereskedés a következő lépésénél átadja a böngészőt")
+        item = self.store.get(item.id)
+        self.assertEqual((item.reviewed, item.busy), (True, "Feltöltésre vár (a kereskedés átadja a böngészőt)…"))
+        self.assertEqual(app.last_activity, talked, "a feltöltés nem beszélgetés: utána hamar jöhet a kereskedés")
+        calls = len(self.fake.chat_bodies())
+        self.fake.chat_script = [reply("Be kell jelentkezned a Vintedre, utána az Újra gombbal folytatom.")]
+        app.run_work(payload)                               # az ágens-szál: a feltöltés
+        item = self.store.get(item.id)
+        self.assertEqual(item.platforms["vinted"]["note"], "Be kell jelentkezned a Vintedre, utána az Újra gombbal folytatom.")
+        self.assertEqual((len(self.fake.chat_bodies()), item.busy), (calls + 1, ""), "a fotókat nem nézte át újra")
+
+    def test_a_price_check_in_the_browser_goes_on_on_the_agent_thread(self):
+        """A fotók átnézése az előkészítő szálon megy; a Vinted-árkutatáshoz böngésző kell, az az ágens-szálon
+        folytatódik (elsőbbséggel), és ott a fotókat már nem nézi át újra."""
+        self.start_prep()
+        item = self.store.add_photo(self.store.create(targets=["vinted"], pro=True).id, jpeg())
+        self.fake.chat_script = [seen(**{**{k: v for k, v in SHIRT.items() if k in selling.PRO_FIELDS + ("kind",)},
+                                         "price_estimate": 2000})]
+        self.app.submit_work("sell", [item.id])
+        kind, payload = self.app.requests.get(timeout=20)
+        self.assertEqual((kind, payload["action"]), ("work", "sell"))
+        self.assertEqual(self.store.get(item.id).busy, "Árkutatásra vár (a böngészőben)…")
+        self.assertEqual(len(self.fake.chat_bodies()), 1, "a fotókat átnézte")
+        with mock.patch.object(self.app.work, "researcher", None):
+            self.app.run_work(payload)
+        item = self.store.get(item.id)
+        self.assertEqual((item.status, item.price, item.busy), ("átnézésre vár", 2000, ""))
+        self.assertEqual(len(self.fake.chat_bodies()), 1, "az ágens-szálon nem nézte át újra a fotókat")
 
     def test_price_check_then_your_decision(self):
         item = self.new_item(["vinted"], prompt="Zara blézer, M, nagyon jó, 9000 Ft", research_wanted=True)

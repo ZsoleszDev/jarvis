@@ -20,6 +20,7 @@ from .memory import GB, MemoryReport, OllamaProcess, gb, process_env_note
 
 CACHE_SETTING = "LLAMA_ARG_CACHE_RAM"
 CHECKPOINT_SETTING = "LLAMA_ARG_CTX_CHECKPOINTS"
+PARALLEL_SETTING = "OLLAMA_NUM_PARALLEL"   # hány kérést dolgoz fel egyszerre (alapból egyet)
 READ_LIMIT = 512 * 1024      # a napló végéből legfeljebb ennyit olvasunk
 
 # Az okok a valószínűség sorrendjében; mindegyiknél az utolsó illeszkedő sor számít.
@@ -105,6 +106,29 @@ def user_setting(name: str) -> str | None:
         except OSError:
             pass
     return os.environ.get(name)
+
+
+def _count(value: str | None) -> int | None:
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def server_parallel(proc: OllamaProcess, user: str | None) -> tuple[int, str]:
+    """Hány kérést dolgoz fel egyszerre a futó Ollama (OLLAMA_NUM_PARALLEL; alapból egyet): a környezetéből, ha
+    kiolvasható, különben a felhasználói beállításból (setx). A második érték egy tanács (üres, ha nincs mit
+    tenni): ha a beállítás megvan, de a futó Ollama még előtte indult, azt mondja meg."""
+    wanted = _count(user)
+    if proc.found and proc.readable:
+        running = _count(proc.env.get(PARALLEL_SETTING)) or 1
+        if wanted and wanted > running:
+            return running, (f"Az {PARALLEL_SETTING} be van állítva ({wanted}), de a futó Ollama még előtte indult: "
+                             "lépj ki az Ollamából a tálcán (jobb klikk az ikonjára), indítsd újra a Start menüből, "
+                             "és utána a Jarvist is.")
+        return running, ""
+    return wanted or 1, ""
 
 
 def explain(cause: Cause | None, path: Path | None, user: dict[str, str | None],

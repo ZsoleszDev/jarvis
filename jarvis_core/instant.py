@@ -35,6 +35,7 @@ from typing import Any, Callable
 from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, deal_action, excluded, matches_query, parse_words,
                     safety_text)
 from .feeds import FAST_SITES, FeedError
+from .llm import background_calls
 from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price
 from .textutil import fold
 
@@ -266,6 +267,10 @@ class InstantWatch:
             pass
 
     def _loop(self) -> None:
+        with background_calls():       # a modellhívásai háttérhívások: a feltöltés és a beszélgetés előbb jön
+            self._watch()
+
+    def _watch(self) -> None:
         while not self._stop.wait(TICK):
             try:
                 self.tick()

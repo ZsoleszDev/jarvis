@@ -29,7 +29,8 @@ from .config import Config, adopt_legacy_data, app_data, resolve_path
 from .creative import CreativeDesk, StoryError
 from .llm import FULL_GPU, Cancelled, OllamaClient, OllamaError, gpu_share, is_runner_crash
 from .notices import NoticeBoard
-from .ollama_log import CACHE_SETTING, CHECKPOINT_SETTING, ServerLog, explain, find_cause, pagefile_tip, user_setting
+from .ollama_log import (CACHE_SETTING, CHECKPOINT_SETTING, PARALLEL_SETTING, ServerLog, explain, find_cause,
+                         pagefile_tip, server_parallel, user_setting)
 from .recorder import Recorder
 from .browser import BrowserError
 from .scheduler import Hooks, Job, Scheduler, standby_ok, within_hours
@@ -45,9 +46,16 @@ from .work import (DELISTED_NOTE, PRICE_CHOICES, WORK_ONLY_TOOLS, WorkDesk, inte
 
 MODES = ("chat", "work")
 # Az Adás/Vétel feladatai, amik egy tárgyon dolgoznak (a kártyán látszik, hogy épp mi történik)
-BUSY_ACTIONS = {"sell", "reply", "price", "post", "research", "delist", "sold", "approve"}
+BUSY_ACTIONS = {"sell", "reply", "price", "post", "research", "delist", "sold", "approve", "upload"}
 # A felhasználó kérései (a háttérmunka és a belső lépések nem ilyenek): ezek szakítják meg a háttérmunkát.
 INTERACTIVE = {"text", "voice", "audio", "work", "creative"}
+# Az eladás előkészítése (a fotók átnézése, az adatok, a visszakérdezés, az ár) böngésző nélkül megy: ezek a saját
+# szálukon rögtön indulnak, a kereskedéssel párhuzamosan; ami utána böngészőt kér (árkutatás egy böngészős oldalon,
+# a feltöltés), az elsőbbséggel kerül az ágens-szálra (a futó kereskedés a következő lépésénél átadja).
+PREP_ACTIONS = {"sell", "approve", "reply", "price"}
+# Egy feltöltés vagy más eladási lépés után ennyi másodperc múlva folytatódhat a kereskedés (a beszélgetés után a
+# [scheduler] quiet_minutes); ha közben újabb feltöltés jön, a kereskedés úgyis átadja a böngészőt.
+AFTER_WORK = 60.0
 
 VOICE_EXIT_PHRASES = {"viszlat jarvis", "kilepes", "kapcsolj ki", "kapcsold ki magad", "leallas"}
 # Szünet hanggal is (folytatni csak a gombbal vagy a telefonról lehet, mert a hangfelismerés is leáll)
@@ -287,14 +295,33 @@ class JarvisApp:
         self._dossiers_made: set[tuple[str, str, str, str]] = set()
         # A háttérmunka csak akkor indul, ha pár perce nem beszélgettetek (time.time() szerint).
         self.last_activity = time.time()
+        self.last_work = 0.0                             # az utolsó eladási lépés vége (AFTER_WORK)
+        self.last_prep = 0.0                             # az utolsó eladás-előkészítés vége (a készenléthez)
         self.preempt = threading.Event()                 # a felhasználó közbeszólt: a háttérmunka álljon meg
+        # Az eladás előkészítése a saját szálán (PREP_ACTIONS): a sor, a szál, és hogy épp melyik tárgyon dolgozik.
+        self._prep_requests: queue.Queue = queue.Queue()
+        self._prep: threading.Thread | None = None
+        self._prep_stop = threading.Event()              # az Állj gomb ezt is megállítja
+        self.prepping = ""
+        self._handoffs: dict[str, dict[str, Any]] = {}  # tárgy → amit az előkészítés után az ágens-szál folytat
         self._current_kind = ""                          # amin az ágens-szál épp dolgozik
+        self._own_silent = threading.local()            # az eladás-előkészítő szál saját kérése (_silent)
         self._silent = False                             # a telefonról jött kérés: a gépen ne szóljon
         self._done_events: dict[str, threading.Event] = {}
         self._done_lock = threading.Lock()              # a telefonos szálak is hozzányúlnak
         self.notices: NoticeBoard | None = None
         self.watches: WatchList | None = None
         self.scheduler: Scheduler | None = None
+
+    @property
+    def _silent(self) -> bool:
+        """A mostani kérés a telefonról jött: a gépen ne szóljon. Az eladás-előkészítő szálon a saját kéréséé."""
+        own = getattr(self._own_silent, "value", None)
+        return self._agent_silent if own is None else own
+
+    @_silent.setter
+    def _silent(self, value: bool) -> None:
+        self._agent_silent = value
 
     @property
     def voice_ready(self) -> bool:
@@ -363,6 +390,27 @@ class JarvisApp:
         self._check_pagefile()
         return True
 
+    def _check_parallel(self) -> None:
+        """Hány modellhívás mehet egyszerre: a [llm] parallel, de legfeljebb amennyit a futó Ollama bír
+        (OLLAMA_NUM_PARALLEL, alapból egy). Ha többet szeretnél, mint amennyit az Ollama enged, megmondja, hogyan."""
+        wanted = max(1, int(self.cfg.llm.parallel or 1))
+        try:
+            proc = memory.ollama_process()
+        except Exception:  # noqa: BLE001 - csak tanács: ha nem derül ki, az Ollama alapbeállításával számol
+            proc = memory.OllamaProcess()
+        server, note = server_parallel(proc, user_setting(PARALLEL_SETTING))
+        slots = min(wanted, server)
+        self.llm.gate.set_slots(slots)
+        if slots > 1:
+            self.ui.info(f"Egyszerre {slots} modellhívás mehet: a feltöltés és az automata kereskedés párhuzamosan "
+                         "kérdezheti a modellt (a feltöltés elsőbbséget kap).")
+        elif wanted > 1:
+            self.ui.info(note or (
+                "Egyszerre egy modellhívás megy, mert az Ollama így van beállítva; a feltöltés és a beszélgetés így is "
+                "előbb jön a kereskedésnél. Hogy egyszerre kettő menjen: PowerShellben "
+                f"„setx {PARALLEL_SETTING} 2”, majd lépj ki az Ollamából a tálcán, indítsd újra, és utána a Jarvist is "
+                "(a kontextus memóriája így kétszer kell; ha nem fér el, a Jarvis kisebb kontextussal tölti be)."))
+
     def _check_pagefile(self) -> None:
         """Windows: ha nincs lapozófájl, vagy kicsi, a nagy modell, a böngésző és a többi program mellett könnyen
         elfogy a memória (a modell és a böngésző leáll). Ezt előre megmondjuk, egyszer."""
@@ -397,6 +445,7 @@ class JarvisApp:
         adopt_legacy_data(self.cfg.browser.profile_dir, "browser_profile", self.ui.info)
         if self.cfg.work.enabled:
             adopt_legacy_data(self.cfg.work.dir, "munka", self.ui.info)
+        self._check_parallel()
         self.toolbox = Toolbox(self.cfg, notify=self.notify, confirm=self.confirm, llm=self.llm)
         for folder in self.toolbox.missing_folders:
             self.ui.warn(f"Nem létező mappa a beállításokban (kihagyva): {folder}")
@@ -490,7 +539,7 @@ class JarvisApp:
                                                     max_results=10))
         self._register_watch_tools()
         hooks = Hooks(paused=lambda: self.paused, busy=lambda: self.busy,
-                      last_activity=lambda: self.last_activity, submit=self.submit_job,
+                      last_activity=self._quiet_since, submit=self.submit_job,
                       preempted=self.preempt.is_set, notify=self.notify_event,
                       standby=lambda: self.paused and self.standby)
         self.scheduler = Scheduler(self.cfg.scheduler, base / "hatter.json", hooks)
@@ -521,14 +570,16 @@ class JarvisApp:
             # készenlét nem, és a beszélgetésre sem vár (csak a felolvasás vár, ha épp dolgozol vele).
             instant.notify = self._quick_notify
             instant.allowed = self._instant_allowed
-            instant.model_ok = lambda: not self.busy   # amíg dolgozol a Jarvisszal, a modellre váró hirdetés vár
+            # amíg a modellkapu nem enged háttérhívást (pl. egy feltöltés vagy beszélgetés kérdezi a modellt, és csak
+            # egy hívás mehet egyszerre), a modellre váró hirdetés vár, és a figyelő közben nézi tovább az oldalakat
+            instant.model_ok = self.llm.gate.background_ok
             instant.start()
         trading = self.work.deals if self.work is not None else None
         if trading is not None:
             trading.journal.on_add = lambda text: self.ui.info(f"Kereskedés: {text}")   # a konzolon is lásd, mit csinál
             # Párhuzamos böngészés: a Hardverapró és a Jófogás böngésző nélkül, a saját szálán, amíg a böngésző a
             # Vintedet és a Vaterát nézi (a Szünet ezt is megállítja, a készenlét nem).
-            trading.start_fast_lane(self._instant_allowed, lambda: not self.busy, self._quick_notify)
+            trading.start_fast_lane(self._instant_allowed, self.llm.gate.background_ok, self._quick_notify)
         deals = self.work.deals if self.work is not None else None
         if deals is not None and deals.browser is not None:
             # Olcsó hirdetések keresése: modell nélkül (csak a kevés jelöltre egy rövid kérdés), a böngésző kell hozzá.
@@ -682,6 +733,12 @@ class JarvisApp:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _quiet_since(self) -> float:
+        """Mióta csendes a Jarvis a háttérmunkának: a beszélgetés után [scheduler] quiet_minutes kell, egy eladási
+        lépés (feltöltés, Pro adatlap) után csak AFTER_WORK másodperc; utána a kereskedés folytatódhat."""
+        quiet = float(self.cfg.scheduler.quiet_minutes or 0) * 60
+        return max(self.last_activity, self.last_work - max(0.0, quiet - AFTER_WORK))
+
     def _standby_keep_alive(self) -> str:
         """Készenlétben ennyi ideig marad betöltve a modell egy kérdés után: amíg az automata kereskedés fut, tovább."""
         trading = self.work.deals if self.work is not None else None
@@ -831,6 +888,9 @@ class JarvisApp:
     def start_agent(self) -> None:
         self._agent = threading.Thread(target=self._agent_loop, name="jarvis-agent", daemon=True)
         self._agent.start()
+        if self.work is not None:
+            self._prep = threading.Thread(target=self._prep_loop, name="jarvis-eladas", daemon=True)
+            self._prep.start()
         self._set_phase(self._rest_phase())
         if self.wake is not None:
             self.wake.start()
@@ -850,8 +910,9 @@ class JarvisApp:
         """Készenléti indulásnál: ha egy ideje nem használod, visszaáll készenlétbe (a modellek leállnak)."""
         while not self._closing.wait(self.STANDBY_CHECK_SECONDS):
             idle = float(self.cfg.standby.idle_minutes or 0) * 60
-            if (idle > 0 and not self.paused and not self.busy
-                    and time.time() - self.last_activity >= idle):
+            last = max(self.last_activity, self.last_work, self.last_prep)
+            if (idle > 0 and not self.paused and not self.busy and not self.prepping
+                    and self._prep_requests.empty() and time.time() - last >= idle):
                 self._submit(("standby", None))
 
     def _warm_up(self, mode: str | None = None) -> None:
@@ -907,6 +968,8 @@ class JarvisApp:
             self.speech.interrupt()
         if self.wake is not None:
             self.wake.stop()
+        if self._prep is not None:
+            self._prep_requests.put(None)
         if self._agent is not None and self._agent.is_alive():
             self.requests.put(("quit", None))
             self._agent.join(15)
@@ -923,7 +986,8 @@ class JarvisApp:
 
     def _submit(self, item: tuple[str, Any]) -> None:
         if item[0] in INTERACTIVE:
-            self.last_activity = time.time()
+            if item[0] != "work":       # az eladási lépés nem beszélgetés: utána hamar folytatódhat a kereskedés
+                self.last_activity = time.time()
             self.preempt.set()          # ha épp háttérmunka fut, a következő lépésnél abbahagyja
         with self._outstanding_lock:
             self._outstanding += 1
@@ -990,9 +1054,16 @@ class JarvisApp:
     def submit_work(self, action: str, ids: list[str] | None = None, platform: str = "", **extra: Any) -> None:
         """Az Adás/Vétel gombjai (eladás, válasz, árdöntés, újra, bejelentkezés): az ágens-szálon futnak."""
         ids = [str(i) for i in ids or []]
+        payload = {"action": action, "ids": ids, "platform": platform, **extra}
+        if action in PREP_ACTIONS and self._prep is not None and self.work is not None and not self.paused:
+            # a saját szálán, rögtön (a kereskedés közben is); a böngészős része utána elsőbbséggel az ágens-szálon
+            if ids and (self.prepping or not self._prep_requests.empty()):
+                self.work.store.set_busy(ids[0], "Sorra vár…")
+            self._prep_requests.put(payload)
+            return
         if self.work is not None and ids and action in BUSY_ACTIONS and self.busy:
             self.work.store.set_busy(ids[0], "Sorra vár…")   # amíg Jarvis mással dolgozik
-        self._submit(("work", {"action": action, "ids": ids, "platform": platform, **extra}))
+        self._submit(("work", payload))
 
     def submit_creative(self, action: str, story_id: str) -> None:
         """A Kreatív menü modellmunkája (írás, másik változat, ötletből történet, összefoglalás): az
@@ -1023,6 +1094,16 @@ class JarvisApp:
 
     def _drop_queued(self) -> None:
         """A sorban várakozó kéréseket eldobja (a Szünet előtt): a már futót a stop_event állítja le."""
+        while True:
+            try:
+                waiting = self._prep_requests.get_nowait()
+            except queue.Empty:
+                break
+            if waiting is None:
+                self._prep_requests.put(None)
+                break
+            for item_id in waiting.get("ids") or []:
+                self._clear_busy(item_id)
         dropped = []
         while True:
             try:
@@ -1042,12 +1123,16 @@ class JarvisApp:
                 self.creative.finished(str((payload or {}).get("id") or ""))
             if kind == "work" and self.work is not None:
                 for item_id in (payload or {}).get("ids") or []:
-                    try:
-                        self.work.store.set_busy(item_id, "")
-                    except ItemError:
-                        pass
+                    self._clear_busy(item_id)
             if isinstance(payload, dict):
                 self._finish_request(payload.get("request_id"))
+
+    def _clear_busy(self, item_id: str) -> None:
+        if self.work is not None:
+            try:
+                self.work.store.set_busy(item_id, "")
+            except ItemError:
+                pass
 
     def set_mode(self, mode: str) -> None:
         """Melyik menü van elöl: a hangos kérések (Hey Jarvis) oda mennek. Ha a Munka menüre váltasz, és Jarvis
@@ -1068,7 +1153,13 @@ class JarvisApp:
 
     @contextlib.contextmanager
     def _channel(self, mode: str):
-        """A felület tudja, melyik menü naplójába kerüljenek az üzenetek."""
+        """A felület tudja, melyik menü naplójába kerüljenek az üzenetek. Az eladás-előkészítő szálon csak a saját
+        üzenetei mennek oda (a felület szálanként is tudja: own_channel), az ágens-szál beszélgetése marad, ahol volt."""
+        own = getattr(type(self.ui), "own_channel", None)
+        if threading.current_thread() is self._prep and callable(own):
+            with own(self.ui, mode):
+                yield
+            return
         previous = getattr(self.ui, "channel", None)
         if isinstance(previous, str):
             self.ui.channel = mode
@@ -1081,6 +1172,7 @@ class JarvisApp:
     def stop_current(self) -> None:
         """Állj: megszakítja a felvételt, a modellt, a következő lépést és a beszédet."""
         self.stop_event.set()
+        self._prep_stop.set()
         if self.speech:
             self.speech.interrupt()
 
@@ -1122,6 +1214,8 @@ class JarvisApp:
                 channel = contextlib.ExitStack()
                 if kind == "creative":
                     channel.enter_context(self._channel("creative"))
+                if kind in INTERACTIVE:   # a kérésed modellhívásai előbb jönnek a kereskedésnél (llm.ModelGate)
+                    channel.enter_context(self.llm.gate.session())
                 try:
                     if self.paused and self.standby and kind in INTERACTIVE and not self._asks_pause(kind, payload):
                         self._wake_up(self._request_mode(kind, payload))   # készenlétből felébreszti (10–20 mp)
@@ -1130,6 +1224,9 @@ class JarvisApp:
                         self._do_pause()           # készenlétből Szünet: felébredés nélkül
                     elif self.paused and kind in INTERACTIVE:
                         self.ui.notice(WAKE_FAILED if self.standby else PAUSED_REPLY)
+                        if kind == "work":    # pl. az előkészítés után átadott feltöltés: a kártyán ne várjon tovább
+                            for item_id in payload.get("ids") or []:
+                                self._clear_busy(item_id)
                     elif self.paused and kind == "job" and not self._light_job(payload):
                         if self.scheduler is not None:
                             self.scheduler.dropped()
@@ -1183,7 +1280,9 @@ class JarvisApp:
                     if kind == "creative" and self.creative is not None:
                         self.creative.finished(str(payload.get("id") or ""))
                     channel.close()
-                    if kind in INTERACTIVE:
+                    if kind == "work":
+                        self.last_work = time.time()       # utána AFTER_WORK múlva folytatódhat a kereskedés
+                    elif kind in INTERACTIVE:
                         self.last_activity = time.time()   # a csendes időszak a kérés végétől számít
                     self._set_phase(self._rest_phase())
                     if hasattr(self.ui, "request_id"):
@@ -1519,8 +1618,10 @@ class JarvisApp:
                 return
         self.answer(text, via=via, mode=mode)
 
-    def run_work(self, payload: dict[str, Any]) -> None:
-        """Az Adás/Vétel feladatai az ágens-szálon: eladás, válasz, árdöntés, újra, árkutatás, belépés."""
+    def run_work(self, payload: dict[str, Any], browser: bool = True) -> None:
+        """Az Adás/Vétel feladatai az ágens-szálon: eladás, válasz, árdöntés, újra, árkutatás, belépés.
+        browser=False: az eladás-előkészítő szálon (PREP_ACTIONS): a böngészős részt (árkutatás egy böngészős oldalon,
+        feltöltés) nem itt csinálja, hanem az ágens-szálra adja (_handoffs, _prep_loop)."""
         if self.work is None or self.work_assistant is None:
             self.ui.error("A Munka menü nincs bekapcsolva.")
             return
@@ -1530,19 +1631,22 @@ class JarvisApp:
         with self._channel("work"):
             try:
                 if action == "sell":
-                    self._sell(item_id)
+                    self._sell(item_id, browser)
                 elif action == "approve":      # Pro: átnézted az adatokat (Nézd át), mehet a feltöltés
                     self.work.approve(item_id)
-                    self._sell(item_id)
+                    self._sell(item_id, browser)
+                elif action == "upload":       # az előkészítés kész (eladás-előkészítő szál): a feltöltés jön
+                    if not self.work.store.get(item_id).pending:
+                        self._post_all(item_id)
                 elif action == "reply":
-                    self._reply(item_id, str(payload.get("text") or ""), str(payload.get("via") or "text"))
+                    self._reply(item_id, str(payload.get("text") or ""), str(payload.get("via") or "text"), browser)
                 elif action == "price":
                     choice = payload.get("choice")
                     if choice not in PRICE_CHOICES:
                         choice = parse_price(choice) or "keep"
                     self.work.decide_price(item_id, choice)
                     if not self._price_question(item_id):
-                        self._sell(item_id)
+                        self._sell(item_id, browser)
                 elif action == "cancel":
                     self.work.store.set_pending(item_id, None)
                     self.ui.info("Rendben, ezt most hagyom.")
@@ -1610,8 +1714,10 @@ class JarvisApp:
             self._set_phase("working", f"{name}: {detail}" if name else detail)
         return show
 
-    def _sell(self, item_id: str) -> None:
-        """Egy eladás: adatok a leírásból → visszakérdezés vagy árdöntés → feltöltés oldalanként."""
+    def _sell(self, item_id: str, browser: bool = True) -> None:
+        """Egy eladás: adatok a leírásból → visszakérdezés vagy árdöntés → feltöltés oldalanként. browser=False (az
+        eladás-előkészítő szálon): ha a következő lépéshez böngésző kell (árkutatás egy böngészős oldalon, vagy már a
+        feltöltés), azt az ágens-szál folytatja (_handoffs)."""
         assert self.work is not None
         if not self.work.browser_ready:
             raise ItemError("A feltöltéshez Jarvis saját böngészője kell (pip install playwright, "
@@ -1619,9 +1725,13 @@ class JarvisApp:
         store = self.work.store
         store.set_busy(item_id, "Értelmezem a leírást…")
         try:
-            step = self.work.prepare(item_id, self._progress(item_id))
+            step = self.work.prepare(item_id, self._progress(item_id) if browser else self._card_progress(item_id),
+                                     browser=browser)
         finally:
             store.set_busy(item_id, "")
+        if step.kind == "browser":     # a böngésző kell (árkutatás): az ágens-szálon folytatja, elsőbbséggel
+            self._handoffs[item_id] = {"action": "sell", "ids": [item_id]}
+            return
         if step.kind in ("ask", "price"):
             self.ui.notice(step.text)
             self.say(step.text)
@@ -1639,9 +1749,58 @@ class JarvisApp:
             self.ui.notice(step.text)
         if step.note:      # a fotókról: csak szól, a feltöltés megy tovább
             self.ui.notice(step.note)
+        if not browser:
+            self._handoffs[item_id] = {"action": "upload", "ids": [item_id]}
+            return
         self._post_all(item_id)
 
-    def _reply(self, item_id: str, text: str, via: str) -> None:
+    def _card_progress(self, item_id: str) -> Callable[[str], None]:
+        """Az eladás-előkészítő szál haladása a tárgy kártyáján (az állapotsor az ágens-szálé: a kereskedésé)."""
+        def show(detail: str) -> None:
+            text = detail[:1].upper() + detail[1:]
+            self.work.store.set_busy(item_id, text if text.endswith("…") else text + "…")
+        return show
+
+    def _prep_loop(self) -> None:
+        """Az eladás-előkészítő szál: a PREP_ACTIONS kérések egymás után, a kereskedéssel párhuzamosan (a modellhívásai
+        elsőbbségiek: llm.ModelGate). Amit utána böngésző kell, az ágens-szál sorába kerül (az a futó kereskedést
+        megszakítja), a kártyán közben látszik, hogy a böngészőre vár."""
+        assert self.work is not None
+        while True:
+            payload = self._prep_requests.get()
+            if payload is None:
+                return
+            ids = list(payload.get("ids") or [])
+            item_id = ids[0] if ids else ""
+            if self.paused:               # közben Szünet vagy készenlét jött: az ágens-szál intézi (felébred, ha lehet)
+                self._submit(("work", payload))
+                continue
+            self.prepping = item_id or "?"
+            self._prep_stop.clear()
+            self._own_silent.value = bool(payload.get("silent"))
+            try:
+                with self.llm.gate.session(), self.llm.stopped_by(self._prep_stop):
+                    self.run_work(payload, browser=False)
+            except Cancelled:
+                with self._channel("work"):
+                    self.ui.info("Megszakítva.")
+            except Exception as exc:  # noqa: BLE001 - egy hiba ne állítsa le az előkészítést
+                with self._channel("work"):
+                    self.ui.error(f"Váratlan hiba: {type(exc).__name__}: {exc}")
+                traceback.print_exc()
+            finally:
+                self.prepping = ""
+                self.last_prep = time.time()
+                self._own_silent.value = None
+            handoff = self._handoffs.pop(item_id, None)
+            if handoff is not None and self.work is not None:
+                self.work.store.set_busy(item_id, "Feltöltésre vár (a kereskedés átadja a böngészőt)…"
+                                         if handoff["action"] == "upload" else "Árkutatásra vár (a böngészőben)…")
+                if payload.get("silent"):
+                    handoff["silent"] = True     # a telefonról indítottad: a gép a feltöltésnél se beszéljen
+                self._submit(("work", handoff))
+
+    def _reply(self, item_id: str, text: str, via: str, browser: bool = True) -> None:
         """Válasz Jarvis kérdésére: kiegészítő adat vagy árdöntés."""
         assert self.work is not None
         item = self.work.store.get(item_id)
@@ -1666,7 +1825,7 @@ class JarvisApp:
                 return
         else:
             self.work.answer(item_id, text)
-        self._sell(item_id)
+        self._sell(item_id, browser)
 
     def _price_question(self, item_id: str) -> bool:
         """Ha az árdöntés után még kérdés maradt (pl. „3 Ft-ra gondoltál?”), felteszi. Igaz, ha kérdezett."""

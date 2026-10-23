@@ -173,7 +173,7 @@ class OllamaProcess:
     flags: dict[str, str] = field(default_factory=dict)  # a modellfolyamatnak kézzel átadott kapcsolók
 
 
-SETTINGS = ("LLAMA_ARG_CACHE_RAM", "LLAMA_ARG_CTX_CHECKPOINTS")
+SETTINGS = ("LLAMA_ARG_CACHE_RAM", "LLAMA_ARG_CTX_CHECKPOINTS", "OLLAMA_NUM_PARALLEL")
 FLAGS = {"--cache-ram": "LLAMA_ARG_CACHE_RAM", "-cram": "LLAMA_ARG_CACHE_RAM",
          "--ctx-checkpoints": "LLAMA_ARG_CTX_CHECKPOINTS", "-ctxcp": "LLAMA_ARG_CTX_CHECKPOINTS",
          "--swa-checkpoints": "LLAMA_ARG_CTX_CHECKPOINTS"}
