@@ -126,6 +126,10 @@ EXPLORE_PICKS = 3
 # Felfedező (figyelt oldalak, keresőszó nélkül): az árbázishoz (vagy a máshol talált árhoz) mérve legalább ennyivel
 # olcsóbb, és legalább a megadott haszon jön ki belőle.
 EXPLORE_CUT = 0.15
+# Olcsó termék: a legkisebb haszon legfeljebb a szokásos ár negyede (legalább CHEAP_MIN_PROFIT), hogy a gyanúsan olcsó
+# határ (SUSPECT_RATIO) és a haszon között maradjon ár, ami megéri (profit_floor).
+CHEAP_SHARE = 0.25
+CHEAP_MIN_PROFIT = 1000
 # Gyanúsan olcsó: a szokásos ár SUSPECT_RATIO-ja alatt (a gyakran hamisított márkáknál FAKE_RATIO-ja alatt) többnyire
 # átverés, hamisítvány vagy hibás; ezekről nem szól. (A FLOOR alatti ár nem is valódi ár: azt meg sem nézi.)
 SUSPECT_RATIO = 0.4
@@ -411,10 +415,19 @@ def highest_ok(search: dict[str, Any], reference: int) -> int | None:
     return low
 
 
+def profit_floor(reference: int, min_profit: int) -> int:
+    """A legkisebb haszon egy termékre: a megadott, de olcsó terméknél legfeljebb a szokásos ár CHEAP_SHARE-e (legalább
+    CHEAP_MIN_PROFIT). Különben egy 10 000 Ft-os terméknél (9 000-ért eladva, 1 500 posta, 5 000 haszon: legfeljebb
+    2 500 Ft-ért) semmi nem menne át, hiszen 4 000 Ft alatt már gyanúsan olcsó (SUSPECT_RATIO)."""
+    return int(min(min_profit, max(CHEAP_MIN_PROFIT, round(reference * CHEAP_SHARE))))
+
+
 def explore_top(reference: int, min_profit: int, low: int | None = None) -> int:
     """Felfedező: a legmagasabb ár (vagy licit), ami még megéri: legalább EXPLORE_CUT-tal a szokásos ár alatt, és
-    legalább min_profit haszonnal (az óvatos eladási áron eladva, a postával; safe_sale)."""
-    return math.floor(min(safe_sale(reference, low) - SHIPPING - min_profit, reference * (1 - EXPLORE_CUT)))
+    legalább min_profit haszonnal (olcsó terméknél arányosan kevesebbel: profit_floor; az óvatos eladási áron eladva, a
+    postával; safe_sale)."""
+    floor = profit_floor(reference, min_profit)
+    return math.floor(min(safe_sale(reference, low) - SHIPPING - floor, reference * (1 - EXPLORE_CUT)))
 
 
 def safe_sale(reference: int, low: int | None = None) -> int:
@@ -733,9 +746,18 @@ class _Round:
             return
 
 
+_SIZE_GAP = re.compile(r"(?<=\d)\s+(?=(?:gb|tb)\b)", re.IGNORECASE)
+
+
+def _joined_sizes(text: str) -> str:
+    """„16 GB” → „16GB”: a kapacitás egy szó, ahogy a keresőszóban is (pricebook.capacities)."""
+    return _SIZE_GAP.sub("", text or "")
+
+
 def matches_query(query: str, text: str) -> bool:
     """A hirdetés tényleg a keresett dolog-e: a keresés minden szava (vagy a rokon szava, SYNONYMS) benne van; négy
     szónál hosszabb keresésnél egy hiányozhat. Így a „PS5 kontroller” keresésre a PS5-játék nem jelölt."""
+    query, text = _joined_sizes(query), _joined_sizes(text)
     wanted = _tokens(query)
     have = _tokens(text)
     if not wanted:
@@ -3432,12 +3454,14 @@ class DealHunter:
            ha nem, megnézi az árát a többi oldalon (search; legfeljebb EXPLORE_PICKS, a modell szerint megérők elöl);
         3. a megérő jelölt oldala (look: elkelt, hibás, gyanús → kiesik), és egy rövid modellkérdés (tényleg ez, egy
            darab, működik?).
-        A vételi limit fölötti és a nem eladási árú hirdetés (kereső, csere, alkatrész…) meg sem jön. Visszaadja a
-        modellre váró hirdetéseket (ha most nem lehet kérdezni, pl. épp beszélgetsz a Jarvisszal)."""
+        A vételi limit fölötti és a nem eladási árú hirdetés (kereső, csere, alkatrész…) meg sem jön. Visszaadja, ami
+        még sorra kerül: a modellre várókat (ha most nem lehet kérdezni, pl. épp beszélgetsz a Jarvisszal), és amit a
+        mostani keretbe (EXPLORE_PICKS ár-ellenőrzés) már nem fért bele; ezek nem vesznek el, a hívó később újra adja
+        őket (a modell által már megnevezettek a nevükkel: named, így nem kell újra megnevezni)."""
         with self._lock:
             floor = int(self._data["browse"].get("min_profit") or WATCH_PROFIT)
             known = self._deal_keys()
-        unknown, skip, recheck, lots = [], [], [], []
+        unknown, skip, recheck, lots, named_before = [], [], [], [], []
         for row in rows:
             if listing_key(row["url"]) in known:
                 continue                       # erről már szóltunk (pl. a böngészős kör)
@@ -3449,7 +3473,7 @@ class DealHunter:
                 continue
             value = self.quick_value(row, floor)
             if value is None:
-                unknown.append(row)
+                (named_before if row.get("named") else unknown).append(row)
             elif value["cheap"] and value["sure"]:
                 self._settle(row, value, source, look, can_ask, found)
             elif value["cheap"]:                     # olcsónak látszik, de az ára nem elég biztos
@@ -3460,27 +3484,33 @@ class DealHunter:
         self._mark(*skip)
         for row, name in recheck[:EXPLORE_PICKS]:
             self._recheck(row, name, search, floor, source, look, can_ask, found)
-        if not unknown:
-            return []
-        if self.llm is None:
+        later = [row for row, _name in recheck[EXPLORE_PICKS:]]   # a keretbe nem fért: a következő körben
+        named: list[tuple[dict[str, Any], str, bool]] = [(row, str(row["named"]), True) for row in named_before]
+        rest: list[dict[str, Any]] = []
+        if unknown and self.llm is None:
             self._mark(*unknown)               # modell nélkül az ismeretlenről nem derül ki, mennyit ér
-            return []
-        if not can_ask():
-            return unknown
-        named = self._explore(unknown[:EXPLORE_ROWS])
-        if named is None:
-            return unknown                     # a modell nem válaszolt: később újra
-        rest = unknown[EXPLORE_ROWS:]
-        done = {id(row) for row, _q, _b in named}
-        self._mark(*[row for row in unknown[:EXPLORE_ROWS] if id(row) not in done])
+        elif unknown and not can_ask():
+            rest = unknown
+        elif unknown:
+            answer = self._explore(unknown[:EXPLORE_ROWS])
+            if answer is None:
+                rest = unknown                 # a modell nem válaszolt: később újra
+            else:
+                rest = unknown[EXPLORE_ROWS:]
+                done = {id(row) for row, _q, _b in answer}
+                self._mark(*[row for row in unknown[:EXPLORE_ROWS] if id(row) not in done])
+                named += answer
+        if not named:
+            return rest + later
         priced: list[tuple[dict[str, Any], dict[str, Any]]] = []
         elsewhere: list[tuple[dict[str, Any], str, bool]] = []
         for row, query, buy in named:
-            self.book.add([row], name=query)
-            brand = self.book.learn_name(query)
-            if brand:
-                self.journal.add(f"Tanultam egy új márkát: {brand.capitalize()} (a modell többször így nevezte meg a "
-                                 "terméket); mostantól modell nélkül is felismerem.")
+            if not row.get("named"):           # (a korábban megnevezettet már feljegyezte)
+                self.book.add([row], name=query)
+                brand = self.book.learn_name(query)
+                if brand:
+                    self.journal.add(f"Tanultam egy új márkát: {brand.capitalize()} (a modell többször így nevezte meg "
+                                     "a terméket); mostantól modell nélkül is felismerem.")
             product = self.book.key(query)
             reference = self.book.reference(product[0], exclude=row["url"]) if product else None
             value = self._valued(int(row["price"]), reference, query, floor) if reference is not None else None
@@ -3497,8 +3527,8 @@ class DealHunter:
         elsewhere.sort(key=lambda entry: not entry[2])
         for row, query, _buy in elsewhere[:EXPLORE_PICKS]:
             self._recheck(row, query, search, floor, source, look, can_ask, found)
-        self._mark(*[row for row, _q, _b in elsewhere[EXPLORE_PICKS:]])
-        return rest
+        later += [{**row, "named": query} for row, query, _buy in elsewhere[EXPLORE_PICKS:]]
+        return rest + later
 
     def _recheck(self, row: dict[str, Any], query: str, search: Callable[[str], list[dict[str, Any]]], floor: int,
                  source: str, look: Callable[[dict[str, Any]], dict[str, Any] | None], can_ask: Callable[[], bool],

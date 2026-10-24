@@ -20,9 +20,9 @@ from test_offline import make_cfg  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
 from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
-from jarvis_core.deals import (DealError, DealHunter, ModelLane, assess, careful_low, expected_profit,  # noqa: E402
-                               explore_top, highest_ok, last_chance, left_text, market, offer_price, parse_auction,
-                               safe_sale, safety_text)
+from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, assess, careful_low,  # noqa: E402
+                               expected_profit, explore_top, highest_ok, last_chance, left_text, market, offer_price,
+                               parse_auction, profit_floor, safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
 from jarvis_core.pricebook import PriceBook, pace, product_key, usable  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
@@ -853,24 +853,56 @@ class PriceBookTests(unittest.TestCase):
 
     def test_product_keys_from_titles(self):
         cases = {
-            "ASUS Dual RTX 3060 Ti 8GB videókártya": "3060 rtx ti", "Gigabyte GeForce RTX 3060 Ti Gaming OC": "3060 rtx ti",
-            "iPhone 13 Pro Max 128GB": "13 iphone max pro", "PS5 DualSense kontroller": "kontroller ps5",
+            "ASUS Dual RTX 3060 Ti 8GB videókártya": "3060 8gb rtx ti", "Gigabyte GeForce RTX 3060 Ti Gaming OC": "3060 rtx ti",
+            "iPhone 13 Pro Max 128GB": "128gb 13 iphone max pro", "PS5 DualSense kontroller": "kontroller ps5",
             "Sony WH-1000XM4 fejhallgató": "sony wh1000xm4", "LEGO Technic 42115 Lamborghini": "42115 lego",
             "Makita DHP482 akkus fúró": "dhp482 makita", "Nike Air Max 90 42-es": "90 air max nike",
             "PlayStation 5 Digital Edition": "digital ps5", "RTX 3060 95000 Ft": "3060 rtx",
-            "RTX 3060 Ti 8 GB": "3060 rtx ti", "AirPods Pro 2": "2 airpods pro",
-            "Xiaomi Redmi Note 10 Pro": "10 note pro redmi", "Xbox Series X 1TB": "seriesx xbox",
+            "RTX 3060 Ti 8 GB": "3060 8gb rtx ti", "AirPods Pro 2": "2 airpods pro",
+            "Xiaomi Redmi Note 10 Pro": "10 note pro redmi", "Xbox Series X 1TB": "1tb seriesx xbox",
+            # a kapacitás más változat, más ár: külön kulcs (a „16 GB” két szóban és az „1000GB” is)
+            "RTX 5060 Ti 16 GB": "16gb 5060 rtx ti", "Samsung 970 EVO Plus 1000GB": "1tb 970 plus samsung",
+            "Corsair Vengeance LPX 16GB DDR4 3200MHz": "16gb corsair ddr4",
+            "MacBook Air M1 8GB 256GB": "256gb 8gb air m1 macbook",
             "Xbox Series S": "seriess xbox", "Nintendo Switch OLED": "oled switch", "Ryzen 5 5600X": "5 5600x ryzen",
         }
         for title, key in cases.items():
             self.assertEqual(product_key(title)[0], key, title)
         # ami nem egy biztos termék: csak a család, a márka egy cipőmérettel, vagy több generáció egy néven
         for title in ("Eladó videókártya jó állapotban", "Zara kabát 38-as", "PS5 Spider-Man 2", "PS5", "Nike cipő 42",
-                      "AirPods Pro", "Nintendo Switch", "Xbox One S"):
+                      "AirPods Pro", "Nintendo Switch", "Xbox One S", "Corsair DDR4 8GB 16GB 32GB"):
             self.assertIsNone(product_key(title), title)
         for title in ("iPhone 13 tok", "Töltő iPhone 13-hoz", "RTX 3060 Ti hibás, alkatrésznek", "Keresek RTX 3060-at",
                       "3 db RTX 3060 csomagban", "2x RTX 3060"):
             self.assertFalse(usable(title), title)
+
+    def test_a_title_without_capacity_is_priced_as_the_cheapest_variant(self):
+        """Ha a címből nem derül ki, 8 vagy 16 GB-os-e a kártya, a legolcsóbb változat szokásos árával számol (így egy
+        8 GB-os nem látszik olcsó 16 GB-osnak); a keresőszó a kapacitással megy tovább."""
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PriceBook(Path(tmp), Clock())
+            book.add([listing(n, f"RTX 5060 Ti 8GB {n}", p) for n, p in enumerate((110000, 112000, 108000, 111000, 109000))])
+            self.assertEqual(book.reference("5060 rtx ti")["price"], 110000, "csak egy változat van")
+            book.add([listing(10 + n, f"RTX 5060 Ti 16 GB {n}", p)
+                      for n, p in enumerate((150000, 152000, 148000, 151000, 149000))])
+            self.assertEqual((book.reference("16gb 5060 rtx ti")["price"], book.reference("5060 8gb rtx ti")["price"]),
+                             (150000, 110000), "a két változat külön")
+            plain = book.reference("5060 rtx ti")
+            self.assertEqual((plain["price"], plain["name"]), (110000, "rtx 5060 ti 8gb"), "a legolcsóbb változat")
+            self.assertEqual(book.variants("16gb 5060 rtx ti"), [])
+            self.assertEqual(book.query("Gigabyte RTX 5060 Ti 16 GB Gaming OC"), "RTX 5060 Ti 16GB")
+            book.add([listing(1, "RTX 5060 Ti 8GB", 99000)])
+            [cut] = [s for s in book.samples("5060 8gb rtx ti") if s["url"].endswith("100001.html")]
+            self.assertEqual((cut["cuts"], cut["p0"], cut["p"]), (1, 112000, 99000), "leárazta")
+
+    def test_a_cheap_product_needs_a_smaller_profit(self):
+        """Egy 10 000 Ft-os terméknél az 5 000 Ft-os min. haszonnal legfeljebb 2 500 Ft-ért érné meg, de 4 000 Ft alatt
+        már gyanúsan olcsó: így semmi nem ment át. Olcsó terméknél a min. haszon a szokásos ár negyede."""
+        self.assertEqual((profit_floor(10000, 5000), profit_floor(40000, 5000), profit_floor(2000, 5000)),
+                         (2500, 5000, 1000))
+        for reference in (10000, 15000, 20000, 60000):
+            self.assertGreater(explore_top(reference, 5000), reference * SUSPECT_RATIO, reference)
+        self.assertEqual(explore_top(10000, 5000), 5000)
 
     def test_brands_learned_from_the_model(self):
         with tempfile.TemporaryDirectory() as tmp:

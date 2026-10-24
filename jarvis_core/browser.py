@@ -479,7 +479,7 @@ SNAPSHOT_JS = r"""
   // Hirdetéskártya ára a hirdetés linkje mellé (ha a link felirata nem mondja): a kártya első, nem profil-linkje
   // kapja, az eladó profiljára mutató link nem. Mint az árkutatásnál (LISTINGS_JS): az áthúzott (régi) ár nem
   // számít, és ha a kártyán villámár vagy fix ár is van, az az ár.
-  const PRICE = /(\d{1,3}(?:[ \u00a0\u202f.]\d{3})+|\d+)(?:,\d{1,2})?\s?(?:Ft|HUF)(?![a-zá-ű])/i;
+  const PRICE = /(?<![\d:])(\d{1,3}(?:[ \u00a0\u202f.]\d{3})+|\d+)(?:,\d{1,2})?\s?(?:Ft|HUF)(?![a-zá-ű])/i;
   const PRICE_FIRST = /(?:Ft|HUF)\s?\d[\d \u00a0\u202f.]*\d/;
   const FIXED = new RegExp('(?:villámár|fix ?ár|azonnal megvehető|buy it now)\\D{0,4}(' + PRICE.source + ')', 'i');
   const PROFILE = /\/(member|members|user|users|profil|profile|seller|felhasznalo)(\/|$|\?)/i;
@@ -660,7 +660,7 @@ SNAPSHOT_JS = r"""
 # látható ár csak a mostani ajánlat.
 LISTINGS_JS = r"""
 () => {
-  const PRICE = /(\d{1,3}(?:[   .]\d{3})+|\d{2,7})(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])/i;
+  const PRICE = /(?<![\d:])(\d{1,3}(?:[   .]\d{3})+|\d{2,7})(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])/i;
   const FIXED = new RegExp('(?:villámár|fix ?ár|azonnal megvehető|buy it now)\\D{0,4}' + PRICE.source, 'i');
   const AUCTION = /(licit|aukció|árverés|jelenlegi ár|kikiáltási ár|\bbids?\b|auction)/i;
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
