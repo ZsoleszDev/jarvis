@@ -31,11 +31,11 @@ from . import console, creative_templates, instance, qr, remote
 from .app import STATE_TEXT, JarvisApp, tool_label
 from .config import GuiCfg, app_data
 from .creative import MAX_TEXT, StoryError
-from .deals import SALE_RATIO, SHIPPING, DealError, profit_report
+from .deals import SALE_RATIO, SHIPPING, DealError, bundle_parts, profit_report
 from .dossier import open_folder
 from .gpu import GpuMonitor
 from .messages import CONV_ID_RE, MAX_TEXT as MAX_MESSAGE
-from .selling import LEDGER_FIELDS, MAX_PHOTO_BYTES, ItemError, round_price
+from .selling import LEDGER_FIELDS, MAX_PHOTO_BYTES, ItemError, parse_price, round_price
 from .tools import summarize_result
 from .watches import WatchError
 from .work import PRICE_CHOICES
@@ -812,6 +812,13 @@ class _Handler(BaseHTTPRequestHandler):
                                                                        body.get("safe_only"))})
             if action == "enable":
                 return self._json(200, {"ok": True, **deals.set_enabled(bool(body.get("on")))})
+            if action == "bundles":     # csomagbontás: be/ki, legalább mennyi haszonnal szóljon
+                return self._json(200, {"ok": True, **deals.set_bundles(body.get("on"), body.get("min_profit"))})
+            if action == "bundle_add":  # csomagkeresés (pl. „ruhacsomag”)
+                return self._json(200, {"ok": True, **deals.add_bundle_search(
+                    str(body.get("query") or ""), body.get("sites"), body.get("max_price"), body.get("every"))})
+            if action == "bundle_remove":
+                return self._json(200, {"ok": True, **deals.remove_bundle_search(str(body.get("id") or ""))})
             fields = {k: body.get(k) for k in DEAL_FIELDS if k in body}
             if action == "add":
                 return self._json(200, {"ok": True, **deals.add_search(**{"query": "", **fields})})
@@ -852,6 +859,8 @@ class _Handler(BaseHTTPRequestHandler):
             if action == "bought":      # Megvettem: eladási tárgy lesz belőle, a vételárral (Vételeim)
                 deal = deals.get(str(body.get("id") or ""))
                 store = self._work().store
+                if deal.get("bundle"):  # egy csomag: a darabjai külön tárgyak, a vételár szétosztva
+                    return self._bought_bundle(deal, body)
                 median = int(deal.get("median") or 0) or None
                 # a cím (a kártya szövegében a város, a dátum és az eladó is ott van), és amire az árkutatás keressen:
                 # a keresésed, vagy a cím termékkulcsa („Sony WH-1000XM4”)
@@ -877,6 +886,27 @@ class _Handler(BaseHTTPRequestHandler):
         except (DealError, ItemError) as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
         return self._json(400, {"ok": False})
+
+    def _bought_bundle(self, deal: dict[str, Any], body: dict[str, Any]) -> None:
+        """Megvettél egy csomagot: a darabjai (tételenként egy, az apróságok együtt) eladási tárgyak lesznek, a
+        vételár és a posta az értékük arányában szétosztva (deals.bundle_parts), és mind a Vételeim közé kerül."""
+        work = self._work()
+        paid = parse_price(body.get("price") or deal["price"]) or int(deal["price"])
+        shipping = parse_price(body.get("shipping")) or 0
+        parts = bundle_parts(deal, paid, shipping)
+        if not parts:
+            raise DealError("Ebben a csomagban nincs külön eladható darab.")
+        now = time.time()
+        items = [work.store.create(prompt=part["prompt"], source=deal["url"], search_query=part["search_query"],
+                                   bought_price=part["bought_price"], bought_at=now,
+                                   bought_shipping=part["bought_shipping"] or None,
+                                   bought_from=str(deal.get("site") or ""), in_transit=bool(body.get("in_transit", True)),
+                                   target_price=part["target_price"], trade_note=part["trade_note"])
+                 for part in parts]
+        work.deals.mark_bought(deal["id"], items[0].id, [item.id for item in items])
+        self._money_check(work)
+        return self._json(200, {"ok": True, **work.deals.state(), "item": items[0].id,
+                                "items": [item.id for item in items], "profit": profit_report(work.store.all())})
 
     @staticmethod
     def _ledger(work: Any) -> dict[str, Any]:
@@ -928,12 +958,23 @@ class _Handler(BaseHTTPRequestHandler):
             if item.sold:
                 return self._json(400, {"ok": False, "error": "Ez már elkelt: a visszamondás csak a még meg nem érkezett "
                                                               "vagy el nem adott tárgyaknál van."})
+            others = []                 # egy csomag darabjai együtt mennek (amit már töröltél, az kimarad)
+            for other_id in work.deals.bought_group(item.id):
+                if other_id != item.id:
+                    try:
+                        others.append(work.store.get(other_id))
+                    except ItemError:
+                        pass
+            if any(other.sold for other in others):
+                return self._json(400, {"ok": False, "error": "A csomag egy darabja már elkelt: a visszamondás csak a "
+                                                              "még el nem adott csomagnál van."})
             deal = work.deals.cancel_bought(item.id, item.name)
             if deal is not None and work.instant is not None:
                 work.instant.forget_deal(deal["id"])
-            work.store.delete(item.id)
+            for gone in [item, *others]:
+                work.store.delete(gone.id)
             self.gui.ui.work_deals()    # a találatok listája is frissül (a gépen és a telefonon)
-            return self._json(200, self._ledger(work))
+            return self._json(200, {**self._ledger(work), "removed": [gone.id for gone in (item, *others)]})
         return self._json(400, {"ok": False, "error": "Ismeretlen művelet."})
 
     def _messages_post(self, path: str, body: dict[str, Any], remote: bool = False) -> None:

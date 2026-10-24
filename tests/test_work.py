@@ -1517,7 +1517,6 @@ class SellFlowTests(unittest.TestCase):
         cfg.browser.headless = True
         cfg.web.allow_local = True
         cfg.assistant.show_timings = False
-        cfg.assistant.fillers = False
         cfg.work.platforms = ["vinted", "jofogas"]
         cfg.work.research_sites = ["vinted"]
         self.patch = mock.patch.dict(selling.PLATFORMS, local_platforms(self.pages), clear=True)

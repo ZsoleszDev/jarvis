@@ -454,7 +454,6 @@ class SellNoteTests(unittest.TestCase):
         cfg = make_cfg(Path(self.tmp.name), self.fake.url)
         cfg.browser.headless = True
         cfg.assistant.show_timings = False
-        cfg.assistant.fillers = False
         self.ui = RecordingUI()
         self.app = JarvisApp(cfg, self.ui)
         self.assertTrue(self.app.start())

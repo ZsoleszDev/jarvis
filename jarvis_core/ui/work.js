@@ -679,7 +679,28 @@
   }
   // Az óvatos eladási ár (deals.safe_sale): a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede (és ha tudjuk,
   // az elkelt hasonlók ára).
+  // Egy csomag tételei: darabszám, név, darabár, és honnan (mostani hirdetésekből vagy a modell becsléséből).
+  function bundleLines(d) {
+    const min = (deals.bundles || {}).piece_min || 1500;
+    return `<ul class="dealrows">${d.bundle.lines.map((l) => `<li>${l.count > 1 ? `${esc(l.count)} db ` : ""}${esc(l.name)}:
+      ${l.unit ? `kb. ${esc(price(l.unit))}${l.count > 1 ? "/db" : ""}` : "nem ér semmit"}
+      <small class="muted">${l.source === "piac" ? `(${l.n ? `${esc(l.n)} hirdetés alapján` : "hirdetésekből"})` : "(becslés)"}${l.unit && l.unit < min ? " · egyben a többi apróval" : ""}</small></li>`).join("")}</ul>`;
+  }
+  function bundleFacts(d) {
+    const b = d.bundle;
+    const rows = [["Ára", `<b>${esc(price(d.price))}</b> · ${esc(d.site)} · csomag`],
+                  ["Mi van benne", bundleLines(d)],
+                  ["Darabonként eladva", `kb. ${esc(price(b.value))} (${esc(b.listings)} hirdetés${b.leftover ? `; ${esc(b.small)} apróság egyben` : ""})`],
+                  ["Ennyit kereshetsz vele", `<b>kb. ${esc(price(d.profit))}</b> (a posta és darabonként a csomagolás benne van)`]];
+    if (d.safety) rows.push(["Biztonság", safetyLine(d.safety)]);
+    return `<p class="muted">Megtaláltam: ${esc(ago(d.at))}${d.explore ? ` · ${esc(d.explore)}` : ""}</p>
+      <dl class="facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+      ${d.note ? `<p class="muted">${esc(d.note)}${d.photos_checked ? " (a hirdetés fotói alapján is)" : ""}</p>` : ""}
+      ${(d.warnings || []).map((w) => `<p class="warn">Figyelj: ${esc(w)}</p>`).join("")}
+      <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(deals.message || "")}</pre>`;
+  }
   function dealFacts(d) {
+    if (d.bundle) return bundleFacts(d);
     const sale = d.median ? Math.round(Math.min(d.median * (deals.sale_ratio || 0.9), d.low || Infinity) / 100) * 100 : null;
     const where = (d.sites || []).length ? `, ${d.sites.join(" és ")}` : "";
     const rows = [["Ára", `<b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))} → ${esc(price(d.price))})` : ""} · ${esc(d.site)}${d.auction ? " (licit)" : ""}`],
@@ -738,6 +759,13 @@
   // Szakértői tipp: a kérdés (a hirdetés adataival és linkjével) a vágólapra, és megnyílik a ChatGPT (az
   // Android-alkalmazásban a ChatGPT alkalmazás, ha telepítve van), ahol csak be kell illeszteni.
   function expertPrompt(d) {
+    if (d.bundle) {
+      return "Találtam egy csomagot, amit darabonként eladva többet érne, mint amennyibe kerül. Megnéznéd, hogy tényleg " +
+        "jó vétel lenne-e, és reálisak-e a darabárak?\n\n" +
+        `${d.title || d.text}\nÁra: ${price(d.price)} (${d.site})\nSzerintem ez van benne:\n` +
+        d.bundle.lines.map((l) => `- ${l.count > 1 ? `${l.count} db ` : ""}${l.name}: kb. ${price(l.unit)}${l.count > 1 ? "/db" : ""}`).join("\n") +
+        `\nDarabonként eladva kb. ${price(d.bundle.value)}, a haszon kb. ${price(d.profit)}.\n` + d.url;
+    }
     return "Találtam egy jónak tűnő árut, ami jó befektetés lehetne, ha vétel után kicsit drágábban továbbárusítanám. " +
       "Megnéznéd, hogy tényleg jó vétel lenne-e?\n\n" +
       `${d.title || d.text}\nÁra: ${price(d.price)} (${d.site})\n` +
@@ -794,12 +822,15 @@
           elfogadja, a Vinted értesít.</small>`
       : d.offer ? `<span class="row"><input id="d-offer-${esc(d.id)}" type="number" min="1" value="${esc(d.offer)}" style="width: 6em"
           aria-label="Ajánlat (Ft)"> Ft <button type="button" class="small primary" data-offer="${esc(d.id)}">Ajánlatot teszek</button></span>` : "";
+    const bundleCard = (d) => `<small class="muted">${esc(d.site)} · csomag · <b>${esc(price(d.price))}</b>, darabonként eladva kb. ${esc(price(d.bundle.value))}
+        (${esc(d.bundle.listings)} hirdetés) · várható haszon kb. <b>${esc(price(d.profit))}</b>${d.explore ? " · " + esc(d.explore) : ""}</small>
+        <details class="setup"><summary>Mi van benne (${d.bundle.lines.length} tétel)</summary>${bundleLines(d)}</details>`;
     const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.text)}</a>
-        <small class="muted">${esc(d.site)}${d.auction ? " (licit)" : ""} · <b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))})` : ""},
+        ${d.bundle ? bundleCard(d) : `<small class="muted">${esc(d.site)}${d.auction ? " (licit)" : ""} · <b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))})` : ""},
         ${d.auction ? "máshol" : "szokásos ár"} ${esc(price(d.median))}${d.auction ? ` · ${esc(leftText(d))} · legfeljebb <b>${esc(price(d.max_bid))}</b>-ig érdemes licitálni`
           : d.offer ? ` · ajánlattal (${esc(price(d.offer))}) kb. <b>${esc(price(d.profit))}</b> haszon`
           : d.profit !== undefined ? ` · várható haszon kb. <b>${esc(price(d.profit))}</b>` : ` (kb. ${esc(price(d.margin))}-tal olcsóbb)`}
-        ${d.calibration ? " · a felmérés közben" : ""}${d.explore ? " · " + esc(d.explore) : ""}${d.note ? " · " + esc(d.note) : ""}</small>
+        ${d.calibration ? " · a felmérés közben" : ""}${d.explore ? " · " + esc(d.explore) : ""}${d.note ? " · " + esc(d.note) : ""}</small>`}
         ${d.speed ? `<small class="muted">Eladási sebesség: ${esc(d.speed)}</small>` : ""}
         ${d.safety ? `<small class="${d.safety.level === "kockázatos" ? "warn" : "muted"}">${safetyLine(d.safety)}</small>` : ""}
         ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}
@@ -824,6 +855,10 @@
     const v = (key, fallback = "") => esc(edit && edit[key] != null ? edit[key] : fallback);
     const checked = (key) => !edit || (edit.sites || []).includes(key) ? "checked" : "";
     const alertCount = ((deals.instant || {}).alerts || []).length;
+    const bd = deals.bundles || { on: false, min_profit: 8000, searches: [], waiting: 0, presets: [] };
+    const bundleSearches = bd.searches.map((s) => `<li><span><b>${esc(s.query)}</b>
+        <small class="muted">${esc((s.sites || []).map(siteName).join(", "))} · ${esc(every(s.every || 60))}${s.max_price ? ` · legfeljebb ${esc(price(s.max_price))}` : ""}</small></span>
+        <button type="button" class="small quiet" data-bundle-remove="${esc(s.id)}">Törlés</button></li>`).join("");
     box.innerHTML = `
       <div class="runbar">
         <button type="button" id="d-run-toggle" class="${running ? "" : "primary"}" ${deals.browser || deals.instant ? "" : "disabled"}>${running ? "Leállítás" : "Indítás"}</button>
@@ -870,6 +905,22 @@
           </div>
           <div class="row"><button type="submit" class="primary">${edit ? "Mentés" : "Hozzáadás"}</button>
             ${edit ? '<button type="button" id="d-cancel">Mégse</button>' : '<button type="button" id="d-run">Keresés most</button>'}</div>
+        </form>`)}
+      ${section("bundles", `Csomagbontás (${bd.on ? "be" : "ki"})`, `
+        <label class="check"><input id="db-on" type="checkbox" ${bd.on ? "checked" : ""}> Csomagok felmérése darabonként</label>
+        <div class="row"><label>Legalább <input id="db-profit" type="number" inputmode="numeric" min="0" value="${esc(bd.min_profit)}" style="width: 6em"> Ft haszon</label>
+          <button type="button" class="small" id="db-save">Mentés</button></div>
+        ${bd.on && bd.waiting ? `<p><small>${esc(bd.waiting)} csomag vár felmérésre.</small></p>` : ""}
+        <ul class="dealist">${bundleSearches || '<li class="muted">Még nincs csomagkeresés.</li>'}</ul>
+        <form id="db-add" class="compose" autocomplete="off">
+          <input id="db-query" placeholder="Pl. ruhacsomag, lego ömlesztve">
+          <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="db-site" value="${esc(s.key)}" checked> ${esc(s.name)}</label>`).join("")}</div>
+          <div class="row">
+            <label>Legfeljebb <input id="db-max" type="number" inputmode="numeric" min="0" placeholder="bármennyi" style="width: 7em"> Ft</label>
+            <label>Nézze <select id="db-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === 60 ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label>
+          </div>
+          <div class="row"><button type="submit" class="primary">Csomagkeresés hozzáadása</button></div>
+          ${bd.presets.length ? `<div class="row presets"><small class="muted">Gyorsan:</small>${bd.presets.map((pr, i) => `<button type="button" class="small" data-bundle-preset="${i}">${esc(pr.name)}</button>`).join("")}</div>` : ""}
         </form>`)}
       ${deals.instant ? section("instant", `Azonnali figyelő (${alertCount})`, instantBox()) : ""}
       ${section("browse", "Böngészés", `
@@ -931,6 +982,23 @@
       for (const b of box.querySelectorAll("[data-iremove]")) b.addEventListener("click", () => dealAction({ action: "instant_remove", id: b.dataset.iremove }));
       for (const b of box.querySelectorAll("[data-ipause]")) b.addEventListener("click", () => dealAction({ action: "instant_pause", id: b.dataset.ipause, off: !!b.dataset.off }));
     }
+    $("db-save").addEventListener("click", async () => {
+      const on = $("db-on").checked;
+      if (await dealAction({ action: "bundles", on, min_profit: $("db-profit").value }))
+        J.toast(on ? "Rendben: a csomagokat darabonként is felmérem, és ha megéri, szólok." : "Kikapcsoltam a csomagbontást.");
+    });
+    $("db-add").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const sites = [...box.querySelectorAll('input[name="db-site"]:checked')].map((i) => i.value);
+      if (await dealAction({ action: "bundle_add", query: $("db-query").value, sites, max_price: $("db-max").value,
+                             every: $("db-every").value }))
+        J.toast(running ? "Felvettem: a csomagokat darabonként felmérem, és ha megéri, szólok." : "Felvettem. Az Indítás gombbal indul.");
+    });
+    for (const b of box.querySelectorAll("[data-bundle-preset]")) b.addEventListener("click", async () => {
+      const pr = bd.presets[Number(b.dataset.bundlePreset)];
+      if (pr && await dealAction({ action: "bundle_add", query: pr.query, sites: pr.sites })) J.toast(`Felvettem: ${pr.name}.`);
+    });
+    for (const b of box.querySelectorAll("[data-bundle-remove]")) b.addEventListener("click", () => dealAction({ action: "bundle_remove", id: b.dataset.bundleRemove }));
     $("d-bsave").addEventListener("click", async () => {
       const sites = [...box.querySelectorAll('input[name="d-bsite"]:checked')].map((i) => i.value);
       if (await dealAction({ action: "browse", sites })) J.toast("Mentve.");
@@ -1009,7 +1077,9 @@
                                         shipping: $("d-ship").value, in_transit: $("d-transit").checked });
       if (!result) return;
       buying = null;
-      J.toast("Felvettem a Vételeim közé és az eladandók közé. Pipáld be, hova töltsem fel.");
+      J.toast((result.items || []).length > 1
+        ? `Felvettem: a csomag ${result.items.length} darabja külön tárgy lett az eladandók között (a vételár szétosztva). Pipáld be, hova töltsem fel.`
+        : "Felvettem a Vételeim közé és az eladandók közé. Pipáld be, hova töltsem fel.");
       openId = result.item;
       await load();
       setJob("sales");
@@ -1022,16 +1092,19 @@
   // találatok, havi keret), és erről a hirdetésről többé nem szólok.
   async function cancelBought(id, name) {
     const ok = await ask("Visszamondva", `Visszamondtad a vételt: ${name}?\nTörlöm a Vételeim, az eladandók és a ` +
-      "találatok közül, a havi keretbe sem számít bele, és erről a hirdetésről többé nem szólok. (A munka mappán belül " +
-      "a _torolt mappába kerül.)", "Visszamondva");
+      "találatok közül, a havi keretbe sem számít bele, és erről a hirdetésről többé nem szólok. Ha egy csomag darabja, " +
+      "a csomag többi darabját is. (A munka mappán belül a _torolt mappába kerül.)", "Visszamondva");
     if (!ok) return;
     const result = await J.postJson("/api/work/ledger", { action: "cancel", id });
     if (!result.ok) { J.toast(result.error || "Nem sikerült."); return; }
     ledger = result;
-    items.delete(id);
-    if (openId === id) openId = null;
-    if (ledgerOpen === id) ledgerOpen = null;
-    J.toast("Visszamondva: mindenhonnan töröltem.");
+    for (const gone of result.removed || [id]) {     // egy csomagnál a darabjai is
+      items.delete(gone);
+      if (openId === gone) openId = null;
+      if (ledgerOpen === gone) ledgerOpen = null;
+    }
+    J.toast((result.removed || []).length > 1 ? `Visszamondva: a csomag mind a ${result.removed.length} darabját töröltem.`
+      : "Visszamondva: mindenhonnan töröltem.");
     await loadDeals();
     render();
   }

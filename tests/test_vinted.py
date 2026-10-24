@@ -542,7 +542,6 @@ class VintedBrowserBase(unittest.TestCase):
         cfg.browser.headless = True
         cfg.web.allow_local = True
         cfg.assistant.show_timings = False
-        cfg.assistant.fillers = False
         cfg.work.platforms = ["vinted"]
         cfg.work.research_sites = []
         cfg.work.autofill = True

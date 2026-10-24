@@ -30,6 +30,9 @@
 - Gyorsabb, szabályos keresés: 6–13 mp szünet, óránként 120 kérés oldalanként (a figyelőnek 80), lassú válasznál
   magától lassít; a találati oldalt 5 percig közösen használja a kör és a figyelő; körönként 8 jelölt; a keresések
   alapból óránként, és a Hardverapró/Jófogás-keresések ötpercenként az azonnali figyelőben is.
+- Csomagbontás: a csomaghirdetések (csomagkeresések, és amit a többi út eddig kihagyott) várólistán; a modell a címük
+  alapján kettőt választ, a leírásból és a fotókból tételesen felsorolja; darabár az árbázisból, a gyors oldalakról
+  vagy óvatos becslésből; értesítés, kártya és ablak; Megvettem után a darabok külön tárgyak (a vételár szétosztva).
 
 ## Élesben kipróbálandó
 - Az Android-alkalmazás új része (a megérő hirdetés értesítése: rezgés, hang, ismétlés, a találat ablaka, a vágólap) a
@@ -49,6 +52,10 @@
 - Automata kereskedés a valódi oldalakon: a kategóriaoldalak (Vinted catalog, Jófogás, Hardverapró, Vatera „hamarosan lejár”) hirdetéskártyáinak kiolvasása, a Vatera-kártyák hátralévő ideje, a Vinted ajánlattétel-ablaka, az újranézett hirdetés „elkelt / eltűnt” felismerése.
 - A böngészés a valódi oldalakon: a Vinted kezdőoldalának kártyái (a kártyán sokszor csak a márka és a méret látszik), a Jófogás és a Vatera keresőjének rendezése (a legújabb elöl-e), a Hardverapró-kategóriák címe (2026 októberében ellenőrizve).
 - A termékkulcs valódi címeken: ha egy gyakori termék nem kap kulcsot, vagy két különböző termék egy kulcsra esik, a `pricebook.py` BRANDS / FAMILIES / MODIFIERS / TYPE_WORDS listáját kell bővíteni.
+
+- Csomagbontás a valódi oldalakon: a modell darabszám- és darabár-becslése a fotókról (ruhánál, Legónál), hogy a
+  csomaghirdetések címéből (bundle_like) mennyi jön, és hogy a GUESS_RATIO (60%), a PIECE_MIN (1 500 Ft), a
+  PIECE_COST (300 Ft) és a BUNDLE_ROI (50%) jó-e; a Vinted csomagjainak oldala (fotók, leírás) a böngészővel.
 
 ## Kisebb javítások (ismertek, nem sürgősek)
 ### Begyakorolt lépések (replay.py)
@@ -84,6 +91,14 @@
 - Készenlétben a böngészés miatt a böngésző újraindul; egy app-szintű teszt (a kereskedés munkája készenlétben, valódi böngészővel) még hiányzik, csak az ütemezőé van meg.
 - Az indulóoldalak súlya csak nő vagy csökken; ha egy oldal hetekig nem hoz semmit, a régi sikerei miatt még sokáig előre kerül.
 - Ami csak a termékcsaládot nevezi meg típus nélkül („PS5 konzol”, „Nintendo Switch”), nem kap kulcsot (a játékkal, kiegészítővel keveredne): ezeket csak a modell nevezi meg, vagy egy keresés méri.
+
+### Csomagbontás (deals.py)
+- A Vatera csomag-licitjeit nem méri fel (csak a fix árasakat); a licit mostani ára még nő.
+- A csomagkeresések nem kerülnek az azonnali figyelőbe (a körben futnak, alapból óránként); a csomagok felmérése úgyis
+  lassabb (oldal, fotók, modell).
+- Egy tétel több darabja (pl. „5 db Zara póló”) egy eladandó tárgy lesz; ha egyenként adod el, kézzel kell szétbontani.
+- Körönként legfeljebb két csomag oldalát nyitja meg: egy új, sok találatos csomagkeresésnél az első napon a modell a
+  várólistából csak a legígéretesebbeket választja, a többit látottnak jegyzi.
 
 ### Párhuzamos munka (eladás-előkészítő szál, modellkapu)
 - A valódi Ollamával `OLLAMA_NUM_PARALLEL=2` mellett nincs kipróbálva: mennyit lassít a két egyszerre futó hívás
