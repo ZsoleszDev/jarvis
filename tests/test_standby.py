@@ -69,7 +69,6 @@ class StandbyAppTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = make_cfg(Path(self.tmp.name), self.fake.url)
         self.cfg.assistant.show_timings = False
-        self.cfg.assistant.fillers = False
         self.cfg.standby.idle_minutes = 0
         self.ui = RecordingUI()
         self.app = JarvisApp(self.cfg, self.ui)
@@ -262,7 +261,6 @@ class PhoneStandbyTests(unittest.TestCase):
         cfg = make_cfg(Path(self.tmp.name), self.fake.url)
         cfg.api.port = 0
         cfg.assistant.show_timings = False
-        cfg.assistant.fillers = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
         self.app = JarvisApp(cfg, self.ui)
@@ -319,7 +317,6 @@ class GuiStandbyTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         cfg = make_cfg(Path(self.tmp.name), self.fake.url)
         cfg.assistant.show_timings = False
-        cfg.assistant.fillers = False
         cfg.api.enabled = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")

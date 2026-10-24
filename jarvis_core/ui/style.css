@@ -744,6 +744,8 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
 .profit { margin: 6px 0 10px; line-height: 1.6; }
 .dealist li > .row { flex: none; gap: 6px; align-items: center; }
 .dealrows { margin: 4px 0; padding-left: 18px; font-size: 13px; }
+/* egy csomag tételei a találat kártyáján: egyszerű felsorolás (nem a találatok sora) */
+.dealist .dealrows li { display: list-item; padding: 2px 0; border: 0; }
 .dealist li > span > .row { flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 /* Indítás / Leállítás: egy nagy gomb, mellette az állapot */
 .runbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }

@@ -480,7 +480,6 @@ class AppTests(unittest.TestCase):
         self.fake.vram_fit = lambda ctx: 1.0
         self.tmp = tempfile.TemporaryDirectory()
         cfg = make_cfg(Path(self.tmp.name), self.fake.url)
-        cfg.assistant.fillers = False
         cfg.api.enabled = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")

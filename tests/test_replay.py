@@ -673,7 +673,6 @@ class ReplayHarness:
         cfg.browser.headless = True
         cfg.web.allow_local = True
         cfg.assistant.show_timings = False
-        cfg.assistant.fillers = False
         cfg.work.platforms = ["vinted"]
         cfg.work.research_sites = []
         platform = Platform("vinted", "Vinted", self.site.url("fooldal.html"), self.site.url("urlap.html"), "",

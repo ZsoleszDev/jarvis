@@ -26,6 +26,13 @@ címből kiolvasott termékkulcs alatt); amit nem ismer fel, azt egy modellhív�
 és ami a modell szerint megérhet, annak a többi oldalon nézi meg az árát. A régebben látott hirdetések közül néhányat
 később újra megnéz (elkelt-e): ebből lesz az eladási sebesség.
 
+Csomagbontás: a csomaghirdetéseket (több darab egy áron), amiket a keresés, a figyelt oldalak, a böngészés és az azonnali
+figyelő eddig kihagyott, és a csomagkeresések (pl. „ruhacsomag”) találatait darabonként is felméri, ha bekapcsolod: a
+modell a címük alapján kiválasztja a legígéretesebbeket, aztán a hirdetés leírásából és fotóiból tételesen felsorolja,
+mi van benne; a darabárak az árbázisból vagy a gyors oldalak mostani hirdetéseiből jönnek (ahol nincs ilyen, a modell
+becsléséből, óvatosan). Ha darabonként eladva (a posta és a csomagolás nélkül) jóval többet ér, szól róla; a Megvettem
+után a darabjai külön eladandó tárgyak lesznek, a vételár az értékük arányában szétosztva.
+
 Gyorsaság: a találatokat a legújabb elöl nézi. Keresésenként megadható, milyen sűrűn nézze (30 perc – 6 óra); a Vintedet
 legfeljebb kétóránként (robot-ellenőrzés). Az egész egy kapcsolóval be- és kikapcsolható (a Munka menü Automata
 kereskedés fülén); alapból ki van kapcsolva.
@@ -56,8 +63,8 @@ from .llm import background_calls
 from .journal import Journal, day_of
 from .pricebook import SOLD_MIN, PriceBook, fake_prone, pace, speed_text, usable
 from .replay import norm_text
-from .selling import (_PARTS_RE, ON_SITE, Item, ItemError, Platform, _shared, _tokens, format_price, listing_key,
-                      parse_price, prefilter, price_stats, round_price, vision_jpeg)
+from .selling import (_PARTS_RE, _SALE_RE, _SWAP_RE, _WANTED_RE, ON_SITE, Item, ItemError, Platform, _shared, _tokens,
+                      format_price, listing_key, parse_price, prefilter, price_stats, round_price, vision_jpeg)
 from .textutil import fold
 from .vinted import BUTTON_KINDS, consent_button, elem_key, logged_out, new_elements
 from .web import UNTRUSTED_NOTE
@@ -141,6 +148,47 @@ RISKY_ROI = 0.1
 WIDE_SPREAD = 0.45
 SLOW_OK_ROI = 0.35
 SPEED_CHECKS = 2           # egy körben ennyi régebben látott hirdetést néz meg újra (elkelt-e; a Vintedet nem)
+# Csomagbontás: a csomaghirdetés (több darab egy áron: „ruhacsomag”, „PC-alkatrészek egyben”, „Lego ömlesztve”)
+# darabonként eladva gyakran jóval többet ér, mert a legtöbb vevő nem számolja ki. A csomagokat a modell előbb a címük
+# alapján rostálja (körönként legfeljebb BUNDLE_PICKS-et nyit meg), aztán a hirdetés leírásából és első BUNDLE_PHOTOS
+# fotójából tételesen felsorolja, mi van benne. A darabár: az árbázis, vagy a gyors oldalak mostani hirdetései
+# (csomagonként legfeljebb BUNDLE_LOOKUPS keresés, legalább BUNDLE_MARKET_MIN hasonlóval), óvatosan (safe_sale), de
+# legfeljebb a modell becslésének GUESS_CAP-szorosa (ha a modell félreismerte, ne abból jöjjön a haszon); ahol nincs ilyen,
+# a modell becslésének GUESS_RATIO-ja. A PIECE_MIN alatti darabokat nem éri meg külön hirdetni: azok egy maradék
+# csomagban mennek, az értékük LEFTOVER_RATIO-jáért. Költség: a vétel postája (SHIPPING), és darabonként PIECE_COST
+# (csomagolás, hirdetés). Csak akkor szól, ha legalább a megadott haszon (alapból BUNDLE_PROFIT), és a vételár
+# legalább BUNDLE_ROI-ja jön ki belőle (sok munka: többet kell hoznia, mint egy darabnak).
+BUNDLE_PROFIT = 8000
+BUNDLE_ROI = 0.5
+PIECE_MIN = 1500
+PIECE_COST = 300
+LEFTOVER_RATIO = 0.5
+GUESS_RATIO = 0.6
+GUESS_CAP = 2.0
+BUNDLE_MIN_PRICE = 1000    # ez alatt nem valódi ár („1 Ft”, „ár megegyezés szerint”)
+BUNDLE_PICKS = 2
+BUNDLE_PHOTOS = 4
+BUNDLE_LOOKUPS = 2
+BUNDLE_MARKET_MIN = 3
+MAX_LINES = 15             # ennyi tételt sorol fel a modell (az azonos darabok egy sorban, darabszámmal)
+MAX_PIECES = 60            # egy tétel legfeljebb ennyi darab
+BUNDLE_INBOX = 40          # ennyi csomag várhat a felmérésre (a legújabbak elöl; a régebbiek kiesnek)
+BUNDLE_TRIES = 2           # ha a modell ennyiszer sem válaszolt egy csomagra, kimarad
+MAX_BUNDLE_SEARCHES = 8
+# Nyugodt szívvel (assess_bundle): az érték legalább BUNDLE_SURE része hirdetési árakból jön (nem becslés), vagy a
+# haszon a vételár legalább BUNDLE_SAFE_ROI-ja; BUNDLE_BIG-nél több külön hirdetés sok munka.
+BUNDLE_SURE = 0.6
+BUNDLE_SAFE_ROI = 1.0
+BUNDLE_BIG = 15
+BUNDLE_PRESETS = (("Ruhacsomag", "ruhacsomag", ("vinted", "jofogas")),
+                  ("Lego ömlesztve", "lego ömlesztve", ("jofogas", "vatera")),
+                  ("Videojáték-csomag", "videojáték csomag", ("jofogas", "hardverapro", "vatera")),
+                  ("PC-alkatrészek egyben", "alkatrészek egyben", ("hardverapro", "jofogas")))
+# Csomagra utaló szó (ékezet nélkül): „ruhacsomag”, „csomagban”, „ömlesztve”, „gyűjtemény”, „játékok egyben”,
+# „15 db”. A „csomagolás”, a „csomagautomata” nem; a „szett” sem (a „Lego szett” egy termék).
+_BUNDLE_RE = re.compile(r"\b\w*csomag(?:ban|ot|kent|om|ja)?\b|\b(?:lot|kotegben|tetelben|omlesztve|omlesztett|"
+                        r"gyujtemeny\w*|egyben elado\w*|elado\w* egyben)\b|\b\w{3,}k egyben\b|"
+                        r"\btobb (?:db|darab)\b|\b(?:[3-9]|[1-9]\d) ?(?:db|darab|darabos)\b")
 DEFAULT_DAY = (7, 23)      # a gép általában ekkor megy (óra): a licitekről még az esti leállás előtt szól
 # Böngészés napközben: a gép üzemidejében (DEFAULT_DAY) munkamenetekben dolgozik, ahogy egy ember: egy oldalon kb.
 # BROWSE_WORK percig nézelődik (két oldalbetöltés között STEP_PAUSE másodperc), aztán egy rövid SWITCH_PAUSE után a
@@ -259,6 +307,40 @@ CHECK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"ok": {"type": "boolean"}, "suspicious": {"type": "boolean"}, "reason": {"type": "string"}},
     "required": ["ok", "suspicious", "reason"],
+}
+BUNDLE_PICK_SYSTEM = (
+    "Egy használtcikk-kereskedőnek segítesz csomagokat (több darab egy áron) felmérni: ha darabonként eladja őket, "
+    "többet kaphat érte. Megkapod a csomaghirdetéseket (számozva, árral). Válaszd ki legfeljebb kettőt, amelyik "
+    "darabonként eladva valószínűleg jóval többet ér, mint a csomag ára: keresett vagy márkás darabok (pl. Lego, "
+    "videojátékok, konzolok és kiegészítőik, márkás ruha és cipő, PC-alkatrészek, szerszámok), elég darabbal. Ne "
+    "válaszd: az egy darabos terméket (pl. egy Lego szett, egy ruha), a keresőhirdetést, a hibásat, és a tömegárut, "
+    "amiből egy darab csak pár száz forintot ér (no-name ruha, babaruha, régi könyvek). Ha egyik sem ilyen, üres "
+    "listát adj. reason: egy rövid mondat magyarul. " + UNTRUSTED_NOTE)
+BUNDLE_PICK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"picks": {"type": "array", "items": {"type": "integer"}}, "reason": {"type": "string"}},
+    "required": ["picks", "reason"],
+}
+BUNDLE_SYSTEM = (
+    "Egy használtcikk-kereskedőnek segítesz egy csomaghirdetést (több darab egy áron) felmérni: mennyit érne, ha "
+    "darabonként adná el. Megkapod a hirdetés címét, leírását, árát, és ha vannak, a fotóit. Sorold fel tételenként, "
+    "mi van benne (legfeljebb 15 sor; az azonos darabokat egy sorba, darabszámmal). Minden sorhoz: name (rövid magyar "
+    "név, a márkával és a típussal, ha kiderül), query (keresőszó, amivel egy használtpiacon megtalálni a hasonlót: "
+    "márka és típus, 2–5 szó, pl. „Lego 42115”, „Nike Air Force 1”, „FIFA 23 PS4”), count (darabszám), estimate (egy "
+    "darab reális ára forintban, amennyiért egy magyar használtpiacon – Vinted, Jófogás, Hardverapró – gyorsan elkel, "
+    "az állapotát is nézve; légy óvatos). Csak azt sorold fel, ami a leírásból vagy a fotókról tényleg kiderül; ha a "
+    "darabszám nem derül ki, óvatosan becsüld. bundle=false, ha ez nem csomag (egy termék, vagy csak egy darab "
+    "eladó). suspicious=true, ha átverésnek látszik (letöltött képek, túl szép, hogy igaz legyen, előre fizetést vagy "
+    "más oldalon való kapcsolatfelvételt kér). reason: egy rövid mondat magyarul. " + UNTRUSTED_NOTE)
+BUNDLE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "bundle": {"type": "boolean"},
+        "lines": {"type": "array", "items": {"type": "object", "properties": {
+            "name": {"type": "string"}, "query": {"type": "string"}, "count": {"type": "integer"},
+            "estimate": {"type": "integer"}}, "required": ["name", "query", "count", "estimate"]}},
+        "suspicious": {"type": "boolean"}, "reason": {"type": "string"}},
+    "required": ["bundle", "lines", "suspicious", "reason"],
 }
 
 
@@ -416,6 +498,95 @@ def safety_text(safety: dict[str, Any] | None) -> str:
     return "Jó vétel" + (f", de figyelj: {'; '.join(why)}." if why else (f": {', '.join(good)}." if good else "."))
 
 
+def _not_for_sale(text: str) -> bool:
+    """Kereső- vagy cserehirdetés (valaki venni vagy cserélni akar)."""
+    folded = fold(text or "")
+    return bool(_WANTED_RE.search(folded) or (_SWAP_RE.search(folded) and not _SALE_RE.search(folded)))
+
+
+def bundle_like(text: str) -> bool:
+    """Csomaghirdetésnek látszik-e (több darab egy áron), és nem kereső- vagy cserehirdetés."""
+    return not _not_for_sale(text) and bool(_BUNDLE_RE.search(fold(text or "")))
+
+
+def bundle_value(lines: list[dict[str, Any]], price: int) -> dict[str, Any]:
+    """Mennyit ér egy csomag darabonként eladva (a beárazott tételekből: count, unit, source „piac”/„becslés”): a
+    PIECE_MIN alatti darabok egy maradék csomagban (LEFTOVER_RATIO), a többi egyenként. value: az óvatos eladási érték,
+    listings: hány hirdetés kell hozzá, profit: a vételár, a posta (SHIPPING) és darabonként PIECE_COST nélkül, sure: az
+    érték mekkora része jön hirdetési árakból (nem becslésből), top: a legértékesebb darab része az értékből (ha nagy, a
+    haszon egyetlen darabon múlik: ha a modell azt félreismerte, nincs haszon)."""
+    big = [line for line in lines if line["unit"] >= PIECE_MIN]
+    small = [line for line in lines if 0 < line["unit"] < PIECE_MIN]
+    worth = lambda group: sum(line["unit"] * line["count"] for line in group)  # noqa: E731
+    leftover = int(round(worth(small) * LEFTOVER_RATIO))
+    value = worth(big) + leftover
+    listings = sum(line["count"] for line in big) + (1 if leftover else 0)
+    sure = worth([line for line in big if line["source"] == "piac"]) + \
+        worth([line for line in small if line["source"] == "piac"]) * LEFTOVER_RATIO
+    return {"value": value, "leftover": leftover, "small": sum(line["count"] for line in small),
+            "listings": listings, "profit": int(value - price - SHIPPING - listings * PIECE_COST),
+            "sure": round(sure / value, 2) if value else 0.0,
+            "top": round(max((line["unit"] for line in big), default=0) / value, 2) if value else 0.0}
+
+
+def assess_bundle(deal: dict[str, Any]) -> dict[str, Any]:
+    """Egy csomag nyugodt szívvel megvehető-e (mint az assess): „biztos”, ha az értéke nagyrészt hirdetési árakból
+    jön (BUNDLE_SURE), vagy a haszon a vételár legalább BUNDLE_SAFE_ROI-ja, és nincs figyelmeztetés; „kockázatos”, ha
+    a darabárak többsége csak becslés, és a haszon sem nagy; különben „jó”."""
+    bundle, price = deal["bundle"], int(deal["price"])
+    roi = int(deal.get("profit") or 0) / price if price > 0 else 0.0
+    risks, cautions, good = [], [], []
+    if bundle["sure"] < 0.3 and roi < BUNDLE_SAFE_ROI:
+        risks.append("a darabárak többsége csak becslés, és nem hozza a vételár dupláját")
+    elif bundle["sure"] < BUNDLE_SURE:
+        cautions.append("a darabárak egy része csak becslés")
+    else:
+        good.append(f"az érték {round(bundle['sure'] * 100)}%-a mostani hirdetési árakból")
+    if bundle["listings"] > BUNDLE_BIG:
+        cautions.append(f"sok munka: {bundle['listings']} külön hirdetés")
+    if bundle["top"] >= 0.6 and len(bundle["lines"]) > 1:
+        cautions.append("az érték nagy része egy tételen múlik: nézd meg a fotón, tényleg az-e")
+    if roi >= BUNDLE_ROI:
+        good.insert(0, f"{round(roi * 100)}% haszon")
+    level = ("kockázatos" if risks else
+             "biztos" if not cautions and (roi >= BUNDLE_SAFE_ROI or bundle["sure"] >= BUNDLE_SURE) else "jó")
+    return {"level": level, "why": risks + cautions, "good": good}
+
+
+def bundle_parts(deal: dict[str, Any], paid: int, shipping: int = 0) -> list[dict[str, Any]]:
+    """Egy megvett csomag darabjai eladási tárgynak (tételenként egy, a PIECE_MIN alattiak együtt egy maradék
+    csomagban): a név, a keresőszó, hogy mennyiért adnád tovább, és a vételár meg a posta, az értékük arányában
+    szétosztva (forintra pontosan: az összegük a kifizetett összeg)."""
+    bundle = deal["bundle"]
+    title = str(deal.get("title") or deal["text"])[:60]
+    parts: list[dict[str, Any]] = []
+    for line in bundle["lines"]:
+        if line["unit"] < PIECE_MIN:
+            continue
+        count = int(line["count"])
+        parts.append({"prompt": f"{line['name']}" + (f", {count} db" if count > 1 else "") + f", {line['unit']} Ft",
+                      "search_query": line.get("query") or "", "target_price": line["unit"] * count,
+                      "trade_note": f"Csomagból („{title}”): " + (f"{count} db, darabonként kb. {line['unit']} Ft"
+                                                                   if count > 1 else f"kb. {line['unit']} Ft"),
+                      "weight": line["unit"] * count})
+    if bundle.get("leftover"):
+        parts.append({"prompt": f"Apróságok egyben a csomagból ({bundle.get('small') or 0} db), {bundle['leftover']} Ft",
+                      "search_query": "", "target_price": bundle["leftover"],
+                      "trade_note": f"Csomagból („{title}”): a {PIECE_MIN} Ft alatti darabok egyben",
+                      "weight": bundle["leftover"]})
+    if not parts:
+        return []
+    total = sum(part["weight"] for part in parts) or 1
+    for field_name, amount in (("bought_price", paid), ("bought_shipping", shipping)):
+        shares = [amount * part["weight"] // total for part in parts]
+        shares[max(range(len(parts)), key=lambda i: parts[i]["weight"])] += amount - sum(shares)
+        for part, share in zip(parts, shares):
+            part[field_name] = share
+    for part in parts:
+        part.pop("weight")
+    return parts
+
+
 def sure_price(reference: dict[str, Any]) -> bool:
     """Elég biztos-e egy szokásos ár: legalább SURE_MIN hasonló áron alapul, két oldalról (vagy egy oldalról legalább
     SURE_ALONE áron)."""
@@ -516,7 +687,8 @@ class _Round:
         self.check, self.notify, self.lane = check, notify, lane
         self.work: deque[Callable[[], None]] = deque()
         self.pages, self.checks, self.resale, self.blocked = MAX_PAGES, MAX_CHECKS, EXPLORE_PICKS, False
-        self.found = self.done = 0
+        self.bundle_picks = BUNDLE_PICKS       # ennyi csomag oldalát nyithatja meg (a modell választja ki)
+        self.found = self.done = self.bundled = 0
         self.loaded = self.named = 0          # betöltött oldalak, a modell által megnevezett hirdetések
         self.captcha = ""                     # ezen az oldalon kért robot-ellenőrzést
         self.closing = False                  # böngészés: a munkamenet a kör végén lezárul
@@ -804,6 +976,8 @@ class DealHunter:
                 "sites_state": {"ended": {}, "rest": {}, "blocked": {}, "learned": "",
                                 **(data.get("sites_state") if isinstance(data.get("sites_state"), dict) else {})},
                 "feedback": dicts("feedback"),    # termék → elrejtve / megvetted (öntanulás)
+                # csomagbontás: be/ki, a legkisebb haszon, a csomagkeresések, és a felmérésre váró csomagok (inbox)
+                "bundles": self._load_bundles(data.get("bundles")),
                 "searches": [s for s in data.get("searches") or [] if isinstance(s, dict) and s.get("query")],
                 "watches": [w for w in data.get("watches") or [] if isinstance(w, dict) and w.get("url")],
                 "deals": [d for d in data.get("deals") or [] if isinstance(d, dict) and d.get("url")],
@@ -811,6 +985,14 @@ class DealHunter:
                 "cancelled": numbers("cancelled"),   # visszamondott vétel hirdetése → mikor: többé nem szól róla
                 "prices": {k: int(v) for k, v in numbers("prices").items()},   # hirdetés → az ára akkor (leárazás)
                 "last": numbers("last")}       # keresés:oldal → mikor néztük meg (gyakoriság)
+
+    @staticmethod
+    def _load_bundles(saved: Any) -> dict[str, Any]:
+        saved = saved if isinstance(saved, dict) else {}
+        return {"on": bool(saved.get("on")), "min_profit": int(saved.get("min_profit") or BUNDLE_PROFIT),
+                "searches": [s for s in saved.get("searches") or [] if isinstance(s, dict) and s.get("query")],
+                "inbox": [r for r in saved.get("inbox") or [] if isinstance(r, dict) and r.get("url")
+                          and isinstance(r.get("price"), int)][:BUNDLE_INBOX]}
 
     def _save(self) -> None:
         with self._lock:                      # két szál is menthet (a böngésző sora és a gyors sor)
@@ -835,7 +1017,8 @@ class DealHunter:
                     "day": list(self._data["day"]), "book": self.book.stats(),
                     "browse": {**json.loads(json.dumps(self._data["browse"])),
                                "status": self._browse_status(self.clock())},
-                    "lanes": self._lane_list(), "journal": self.journal.entries(), "journal_days": self.journal.days()}
+                    "lanes": self._lane_list(), "journal": self.journal.entries(), "journal_days": self.journal.days(),
+                    "bundles": self._bundle_state()}
 
     def available(self) -> bool:
         """Van-e most dolga: egy esedékes keresés, figyelt oldal, vagy a böngészés következő lépése. Az ütemező csak
@@ -855,6 +1038,8 @@ class DealHunter:
                 platform = watch.get("platform") or "vatera"
                 if platform in self.platforms and self._due(watch, platform, now):
                     return True
+            if self._bundles_due(now):
+                return True
             return self._browse_due(now)
 
     def running_searches(self) -> list[dict[str, Any]]:
@@ -1297,14 +1482,16 @@ class DealHunter:
                     return dict(deal)
         raise DealError("Ez a találat már nincs meg.")
 
-    def mark_bought(self, deal_id: str, item_id: str) -> dict[str, Any]:
-        """Megvetted: a találatból eladási tárgy lett (item_id); a listában jelölve marad. Öntanulás: az indulóoldala
-        és a termék jó pontot kap (ha elrejtetted volna, újra szól róla)."""
+    def mark_bought(self, deal_id: str, item_id: str, items: list[str] | None = None) -> dict[str, Any]:
+        """Megvetted: a találatból eladási tárgy lett (item_id; egy csomagból több is: items, a darabjai); a listában
+        jelölve marad. Öntanulás: az indulóoldala és a termék jó pontot kap (ha elrejtetted volna, újra szól róla)."""
         found = None
         with self._lock:
             for deal in self._data["deals"]:
                 if deal.get("id") == deal_id:
                     deal["bought"] = item_id
+                    if items:
+                        deal["bought_items"] = list(items)
                     found = deal
             if found is not None:
                 if found.get("product_key"):
@@ -1320,9 +1507,11 @@ class DealHunter:
     def cancel_bought(self, item_id: str, name: str = "") -> dict[str, Any] | None:
         """Visszamondtad a vételt (a tárgyat a hívó törli): a találat, amiből lett, kikerül a találatok közül, a jó pontja
         (a termék, az indulóoldal) visszavonódik, a havi keret maradéka rögtön újraszámolódik, és erről a hirdetésről
-        többé nem szól. Visszaadja a találatot (None, ha kézzel felvett vétel volt)."""
+        többé nem szól. Visszaadja a találatot (None, ha kézzel felvett vétel volt). Egy csomagnál a darabjait
+        (bought_group) a hívó mind törli."""
         with self._lock:
-            found = next((d for d in self._data["deals"] if d.get("bought") == item_id), None)
+            found = next((d for d in self._data["deals"] if d.get("bought") == item_id
+                          or item_id in (d.get("bought_items") or [])), None)
             if found is not None:
                 self._data["deals"].remove(found)
                 feedback = self._data["feedback"].get(found.get("product_key") or "")
@@ -1388,6 +1577,11 @@ class DealHunter:
         with self._lock:
             jobs = [int(s.get("every") or DEFAULT_EVERY) for s in self._data["searches"]]
             jobs += [int(w.get("every") or WATCH_EVERY) for w in self._data["watches"]]
+            bundles = self._data["bundles"]
+            if bundles["on"]:
+                jobs += [int(s.get("every") or DEFAULT_EVERY) for s in bundles["searches"]]
+                if bundles["inbox"]:
+                    jobs.append(5)             # a felmérésre váró csomagok (a többi oldalról) hamar sorra kerülnek
             if not self._data["enabled"] or not (jobs or self._data["browse"]["on"]):
                 return 0.0
             # böngészés közben percenként megnézi, van-e dolga (csak akkor fut, ha van: lásd available)
@@ -1416,6 +1610,7 @@ class DealHunter:
                 return "Az automata kereskedés ki van kapcsolva."
             searches = json.loads(json.dumps(self._data["searches"]))
             watches = json.loads(json.dumps(self._data["watches"]))
+            bundles = json.loads(json.dumps({k: v for k, v in self._data["bundles"].items() if k != "inbox"}))
         if self.browser is None:
             return "Az automata kereskedéshez Jarvis saját böngészője kell."
         now = self.clock()
@@ -1444,6 +1639,15 @@ class DealHunter:
                 game.done += 1
                 names.append(watch["name"])
                 game.work.append(partial(self._step_watch, game, watch, platform, running))
+        bundle_searches = []
+        for bundle_search in bundles["searches"] if bundles["on"] else []:
+            sites = [key for key in bundle_search.get("sites") or list(self.platforms) if key in self.platforms
+                     and (force or self._due(bundle_search, key, now))]
+            if sites:
+                game.done += 1
+                names.append(f"csomag: „{bundle_search['query']}”")
+                bundle_searches.append(bundle_search)
+                game.work.append(partial(self._step_bundle_search, game, bundle_search, sites))
         browse = False
         if game.done:
             game.work.append(partial(self._step_revisit, game))
@@ -1452,12 +1656,14 @@ class DealHunter:
                 browse = self._browse_due(now)
             if browse:
                 game.work.append(partial(self._step_browse, game, running))
+        if bundles["on"]:                     # a felmérésre váró csomagok (a keresések, a böngészés után)
+            game.work.append(partial(self._step_bundles, game))
         if self.fetcher is not None and game.done:
             # a Hardverapró és a Jófogás találati oldalai rögtön, a háttérben (oldalanként egyszerre egy, szünetekkel),
             # amíg a böngésző a Vintedet és a Vaterát nézi
             game.pool = ThreadPoolExecutor(max_workers=max(1, len(getattr(self.fetcher, "sites", ()) or (1,))),
                                            thread_name_prefix="jarvis-gyors")
-            for url, platform in self._fast_loads(searches, watches, now, force):
+            for url, platform in self._fast_loads(searches + bundle_searches, watches, now, force):
                 game.fetch_ahead(self.fetcher, url, platform)
         try:
             game.loop()
@@ -1470,6 +1676,9 @@ class DealHunter:
         if browse:
             return self._after_browse(game)
         extra = [n for n in game.notes if n] + game.errors
+        if not game.done and game.bundled:
+            return f"Csomagbontás: {game.bundled} csomag felmérve, " + (
+                f"{game.found} megéri." if game.found else "egyik sem éri meg.")
         if not game.done:
             return "Most egyik keresés sem esedékes" + (f" ({'; '.join(extra[:4])})" if extra else "") + "."
         text = (f"{game.done} keresés: {game.found} olcsó hirdetés" if game.found
@@ -1544,6 +1753,7 @@ class DealHunter:
         game.errors += problems
         if not rows:
             return
+        self._to_bundles([row for row in rows if not usable(row["text"])], f"Keresés: {search['query']}")
         kept = self._relevant(search, rows)
         if status == "fut":
             game.next([partial(self._candidate, game, search, deal) for deal in self._hunt(search, kept)])
@@ -1944,7 +2154,7 @@ class DealHunter:
         megnézi (_resale). A jelöltek (_candidate) rögtön jönnek; visszaadja az ismeretleneket (ezeket a modell
         nevezheti meg). A már látottak (ha nem árazták le) és a nem eladási árak (kereső, csomag, alkatrész…)
         kimaradnak."""
-        unknown, found, skip, recheck = [], [], [], []
+        unknown, found, skip, recheck, lots = [], [], [], [], []
         with self._lock:
             seen, prices, deals = dict(self._data["seen"]), dict(self._data["prices"]), self._deal_keys()
             cancelled = set(self._data["cancelled"])
@@ -1955,7 +2165,7 @@ class DealHunter:
             if (key in seen and not drop) or (key in deals and not drop) or key in cancelled:
                 continue
             if not usable(row["text"]):
-                skip.append(row)               # nem eladási ár (kereső, csere, csomag, alkatrész…)
+                lots.append(row)               # nem eladási ár (kereső, csere, csomag, alkatrész…); a csomag felmérhető
                 continue
             if not self._within_reach(row):
                 continue                       # a vételi limit fölött: nem jegyzi látottnak (ha emeled, sorra kerül)
@@ -1990,6 +2200,8 @@ class DealHunter:
                     recheck.append(partial(self._resale, game, source, row, query))
             else:
                 found.append(({"id": source["id"], "query": reference["name"]}, deal))
+        lane = next((row.get("lane_name") for row in lots if row.get("lane_name")), "")
+        skip += self._to_bundles(lots, f"Böngészés közben ({lane})" if lane else f"Figyelt oldal: {source['name']}")
         self._mark(*skip)
         game.next([partial(self._candidate, game, search, deal) for search, deal in found] + recheck)
         return unknown
@@ -2152,6 +2364,371 @@ class DealHunter:
                 game.blocked = True
                 return
             self.book.revisited(key, url, state in (SOLD, GONE))
+
+    # --- csomagbontás: csomaghirdetések, darabonként felmérve ---
+
+    def _bundle_state(self) -> dict[str, Any]:
+        with self._lock:
+            bundles = self._data["bundles"]
+            return {"on": bundles["on"], "min_profit": bundles["min_profit"],
+                    "searches": json.loads(json.dumps(bundles["searches"])), "waiting": len(bundles["inbox"]),
+                    "presets": [{"name": name, "query": query, "sites": [s for s in sites if s in self.platforms]}
+                                for name, query, sites in BUNDLE_PRESETS],
+                    "piece_min": PIECE_MIN, "max_searches": MAX_BUNDLE_SEARCHES}
+
+    def _bundles_due(self, now: float) -> bool:
+        """Van-e dolga a csomagbontásnak (a hívó fogja a zárat): egy esedékes csomagkeresés, vagy felmérésre váró csomag
+        (modell nélkül nem mérhető fel)."""
+        bundles = self._data["bundles"]
+        if not bundles["on"]:
+            return False
+        if bundles["inbox"] and self.llm is not None:
+            return True
+        return any(self._due(search, key, now) for search in bundles["searches"]
+                   for key in search.get("sites") or list(self.platforms) if key in self.platforms)
+
+    def set_bundles(self, on: Any = None, min_profit: Any = None) -> dict[str, Any]:
+        """Csomagbontás be/ki (kikapcsolva a felmérésre várók is elmaradnak), és legalább mennyi haszonnal szóljon."""
+        profit = self._amount(min_profit, "A legkisebb haszon") if min_profit not in (None, "") else None
+        with self._lock:
+            bundles = self._data["bundles"]
+            if on is not None:
+                bundles["on"] = bool(on)
+                if not bundles["on"]:
+                    bundles["inbox"] = []
+            if profit:
+                bundles["min_profit"] = profit
+            self._save()
+        if on is not None:
+            self.journal.add("Bekapcsoltad a csomagbontást: a csomaghirdetéseket darabonként is felmérem." if on
+                             else "Kikapcsoltad a csomagbontást.")
+        return self.state()
+
+    def add_bundle_search(self, query: str, sites: list[str] | None = None, max_price: Any = None,
+                          every: Any = None) -> dict[str, Any]:
+        """Csomagkeresés (pl. „ruhacsomag”): a találatai mind a felmérésre várók közé kerülnek (szokásos ár nem kell).
+        Bekapcsolja a csomagbontást is."""
+        search = self._clean({"query": query, "sites": sites or list(self.platforms), "max_price": max_price,
+                              "every": every})
+        with self._lock:
+            bundles = self._data["bundles"]
+            if any(fold(s["query"]) == fold(search["query"]) for s in bundles["searches"]):
+                raise DealError("Ezt a csomagot már keresem.")
+            if len(bundles["searches"]) >= MAX_BUNDLE_SEARCHES:
+                raise DealError(f"Legfeljebb {MAX_BUNDLE_SEARCHES} csomagkeresés lehet.")
+            bundles["searches"].append({"id": "b" + secrets.token_hex(4), **search})
+            bundles["on"] = True
+            self._save()
+        return self.state()
+
+    def remove_bundle_search(self, search_id: str) -> dict[str, Any]:
+        with self._lock:
+            bundles = self._data["bundles"]
+            bundles["searches"] = [s for s in bundles["searches"] if s.get("id") != search_id]
+            for key in self.platforms:
+                self._data["last"].pop(f"{search_id}:{key}", None)
+            self._save()
+        return self.state()
+
+    def _to_bundles(self, rows: list[dict[str, Any]], label: str) -> list[dict[str, Any]]:
+        """A csomagnak látszó hirdetések (bundle_like) a felmérésre várók közé (_inbox); a többit visszaadja (a hívó
+        látottnak jegyzi, ahogy eddig). Ha a csomagbontás ki van kapcsolva, mindet visszaadja."""
+        return self._inbox(rows, label, lambda row: bundle_like(row["text"]))
+
+    def _inbox(self, rows: list[dict[str, Any]], label: str,
+               wanted: Callable[[dict[str, Any]], bool]) -> list[dict[str, Any]]:
+        """Hirdetések a felmérésre várók elejére (a legújabbak elöl; legfeljebb BUNDLE_INBOX), ha be van kapcsolva a
+        csomagbontás: ami nem licit, wanted szerint csomag, valódi ára van (BUNDLE_MIN_PRICE), és belefér a vételi
+        limitbe. Ami már vár, amit már láttunk vagy amiről már szóltunk, kimarad. Visszaadja, amit nem vett fel."""
+        if not rows:
+            return []
+        with self._lock:
+            bundles = self._data["bundles"]
+            if not bundles["on"]:
+                return list(rows)
+            have = {listing_key(r["url"]) for r in bundles["inbox"]} | self._deal_keys() | set(self._data["seen"])
+        taken, rest = [], []
+        for row in rows:
+            price = int(row.get("price") or 0)
+            if not row.get("url") or row.get("auction") or price < BUNDLE_MIN_PRICE or not wanted(row) \
+                    or not self._affordable(price):
+                rest.append(row)
+                continue
+            key = listing_key(row["url"])
+            if key in have:
+                continue
+            have.add(key)
+            taken.append({"site": str(row.get("site") or ""),
+                          "platform": str(row.get("platform") or self._platform_of(row["url"])),
+                          "text": str(row.get("text") or "")[:180], "price": price, "url": str(row["url"]),
+                          **({"title": str(row["title"])[:160]} if row.get("title") else {}), "from": label[:80]})
+        if taken:
+            with self._lock:
+                bundles = self._data["bundles"]
+                fresh = {listing_key(r["url"]) for r in taken}
+                bundles["inbox"] = (taken + [r for r in bundles["inbox"]
+                                             if listing_key(r["url"]) not in fresh])[:BUNDLE_INBOX]
+                self._save()
+        return rest
+
+    def _return_bundles(self, rows: list[dict[str, Any]], failed: bool = False) -> None:
+        """Vissza a felmérésre várók elejére (a kör keretébe már nem fért bele, vagy a modell nem válaszolt: failed).
+        Amire a modell BUNDLE_TRIES-szor sem válaszolt, az kimarad (látottnak jegyzi)."""
+        if failed:
+            rows = [{**row, "tries": int(row.get("tries") or 0) + 1} for row in rows]
+            self._mark(*[row for row in rows if row["tries"] >= BUNDLE_TRIES])
+            rows = [row for row in rows if row["tries"] < BUNDLE_TRIES]
+        if not rows:
+            return
+        with self._lock:
+            bundles = self._data["bundles"]
+            if not bundles["on"]:
+                return
+            back = {listing_key(r["url"]) for r in rows}
+            bundles["inbox"] = (rows + [r for r in bundles["inbox"] if listing_key(r["url"]) not in back])[:BUNDLE_INBOX]
+            self._save()
+
+    def _step_bundle_search(self, game: _Round, search: dict[str, Any], sites: list[str]) -> None:
+        """Egy csomagkeresés találati oldalai (a legújabb elöl): a kereső- és a cserehirdetés kivételével minden
+        találat a felmérésre várók közé kerül (a megadott ársávban)."""
+        rows, problems = self._collect(search, sites, game.check, game=game)
+        game.errors += problems
+        cap = search.get("max_price")
+        self._inbox([row for row in rows if not cap or row["price"] <= cap], f"Csomagkeresés: {search['query']}",
+                    lambda row: not _not_for_sale(row["text"]))
+
+    def _step_bundles(self, game: _Round) -> None:
+        """A felmérésre váró csomagok: a modell a címük és az áruk alapján kiválasztja a legígéretesebbeket (egy hívás,
+        legfeljebb EXPLORE_ROWS csomag; a többit látottnak jegyzi), és ezek oldalát megnyitja (_bundle_candidate). A
+        gyors sor csak a böngésző nélkül olvasható oldalak csomagjait veszi el."""
+        if game.bundle_picks <= 0 or game.blocked:
+            return
+        if self.llm is None:                   # modell nélkül nem derül ki, mi van benne
+            with self._lock:
+                rows, self._data["bundles"]["inbox"] = self._data["bundles"]["inbox"], []
+                self._save()
+            self._mark(*rows)
+            return
+        if game.lane is None:
+            return                             # most nem lehet kérdezni a modellt: később
+        fast = {k for k in self.platforms if self.fetcher is not None and self.fetcher.usable(k)}
+        with self._lock:
+            inbox = self._data["bundles"]["inbox"]
+            batch = [row for row in inbox if row.get("platform") in self.platforms
+                     and (not game.no_browser or row.get("platform") in fast)][:EXPLORE_ROWS]
+            if not batch:
+                return
+            taken = {id(row) for row in batch}
+            self._data["bundles"]["inbox"] = [row for row in inbox if id(row) not in taken]
+            self._save()
+        game.ask(partial(self._bundle_pick, batch), partial(self._bundle_picked, game, batch))
+
+    def _bundle_pick(self, batch: list[dict[str, Any]]) -> list[int] | None:
+        """Egy modellhívás: melyik csomag érhet darabonként jóval többet (a kérés szerint legfeljebb kettő; ha többet
+        választ, a kör keretén felüliek a következő körre várnak). None: nem válaszolt."""
+        lines = "\n".join(f"{n}. [{row['site']}] {row.get('title') or row['text']} – {format_price(row['price'])}"
+                          for n, row in enumerate(batch, 1))
+        messages = [{"role": "system", "content": BUNDLE_PICK_SYSTEM},
+                    {"role": "user", "content": "Csomaghirdetések:\n" + lines}]
+        try:
+            data = self.llm.chat_json(messages, BUNDLE_PICK_SCHEMA, temperature=0.0, max_tokens=200)
+        except Exception:  # noqa: BLE001 - a modell hibája ne állítsa le a kört
+            return None
+        picks: list[int] = []
+        for number in data.get("picks") or []:
+            try:
+                index = int(number) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(batch) and index not in picks:
+                picks.append(index)
+        return picks[:EXPLORE_ROWS]
+
+    def _bundle_picked(self, game: _Round, batch: list[dict[str, Any]], picks: list[int] | None) -> None:
+        """A modell választása után: a kiválasztottak oldala jön (a kör keretébe nem férők a következő körre várnak), a
+        többit látottnak jegyzi."""
+        if picks is None:
+            self._return_bundles(batch, failed=True)
+            return
+        chosen = [batch[index] for index in picks]
+        now, later = chosen[:game.bundle_picks], chosen[game.bundle_picks:]
+        game.bundle_picks -= len(now)
+        picked = {id(row) for row in chosen}
+        self._mark(*[row for row in batch if id(row) not in picked])
+        self._return_bundles(later)
+        game.next([partial(self._bundle_candidate, game, row) for row in now])
+
+    def _bundle_candidate(self, game: _Round, row: dict[str, Any]) -> None:
+        """Egy kiválasztott csomag oldala (csak olvasva: elkelt, gyanús?), a leírása és az első BUNDLE_PHOTOS fotója;
+        utána a modell tételesen felsorolja, mi van benne (_itemize). Ha a kör keretébe már nem fér bele, vár."""
+        if game.blocked or game.pages <= 0 or game.checks <= 0:
+            self._return_bundles([row])
+            return
+        deal = {k: v for k, v in row.items() if k not in ("from", "tries")}
+        deal.update(id=secrets.token_hex(5), explore=row.get("from") or "Csomagbontás")
+        game.pages -= 1
+        game.loaded += 1
+        verdict = self._inspect(deal, None, game, photos=BUNDLE_PHOTOS, defects=False)
+        if verdict == "captcha":
+            game.blocked = True
+            self._return_bundles([row])
+            return
+        if not verdict and not deal.get("details"):
+            self._return_bundles([row], failed=True)   # az oldala nem nyílt meg: a leírása és a fotói nélkül nem
+            return                                     # mérhető fel (később, vagy a böngészővel újra)
+        if verdict == "gyanús":
+            self._suspicious(deal)
+            return
+        if verdict:                            # elkelt, eltűnt
+            self._mark(deal)
+            return
+        game.checks -= 1
+        game.ask(partial(self._itemize, deal), partial(self._bundle_priced, game, row, deal))
+
+    def _itemize(self, deal: dict[str, Any]) -> dict[str, Any] | None:
+        """Egy modellhívás a csomag leírásával és fotóival: mi van benne tételenként (név, keresőszó, darabszám, a
+        modell becsült darabára), csomag-e egyáltalán, és gyanús-e. None: nem válaszolt."""
+        photos = self._photos(deal, BUNDLE_PHOTOS)
+        text = (f"Csomaghirdetés ({deal['site']}): {deal.get('title') or deal['text']}\n"
+                f"Ára: {format_price(deal['price'])}"
+                + (f"\nA hirdetés oldala: {deal['details'][:1500]}" if deal.get("details") else "")
+                + (f"\nA hirdetés fotói ({len(photos)} db) mellékelve." if photos else ""))
+        messages = [{"role": "system", "content": BUNDLE_SYSTEM},
+                    {"role": "user", "content": text, **({"images": photos} if photos else {})}]
+        try:
+            data = self.llm.chat_json(messages, BUNDLE_SCHEMA, temperature=0.0, max_tokens=900)
+        except Exception:  # noqa: BLE001 - a modell hibája ne állítsa le a kört
+            if not photos:
+                return None
+            try:                               # pl. a modell nem tud képet: fotók nélkül
+                messages[1] = {"role": "user", "content": text.rsplit("\nA hirdetés fotói", 1)[0]}
+                data = self.llm.chat_json(messages, BUNDLE_SCHEMA, temperature=0.0, max_tokens=900)
+                photos = []
+            except Exception:  # noqa: BLE001
+                return None
+        lines = []
+        for line in data.get("lines") or []:
+            if not isinstance(line, dict):
+                continue
+            name = " ".join(str(line.get("name") or "").split())[:60]
+            try:
+                count = min(max(int(line.get("count") or 1), 1), MAX_PIECES)
+                estimate = min(max(int(line.get("estimate") or 0), 0), 2_000_000)
+            except (TypeError, ValueError):
+                continue
+            if name:
+                lines.append({"name": name, "query": " ".join(str(line.get("query") or "").split())[:60],
+                              "count": count, "estimate": estimate})
+        return {"bundle": bool(data.get("bundle")), "lines": lines[:MAX_LINES],
+                "suspicious": bool(data.get("suspicious")), "reason": str(data.get("reason") or "")[:200],
+                "photos": len(photos)}
+
+    def _bundle_priced(self, game: _Round, row: dict[str, Any], deal: dict[str, Any],
+                       result: dict[str, Any] | None) -> None:
+        """A modell felsorolása után (a böngésző szálán): a darabárak (_price_lines), mennyit ér darabonként eladva
+        (bundle_value), és ha megéri (legalább a megadott haszon, és a vételár legalább BUNDLE_ROI-ja), nyugodt szívvel
+        megvehető-e (assess_bundle). Ami átment, arról szól; a többit a naplóba írja."""
+        if result is None:
+            self._return_bundles([row], failed=True)
+            return
+        deal.update(checked=True, photos_checked=result["photos"] or None, note=result["reason"])
+        if result["suspicious"]:
+            deal["suspect"] = "a modell szerint gyanús" + (f": {deal['note']}" if deal["note"] else "")
+            self._suspicious(deal)
+            return
+        name = str(deal.get("title") or deal["text"])[:60]
+        if not result["bundle"] or not result["lines"]:
+            self._mark(deal)
+            self.journal.add(f"Nem csomag (vagy nem derül ki, mi van benne): „{name}” {format_price(deal['price'])}.")
+            return
+        game.bundled += 1
+        lines = self._price_lines(game, deal, result["lines"])
+        info = bundle_value(lines, int(deal["price"]))
+        deal.update(bundle={**info, "lines": lines}, profit=info["profit"], value=info["value"], at=self.clock())
+        with self._lock:
+            floor = int(self._data["bundles"]["min_profit"] or BUNDLE_PROFIT)
+            safe_only = self._data["safe_only"]
+        summary = (f"darabonként kb. {format_price(info['value'])} ({info['listings']} hirdetés), a haszon kb. "
+                   f"{format_price(info['profit'])}")
+        if info["profit"] < floor or info["profit"] < deal["price"] * BUNDLE_ROI or not self._affordable(deal["price"]):
+            self._mark(deal)
+            self.journal.add(f"Csomag, nem éri meg: „{name}” {format_price(deal['price'])} ({deal['site']}) – {summary}.")
+            return
+        deal["safety"] = assess_bundle(deal)
+        if deal["safety"]["level"] == "kockázatos" and safe_only:
+            self._mark(deal)
+            self.journal.add(f"Kockázatos csomag, nem szóltam: „{name}” {format_price(deal['price'])} ({deal['site']}) "
+                             f"– {summary}; {'; '.join(deal['safety']['why'])}.")
+            return
+        with self._lock:
+            if listing_key(deal["url"]) in self._deal_keys():
+                return
+        self._mark(deal)
+        self._remember(deal)
+        game.found += 1
+        hit = f"„{name}” {format_price(deal['price'])} ({deal['site']}, csomag, kb. {format_price(info['profit'])} haszon)"
+        game.hits.append(hit)
+        self.journal.add(f"Jó csomag: {hit} – {deal['explore']}")
+        game.notify("deal", f"Csomag: {name}", self._bundle_text(deal), url=deal["url"],
+                    actions=[deal_action(deal["id"])], deal=deal["id"], urgent=True)
+
+    def _price_lines(self, game: _Round, deal: dict[str, Any], lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Egy csomag tételeinek darabára (unit): az árbázis szokásos ára (ha ismeri a terméket), vagy a gyors oldalak
+        mostani hirdetései (a legértékesebb tételekre, csomagonként legfeljebb BUNDLE_LOOKUPS keresés; az árak az
+        árbázisba is bekerülnek), óvatosan (safe_sale), de legfeljebb a modell becslésének GUESS_CAP-szorosa (source:
+        „piac”); ahol egyik sincs, a becslés GUESS_RATIO-ja (source: „becslés”)."""
+        sites = [k for k in RESALE_SITES if k in self.platforms and self.fetcher is not None and self.fetcher.usable(k)]
+        lookups = BUNDLE_LOOKUPS if sites else 0
+        priced = [dict(line) for line in lines]
+        for line in sorted(priced, key=lambda line: -line["estimate"] * line["count"]):
+            found = None
+            for text in (line["query"], line["name"]):
+                product = self.book.key(text) if text else None
+                found = self.book.reference(product[0], exclude=deal["url"]) if product else None
+                if found:
+                    break
+            if found is None and lookups > 0 and line["query"] and line["estimate"] >= PIECE_MIN:
+                lookups -= 1
+                probe = {"id": "csomag", "query": line["query"]}
+                rows = self._collect(probe, sites, game.check, track=False, game=game)[0]
+                market_now = self._market_of(deal, line["query"], rows)
+                if market_now and market_now["n"] >= BUNDLE_MARKET_MIN:
+                    found = market_now
+            if found:
+                unit = safe_sale(int(found["price"]), careful_low(found))
+                if line["estimate"]:
+                    unit = min(unit, int(line["estimate"] * GUESS_CAP))
+                line.update(unit=round_price(unit), source="piac", n=int(found.get("n") or 0))
+            else:
+                line.update(unit=round_price(line["estimate"] * GUESS_RATIO) if line["estimate"] else 0,
+                            source="becslés")
+        return priced
+
+    def _bundle_text(self, deal: dict[str, Any]) -> str:
+        """Az értesítés szövege egy megérő csomagról: mi van benne (a legértékesebb tételek), mennyit ér darabonként,
+        mennyi a haszon, és nyugodt szívvel megvehető-e."""
+        bundle = deal["bundle"]
+        big = sorted((line for line in bundle["lines"] if line["unit"] >= PIECE_MIN),
+                     key=lambda line: -line["unit"] * line["count"])
+        parts = [(f"{line['count']} db " if line["count"] > 1 else "") + line["name"] +
+                 f" (kb. {format_price(line['unit'])}" + ("/db" if line["count"] > 1 else "") + ")" for line in big[:4]]
+        if len(big) > 4:
+            parts.append(f"és még {len(big) - 4} tétel")
+        if bundle["leftover"]:
+            parts.append(f"{bundle['small']} apróság egyben kb. {format_price(bundle['leftover'])}")
+        warn = f" {safety_text(deal['safety'])}" if deal.get("safety") else ""
+        return (f"{deal['site']}: csomag, „{str(deal.get('title') or deal['text'])[:80]}” "
+                f"{format_price(deal['price'])}. Darabonként eladva kb. {format_price(bundle['value'])} "
+                f"({bundle['listings']} hirdetés): {'; '.join(parts)}. A várható haszon kb. "
+                f"{format_price(deal['profit'])} (a posta és a csomagolás benne van).{warn} {deal['explore']}.")
+
+    def bought_group(self, item_id: str) -> list[str]:
+        """Egy megvett tárgy és a csomagtársai (ha egy csomag darabja: a csomag minden darabja; különben csak ő)."""
+        with self._lock:
+            for deal in self._data["deals"]:
+                if item_id in (deal.get("bought_items") or []):
+                    return list(deal["bought_items"])
+        return [item_id]
 
     # --- böngészés napközben (munkamenetek, pihenők, oldalváltás) ---
 
@@ -2509,6 +3086,7 @@ class DealHunter:
         game = _Round(check, notify, ModelLane() if self.llm is not None and model_ok() else None)
         game.browse_lane, game.no_browser = LANE_FAST, True
         game.work.append(partial(self._step_browse, game, running, LANE_FAST))
+        game.work.append(partial(self._step_bundles, game))   # a gyors oldalak felmérésre váró csomagjai
         try:
             game.loop()
         finally:
@@ -2723,10 +3301,12 @@ class DealHunter:
         for key in [k for k in prices if k not in seen][:max(0, len(prices) - MAX_SEEN)]:
             prices.pop(key, None)
 
-    def _inspect(self, deal: dict[str, Any], page: dict[str, Any] | None = None, game: _Round | None = None) -> str:
+    def _inspect(self, deal: dict[str, Any], page: dict[str, Any] | None = None, game: _Round | None = None,
+                 photos: int = CHECK_PHOTOS, defects: bool = True) -> str:
         """A jelölt hirdetés oldala (ha még nincs meg, megnyitja), modell nélkül, csak olvasva. Visszaadja, miért esik
-        ki („” = maradhat, „captcha”: robot-ellenőrzés, ilyenkor maradhat, de nem néztük meg). A figyelmeztetéseket és a
-        leírás elejét a jelölthöz teszi (a modellkérdéshez)."""
+        ki („” = maradhat, „captcha”: robot-ellenőrzés, ilyenkor maradhat, de nem néztük meg). A figyelmeztetéseket, a
+        leírás elejét és az első fotók címét (photos) a jelölthöz teszi (a modellkérdéshez). defects=False: a hibára
+        utaló szó nem ejti ki (egy csomagban lehet pár hibás darab; azt a modell méri fel)."""
         if page is None:
             try:
                 page = self._look(deal["url"], deal.get("platform", ""), game=game)
@@ -2741,14 +3321,14 @@ class DealHunter:
             return "elkelt"
         text = fold(str(page.get("text") or "")[:PAGE_TEXT])
         deal["details"] = " ".join(str(page.get("text") or "").split())[:PAGE_TEXT]
-        deal["images"] = [str(url) for url in page.get("images") or []][:CHECK_PHOTOS]
+        deal["images"] = [str(url) for url in page.get("images") or []][:photos]
         for pattern, why in ((_SCAM_RE, "átverésre utaló jel a hirdetésben (előre fizetés, külföldről küldi…)"),
                              (_OFFSITE_RE, "az oldalon kívüli elérhetőséget ad meg (WhatsApp, Telegram, e-mail…)"),
                              (_NO_REVIEWS_RE, "az eladónak még nincs értékelése")):
             if pattern.search(text):
                 deal["suspect"] = why
                 return "gyanús"
-        if _PARTS_RE.search(text) or _DEFECT_RE.search(text):
+        if defects and (_PARTS_RE.search(text) or _DEFECT_RE.search(text)):
             return "hibás"
         return ""
 
@@ -2782,10 +3362,10 @@ class DealHunter:
             return False
         return bool(data.get("ok"))
 
-    def _photos(self, deal: dict[str, Any]) -> list[str]:
+    def _photos(self, deal: dict[str, Any], limit: int = CHECK_PHOTOS) -> list[str]:
         """A hirdetés első fotói a modellnek (letöltve, kicsinyítve); ami nem sikerül, kimarad."""
         out = []
-        for url in (deal.get("images") or [])[:CHECK_PHOTOS]:
+        for url in (deal.get("images") or [])[:limit]:
             data = self.image_get(url) if self.image_get is not None else None
             if not data:
                 continue
@@ -2857,11 +3437,14 @@ class DealHunter:
         with self._lock:
             floor = int(self._data["browse"].get("min_profit") or WATCH_PROFIT)
             known = self._deal_keys()
-        unknown, skip, recheck = [], [], []
+        unknown, skip, recheck, lots = [], [], [], []
         for row in rows:
             if listing_key(row["url"]) in known:
                 continue                       # erről már szóltunk (pl. a böngészős kör)
-            if not usable(row["text"]) or not self._affordable(row["price"]):
+            if not usable(row["text"]):
+                lots.append(row)               # a csomagot a csomagbontás méri fel (ha be van kapcsolva)
+                continue
+            if not self._affordable(row["price"]):
                 skip.append(row)
                 continue
             value = self.quick_value(row, floor)
@@ -2873,6 +3456,7 @@ class DealHunter:
                 recheck.append((row, self.book.query(row.get("title") or row["text"]) or value["name"]))
             else:
                 skip.append(row)
+        skip += self._to_bundles(lots, f"Azonnali figyelő: {source}")
         self._mark(*skip)
         for row, name in recheck[:EXPLORE_PICKS]:
             self._recheck(row, name, search, floor, source, look, can_ask, found)

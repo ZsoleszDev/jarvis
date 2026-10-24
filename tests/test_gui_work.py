@@ -43,7 +43,6 @@ class WorkHarness:
         cfg.browser.headless = True
         cfg.web.allow_local = True
         cfg.assistant.show_timings = False
-        cfg.assistant.fillers = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
         self.app = JarvisApp(cfg, self.ui)
@@ -243,6 +242,49 @@ class WorkSecurityTests(unittest.TestCase):
         item = self.h.store.get(data["item"])
         self.assertEqual((item.prompt, item.search_query), ("Sony WH-1000XM4 fejhallgató, 71000 Ft", "Sony WH-1000XM4"))
         self.h.store.delete(item.id)
+
+    def test_a_bought_bundle_becomes_items(self):
+        """Csomagbontás: a beállítások és a csomagkeresések; a megvett csomag darabjai külön eladandó tárgyak, a vételár
+        és a posta az értékük arányában szétosztva; a visszamondás a csomag minden darabját törli (ha egy sem kelt el)."""
+        deals = self.h.app.work.deals
+        status, data = self.post("/api/work/deals", {"action": "bundle_add", "query": "ruhacsomag"})
+        self.assertEqual((status, data["bundles"]["on"], data["bundles"]["searches"][0]["query"]), (200, True, "ruhacsomag"))
+        self.assertEqual(self.post("/api/work/deals", {"action": "bundle_add", "query": "Ruhacsomag"})[0], 400)
+        status, data = self.post("/api/work/deals", {"action": "bundles", "on": False, "min_profit": "10 000"})
+        self.assertEqual((status, data["bundles"]["on"], data["bundles"]["min_profit"]), (200, False, 10000))
+        status, data = self.post("/api/work/deals", {"action": "bundle_remove", "id": data["bundles"]["searches"][0]["id"]})
+        self.assertEqual((status, data["bundles"]["searches"]), (200, []))
+        lines = [{"name": "Nike pulóver", "query": "Nike pulóver", "count": 3, "unit": 4800, "source": "becslés"},
+                 {"name": "Zara póló", "query": "Zara póló", "count": 5, "unit": 1500, "source": "becslés"},
+                 {"name": "Zokni", "query": "", "count": 4, "unit": 300, "source": "becslés"}]
+        for deal_id, number in (("db", 77777), ("db2", 77778)):
+            deals._remember({"id": deal_id, "url": f"https://www.jofogas.hu/ruha/{number}.htm", "site": "Jófogás",
+                             "text": "Márkás ruhacsomag", "price": 6000, "profit": 12300, "value": 22500,
+                             "at": time.time(), "bundle": {"value": 22500, "leftover": 600, "small": 4, "listings": 9,
+                                                           "profit": 12300, "sure": 0.0, "top": 0.21, "lines": lines}})
+        status, data = self.post("/api/work/deals", {"action": "bought", "id": "db", "price": "6 001", "shipping": "1500"})
+        self.assertEqual(status, 200, data)
+        items = [self.h.store.get(i) for i in data["items"]]
+        self.assertEqual([i.prompt for i in items], ["Nike pulóver, 3 db, 4800 Ft", "Zara póló, 5 db, 1500 Ft",
+                                                     "Apróságok egyben a csomagból (4 db), 600 Ft"])
+        self.assertEqual((sum(i.bought_price for i in items), sum(i.bought_shipping or 0 for i in items)), (6001, 1500))
+        self.assertEqual([i.target_price for i in items], [14400, 7500, 600])
+        self.assertEqual([i.search_query for i in items], ["Nike pulóver", "Zara póló", ""])
+        self.assertTrue(all(i.in_transit and i.source.endswith("/77777.htm") for i in items))
+        bought = next(d for d in data["deals"] if d["id"] == "db")
+        self.assertEqual((bought["bought"], bought["bought_items"]), (items[0].id, data["items"]))
+        self.assertEqual(data["profit"]["open"]["count"], 3)
+        status, data = self.post("/api/work/ledger", {"action": "cancel", "id": items[1].id})
+        self.assertEqual((status, sorted(data["removed"])), (200, sorted(i.id for i in items)), "a csomag mind")
+        self.assertFalse({i.id for i in self.h.store.all()} & {i.id for i in items})
+        self.assertNotIn("db", [d["id"] for d in deals.state()["deals"]])
+        status, data = self.post("/api/work/deals", {"action": "bought", "id": "db2"})
+        others = [self.h.store.get(i) for i in data["items"]]
+        self.h.store.mark(others[0].id, sold=True)
+        self.assertEqual(self.post("/api/work/ledger", {"action": "cancel", "id": others[2].id})[0], 400,
+                         "egy darabja már elkelt")
+        for item in others:
+            self.h.store.delete(item.id)
 
     def test_instant_watch_from_the_window(self):
         """Azonnali figyelő: egy keresőszó két oldalon, egy oldalcím, szünet és törlés; az Indítás és a Leállítás vele együtt
@@ -807,8 +849,8 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertTrue(page.locator("text=Legutóbbi találatok").is_visible())
         titles = [t.strip() for t in page.locator("#w-deals details.fold > summary").all_inner_texts()]
         self.assertEqual([t.split(" (")[0] for t in titles],
-                         ["Beállítások", "Keresések", "Azonnali figyelő", "Böngészés", "Figyelt oldalak", "Mennyit ér?",
-                          "Napló"])
+                         ["Beállítások", "Keresések", "Csomagbontás", "Azonnali figyelő", "Böngészés", "Figyelt oldalak",
+                          "Mennyit ér?", "Napló"])
         self.assertEqual(page.locator("#w-deals details.fold[open]").count(), 0)
         for hidden in ("#d-maxbuy", "#d-query", "#dl-query"):
             self.assertTrue(page.locator(hidden).is_hidden(), hidden)
@@ -951,6 +993,59 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector('.toast:has-text("ezt másolom ki")')
         self.assertEqual(deals.state()["message"], "Szia! Megvan még?")
         context.close()
+
+    def test_bundle_section_and_a_bundle_find(self):
+        """Csomagbontás: egy megérő csomag kártyáján és ablakában látszik, mi van benne, mennyit ér darabonként és
+        mennyit kereshetsz vele; a blokkban egy gombbal csomagkeresés kerül fel, és kikapcsolható; a Megvettem után a
+        csomag darabjai külön eladandó tárgyak."""
+        deals = self.h.app.work.deals
+        self.h.app.work.instant.allowed = lambda: False
+        lines = [{"name": "Nike pulóver", "query": "Nike pulóver", "count": 3, "unit": 4800, "source": "becslés"},
+                 {"name": "Zara póló", "query": "Zara póló", "count": 5, "unit": 1500, "source": "piac", "n": 7},
+                 {"name": "Zokni", "query": "", "count": 4, "unit": 300, "source": "becslés"}]
+        deals._remember({"id": "cs1", "url": "https://www.jofogas.hu/ruha/55555.htm", "text": "Márkás ruhacsomag 10 db",
+                         "site": "Jófogás", "platform": "jofogas", "price": 6000, "profit": 12300, "value": 22500,
+                         "at": time.time(), "explore": "Csomagkeresés: ruhacsomag",
+                         "bundle": {"value": 22500, "leftover": 600, "small": 4, "listings": 9, "profit": 12300,
+                                    "sure": 0.33, "top": 0.21, "lines": lines},
+                         "safety": {"level": "jó", "why": ["a darabárak egy része csak becslés"], "good": ["205% haszon"]}})
+        page = self.page
+        page.click("#job-deals")
+        page.wait_for_selector('[data-deal-open="cs1"]')
+        card = 'li:has([data-deal-open="cs1"])'
+        self.assertIn("csomag · 6 000 Ft, darabonként eladva kb. 22 500 Ft", page.inner_text(card))
+        self.assertIn("várható haszon kb. 12 300 Ft", page.inner_text(card))
+        page.click(f'{card} summary:has-text("Mi van benne")')
+        self.assertIn("3 db Nike pulóver: kb. 4 800 Ft/db", page.inner_text(card))
+        self.assertIn("(7 hirdetés alapján)", page.inner_text(card))
+        page.click('[data-deal-open="cs1"]')
+        page.wait_for_selector("#deal-dialog[open]")
+        body = page.inner_text("#deal-body")
+        for part in ("Mi van benne", "kb. 22 500 Ft (9 hirdetés; 4 apróság egyben)", "egyben a többi apróval",
+                     "kb. 12 300 Ft (a posta és darabonként a csomagolás benne van)", "(becslés)",
+                     "Jó vétel: a darabárak egy része csak becslés"):
+            self.assertIn(part, body)
+        page.click("#deal-close")
+        page.click('details[data-fold="bundles"] > summary')
+        page.click('[data-bundle-preset="0"]')
+        page.wait_for_selector('.toast:has-text("Felvettem: Ruhacsomag.")')
+        state = deals.state()["bundles"]
+        self.assertEqual((state["on"], state["searches"][0]["query"], state["searches"][0]["sites"]),
+                         (True, "ruhacsomag", [k for k in ("vinted", "jofogas") if k in deals.platforms]))
+        page.wait_for_selector('#w-deals .dealist li:has-text("ruhacsomag")')
+        page.uncheck("#db-on")
+        page.click("#db-save")
+        page.wait_for_selector('.toast:has-text("Kikapcsoltam a csomagbontást.")')
+        self.assertFalse(deals.state()["bundles"]["on"])
+        page.click('[data-deal-buy="cs1"]')
+        page.wait_for_selector("#d-paid")
+        self.assertEqual(page.input_value("#d-paid"), "6000")
+        page.click('[data-deal-paid="cs1"]')
+        page.wait_for_selector('.toast:has-text("a csomag 3 darabja külön tárgy lett")')
+        parts = [i for i in self.h.store.all() if i.trade_note.startswith("Csomagból")]
+        self.assertEqual((len(parts), sum(i.bought_price for i in parts)), (3, 6000), "a vételár szétosztva")
+        for item in parts:
+            self.h.store.delete(item.id)
 
     def test_flags_filter_last_check_and_a_false_flag(self):
         store = self.h.store

@@ -43,7 +43,6 @@ class Harness:
         self.cfg = make_cfg(Path(self.tmp.name), self.fake.url)
         self.cfg.api.port = 0
         self.cfg.assistant.show_timings = False
-        self.cfg.assistant.fillers = False
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
         self.app = JarvisApp(self.cfg, self.ui)

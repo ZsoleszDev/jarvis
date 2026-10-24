@@ -571,7 +571,6 @@ class AppMessageTests(unittest.TestCase):
         self.cfg.browser.headless = True
         self.cfg.web.allow_local = True
         self.cfg.assistant.show_timings = False
-        self.cfg.assistant.fillers = False
         self.cfg.work.platforms = ["vinted"]
         self.patch = mock.patch.dict(selling.PLATFORMS, {"vinted": inbox_platform(self.site)}, clear=True)
         self.patch.start()
@@ -689,7 +688,6 @@ class MessagesHarness:
         cfg.browser.headless = True
         cfg.web.allow_local = True
         cfg.assistant.show_timings = False
-        cfg.assistant.fillers = False
         cfg.work.platforms = ["vinted"]
         cfg.api.port = 0
         self.bus = EventBus()

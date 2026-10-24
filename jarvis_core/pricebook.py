@@ -87,6 +87,9 @@ _UNIT_WORDS = {"gb", "tb", "mb", "ghz", "mhz", "hz", "w", "v", "mah", "wh", "cm"
                "inch", "db", "darab", "ft", "ev", "eves", "honap", "honapos", "nap", "ora", "perc", "licit", "meret",
                "es", "as", "os"}
 _PIECES = re.compile(r"\b[2-9] ?(x|db|darab|par)\b")   # „2x”, „3 db”: több darab egy áron
+# Ömlesztett vagy összetett csomag („ruhacsomag”, „ömlesztve”, „gyűjtemény”, „játékok egyben”): az ár nem egy darabé.
+_HEAP = re.compile(r"\b\w+csomag\w*|\b(omlesztve|omlesztett|gyujtemeny\w*|egyben elado\w*|elado\w* egyben)\b|"
+                   r"\b\w{3,}k egyben\b")
 _FOR_IT = re.compile(r"\w{2,}(?:hoz|hez)$")     # „iphonehoz”, „13hoz”, „kontrollerhez”: kiegészítő hozzá
 # Kiegészítő (tok, töltő, kábel…): nem maga a termék ára.
 _ACCESSORY = re.compile(r"\b(tolto\w*|dokkolo\w*|tok|tokja|tokok|vedotok\w*|borito\w*|skin|matrica\w*|kabel\w*|"
@@ -109,7 +112,8 @@ def usable(text: str) -> bool:
     folded = fold(text or "")
     if _WANTED_RE.search(folded) or (_SWAP_RE.search(folded) and not _SALE_RE.search(folded)):
         return False
-    if _LOT_RE.search(folded) or _PIECES.search(folded) or _PARTS_RE.search(folded) or _ACCESSORY.search(folded):
+    if _LOT_RE.search(folded) or _PIECES.search(folded) or _HEAP.search(folded) or _PARTS_RE.search(folded) \
+            or _ACCESSORY.search(folded):
         return False
     return not any(_FOR_IT.match(w) for w in _words(text))
 
