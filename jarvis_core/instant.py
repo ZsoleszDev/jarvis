@@ -51,7 +51,8 @@ LINKED_EVERY = 5
 LINK_CHECK = 30            # ennyi másodpercenként nézi meg, változtak-e a keresések
 MAX_SEEN = 500             # figyelőnként ennyi látott hirdetést jegyez meg
 MAX_HITS = 60
-MAX_ROWS = 30              # egy letöltésből ennyi hirdetést néz (az oldal eleje: a legújabbak)
+MAX_ROWS = 120             # egy letöltésből ennyi hirdetést néz: az oldal egészét (a Hardverapró 100-at mutat, és az
+                           # elején többnyire a fizetett kiemelések vannak); az értékelést a várólista korlátozza
 OVERFLOW_MIN = 10          # ha egy letöltésen legalább ennyi, és csupa új hirdetés van, a következő oldalt is megnézi
 MAX_WAITING = 60           # ennyi hirdetés várhat a modellre
 WAIT_MAX = 1800            # ennyi ideig (másodperc); ami addig sem került sorra, az kimarad
@@ -321,21 +322,54 @@ class InstantWatch:
             self._worker.start()
 
     def _evaluate(self) -> None:
+        """A sorból egyenként: leállítva (vagy ha a figyelőt törölted) elmarad; ha ezt a figyelőt szünetelteted, a
+        várakozók közé kerül (a folytatásakor jön, WAIT_MAX-ig); Szünet alatt, kikapcsolt háttérmunkával vagy az
+        üzemidőn kívül megtartja, és vár (nem kérdezi a modellt, nem tölt le, nem szól)."""
         with background_calls():       # a modellhívásai háttérhívások: a feltöltés és a beszélgetés előbb jön
+            job = None
             while not self._stop.is_set():
-                try:
-                    alert, site, rows = self._jobs.get(timeout=0.5)
-                except queue.Empty:
-                    continue
+                if job is None:
+                    try:
+                        job = self._jobs.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
+                _alert, site, rows = job
                 with self._lock:
-                    if not self._data["enabled"]:
-                        continue               # közben leállítottad: a sorban állók elmaradnak
+                    enabled = self._data["enabled"]
+                    stored = next((a for a in self._data["alerts"] if a.get("id") == job[0]["id"]), None)
+                    stored = json.loads(json.dumps(stored)) if stored is not None else None
+                if not enabled or stored is None:
+                    job = None                 # leállítottad, vagy törölted a figyelőt: elmarad
+                    continue
+                if stored.get("off"):
+                    self._park(stored["id"], site, rows)
+                    job = None
+                    continue
+                if not self._may_work():
+                    self._stop.wait(1.0)       # Szünet: a feladat megmarad, utána jön
+                    continue
+                job = None
                 try:
-                    self._report(alert, site, rows)
+                    self._report(stored, site, rows)
                 except _Stop:
                     return
                 except Exception:  # noqa: BLE001 - az értékelés egy hiba miatt ne álljon le
                     pass
+
+    def _may_work(self) -> bool:
+        """Most dolgozhat-e (nincs Szünet, a háttérmunka nincs kikapcsolva vagy felfüggesztve, a gép üzemideje van)."""
+        try:
+            return bool(self.allowed()) and self.hunter.in_day()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _park(self, alert_id: str, site: str, rows: list[dict[str, Any]]) -> None:
+        """Egy szüneteltetett figyelő hirdetései a várakozók közé (a folytatásakor jönnek, legfeljebb WAIT_MAX-ig)."""
+        now = self.clock()
+        with self._lock:
+            queued = {row["url"] for _a, _s, row, _t in self._waiting}
+            self._waiting += [(alert_id, site, row, now) for row in rows if row["url"] not in queued]
+            del self._waiting[:-MAX_WAITING]
 
     def stop(self) -> None:
         """Leállítja a szálat, és megvárja (legfeljebb pár másodpercig), hogy a mostani letöltését befejezze."""
@@ -465,7 +499,8 @@ class InstantWatch:
         except FeedError as exc:
             self._failed(alert, site, exc)
             return []
-        result = self._absorb(alert, site, rows, now, count=True)
+        resorted = self.fetcher.sorted_url(url) if hasattr(self.fetcher, "sorted_url") else ""
+        result = self._absorb(alert, site, rows, now, count=True, resorted=resorted)
         if result is None:                    # közben törölted
             return []
         first, fresh, overflow = result
@@ -477,7 +512,9 @@ class InstantWatch:
         if first:
             self.hunter.journal.add(f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): elindult, "
                                     f"{len(rows)} hirdetést már ismerek; innentől minden újat felmérek, és ha megéri, "
-                                    "szólok.")
+                                    "szólok." if first != "resort" else
+                                    f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): a legújabb "
+                                    f"hirdetések szerint rendezve nézem; {len(rows)} hirdetést már ismerek.")
             return []
         self.hunter.tally("new", fresh)
         if self._worker is not None and self._worker.is_alive():
@@ -501,18 +538,22 @@ class InstantWatch:
         return rows
 
     def _absorb(self, alert: dict[str, Any], site: str, rows: list[dict[str, Any]], now: float,
-                count: bool) -> tuple[bool, list[dict[str, Any]], bool] | None:
-        """A letöltött hirdetések a figyelő látottjai közé; visszaadja: első letöltés-e (akkor csak megjegyzi őket), az
-        új (vagy leárazott), illő hirdetéseket, és hogy csupa új volt-e az oldal (overflow: lehet, hogy lemaradt
-        valami). count: ez a figyelő egy letöltése (nem a következő oldal): a számlálók és a ritmus ebből tanul. None,
-        ha a figyelőt közben törölted."""
+                count: bool, resorted: str = "") -> tuple[bool | str, list[dict[str, Any]], bool] | None:
+        """A letöltött hirdetések a figyelő látottjai közé; visszaadja: első letöltés-e (akkor csak megjegyzi őket; „resort”,
+        ha a rendezés váltása miatt), az új (vagy leárazott), illő hirdetéseket, és hogy csupa új volt-e az oldal
+        (overflow: lehet, hogy lemaradt valami). count: ez a figyelő egy letöltése (nem a következő oldal): a számlálók
+        és a ritmus ebből tanul. resorted: ha a letöltő a „legújabb elöl” rendezésre vált (sorted_url), a következő
+        letöltés megint csak megjegyzi az oldalt (különben a más sorrend miatt minden újnak látszana). None, ha a
+        figyelőt közben törölted."""
         fresh: list[dict[str, Any]] = []
         with self._lock:
             stored = next((a for a in self._data["alerts"] if a.get("id") == alert["id"]), None)
             if stored is None:
                 return None
             seen = self._data["seen"].setdefault(alert["id"], {})
-            first = site not in (stored.get("baseline") or [])
+            first: bool | str = site not in (stored.get("baseline") or [])
+            if first and site in (stored.get("resorted") or []):
+                first = "resort"
             unseen = 0
             for row in rows:
                 ident = listing_key(row["url"])
@@ -533,8 +574,13 @@ class InstantWatch:
                 (stored.get("errors") or {}).pop(site, None)
             if first:
                 stored["baseline"] = sorted(set(stored.get("baseline") or []) | {site})
+                stored["resorted"] = [s for s in stored.get("resorted") or [] if s != site]
             elif fresh:
                 self._learn(site, len(fresh), now)
+            if count and resorted and (stored.get("sorted") or {}).get(site) != resorted:
+                stored.setdefault("sorted", {})[site] = resorted      # a következő letöltéstől más a sorrend
+                stored["baseline"] = [s for s in stored.get("baseline") or [] if s != site]
+                stored["resorted"] = sorted(set(stored.get("resorted") or []) | {site})
             self._save()
         overflow = not first and len(rows) >= OVERFLOW_MIN and unseen == len(rows)
         return first, fresh, overflow
@@ -626,9 +672,11 @@ class InstantWatch:
             return
         now = self.clock()
         with self._lock:
-            waiting = [entry for entry in self._waiting if now - entry[3] < WAIT_MAX]
-            self._waiting = []
             alerts = {a["id"]: json.loads(json.dumps(a)) for a in self._data["alerts"]}
+            waiting = [entry for entry in self._waiting if now - entry[3] < WAIT_MAX]
+            # a szüneteltetett figyelő hirdetései várnak (a folytatásáig, WAIT_MAX-ig)
+            self._waiting = [entry for entry in waiting if (alerts.get(entry[0]) or {}).get("off")]
+            waiting = [entry for entry in waiting if not (alerts.get(entry[0]) or {}).get("off")]
         groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for alert_id, site, row, _at in waiting:
             if alert_id in alerts:

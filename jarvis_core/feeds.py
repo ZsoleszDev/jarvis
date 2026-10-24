@@ -42,7 +42,7 @@ BLOCK_FIRST = 3600         # tiltás után ennyi szünet (másodperc); ismétlé
 BLOCK_MAX = 86400
 EMPTY_PAUSE = 6 * 3600     # ha egymás után EMPTY_LIMIT-szer nem talál hirdetést, ennyi ideig a böngésző marad
 EMPTY_LIMIT = 3
-MAX_ROWS = 40
+MAX_ROWS = 120            # egy találati oldal összes hirdetése (a Hardverapró 100-at mutat egy oldalon)
 # A hirdetések címe az oldalon (ha ilyen link is van a kártyák között, csak ezek számítanak; ha egy sem, mind).
 LISTING_URL = {"hardverapro": re.compile(r"/apro/[^/]+/"), "jofogas": re.compile(r"_\d+\.htm")}
 # Az összeg nem kezdődhet egy szám közepén, és nem lehet egy időpont perce: a „ma 12:54 997 Ft” ára 997 Ft, nem 54 997.
@@ -134,6 +134,7 @@ class _TreeBuilder(HTMLParser):
         self.ld_json: list[str] = []
         self.title = ""
         self.next_link = ""                    # <link rel="next">: a találatok következő oldala
+        self.options: list[Node] = []           # <option>: egy rendezés-választó elemei (newest_link)
         self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -147,6 +148,8 @@ class _TreeBuilder(HTMLParser):
             self.shared_images.append(node.attrs.get("content", ""))
         if tag == "title":
             self._in_title = True
+        if tag == "option":
+            self.options.append(node)
         if tag == "link" and "next" in node.attrs.get("rel", "").lower().split() and not self.next_link:
             self.next_link = node.attrs.get("href", "")
         if tag not in VOID:
@@ -203,6 +206,36 @@ def next_page(tree: _TreeBuilder, base_url: str) -> str:
     for href in found:
         url = urllib.parse.urljoin(base_url, href.strip())
         if url.startswith(("http://", "https://")) and url != base_url and urllib.parse.urlsplit(url).hostname == host:
+            return url
+    return ""
+
+
+# A legújabb hirdetések elöl: a rendezés linkje (vagy egy rendezés-választó eleme) az oldalon. A „frissített” (előresorolt)
+# rendezés nem ilyen: abban a régi, felfrissített hirdetések is elöl vannak.
+_NEWEST_TEXT = re.compile(r"\b(legújabb\w*|legujabb\w*|újak elöl|új hirdetések|feladás\w*|feladva|feladási\w*|"
+                          r"beküldés\w*|newest)\b", re.IGNORECASE)
+_NOT_NEWEST = re.compile(r"frissít|frissit|refresh|legrégebbi|régiek|olcsó|drága|\bár\b|price", re.IGNORECASE)
+
+
+def newest_link(tree: _TreeBuilder, base_url: str) -> str:
+    """Az oldal saját „legújabb elöl” rendezése (egy link vagy egy választó eleme, a felirata szerint: „Legújabb”,
+    „Feladás ideje”), ugyanazon az oldalon (csak a paraméterei mások); üres, ha nincs, vagy épp ez van kiválasztva. Így
+    nem kell kitalálni, milyen paraméterrel rendez az oldal."""
+    found: list[str] = []
+    for anchor in tree.anchors:
+        label = clean(anchor.text() or anchor.attrs.get("title") or anchor.attrs.get("aria-label") or "")
+        if _NEWEST_TEXT.search(label) and not _NOT_NEWEST.search(label):
+            found.append(anchor.attrs.get("href", ""))
+    for option in tree.options:
+        label = clean(option.text())
+        if _NEWEST_TEXT.search(label) and not _NOT_NEWEST.search(label) and "selected" not in option.attrs:
+            found.append(option.attrs.get("value", ""))
+    base = urllib.parse.urlsplit(base_url)
+    for href in found:
+        url = urllib.parse.urljoin(base_url, href.strip())
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme in ("http", "https") and parts.hostname == base.hostname and parts.path == base.path \
+                and parts.query != base.query:
             return url
     return ""
 
@@ -471,6 +504,7 @@ class SiteFetcher:
         self._slow: dict[str, float] = {}            # oldal → a szünetek szorzója (lassú válasz után nagyobb)
         self._cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}   # cím → (mikor, hirdetések)
         self._next_pages: dict[str, str] = {}        # találati oldal → a következő oldala (next_page)
+        self._sorted: dict[str, str] = {}            # találati oldal → ugyanez a legújabb elöl (newest_link)
         self.requests = 0                            # összesen (a felületnek)
 
     def handles(self, platform: str) -> bool:
@@ -520,13 +554,18 @@ class SiteFetcher:
                 cached = self._cache.get(url)
             if cached is not None and now - cached[0] <= max_age:
                 return [dict(row) for row in cached[1]]
-        final, html = self._fetch(url, platform, check)
+        with self._state_lock:
+            target = self._sorted.get(url) or url   # ha az oldal kínál „legújabb elöl” rendezést, azzal
+        final, html = self._fetch(target, platform, check)
         tree = parse(html)
         rows = listings_of(tree, final, platform)
         with self._state_lock:
             self._next_pages[url] = next_page(tree, final)
-            if len(self._next_pages) > CACHE_MAX:
-                self._next_pages.pop(next(iter(self._next_pages)))
+            if url not in self._sorted:
+                self._sorted[url] = newest_link(tree, final)
+            for links in (self._next_pages, self._sorted):
+                if len(links) > CACHE_MAX:
+                    links.pop(next(iter(links)))
         if rows:
             with self._state_lock:
                 self._cache[url] = (self.clock(), [dict(row) for row in rows])
@@ -544,6 +583,12 @@ class SiteFetcher:
         if not rows:
             raise FeedError("A letöltött oldalon nem találtam hirdetést.", "empty")
         return rows
+
+    def sorted_url(self, url: str) -> str:
+        """Ha a találati oldal (url) kínál „legújabb elöl” rendezést, annak a címe (a letöltés már azzal megy); üres, ha
+        nem (vagy még nem töltöttük le)."""
+        with self._state_lock:
+            return self._sorted.get(url, "")
 
     def next_page(self, url: str) -> str:
         """A legutóbb letöltött találati oldal (url) következő oldala, ahogy az oldal linkeli; üres, ha nincs."""

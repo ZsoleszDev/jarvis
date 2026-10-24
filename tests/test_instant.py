@@ -493,6 +493,88 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.assertEqual(len(self.net.asked), asked + 1, "ismert hirdetések: nem lapoz tovább")
 
+    def test_the_whole_page_is_read(self):
+        """A Hardverapró egy oldalon 100 hirdetést mutat (az elején többnyire fizetett kiemelésekkel): az egész oldalt nézi,
+        nem csak az elejét; egy új hirdetés a 80. helyen is sorra kerül (eddig csak az első 30 számított)."""
+        url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        alert = self.watch.add(url)["alerts"][0]
+        self.watch.set_enabled(True)
+        cards = [ha_card(300 + n, f"Videókártya {n}", f"{20 + n} 000 Ft") for n in range(100)]
+        self.results(cards, "videokartya/index.html")
+        self.watch.tick()
+        self.assertEqual(len(self.watch._data["seen"][alert["id"]]), 100, "az első letöltés az egész oldalt megjegyzi")
+        self.later()
+        self.results(cards[:79] + [ha_card(999, "Új videókártya", "50 000 Ft")] + cards[79:99], "videokartya/index.html")
+        fresh = []
+        self.hunter.appraise = lambda rows, *args, **kwargs: fresh.extend(rows) or []
+        self.watch.tick()
+        self.assertEqual([r["title"] for r in fresh], ["Új videókártya"])
+
+    def test_the_newest_first_order_when_the_page_offers_it(self):
+        """Ha az oldal kínál „legújabb elöl” rendezést (egy linkkel, ugyanazon az oldalon), onnantól azzal tölt; a váltás
+        után egyszer megint csak megjegyzi az oldalt (különben a más sorrend miatt minden újnak látszana)."""
+        url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        alert = self.watch.add(url)["alerts"][0]
+        self.watch.set_enabled(True)
+        sorting = '<div class="sort"><a href="?order=frissitve">Frissítettek</a> <a href="?order=uj">Legújabbak</a></div>'
+        bumped = ha_page([sorting] + [ha_card(400 + n, f"Kiemelt kártya {n}", "90 000 Ft") for n in range(3)])
+        newest = ha_page([sorting] + [ha_card(500 + n, f"Friss kártya {n}", "40 000 Ft") for n in range(3)])
+        self.net.pages = {"index.html?order=uj": (200, newest), "videokartya/index.html": (200, bumped)}
+        self.watch.tick()
+        self.later()
+        self.watch.tick()
+        self.assertTrue(self.net.asked[-1][1].endswith("index.html?order=uj"), "a legújabb szerint rendezve")
+        self.assertIn("a legújabb hirdetések szerint rendezve nézem", self.hunter.journal.entries()[0]["text"])
+        self.assertEqual(self.notices, [], "a sorrend váltása nem új hirdetés")
+        self.assertEqual(len(self.watch._data["seen"][alert["id"]]), 6)
+
+    def test_the_evaluation_waits_while_paused(self):
+        """Szünet alatt (vagy ha a háttérmunka tiltva van) az értékelő szál nem dolgozik: a feladat megmarad, nem kérdezi
+        a modellt, nem nyitja meg a hirdetést, és nem szól; utána jön. Egy szüneteltetett figyelő hirdetései a
+        várakozók közé kerülnek, és a folytatásakor jönnek."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:2])
+        self.net.pages["_7/friss"] = page_html("Hibátlan.")
+        alert = self.watch.state()["alerts"][0]
+        allowed = {"now": False}
+        self.watch.allowed = lambda: allowed["now"]
+        self.watch.start_worker()
+        try:
+            self.watch.poll(alert, "hardverapro")
+            time.sleep(0.5)
+            self.assertEqual((self.notices, self.hunter.llm.calls), ([], []))
+            self.assertFalse([u for _t, u in self.net.asked if u.endswith("_7/friss.html")], "az oldalát sem nyitotta meg")
+            allowed["now"] = True
+            deadline = time.monotonic() + 5
+            while not self.notices and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual"], "a Szünet után jön")
+
+            self.notices.clear()
+            self.later()
+            self.results([ha_card(8, "Zotac RTX 3060 Ti", "50 000 Ft")] + HA_CARDS[:2])
+            self.net.pages["_8/friss"] = page_html("Hibátlan.")
+            self.watch.pause(alert["id"], True)
+            self.watch.poll(alert, "hardverapro")
+            deadline = time.monotonic() + 5
+            while not self.watch.state()["waiting"] and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual((self.watch.state()["waiting"], self.notices), (1, []), "a szüneteltetett figyelőé vár")
+            self.watch.pause(alert["id"], False)
+            self.watch.tick()
+            deadline = time.monotonic() + 5
+            while not self.notices and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual([n[1] for n in self.notices], ["Megéri: Zotac RTX 3060 Ti"], "a folytatásakor jön")
+        finally:
+            self.watch.stop()
+
     def test_the_evaluation_runs_beside_the_downloads(self):
         """Az új hirdetések értékelése (a hirdetés oldala, a modellkérdés) a saját szálán megy: a letöltés szála csak
         beteszi őket, és mehet tovább."""

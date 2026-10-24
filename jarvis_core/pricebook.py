@@ -149,6 +149,11 @@ def is_capacity(word: str) -> bool:
     return bool(_CAPACITY.match(word))
 
 
+def sizes_of(text: str) -> set[str]:
+    """A szövegben (címben, keresőszóban) lévő kapacitások egységes alakban („16 GB” → „16gb”, „1000GB” → „1tb”)."""
+    return set(capacities(_words(text)))
+
+
 def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> tuple[str, str] | None:
     """A termékkulcs egy hirdetés címéből: (kulcs, név). A kulcs a rendezett szavak (így a sorrend nem számít), a név
     ahogy a címben jönnek. Benne van a termékcsalád (vagy, ha nincs, a márka), a típusjel (szám vagy számot tartalmazó

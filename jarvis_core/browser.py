@@ -714,7 +714,7 @@ LISTINGS_JS = r"""
     if (card.label.length > 3 && card.label.length <= 160 && !PRICE.test(card.label)) entry.title = card.label;
     if (!fixed && AUCTION.test(text)) entry.auction = true;
     out.push(entry);
-    if (out.length >= 40) break;
+    if (out.length >= 120) break;           // egy találati oldal összes hirdetése (a Hardverapró 100-at mutat)
   }
   return out;
 }
