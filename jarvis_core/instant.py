@@ -42,7 +42,12 @@ from .textutil import fold
 MAX_ALERTS = 12
 EVERY_CHOICES = (2, 3, 5, 10, 15)    # percben
 DEFAULT_EVERY = 3
-INSTANT_HOURLY = 60        # az azonnali figyelő oldalanként óránként legfeljebb ennyit kér (a többi a köröké)
+INSTANT_HOURLY = 80        # az azonnali figyelő oldalanként óránként legfeljebb ennyit kér (a többi a köröké)
+# A Keresések (Automata kereskedés) a Hardveraprón és a Jófogáson az azonnali figyelőben is futnak, ennyi percenként
+# (a tanult ritmus és az óránkénti keret szerint): az új hirdetést így pár percen belül felméri, nem csak a keresés
+# óránkénti körében. A felületen a figyelők között látszanak („a Keresésekből”); a keresés törlésével megszűnnek.
+LINKED_EVERY = 5
+LINK_CHECK = 30            # ennyi másodpercenként nézi meg, változtak-e a keresések
 MAX_SEEN = 500             # figyelőnként ennyi látott hirdetést jegyez meg
 MAX_HITS = 60
 MAX_ROWS = 30              # egy letöltésből ennyi hirdetést néz (az oldal eleje: a legújabbak)
@@ -83,7 +88,7 @@ class InstantWatch:
         self.hunter = hunter
         self.clock = clock
         self.rng = rng or random.Random()
-        # A JarvisApp állítja be: értesítés (kind, title, text, spoken=…, **extra), és hogy most dolgozhat-e (nincs
+        # A JarvisApp állítja be: értesítés (kind, title, text, **extra), és hogy most dolgozhat-e (nincs
         # Szünet, a háttérmunka nincs kikapcsolva).
         self.notify: Callable[..., None] = lambda *a, **k: None
         self.allowed: Callable[[], bool] = lambda: True
@@ -95,6 +100,7 @@ class InstantWatch:
         self._recent: dict[str, deque] = {k: deque() for k in self.platforms}
         self._told_blocked: dict[str, float] = {}   # oldal → mikor szóltunk, hogy tilt (naponta egyszer)
         self._book_saved = 0.0
+        self._linked_at = float("-inf")        # mikor nézte meg utoljára a kereséseket (link_searches)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._data = self._load()
@@ -120,6 +126,52 @@ class InstantWatch:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(tmp, self.path)
+
+    def link_searches(self) -> None:
+        """A futó Keresések (DealHunter.running_searches) Hardverapró- és Jófogás-része figyelőként: ami új, felveszi
+        (ugyanazzal a keresőszóval, ársávval és kizáró szavakkal), ami megváltozott, frissíti, a törölt keresését
+        kiveszi. Az első letöltésnél, mint minden figyelő, csak megjegyzi, ami már fent van."""
+        self._linked_at = self.clock()
+        try:
+            searches = self.hunter.running_searches()
+        except AttributeError:
+            return
+        with self._lock:     # amit egy saját figyelőd már ugyanezzel a szóval néz, azt nem kéri le kétszer
+            covered = {(fold(a.get("query") or ""), site) for a in self._data["alerts"]
+                       if not a.get("search") and not a.get("url") for site in a.get("sites") or []}
+        wanted: dict[str, dict[str, Any]] = {}
+        for search in searches:
+            sites = [k for k in search.get("sites") or [] if k in self.platforms
+                     and (fold(str(search.get("query") or "")), k) not in covered]
+            if sites and search.get("query"):
+                wanted["k" + str(search["id"])] = {
+                    "query": str(search["query"])[:80], "url": "", "sites": sites, "name": str(search["query"])[:80],
+                    "max_price": search.get("max_price") or None, "min_price": search.get("min_price") or None,
+                    "exclude": list(search.get("exclude") or [])[:MAX_EXCLUDE], "every": LINKED_EVERY,
+                    "search": str(search["id"])}
+        with self._lock:
+            alerts, changed = [], False
+            for alert in self._data["alerts"]:
+                if not alert.get("search"):
+                    alerts.append(alert)
+                    continue
+                spec = wanted.pop(alert["id"], None)
+                if spec is None:                       # a keresést törölted (vagy újra felméri)
+                    self._data["seen"].pop(alert["id"], None)
+                    changed = True
+                    continue
+                if any(alert.get(key) != value for key, value in spec.items()):
+                    if alert.get("query") != spec["query"] or set(alert.get("sites") or []) != set(spec["sites"]):
+                        alert["baseline"] = []         # más keresés: előbb megint csak megjegyzi, ami fent van
+                    alert.update(spec)
+                    changed = True
+                alerts.append(alert)
+            for ident, spec in wanted.items():
+                alerts.append({"id": ident, "created": self.clock(), **spec})
+                changed = True
+            if changed:
+                self._data["alerts"] = alerts
+                self._save()
 
     def state(self) -> dict[str, Any]:
         """A felületnek: be van-e kapcsolva, a figyelők (mikor nézte, hányat talált), a friss hirdetések, az oldalak
@@ -215,7 +267,7 @@ class InstantWatch:
             if any(a.get("url") == alert["url"] and fold(a.get("query") or "") == fold(alert["query"])
                    and set(a.get("sites") or []) == set(alert["sites"]) for a in self._data["alerts"]):
                 raise InstantError("Ezt már figyelem.")
-            if len(self._data["alerts"]) >= MAX_ALERTS:
+            if sum(1 for a in self._data["alerts"] if not a.get("search")) >= MAX_ALERTS:
                 raise InstantError(f"Legfeljebb {MAX_ALERTS} azonnali figyelő lehet.")
             self._data["alerts"].append(alert)
             self._save()
@@ -339,16 +391,18 @@ class InstantWatch:
         return [(json.loads(json.dumps(alert)), site) for _at, alert, site in out]
 
     def tick(self) -> int:
-        """Egy kör: oldalanként legfeljebb egy esedékes figyelő (ha az oldal most kérhető). Visszaadja, hányat nézett."""
+        """Egy kör: az esedékes figyelők, amíg az oldal kérhető (a letöltő a kérések között szünetet tart, így oldalanként
+        többnyire egy jut egy körre). Visszaadja, hányat nézett."""
+        if self.clock() - self._linked_at >= LINK_CHECK:
+            self.link_searches()
         if not self.active():
             return 0
         self._retry_waiting()
         now = self.clock()
-        done, used = 0, set()
+        done = 0
         for alert, site in self.due(now):
-            if site in used or not self._has_budget(site, now) or not self.fetcher.ready(site):
+            if not self._has_budget(site, now) or not self.fetcher.ready(site):
                 continue
-            used.add(site)
             self.poll(alert, site)
             done += 1
         return done
@@ -531,7 +585,6 @@ class InstantWatch:
         warn = "".join(f" Figyelj: {w}." for w in hit.get("warnings") or [])
         checked = f" {hit['note']}" if hit.get("note") else ""
         self.notify("deal", "Megéri: " + hit["title"][:60], f"{self._line(hit)}.{checked}{warn} ({alert['name']})",
-                    spoken=f"Megérő új hirdetés: {hit['title'][:50]}, {format_price(hit['price'])}.",
                     url=hit["url"], actions=[deal_action(hit["deal"])], deal=hit["deal"], urgent=True)
 
     @staticmethod

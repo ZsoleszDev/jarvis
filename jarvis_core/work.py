@@ -235,7 +235,7 @@ class WorkDesk:
         self.fetcher = (SiteFetcher(fast, domains={k: self.platforms[k].domains for k in fast})
                         if cfg.work.fast_fetch and fast else None)
         self.deals = DealHunter(self.root, self.platforms, (lambda: toolbox.browser) if self.browser_ready else None,
-                                llm, default_every=float(cfg.scheduler.deal_minutes or 180), fetcher=self.fetcher)
+                                llm, default_every=float(cfg.scheduler.deal_minutes or 60), fetcher=self.fetcher)
         # Az árkutatás: a Hardverapró és a Jófogás böngésző nélkül (a gyors letöltővel), a többi a böngészővel.
         if self.browser_ready and sites:
             self.researcher = PriceResearcher(llm, self.store, lambda: toolbox.browser, sites, fetcher=self.fetcher)

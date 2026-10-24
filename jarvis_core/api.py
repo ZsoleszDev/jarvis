@@ -37,15 +37,14 @@ from .work import PRICE_CHOICES
 
 API_VERSION = 1
 MAX_JSON = 256 * 1024
-MAX_AUDIO = 15 * 1024 * 1024
-MAX_FORWARD = max(MAX_PHOTO_BYTES, MAX_AUDIO) + 64 * 1024   # a távoli ablak kérései (fotó, hangfelvétel)
+MAX_FORWARD = MAX_PHOTO_BYTES + 64 * 1024   # a távoli ablak kérései (pl. egy fotó)
 FORWARD_TIMEOUT = 60.0
 # A gép felületének válaszából ezeket a fejléceket adjuk tovább (pl. a történet letöltésénél a fájlnév).
 FORWARD_HEADERS = ("Content-Security-Policy", "Referrer-Policy", "Content-Disposition")
 CODE_SECONDS = 300
 CODE_TRIES = 5
 LOG_LIMIT = 800
-LOG_SKIP = {"delta", "level", "segment_end"}       # ezek túl sűrűk; a végleges szöveg "assistant" eseményként jön
+LOG_SKIP = {"delta", "segment_end"}       # ezek túl sűrűk; a végleges szöveg "assistant" eseményként jön
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
             "size", "condition", "color", "material", "price", "min_price", "location", "shipping", "bought_price",
             "sold_price", *LEDGER_FIELDS}
@@ -310,8 +309,8 @@ class _ApiHandler(BaseHTTPRequestHandler):
             if method == "POST" and sub == "/push/answer":
                 return self._push_answer()      # az értesítés gombja: egyszer használható válaszkulccsal
             token = self._bearer(query)
-            # Képet és hangot az <img>/<audio> nem tud fejléccel kérni: ezeknél a kulcs a címben is lehet.
-            if not token and method == "GET" and (sub.endswith(".jpg") or sub == "/tts"):
+            # Képet az <img> nem tud fejléccel kérni: ilyenkor a kulcs a címben is lehet.
+            if not token and method == "GET" and sub.endswith(".jpg"):
                 token = (query.get("access_token") or [""])[0]
             self.device = self.api.auth.check(token)
             if self.device is None:
@@ -531,14 +530,12 @@ class _ApiHandler(BaseHTTPRequestHandler):
     def r_status(self, query: dict[str, list[str]]) -> None:
         app = self.api.app
         ready = app is not None and app.assistant is not None
-        speaker = getattr(app, "speaker", None) if ready else None
         self._json(200, {
             "ok": True, "api": API_VERSION, "name": getattr(app, "name", "Jarvis"), "ready": ready,
             "state": self.api.bus.state or {}, "paused": bool(getattr(app, "paused", False)),
             "standby": bool(getattr(app, "paused", False) and getattr(app, "standby", False)),
             "busy": bool(getattr(app, "busy", False)), "mode": getattr(app, "mode", "chat"),
-            "model": app.cfg.llm.model if app else "", "voice": bool(ready and app.stt is not None),
-            "speech": bool(speaker is not None and speaker.enabled),
+            "model": app.cfg.llm.model if app else "",
             "work": bool(ready and app.work is not None and app.work_assistant is not None),
             "confirm": self.api.bus.pending_confirm,
             "scheduler": app.scheduler.status() if ready and app.scheduler else None,
@@ -555,29 +552,8 @@ class _ApiHandler(BaseHTTPRequestHandler):
         app = self.api.app
         mode = "work" if body.get("mode") == "work" else "chat"
         request_id = app.new_request_id()
-        app.submit_text(text, mode=mode, request_id=request_id, silent=not body.get("speak"), via="phone")
+        app.submit_text(text, mode=mode, request_id=request_id, via="phone")
         self._result(request_id, _number(body.get("wait"), 0.0, 0.0, 120.0))
-
-    def r_voice(self, query: dict[str, list[str]]) -> None:
-        data = self._raw(MAX_AUDIO)
-        self._ready_for_agent(self._flag(query, "resume"))
-        app = self.api.app
-        if app.stt is None and not app.paused:
-            raise ApiError(409, "no_voice", "A beszédfelismerés nem fut; küldd el szövegként.")
-        mode = "work" if (query.get("mode") or [""])[0] == "work" else "chat"
-        request_id = app.new_request_id()
-        app.submit_audio(data, mode=mode, request_id=request_id, silent=not self._flag(query, "speak"))
-        self._result(request_id, _number((query.get("wait") or ["0"])[0], 0.0, 0.0, 120.0))
-
-    def r_tts(self, query: dict[str, list[str]]) -> None:
-        text = (query.get("text") or [""])[0][:1500]
-        speaker = getattr(self._app(), "speaker", None)
-        if speaker is None or not speaker.enabled:
-            raise ApiError(503, "no_speech", "A felolvasás most nem fut (szünet vagy kikapcsolva).")
-        wav = speaker.wav(text)
-        if not wav:
-            raise ApiError(400, "bad_request", "Nincs mit felolvasni.")
-        self._send(200, wav, "audio/wav")
 
     def r_events(self, query: dict[str, list[str]]) -> None:
         after = int(_number((query.get("after") or ["0"])[0], 0, 0, 1e12))
@@ -787,7 +763,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
         if "messages" not in scheduler.jobs:
             raise ApiError(409, "no_browser", "Az üzenetek olvasásához Jarvis saját böngészője kell.")
         self._ready_for_agent(self._flag(query, "resume"))
-        self.api.app.run_job_now("messages", silent=True)    # a telefonról: a gép ne beszéljen
+        self.api.app.run_job_now("messages")
         self._json(202, {"ok": True})
 
     # --- háttérmunka, figyelők, értesítések --------------------------------------------------------
@@ -806,7 +782,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
         if key not in scheduler.jobs:
             raise ApiError(404, "not_found", "Nincs ilyen háttérmunka.")
         self._ready_for_agent(self._flag(query, "resume"))
-        self.api.app.run_job_now(key, silent=True)
+        self.api.app.run_job_now(key)
         self._json(202, {"ok": True})
 
     def r_snooze(self, query: dict[str, list[str]]) -> None:
@@ -861,8 +837,6 @@ _CONV = r"([0-9a-f]{10})"
 ROUTES: list[tuple[str, re.Pattern[str], str]] = [(m, re.compile(p), n) for m, p, n in (
     ("GET", r"/status", "r_status"),
     ("POST", r"/chat", "r_chat"),
-    ("POST", r"/voice", "r_voice"),
-    ("GET", r"/tts", "r_tts"),
     ("GET", r"/events", "r_events"),
     ("POST", r"/stop", "r_stop"),
     ("POST", r"/pause", "r_pause"),

@@ -70,15 +70,18 @@ MAX_PER_SITE = 30          # egy keresés egy oldalán ennyi találatot néz meg
 MIN_PRICES = 5             # az ármozgás figyeléséhez legalább ennyi hasonló ár kell egy körben
 DEFAULT_DISCOUNT = 30      # ennyi %-kal a szokásos ár (medián) alatt számít olcsónak
 FLOOR = 0.15               # a medián 15%-a alatti ár többnyire nem valódi ár (1 Ft, „ár megegyezés szerint”)
-MAX_CHECKS = 5             # egy körben legfeljebb ennyi jelöltet néz meg a modellel (a többi a következő körre marad)
+MAX_CHECKS = 8             # egy körben legfeljebb ennyi jelöltet néz meg a modellel (a többi a következő körre marad)
 MAX_DEALS = 60             # ennyi találatot őriz meg a listában
 MAX_SEEN = 5000
 EVERY_CHOICES = (30, 60, 180, 360)   # percben: milyen sűrűn nézi meg egy keresés találatait
-DEFAULT_EVERY = 180
+DEFAULT_EVERY = 60
 SITE_MIN_MINUTES = {"vinted": 120}   # a Vintedet legfeljebb kétóránként (ott a robot-ellenőrzés a kockázat)
 # A legújabb hirdetések elöl: a Vinteden külön kérni kell, a Jófogáson és a Hardverapróban ez az alap.
 NEWEST = {"vinted": "&order=newest_first"}
-MAX_PAGES = 5              # egy körben legfeljebb ennyi jelölt hirdetés oldalát nyitja meg (a többi a következőre)
+MAX_PAGES = 8              # egy körben legfeljebb ennyi jelölt hirdetés oldalát nyitja meg (a többi a következőre)
+# A gyors oldalak (Hardverapró, Jófogás) találati oldalát, ha az azonnali figyelő ennyi másodpercen belül már letöltötte,
+# a kör nem kéri le újra (feeds.SiteFetcher.listings max_age): ugyanannyi kérésből több idő jut az új hirdetésekre.
+LISTING_REUSE = 300
 # A szokásos ár felmérése: legfeljebb ennyi találatot kap a modell, és legalább ennyi hasonlóból mond árat. Ha kevés
 # a hasonló, egy nap múlva próbálja újra (addig kézzel megadhatod).
 CALIBRATE_ROWS = 25
@@ -146,7 +149,7 @@ DEFAULT_DAY = (7, 23)      # a gép általában ekkor megy (óra): a licitekről
 # legfeljebb BROWSE_PAGES oldalt tölt be. Ha egy oldal robot-ellenőrzést kér, aznap már nem nézi.
 BROWSE_WORK = 20
 BROWSE_REST = 10
-DEFAULT_STEP = (25, 75)
+DEFAULT_STEP = (15, 50)
 STEP_PAUSE = {"vinted": (45, 120)}
 SWITCH_PAUSE = (20, 60)
 BROWSE_PAGES = {"vinted": 10}
@@ -530,7 +533,7 @@ class _Round:
     def fetch_ahead(self, fetcher: Any, url: str, platform: str) -> None:
         """Egy gyors oldal letöltése a háttérben (ha még nem indult el, és az oldal most így olvasható)."""
         if self.pool is not None and fetcher is not None and url not in self.prefetch and fetcher.usable(platform):
-            self.prefetch[url] = self.pool.submit(fetcher.listings, url, platform, self.check)
+            self.prefetch[url] = self.pool.submit(fetcher.listings, url, platform, self.check, LISTING_REUSE)
 
     def next(self, steps: list[Callable[[], None]]) -> None:
         """Ezek jönnek rögtön (pl. egy keresés jelöltjei a következő keresés előtt)."""
@@ -853,6 +856,15 @@ class DealHunter:
                 if platform in self.platforms and self._due(watch, platform, now):
                     return True
             return self._browse_due(now)
+
+    def running_searches(self) -> list[dict[str, Any]]:
+        """A futó keresések (amelyiknek van jóváhagyott szokásos ára, vagy épp felméri): az azonnali figyelő ezeket a
+        Hardveraprón és a Jófogáson pár percenként is megnézi (InstantWatch.linked)."""
+        now = self.clock()
+        with self._lock:
+            if not self._data["enabled"]:
+                return []
+            return [json.loads(json.dumps(s)) for s in self._data["searches"] if not self._search_waits(s, now)]
 
     @staticmethod
     def _search_waits(search: dict[str, Any], now: float) -> bool:
@@ -1495,7 +1507,8 @@ class DealHunter:
         future = game.prefetch.pop(url, None) if game is not None else None
         if future is not None or (self.fetcher is not None and self.fetcher.usable(platform)):
             try:
-                rows = future.result() if future is not None else self.fetcher.listings(url, platform, check)
+                rows = future.result() if future is not None else self.fetcher.listings(url, platform, check,
+                                                                                        LISTING_REUSE)
             except FeedError:
                 rows = None
             if rows:

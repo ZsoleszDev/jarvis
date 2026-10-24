@@ -220,7 +220,7 @@ class ContextFitTests(FitTestCase):
 
 class AppPlacementTests(FitTestCase):
     def make_app(self) -> JarvisApp:
-        return JarvisApp(self.cfg, RecordingUI(), use_voice=False, use_speech=False)
+        return JarvisApp(self.cfg, RecordingUI())
 
     @staticmethod
     def texts(app: JarvisApp, kind: str) -> list[str]:
@@ -342,15 +342,11 @@ class StubApp:
         self.events.append("start_agent")
 
     def describe(self) -> dict:
-        return {"name": self.name, "model": "x", "stt": None, "voice": False, "speech": False,
-                "wake_word": None, "examples": []}
+        return {"name": self.name, "model": "x"}
 
     def greet(self) -> None:
         self.events.append("greet")
         self.exit_requested.set()
-
-    def say_goodbye(self) -> None:
-        self.events.append("goodbye")
 
 
 class GuiStartOrderTests(unittest.TestCase):
@@ -378,11 +374,11 @@ class GuiStartOrderTests(unittest.TestCase):
     def test_window_opens_after_the_model_is_loaded(self):
         events = self.run_gui(StubApp(self.cfg))
         self.assertEqual(events, ["load_model", "window (modell betöltve)", "start", "start_agent",
-                                  "greet", "goodbye"])
+                                  "greet"])
 
     def test_window_still_opens_to_show_the_error(self):
         events = self.run_gui(StubApp(self.cfg, load_ok=False))
-        self.assertEqual(events, ["load_model", "window", "goodbye"])
+        self.assertEqual(events, ["load_model", "window"])
 
 
 class GpuInfoTests(unittest.TestCase):

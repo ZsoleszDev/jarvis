@@ -7,7 +7,7 @@ A telefonos kapcsolat (api.py) portján érhető el, a Tailscale-en át (`tailsc
   (gui.py) továbbítjuk őket, a helyi kulccsal;
 - a telepíthető alkalmazáshoz (PWA): manifest, service worker, ikonok.
 
-Ami csak a gép előtt ülve szabad, azt távolról nem engedjük: kilépés, új párosító kód, a gép mikrofonja.
+Ami csak a gép előtt ülve szabad, azt távolról nem engedjük: kilépés, új párosító kód.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import sys
 from functools import lru_cache
 
 # Távolról nem engedjük (a gép előtt ülve, a Jarvis ablakában lehet).
-DENIED = ("/api/quit", "/api/listen", "/api/phone")
+DENIED = ("/api/quit", "/api/phone")
 
 # Az Android-alkalmazás: a GitHub Actions fordítja (.github/workflows/android.yml, android/).
 APK_URL = "https://github.com/ZsoleszDev/jarvis/releases/download/android-latest/jarvis.apk"
@@ -254,7 +254,7 @@ document.getElementById("pair").addEventListener("submit", async (event) => {
 """.replace("__APK__", APK_URL).encode("utf-8")
 
 # A Jarvis ablakának fejlécébe (index.html): a telepíthető alkalmazáshoz kell, és ebből tudja a felület, hogy
-# távolról nézik (a mikrofon a telefoné vagy a laptopé, nem a gépé; értesítések).
+# távolról nézik (értesítések).
 HEAD_EXTRA = ('<meta name="jarvis-remote" content="1">\n'
               '<link rel="manifest" href="/manifest.webmanifest">\n'
               '<meta name="theme-color" content="#000000">\n'

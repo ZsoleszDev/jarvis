@@ -493,14 +493,50 @@
       const response = await fetch("/api/work/deals?t=" + encodeURIComponent(token));
       if (response.ok) deals = await response.json();
     } catch { /* a következő megnyitáskor újra */ }
+    renderHome();
     if (job === "deals") render();
   }
   async function dealAction(body) {
     const result = await J.postJson("/api/work/deals", body);
     if (!result.ok) { J.toast(result.error || "Nem sikerült."); return false; }
     if (result.searches) deals = { ...deals, ...result };
+    renderHome();
     render();
     return result;
+  }
+
+  // --- a Beszélgetés eleje: csempék (a kereskedés indítása, egy új tárgy, a találatok); az első üzenet után eltűnnek ---
+  function renderHome() {
+    const box = $("home-tiles");
+    const running = !!deals.running;
+    const fresh = (deals.deals || []).filter((d) => !d.bought).length;
+    box.innerHTML = `
+      <button type="button" class="hometile${running ? " on" : ""}" id="tile-trade" ${deals.browser || deals.instant ? "" : "disabled"}>
+        <span class="hometile-title">${running ? "A kereskedés fut" : "Kereskedés indítása"}</span>
+        <span class="hometile-sub">${running ? `${deals.started ? `${esc(hhmmOf(deals.started))} óta · ` : ""}bökj rá a leállításhoz`
+          : "Keresem a megérő hirdetéseket, és szólok"}</span></button>
+      <button type="button" class="hometile" id="tile-new">
+        <span class="hometile-title">Új tárgy közzététele</span>
+        <span class="hometile-sub">Fotók, és feltöltöm (Pro: elég a fotó)</span></button>
+      ${fresh ? `<button type="button" class="hometile" id="tile-hits">
+        <span class="hometile-title">Találatok (${fresh})</span>
+        <span class="hometile-sub">A legutóbbi megérő hirdetések</span></button>` : ""}`;
+    box.hidden = false;
+    $("empty-hint").textContent = "Vagy kérdezz bármit lent.";
+    $("tile-trade").addEventListener("click", async () => {
+      const start = !deals.running;
+      if (await dealAction({ action: start ? "start" : "stop" }))
+        J.toast(start ? "Elindítottam: keresek, és ha valami megéri, szólok." : "Leállítottam.");
+    });
+    $("tile-new").addEventListener("click", () => {
+      openId = null;
+      J.setMode("work");
+      setJob("sales");
+      composeTouched = true;
+      $("w-compose").classList.remove("folded");
+      $("w-compose").scrollIntoView({ block: "start" });
+    });
+    if ($("tile-hits")) $("tile-hits").addEventListener("click", () => { J.setMode("work"); setJob("deals"); });
   }
   function setJob(name) {
     job = name;
@@ -582,11 +618,16 @@
   }
 
   // Azonnali figyelő (instant.py): a Hardverapró és a Jófogás új hirdetései, böngésző nélkül, pár percenként.
+  // Az Automata kereskedés blokkjai összecsukhatók: alapból csak az Indítás és a legutóbbi találatok látszanak; amit
+  // kinyitsz, nyitva marad (a lista frissülésekor és a következő megnyitáskor is).
+  const openSections = new Set((recall("jarvis-deal-open") || "").split(",").filter(Boolean));
+  const section = (key, title, body) => `<details class="fold" data-fold="${key}"${openSections.has(key) ? " open" : ""}>
+      <summary>${title}</summary><div class="fold-body">${body}</div></details>`;
   function instantBox() {
     const I = deals.instant;
     if (!I) return "";
     const siteLine = (I.sites || []).map((s) => `${esc(s.name)}: ${s.blocked_until ? `tilt (${esc(s.reason)}), ${esc(hhmmOf(s.blocked_until))}-ig szünetel`
-      : s.browser_only ? "most nem olvasható böngésző nélkül (a böngésző nézi)" : `kb. ${s.per_hour} kérés óránként (keret: ${I.hourly})${s.rhythm ? `, ${esc(s.rhythm)}` : ""}`}`).join(" · ");
+      : s.browser_only ? "most nem olvasható böngésző nélkül (a böngésző nézi)" : `kb. ${s.per_hour} kérés óránként (keret: ${I.hourly})${s.slow > 1.05 ? ", lassít (lassan válaszol)" : ""}${s.rhythm ? `, ${esc(s.rhythm)}` : ""}`}`).join(" · ");
     const alerts = (I.alerts || []).map((a) => {
       const sites = (a.sites || []).map((k) => (I.sites.find((s) => s.key === k) || { name: k }).name).join(", ");
       const range = a.min_price || a.max_price ? ` · ${a.min_price ? price(a.min_price) : "0"}–${a.max_price ? price(a.max_price) : "bármennyi"}` : "";
@@ -596,8 +637,8 @@
           <small class="muted">${a.off ? "szünetel" : last ? `utoljára ${esc(ago(last))}` : "még nem nézte"}${a.found ? ` · eddig ${a.found} új` : ""}${a.found_at ? ` (legutóbb ${esc(ago(a.found_at))})` : ""}</small>
           ${Object.values(a.errors || {}).map((e) => `<small class="warn">${esc(e)}</small>`).join("")}
           ${a.url ? `<small><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small>` : ""}</span>
-        <span class="row"><button type="button" class="small quiet" data-ipause="${esc(a.id)}" data-off="${a.off ? "" : "1"}">${a.off ? "Folytatás" : "Szünet"}</button>
-          <button type="button" class="small quiet" data-iremove="${esc(a.id)}">Törlés</button></span></li>`;
+        ${a.search ? '<small class="muted">a Keresésekből</small>' : `<span class="row"><button type="button" class="small quiet" data-ipause="${esc(a.id)}" data-off="${a.off ? "" : "1"}">${a.off ? "Folytatás" : "Szünet"}</button>
+          <button type="button" class="small quiet" data-iremove="${esc(a.id)}">Törlés</button></span>`}</li>`;
     }).join("");
     const hits = (I.hits || []).slice(0, 25).map((h) => `<li><span><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.title || h.text)}</a>
         <small class="muted">${esc(h.site)} · <b>${esc(price(h.price))}</b>${h.drop ? ` (leárazta: ${esc(price(h.drop))})` : ""} · ${esc(ago(h.at))} · ${esc(h.alert_name)}</small>
@@ -606,13 +647,7 @@
         ${h.deal ? `<span class="row">${boughtOf(h.deal) ? cancelButton(boughtOf(h.deal), h.title || h.text)
           : `<button type="button" class="small" data-deal-buy="${esc(h.deal)}">Megvettem</button>`}</span>` : ""}</li>`).join("");
     const presets = (I.presets || []).map((p) => `<button type="button" class="small" data-ipreset="${esc(p.url)}">${esc(p.name)}</button>`).join("");
-    return `<h3 class="section-title">Azonnali figyelő: Hardverapró, Jófogás</h3>
-      <p class="muted">A jó vételek többnyire a friss hirdetésekből jönnek. Pár percenként megnézem a figyelt keresések és
-        kategóriák legújabb hirdetéseit (böngésző nélkül, így gyors, és nem vár a többi munkára), és ami új, arról rögtön
-        kiderítem, megéri-e: a kereséseid és az árbázis szokásos árához mérem, amit nem ismerek, azt a modell megnevezi, és ha
-        kell, megnézem, mennyiért adják a másik oldalon; a megérőnek az oldalát is átnézem. <b>Csak akkor szólok, ha új ÉS
-        megéri</b>, a telefonon is. Az Indítás gombbal megy.</p>
-      ${I.enabled && siteLine ? `<p><small>${siteLine}</small></p>` : ""}
+    return `${I.enabled && siteLine ? `<p><small>${siteLine}</small></p>` : ""}
       ${I.enabled && I.waiting ? `<p><small>${I.waiting} friss hirdetés vár a modellre (amíg a Jarvist használod).</small></p>` : ""}
       <ul class="dealist">${alerts || '<li class="muted">Még nincs azonnali figyelő.</li>'}</ul>
       <form id="di-add" class="compose" autocomplete="off">
@@ -629,7 +664,7 @@
         <div class="row"><button type="submit" class="primary">Figyelő hozzáadása</button></div>
         ${presets ? `<div class="row presets"><small class="muted">Gyorsan (Hardverapró):</small>${presets}</div>` : ""}
       </form>
-      ${hits ? `<details class="setup" open><summary>Friss hirdetések (${(I.hits || []).length})</summary><ul class="dealist">${hits}</ul></details>` : ""}`;
+      ${hits ? `<details class="setup" data-fold="fresh"${openSections.has("fresh") ? " open" : ""}><summary>Friss hirdetések (${(I.hits || []).length})</summary><ul class="dealist">${hits}</ul></details>` : ""}`;
   }
   const hhmmOf = (t) => new Date(t * 1000).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit" });
 
@@ -743,7 +778,6 @@
         <button type="button" class="small quiet" data-deal-remove="${esc(s.id)}">Törlés</button></span></li>`).join("");
     const p = deals.profit;
     const profitBox = p && (p.rows.length) ? `
-      <h3 class="section-title">Haszon</h3>
       <p class="profit"><b>${esc(signed(p.month.profit))}</b> ebben a hónapban (${p.month.count} eladás) ·
         összesen <b>${esc(signed(p.total.profit))}</b> (${p.total.count} eladás${p.days !== null ? `, átlagosan ${p.days} nap alatt` : ""})
         ${p.open.count ? ` · bent van ${esc(price(p.open.spent))} (${p.open.count} tárgy még nem kelt el)` : ""}</p>
@@ -789,106 +823,88 @@
     const edit = deals.searches.find((s) => s.id === editingSearch);
     const v = (key, fallback = "") => esc(edit && edit[key] != null ? edit[key] : fallback);
     const checked = (key) => !edit || (edit.sites || []).includes(key) ? "checked" : "";
+    const alertCount = ((deals.instant || {}).alerts || []).length;
     box.innerHTML = `
       <div class="runbar">
         <button type="button" id="d-run-toggle" class="${running ? "" : "primary"}" ${deals.browser || deals.instant ? "" : "disabled"}>${running ? "Leállítás" : "Indítás"}</button>
         <span class="runstate"><span><b>${running ? "Fut" : "Áll"}</b>${running && deals.started ? ` · ${esc(hhmmOf(deals.started))} óta` : ""}</span>
           ${running && b.status ? `<small>${esc(b.status)}</small>` : ""}</span>
       </div>
-      <p class="muted">${running ? "Dolgozom: a kereséseid, a figyelt oldalak, a böngészés és az azonnali figyelő is megy, amíg le nem állítod (közben pihenőket tartok, és ha a Jarvist használod, várok)."
-        : "Az Indítással minden elindul: a kereséseid, a figyelt oldalak, a böngészés és az azonnali figyelő, amíg le nem állítod."}
-        Csak olvasok: semmit nem veszek meg, és nem írok senkinek.</p>
-      <div class="fields limits">
-        <div class="field"><label for="d-maxbuy">Max. vételár (Ft)</label>
-          <input id="d-maxbuy" type="number" inputmode="numeric" min="0" placeholder="bármennyi" value="${esc(deals.max_buy ?? "")}"></div>
-        <div class="field"><label for="d-minprofit">Min. haszon (Ft)</label>
-          <input id="d-minprofit" type="number" inputmode="numeric" min="0" value="${esc(b.min_profit)}"></div>
-      </div>
-      <label class="check"><input id="d-safeonly" type="checkbox" ${deals.safe_only !== false ? "checked" : ""}>
-        Csak a nyugodt szívvel megvehetőkről szólj (a kockázatosakat kihagyod: kicsi haszon, lassan kelő termék)</label>
-      <div class="row"><button type="button" class="small" id="d-limits">Mentés</button>
-        <small class="muted">Minden keresésre, figyelt oldalra, a böngészésre és az azonnali figyelőre is: ami a max. vételárnál drágább, azt meg sem nézem.</small></div>
+      ${deals.browser ? "" : '<p class="warn"><small>A Vintedhez és a Vaterához Jarvis saját böngészője kell.</small></p>'}
       ${deals.money && deals.money.budget ? `<p><small>Havi keret: ${esc(price(deals.money.spent) || "0 Ft")} / ${esc(price(deals.money.budget))}
-        (${deals.money.remaining ? `${esc(price(deals.money.remaining))} maradt` : "elfogyott"}) · a Vételeim fülön állíthatod</small></p>` : ""}
+        (${deals.money.remaining ? `${esc(price(deals.money.remaining))} maradt` : "elfogyott"})</small></p>` : ""}
       ${((deals.money || {}).warnings || []).map((w) => `<p class="warn"><small>${esc(w)}</small></p>`).join("")}
-      <details class="setup"><summary>Üzenet az eladónak</summary>
-        <p class="muted">Egy megérő találat ablakában (az értesítésre bökve) a gomb ezt másolja ki, és megnyitja a hirdetést.</p>
-        <textarea id="d-message" rows="4">${esc(deals.message || "")}</textarea>
-        <div class="row"><button type="button" class="small" id="d-message-save">Mentés</button></div></details>
-      ${instantBox()}
-      <h3 class="section-title">Böngészés</h3>
-      <p class="muted">Ahogy egy ember: kb. 20 percig nézelődik egy oldalon (fél-egy percenként egy oldal, a Vinteden
-        lassabban; néha megnyit egy hirdetést), aztán rögtön a következő oldalra vált. Csak az az oldal pihen, amelyiken épp
-        volt (legalább 10 percet, a Vinted két órát); ha minden bejelölt oldal pihen, ő is. A Vinteden a kezdőoldallal
-        kezd, a Hardveraprón a felkapott kategóriákat nézi (videókártya, memória, SSD, processzor, alaplap). Ha egy oldal
-        robot-ellenőrzést kér, aznap már nem nézi. A modellt csak kötegben kérdezi (energiatakarékos), és amint talál
-        valamit, amiből haszon lehet, szól. Tanul is: amelyik oldal többet hoz, azt gyakrabban nézi, a gyorsan kelő
-        termékeket külön figyeli, és amit kétszer elrejtesz, arról egy hónapig nem szól.</p>
-      <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-bsite" value="${esc(s.key)}" ${(b.sites || []).includes(s.key) ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>
-      <div class="row"><button type="button" class="small" id="d-bsave">Oldalak mentése</button></div>
-      <details class="setup"><summary>Indulóoldalak, és mit hoztak eddig</summary><ul class="dealist">${laneRows}</ul></details>
-      <p class="muted">Egy új keresésnél először felmérem, mennyiért adják most (egy modellhívás), és ha jóváhagyod, ahhoz
-        az árhoz mérem a legújabb hirdetéseket, modell nélkül. Ami jóval olcsóbb, annak az oldalát is átnézem (elkelt-e,
-        hibás-e, gyanús-e), és csak utána kérdezem meg a modellt. A gyanúsról (a szokásos ár 40%-a alatt, előre utalást
-        vagy WhatsAppot kér, az eladónak nincs értékelése, hamisítványnak látszik) nem szólok, csak a naplóba írom.
-        Csak olvasok: semmit nem veszek meg, és nem írok senkinek.
-        A Vintedet legfeljebb kétóránként nézem.
-        ${deals.browser ? "" : "<b>Ehhez Jarvis saját böngészője kell.</b>"}</p>
-      ${profitBox}
-      <h3 class="section-title">Keresések</h3>
-      <ul class="dealist">${searches || '<li class="muted">Még nincs keresés.</li>'}</ul>
-      <form id="d-add" class="compose" autocomplete="off">
-        ${edit ? `<p><b>Szerkesztés: ${esc(edit.query)}</b></p>` : ""}
-        <input id="d-query" placeholder="Mit keressek? Pl. RTX 3060 Ti, PS5 kontroller" value="${v("query")}">
-        <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-site" value="${esc(s.key)}" ${checked(s.key)}> ${esc(s.name)}</label>`).join("")}</div>
-        <div class="row">
-          <label>Legalább <input id="d-discount" type="number" min="10" max="80" value="${v("discount", 30)}" style="width: 4em">%-kal olcsóbb,</label>
-          <label>vagy legalább <input id="d-profit" type="number" min="0" placeholder="–" value="${v("min_profit")}" style="width: 6em"> Ft haszon</label>
-        </div>
-        <div class="row">
-          <label>Ár: legalább <input id="d-min" type="number" min="0" placeholder="0" value="${v("min_price")}" style="width: 6em"> Ft</label>
-          <label>legfeljebb <input id="d-max" type="number" min="0" placeholder="bármennyi" value="${v("max_price")}" style="width: 7em"> Ft</label>
-        </div>
-        <label class="field-label">Kizáró szavak <input id="d-exclude" placeholder="pl. tok, töltő, játék, doboz" value="${esc(edit ? (edit.exclude || []).join(", ") : "")}"></label>
-        ${edit ? "" : `<label class="field-label">Szokásos ár, ha tudod <input id="d-ref-new" type="number" min="1" placeholder="üresen felmérem" style="width: 9em"> Ft</label>`}
-        <div class="row">
-          <label>Nézze <select id="d-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === Number(v("every", 180)) ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label>
-        </div>
-        <div class="row"><button type="submit" class="primary">${edit ? "Mentés" : "Hozzáadás"}</button>
-          ${edit ? '<button type="button" id="d-cancel">Mégse</button>' : '<button type="button" id="d-run">Keresés most</button>'}</div>
-      </form>
-      <h3 class="section-title">Figyelt oldalak (bármi, ami megéri)</h3>
-      <p class="muted">Itt nem kell megadnod, mit keresel. A böngészőben nyiss meg egy kategóriát (pl. Hardverapró ›
-        Videókártyák, Jófogás › Konzolok, Vinted › Férfi cipők) a legújabb elöl, a Vaterán a „hamarosan lejár”
-        rendezéssel, és másold be az oldal címét. A hirdetéseket az árbázishoz mérem (modell nélkül); amit nem ismerek
-        fel, azt a modell nevezi meg, és ami megérhet, annak máshol is megnézem az árát. Licitálni és venni nem fogok
-        helyetted: megmondom, meddig érdemes.</p>
-      <ul class="dealist">${(deals.watches || []).map((w) => `<li><span><b>${esc(w.name)}</b>
-          <small class="muted">legalább ${esc(price(w.min_profit))} haszon${(w.platform || "vatera") === "vatera" ? ` · licitnél a zárás előtt legfeljebb ${w.hours} órával` : ""} · ${esc(every(w.every))}</small>
-          <small><a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small></span>
-          <button type="button" class="small quiet" data-watch-remove="${esc(w.id)}">Törlés</button></li>`).join("") || '<li class="muted">Még nincs figyelt oldal.</li>'}</ul>
-      <form id="d-watch" class="compose" autocomplete="off">
-        <input id="dw-target" placeholder="Egy találati oldal címe (Vinted, Jófogás, Vatera, Hardverapró), vagy Vatera-keresőszó">
-        <div class="row">
-          <label>Legalább <input id="dw-profit" type="number" min="0" value="5000" style="width: 6em"> Ft haszon,</label>
-          <label>licitnél a zárás előtt legfeljebb <input id="dw-hours" type="number" min="1" max="72" value="6" style="width: 4em"> órával</label>
-        </div>
-        <div class="row"><label>Nézze <select id="dw-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === 60 ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label></div>
-        <div class="row"><button type="submit" class="primary">Oldal hozzáadása</button></div>
-      </form>
-      <h3 class="section-title">Mennyit ér?</h3>
-      <p class="muted">Árbázis: ${book.products} termék, ${book.prices} ár (${book.ready} termékre már van szokásos ár).
-        Minden hirdetés ára bekerül, amit látok; modell és oldalbetöltés nélkül megmondja, mennyiért adják.</p>
-      <form id="d-lookup" class="compose" autocomplete="off">
-        <div class="row"><input id="dl-query" placeholder="Pl. RTX 3060 Ti, iPhone 13, Makita DHP482" value="${esc(lookupQuery)}">
-          <button type="submit">Megnézem</button></div>
-      </form>
-      ${lookupRows}
-      <h3 class="section-title">Olcsó hirdetések</h3>
+      <h3 class="section-title">Legutóbbi találatok</h3>
       <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>
-      <h3 class="section-title">Napló</h3>
-      <div class="row"><label>Nap <select id="d-jday"><option value="">Ma</option>${dayOptions}</select></label></div>
-      <ul class="dealist">${journalRows}</ul>`;
+      ${section("settings", "Beállítások", `
+        <div class="fields limits">
+          <div class="field"><label for="d-maxbuy">Max. vételár (Ft)</label>
+            <input id="d-maxbuy" type="number" inputmode="numeric" min="0" placeholder="bármennyi" value="${esc(deals.max_buy ?? "")}"></div>
+          <div class="field"><label for="d-minprofit">Min. haszon (Ft)</label>
+            <input id="d-minprofit" type="number" inputmode="numeric" min="0" value="${esc(b.min_profit)}"></div>
+        </div>
+        <label class="check"><input id="d-safeonly" type="checkbox" ${deals.safe_only !== false ? "checked" : ""}>
+          Csak a nyugodt szívvel megvehetőkről szólj</label>
+        <div class="row"><button type="button" class="small" id="d-limits">Mentés</button></div>
+        <label class="field-label" for="d-message">Üzenet az eladónak</label>
+        <textarea id="d-message" rows="3">${esc(deals.message || "")}</textarea>
+        <div class="row"><button type="button" class="small" id="d-message-save">Mentés</button></div>`)}
+      ${section("searches", `Keresések (${deals.searches.length})`, `
+        <ul class="dealist">${searches || '<li class="muted">Még nincs keresés.</li>'}</ul>
+        <form id="d-add" class="compose" autocomplete="off">
+          ${edit ? `<p><b>Szerkesztés: ${esc(edit.query)}</b></p>` : ""}
+          <input id="d-query" placeholder="Mit keressek? Pl. RTX 3060 Ti, PS5 kontroller" value="${v("query")}">
+          <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-site" value="${esc(s.key)}" ${checked(s.key)}> ${esc(s.name)}</label>`).join("")}</div>
+          <div class="row">
+            <label>Legalább <input id="d-discount" type="number" min="10" max="80" value="${v("discount", 30)}" style="width: 4em">%-kal olcsóbb,</label>
+            <label>vagy legalább <input id="d-profit" type="number" min="0" placeholder="–" value="${v("min_profit")}" style="width: 6em"> Ft haszon</label>
+          </div>
+          <div class="row">
+            <label>Ár: legalább <input id="d-min" type="number" min="0" placeholder="0" value="${v("min_price")}" style="width: 6em"> Ft</label>
+            <label>legfeljebb <input id="d-max" type="number" min="0" placeholder="bármennyi" value="${v("max_price")}" style="width: 7em"> Ft</label>
+          </div>
+          <label class="field-label">Kizáró szavak <input id="d-exclude" placeholder="pl. tok, töltő, játék, doboz" value="${esc(edit ? (edit.exclude || []).join(", ") : "")}"></label>
+          ${edit ? "" : `<label class="field-label">Szokásos ár, ha tudod <input id="d-ref-new" type="number" min="1" placeholder="üresen felmérem" style="width: 9em"> Ft</label>`}
+          <div class="row">
+            <label>Nézze <select id="d-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === Number(v("every", 180)) ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label>
+          </div>
+          <div class="row"><button type="submit" class="primary">${edit ? "Mentés" : "Hozzáadás"}</button>
+            ${edit ? '<button type="button" id="d-cancel">Mégse</button>' : '<button type="button" id="d-run">Keresés most</button>'}</div>
+        </form>`)}
+      ${deals.instant ? section("instant", `Azonnali figyelő (${alertCount})`, instantBox()) : ""}
+      ${section("browse", "Böngészés", `
+        <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-bsite" value="${esc(s.key)}" ${(b.sites || []).includes(s.key) ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>
+        <div class="row"><button type="button" class="small" id="d-bsave">Oldalak mentése</button></div>
+        ${laneRows ? `<details class="setup" data-fold="lanes"${openSections.has("lanes") ? " open" : ""}><summary>Indulóoldalak, és mit hoztak eddig</summary><ul class="dealist">${laneRows}</ul></details>` : ""}`)}
+      ${section("watches", `Figyelt oldalak (${(deals.watches || []).length})`, `
+        <ul class="dealist">${(deals.watches || []).map((w) => `<li><span><b>${esc(w.name)}</b>
+            <small class="muted">legalább ${esc(price(w.min_profit))} haszon${(w.platform || "vatera") === "vatera" ? ` · licitnél a zárás előtt legfeljebb ${w.hours} órával` : ""} · ${esc(every(w.every))}</small>
+            <small><a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small></span>
+            <button type="button" class="small quiet" data-watch-remove="${esc(w.id)}">Törlés</button></li>`).join("") || '<li class="muted">Még nincs figyelt oldal.</li>'}</ul>
+        <form id="d-watch" class="compose" autocomplete="off">
+          <input id="dw-target" placeholder="Egy találati oldal címe (legújabb elöl), vagy Vatera-keresőszó">
+          <div class="row">
+            <label>Legalább <input id="dw-profit" type="number" min="0" value="5000" style="width: 6em"> Ft haszon,</label>
+            <label>licitnél a zárás előtt legfeljebb <input id="dw-hours" type="number" min="1" max="72" value="6" style="width: 4em"> órával</label>
+          </div>
+          <div class="row"><label>Nézze <select id="dw-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === 60 ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label></div>
+          <div class="row"><button type="submit" class="primary">Oldal hozzáadása</button></div>
+        </form>`)}
+      ${profitBox ? section("profit", "Haszon", profitBox) : ""}
+      ${section("lookup", "Mennyit ér?", `
+        <p><small class="muted">Árbázis: ${book.products} termék, ${book.prices} ár (${book.ready} termékre van szokásos ár)</small></p>
+        <form id="d-lookup" class="compose" autocomplete="off">
+          <div class="row"><input id="dl-query" placeholder="Pl. RTX 3060 Ti, iPhone 13, Makita DHP482" value="${esc(lookupQuery)}">
+            <button type="submit">Megnézem</button></div>
+        </form>
+        ${lookupRows}`)}
+      ${section("journal", "Napló", `
+        <div class="row"><label>Nap <select id="d-jday"><option value="">Ma</option>${dayOptions}</select></label></div>
+        <ul class="dealist">${journalRows}</ul>`)}`;
+    for (const fold of box.querySelectorAll("details[data-fold]")) fold.addEventListener("toggle", () => {
+      if (fold.open) openSections.add(fold.dataset.fold); else openSections.delete(fold.dataset.fold);
+      store("jarvis-deal-open", [...openSections].join(","));
+    });
     $("d-run-toggle").addEventListener("click", async () => {
       const start = !running;
       if (await dealAction({ action: start ? "start" : "stop" }))
@@ -952,7 +968,10 @@
       J.toast(result.ok ? "Keresem; ha találok valamit, szólok." : (result.error || "Nem sikerült."));
     });
     for (const b of box.querySelectorAll("[data-deal-edit]")) b.addEventListener("click", () => {
-      editingSearch = b.dataset.dealEdit; renderDeals(); $("d-add").scrollIntoView({ block: "start" });
+      editingSearch = b.dataset.dealEdit;
+      openSections.add("searches");
+      renderDeals();
+      $("d-add").scrollIntoView({ block: "start" });
     });
     for (const b of box.querySelectorAll("[data-ref-edit]")) b.addEventListener("click", () => { editingRef = b.dataset.refEdit; renderDeals(); $("d-ref").focus(); });
     for (const b of box.querySelectorAll("[data-ref-save]")) b.addEventListener("click", async () => {
@@ -1983,8 +2002,11 @@
     if (event.detail && event.detail.kind === "deal") loadDeals();
   });
   // Egy másik ablakból (pl. a telefonról) elindítottad, leállítottad vagy átírtad: itt is frissül.
-  J.on("work_deals", () => { if (job === "deals") loadDeals(); });
+  J.on("work_deals", () => { if (job === "deals" || J.mode === "chat") loadDeals(); });
   // Amíg a fül látszik, félpercenként frissül az állapot („Most: Hardverapró…”), és ha a gép újraindult.
   setInterval(() => { if (job === "deals" && !document.hidden) loadDeals(); }, 30000);
-  J.onHello((event) => { if (event.work) load(); });
+  J.onHello((event) => {
+    if (event.work) { load(); loadDeals(); }
+    else { $("home-tiles").hidden = true; $("empty-hint").textContent = "Kérdezz bármit."; }
+  });
 })();

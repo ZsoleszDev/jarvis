@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Jarvis – helyi, magyarul beszélő asszisztens.
+"""Jarvis – helyi, magyar nyelvű asszisztens.
 
 Indítás:
     python jarvis.py              grafikus felület (alkalmazásablak); ha már fut, megnyitja az ablakát
     python jarvis.py --console    konzolos mód
-    python jarvis.py --text       mikrofon és beszédfelismerés nélkül
-    python jarvis.py --mute       a válaszokat nem olvassa fel
-    python jarvis.py --no-wake    ébresztőszó nélkül
     python jarvis.py --no-window  a felület ne nyíljon meg magától (a címét kiírja)
     python jarvis.py --standby    készenlétben indul: ablak nélkül, a modellek az első kérésnél töltődnek be
     python jarvis.py --autostart on|off   a gép bekapcsolásakor készenlétben induljon (Windows)
@@ -40,11 +37,8 @@ def _ensure_output() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Jarvis – helyi, magyarul beszélő asszisztens")
+    parser = argparse.ArgumentParser(description="Jarvis – helyi, magyar nyelvű asszisztens")
     parser.add_argument("--console", action="store_true", help="konzolos mód grafikus felület helyett")
-    parser.add_argument("--text", action="store_true", help="csak gépelés, mikrofon nélkül")
-    parser.add_argument("--mute", action="store_true", help="ne olvassa fel a válaszokat")
-    parser.add_argument("--no-wake", action="store_true", help="ébresztőszó nélkül")
     parser.add_argument("--no-window", action="store_true", help="a felület ne nyíljon meg magától")
     parser.add_argument("--standby", action="store_true",
                         help="készenlétben indul (ablak nélkül; a modellek az első kérésnél töltődnek be)")
@@ -110,12 +104,11 @@ def _already_running(args: argparse.Namespace, cfg, info_path) -> int:
 def _run(args: argparse.Namespace, cfg, info_path) -> int:
     from jarvis_core.app import JarvisApp
 
-    options = {"use_voice": not args.text, "use_speech": not args.mute, "use_wake_word": not args.no_wake}
     if args.console:
         from jarvis_core.ui_console import ConsoleUI, run_console
 
         ui = ConsoleUI(cfg.assistant.name)
-        app = JarvisApp(cfg, ui, **options)
+        app = JarvisApp(cfg, ui)
         try:
             if not app.start():
                 return 1
@@ -131,7 +124,7 @@ def _run(args: argparse.Namespace, cfg, info_path) -> int:
 
     bus = EventBus()
     ui = GuiUI(bus, cfg.assistant.name)
-    app = JarvisApp(cfg, ui, **options)
+    app = JarvisApp(cfg, ui)
     try:
         run_gui(app, ui, bus, cfg.gui, open_window=not (args.no_window or args.standby),
                 standby=args.standby, info_path=info_path)

@@ -236,7 +236,7 @@ class Assistant:
         """Megválaszolja a kérést, közben annyi eszközt hív, amennyi kell.
 
         `on_text`: ha meg van adva, a válasz szövege darabonként, azonnal érkezik ide
-        (felolvasáshoz, kiíráshoz), még mielőtt a modell befejezné.
+        (a kiíráshoz), még mielőtt a modell befejezné.
         `tool_names`: ebben a kérésben csak ezeket az eszközöket látja a modell (pl. egy feltöltés csak a
         böngészőt és a tárgy néhány eszközét); a kérés minden körében ugyanaz a lista megy, hogy a prompt eleje
         az Ollama gyorsítótárában maradjon. Alapból a beszélgetés összes eszköze.

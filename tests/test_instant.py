@@ -196,7 +196,7 @@ class FetcherTests(unittest.TestCase):
         self.assertTrue(self.fetcher.ready("hardverapro") is False, "a következő kérés csak a szünet után jöhet")
         self.fetcher.listings(url, "hardverapro")
         first, second = self.net.asked[0][0], self.net.asked[1][0]
-        self.assertGreaterEqual(second - first, 8, "két kérés között legalább 8 másodperc")
+        self.assertGreaterEqual(second - first, 6, "két kérés között legalább 6 másodperc")
         self.assertTrue(self.fetcher.ready("jofogas"), "a másik oldal közben mehet")
         with self.assertRaises(FeedError) as caught:
             self.fetcher.listings("https://www.vinted.hu/catalog", "vinted")
@@ -245,6 +245,37 @@ class FetcherTests(unittest.TestCase):
         with self.assertRaises(FeedError) as caught:
             fetcher.listings("https://hardverapro.hu/aprok/hardver/videokartya/index.html", "hardverapro")
         self.assertEqual(caught.exception.kind, "busy")
+
+    def test_a_fresh_search_page_is_not_downloaded_twice(self):
+        """A kereskedés köre a gyors oldalak találati oldalát nem kéri le újra, ha az azonnali figyelő pár perce már
+        letöltötte (max_age); az azonnali figyelő mindig frisset kér."""
+        self.net.pages["videokartya"] = (200, ha_page(HA_CARDS))
+        url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        self.fetcher.listings(url, "hardverapro")
+        self.assertEqual(len(self.fetcher.listings(url, "hardverapro", max_age=300)), 4)
+        self.assertEqual(len(self.net.asked), 1, "a friss oldalt nem kérte le újra")
+        self.clock.now += 301
+        self.fetcher.listings(url, "hardverapro", max_age=300)
+        self.assertEqual(len(self.net.asked), 2, "a régebbit igen")
+        self.fetcher.listings(url, "hardverapro")
+        self.assertEqual(len(self.net.asked), 3, "max_age nélkül mindig frisset")
+
+    def test_it_slows_down_when_the_site_answers_slowly(self):
+        """Ha az oldal lassan válaszol (terhelt, vagy fékez), a szünetek hosszabbak lesznek; a gyors válaszokkal
+        fokozatosan visszaállnak."""
+        self.net.pages["videokartya"] = (200, ha_page(HA_CARDS))
+        url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        fetcher = SiteFetcher(clock=self.clock, sleep=lambda s: setattr(self.clock, "now", self.clock.now + s),
+                              rng=random.Random(1), get=self.net, gap=(10, 10))
+        with mock.patch("jarvis_core.feeds.SLOW_RESPONSE", 0.0):   # minden válasz „lassú”
+            fetcher.listings(url, "hardverapro")
+            fetcher.listings(url, "hardverapro")
+        self.assertEqual(fetcher.status()["hardverapro"]["slow"], 2.25)
+        start = self.clock.now
+        fetcher.listings(url, "hardverapro")
+        self.assertGreaterEqual(self.net.asked[-1][0] - self.net.asked[-2][0], 22, "a szünet 10 helyett 22,5 mp")
+        self.assertLess(fetcher.status()["hardverapro"]["slow"], 2.25, "a gyors válasz után enyhít")
+        self.assertGreater(self.clock.now, start)
 
     def test_a_real_download_from_a_local_server(self):
         body = ha_page(HA_CARDS).encode("utf-8")
@@ -329,7 +360,6 @@ class InstantTests(InstantCase):
         self.assertIn("kb. 36 500 Ft haszon lehet. Biztos befektetés: 70% haszon. Ugyanaz a kártya.", text,
                       "mennyire biztos, és a modell is megnézte")
         self.assertTrue(extra["urgent"] and extra["url"].endswith("_7/friss.html"))
-        self.assertEqual(extra["spoken"], "Megérő új hirdetés: Palit RTX 3060 Ti Dual, 52 000 Ft.")
         [hit] = self.watch.state()["hits"]
         deals = self.hunter.state()["deals"]
         self.assertEqual(([d["text"][:22] for d in deals], hit["deal"]), (["Palit RTX 3060 Ti Dual"], deals[0]["id"]),
@@ -578,6 +608,41 @@ class InstantTests(InstantCase):
         finally:
             self.watch.stop()
         self.assertEqual(self.net.threads, {"jarvis-azonnali"})
+
+
+class LinkedSearchTests(InstantCase):
+    def test_a_search_is_watched_every_few_minutes_on_the_fast_sites(self):
+        """A Keresések a Hardveraprón és a Jófogáson az azonnali figyelőben is futnak (ugyanazzal a szóval, ársávval,
+        kizáró szavakkal): az új, megérő hirdetésről pár percen belül szól, nem csak a keresés óránkénti körében. Ha
+        egy saját figyelő már ugyanazt nézi, nem kéri le kétszer; a keresés törlésével a figyelés is megszűnik."""
+        state = self.hunter.add_search("RTX 3060 Ti", ["hardverapro", "vinted"], reference=100000, max_price=90000,
+                                       exclude="hibás")
+        search = state["searches"][0]
+        self.hunter.set_enabled(True)
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.assertEqual(self.watch.tick(), 1)
+        [linked] = self.watch.state()["alerts"]
+        self.assertEqual((linked["search"], linked["query"], linked["sites"], linked["max_price"], linked["exclude"]),
+                         (search["id"], "RTX 3060 Ti", ["hardverapro"], 90000, ["hibás"]))
+        self.assertEqual(self.notices, [], "elsőre csak megjegyzi, ami már fent van")
+        self.later(6)
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft"), ha_card(8, "MSI RTX 3060 Ti hibás", "40 000 Ft")]
+                     + HA_CARDS[:2])
+        self.net.pages["_7/friss"] = page_html("Hibátlan, dobozában.")
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual"], "a hibásat ki is zárta")
+        self.assertIn("RTX 3060 Ti", self.notices[0][2])
+        with self.assertRaises(InstantError):
+            self.watch.add("RTX 3060 Ti", ["hardverapro"])         # a keresés miatt már figyeli
+        self.hunter.remove_search(search["id"])
+        self.watch.link_searches()
+        self.assertEqual(self.watch.state()["alerts"], [], "a keresés törlésével a figyelés is megszűnt")
+        # ha egy saját figyelő már ugyanazt nézi, a keresésből nem lesz még egy (nem kéri le kétszer)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.watch.link_searches()
+        self.assertEqual([a.get("search") for a in self.watch.state()["alerts"]], [None])
 
 
 class ParallelRoundTests(InstantCase):

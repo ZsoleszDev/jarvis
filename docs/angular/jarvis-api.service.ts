@@ -21,8 +21,7 @@ import { Observable, firstValueFrom, map } from 'rxjs';
 
 export type Mode = 'chat' | 'work';
 export type JarvisState =
-  | 'starting' | 'idle' | 'listening' | 'transcribing' | 'thinking' | 'working' | 'speaking' | 'paused' | 'standby'
-  | 'error';
+  | 'starting' | 'idle' | 'thinking' | 'working' | 'writing' | 'paused' | 'standby' | 'error';
 export type ItemStatus = 'vázlat' | 'kérdés' | 'árdöntés' | 'részben fent' | 'fent' | 'eladva';
 export type PlatformStatus = 'feltöltve' | 'nincs fent' | 'hiba';
 export type Recency = '' | 'nap' | 'hét' | 'hónap' | 'év';
@@ -46,8 +45,7 @@ export interface SchedulerStatus {
 export interface Status {
   ok: boolean; api: number; name: string; ready: boolean;
   state: { state?: JarvisState; text?: string; detail?: string };
-  paused: boolean; standby: boolean; busy: boolean; mode: Mode; model: string; voice: boolean; speech: boolean;
-  work: boolean;
+  paused: boolean; standby: boolean; busy: boolean; mode: Mode; model: string; work: boolean;
   confirm: ConfirmRequest | null; scheduler: SchedulerStatus | null; unread: number; last_event: number;
 }
 
@@ -237,26 +235,10 @@ export class JarvisApiService {
 
   // --- beszélgetés ---
 
-  /** wait > 0: megvárja a választ (legfeljebb ennyi mp-ig). speak: a gép hangszórója is szóljon. */
-  chat(text: string, opts: { mode?: Mode; wait?: number; speak?: boolean; resume?: boolean } = {}):
-      Observable<ChatResult> {
+  /** wait > 0: megvárja a választ (legfeljebb ennyi mp-ig). */
+  chat(text: string, opts: { mode?: Mode; wait?: number; resume?: boolean } = {}): Observable<ChatResult> {
     return this.post<ChatResult>('/chat', { text, mode: opts.mode ?? 'chat', wait: opts.wait ?? 60,
-                                            speak: opts.speak ?? false, resume: opts.resume ?? false });
-  }
-
-  /** Hangfelvétel (m4a, aac, webm, ogg, wav). A válaszban a felismert szöveg (heard) és a válasz (reply). */
-  voice(audio: Blob, opts: { mode?: Mode; wait?: number; speak?: boolean; resume?: boolean } = {}):
-      Observable<ChatResult> {
-    return this.http.post<ChatResult>(this.url('/voice'), audio, {
-      headers: this.headers().set('Content-Type', audio.type || 'application/octet-stream'),
-      params: toParams({ mode: opts.mode ?? 'chat', wait: opts.wait ?? 60, speak: opts.speak ? 1 : 0,
-                         resume: opts.resume ? 1 : 0 }),
-    });
-  }
-
-  /** Jarvis hangja WAV-ként (<audio [src]>-hoz; a kulcs a címben van, mert az <audio> nem küld fejlécet). */
-  ttsUrl(text: string): string {
-    return `${this.url('/tts')}?text=${encodeURIComponent(text)}&access_token=${encodeURIComponent(this.token)}`;
+                                            resume: opts.resume ?? false });
   }
 
   stop(): Observable<unknown> { return this.post('/stop'); }

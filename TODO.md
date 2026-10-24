@@ -24,6 +24,12 @@
 - Megérő találat ablaka (értesítésből, a listából): ár, mennyiért mennek, haszon; az eladónak szóló üzenet a vágólapra, és
   a hirdetés megnyitása. Android: „Megérő hirdetés” csatorna, 2 perc rezgés/hang, 10 perc szünet, legfeljebb 6 kör.
 - Havi keret (a maradék limit), és szólás, ha felhalmozódnak az el nem adott tárgyak.
+- A beszédfelismerés, a felolvasás és az ébresztőszó teljesen kikerült (Python, felület, Android, dokumentáció).
+- Kezdőképernyő: Indítás gomb és Új tárgy csempe az első üzenetig; az Állj a Küldés mellett, csak futás közben; a
+  Munka menüben a „Kérdezz Jarvistól” sor gombra nyílik; az Automata kereskedés tömör, összecsukható blokkokkal.
+- Gyorsabb, szabályos keresés: 6–13 mp szünet, óránként 120 kérés oldalanként (a figyelőnek 80), lassú válasznál
+  magától lassít; a találati oldalt 5 percig közösen használja a kör és a figyelő; körönként 8 jelölt; a keresések
+  alapból óránként, és a Hardverapró/Jófogás-keresések ötpercenként az azonnali figyelőben is.
 
 ## Élesben kipróbálandó
 - Az Android-alkalmazás új része (a megérő hirdetés értesítése: rezgés, hang, ismétlés, a találat ablaka, a vágólap) a
@@ -31,8 +37,10 @@
 - Néma módban az Android nem rezeg és nem csenget (a rendszer döntése); rezgő módban csak rezeg.
 - A Hardverapró és a Jófogás sima letöltéssel (feeds.py): a valódi oldalakon a kártyák kiolvasása (most a böngészős
   elemzés másolata, a tesztoldalak a két oldal szerkezetét utánozzák), hogy a Jófogás tényleg a szerveren rajzolja-e ki a
-  találatokat (ha nem, háromszor üres után magától a böngészőre vált), és hogy a 8–16 másodperces szünet és az óránkénti
-  90 kérés nem túl sok-e (ha egy oldal 403-at vagy 429-et ad, a `feeds.GAP` és `HOURLY` csökkentendő).
+  találatokat (ha nem, háromszor üres után magától a böngészőre vált), és hogy a 6–13 másodperces szünet és az óránkénti
+  120 kérés nem túl sok-e (ha egy oldal 403-at vagy 429-et ad, vagy sokszor „lassít”, a `feeds.GAP` és `HOURLY`, az
+  azonnali figyelőnél az `instant.INSTANT_HOURLY` és a `LINKED_EVERY` visszaveendő). Egy Keresés a figyelőben
+  ötpercenként fut: sok Hardverapró/Jófogás-keresésnél mindegyik ritkábban kerül sorra (az óránkénti keret véd).
 - Az azonnali figyelő az előresorolt (felfrissített) régi hirdetéseket is újnak látja, ha az első letöltéskor nem voltak
   az első oldalon.
 - A Vinted üzenetoldala: a beszélgetések és üzenetek felismerése általános szabályokkal megy, a valódi oldalon nincs kipróbálva. Ha „nem találtam beszélgetést / üzenetet” jön, egy hibacsomag vagy az oldal HTML-je kell.

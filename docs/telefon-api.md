@@ -1,10 +1,10 @@
 # Telefonos kapcsolat (Jarvis API)
 
-Ezzel a saját (Angular + Capacitor) appodból irányíthatod a Jarvist: beszélgetés (írva vagy hangfelvétellel),
+Ezzel a saját (Angular + Capacitor) appodból irányíthatod a Jarvist: beszélgetés,
 a Munka menü tárgyai és fotói, feltöltés, eladva/levétel, jóváhagyások, Szünet és Folytatás, háttérmunka,
 figyelők és értesítések. A kész Angular-szolgáltatás: [`angular/jarvis-api.service.ts`](angular/jarvis-api.service.ts).
 
-Minden kérés és válasz JSON (kivéve a fotókat és a hangot). Minden útvonal eleje: `/api/v1`.
+Minden kérés és válasz JSON (kivéve a fotókat). Minden útvonal eleje: `/api/v1`.
 
 ## Beállítás (egyszer)
 
@@ -55,8 +55,8 @@ Minden kéréshez (a `/ping` és a `/pair` kivételével):
 Authorization: Bearer <kulcs>
 ```
 
-A képet (`<img src>`) és a hangot (`<audio src>`) a böngésző nem tudja fejléccel kérni: ennél a két
-végpontnál (`…/photos/01.jpg`, `/tts`) a kulcs a címben is lehet: `?access_token=<kulcs>`.
+A képet (`<img src>`) a böngésző nem tudja fejléccel kérni: a fotóknál (`…/photos/01.jpg`) a kulcs a címben is
+lehet: `?access_token=<kulcs>`.
 
 ## Válaszok és hibák
 
@@ -70,9 +70,9 @@ Siker: `{"ok": true, …}`. Hiba: `{"ok": false, "error": "érthető magyar szö
 | 404 | `not_found` | nincs ilyen végpont, tárgy, fotó, figyelő |
 | 409 | `paused` | a Jarvis szünetel (lásd `resume`) |
 | 409 | `acknowledge` | az oldalt még nem fogadtad el (botokra vonatkozó figyelmeztetés, lásd `/work/ack`) |
-| 409 | `no_voice` / `not_posted` | nincs beszédfelismerés / nincs honnan levenni |
-| 413 | `too_large` | túl nagy kérés (JSON 256 KB, fotó 25 MB, hang 15 MB) |
-| 503 | `starting`, `no_speech`, `no_search`, `no_work` | még indul, vagy az a rész nem fut |
+| 409 | `not_posted` | nincs honnan levenni |
+| 413 | `too_large` | túl nagy kérés (JSON 256 KB, fotó 25 MB) |
+| 503 | `starting`, `no_search`, `no_work` | még indul, vagy az a rész nem fut |
 
 ## Végpontok
 
@@ -81,10 +81,8 @@ Siker: `{"ok": true, …}`. Hiba: `{"ok": false, "error": "érthető magyar szö
 | Módszer | Útvonal | Törzs / paraméterek | Válasz |
 |---|---|---|---|
 | GET | `/ping` | – (kulcs nélkül) | `{name, api}` |
-| GET | `/status` | | `{ready, state, paused, standby, busy, mode, model, voice, speech, work, confirm, scheduler, unread, last_event}` |
-| POST | `/chat` | `{text, mode?: "chat"\|"work", wait?: 0–120, speak?: false, resume?: false}` | `wait` nélkül 202 `{request_id}`; `wait`-tel 200 `{request_id, done, heard, reply, errors}` |
-| POST | `/voice?mode=&wait=&speak=&resume=` | nyers hangfájl (m4a, aac, webm, ogg, wav, mp3) | mint a `/chat` (a `heard` a felismert szöveg) |
-| GET | `/tts?text=` | | `audio/wav` (Jarvis hangja; a kulcs lehet `access_token`) |
+| GET | `/status` | | `{ready, state, paused, standby, busy, mode, model, work, confirm, scheduler, unread, last_event}` |
+| POST | `/chat` | `{text, mode?: "chat"\|"work", wait?: 0–120, resume?: false}` | `wait` nélkül 202 `{request_id}`; `wait`-tel 200 `{request_id, done, heard, reply, errors}` (`heard`: a kérésed, ahogy a naplóba került) |
 | GET | `/events?after=&wait=` | `after`: az utolsó látott sorszám, `wait`: legfeljebb 55 mp | `{events: [...], last, gap}` |
 | POST | `/stop` | | Állj: megszakítja, amit épp csinál |
 | POST | `/pause` | | Szünet: minden modell leáll, a VRAM és a memória felszabadul |
@@ -93,12 +91,11 @@ Siker: `{"ok": true, …}`. Hiba: `{"ok": false, "error": "érthető magyar szö
 | GET | `/confirm` | | `{confirm: {id, prompt} \| null}`: épp jóváhagyásra váró lépés |
 | POST | `/confirm` | `{id, approved}` | jóváhagyás vagy elutasítás (pl. közzététel a telefonról) |
 
-A `speak` alapból `false`: a telefonról jött kérésre a gép hangszórója nem szólal meg (a választ a
-telefon felolvashatja a `/tts`-sel vagy a saját hangjával). Ha a Jarvis szünetel, a `/chat` és a `/voice`
-409-et ad; `resume: true` (vagy `?resume=1`) esetén előbb újraindul, és utána válaszol.
+Ha a Jarvis szünetel, a `/chat` 409-et ad; `resume: true` (vagy `?resume=1`) esetén előbb újraindul, és utána
+válaszol.
 
 **Készenlét** (`standby: true`; a gép bekapcsolásakor indított Jarvis, vagy tétlenség után): a modellek nincsenek
-betöltve, de a `/chat` és a `/voice` nem ad 409-et, mert a kérés magától felébreszti (10–20 mp), és utána
+betöltve, de a `/chat` nem ad 409-et, mert a kérés magától felébreszti (10–20 mp), és utána
 válaszol; ilyenkor érdemes nagyobb `wait`-et adni (pl. 60). A `/pause` készenlétből igazi szünetre vált: onnan
 csak a `/resume` (vagy a `resume: true`) hozza vissza. Készenlétben a modell nélküli háttérmunka (figyelők, régóta
 fent lévő hirdetések) fut, szünetben semmi.
@@ -260,9 +257,9 @@ Ha nincs új esemény, a kérés legfeljebb `wait` másodpercig vár, aztán ür
 
 | type | Mezők | Jelentése |
 |---|---|---|
-| `hello` | `name, model, voice, speech, wake_word, work, paused, standby, api` | mi fut (szünet után is jön) |
-| `state` | `state, text, detail` | `idle`, `listening`, `transcribing`, `thinking`, `working`, `speaking`, `paused`, `standby`, `starting`, `error` |
-| `user` | `text, via, channel` | amit mondtál vagy írtál (`via`: `text`, `voice`, `phone`) |
+| `hello` | `name, model, work, paused, standby, api` | mi fut (szünet után is jön) |
+| `state` | `state, text, detail` | `idle`, `thinking`, `working`, `writing`, `paused`, `standby`, `starting`, `error` |
+| `user` | `text, via, channel` | amit írtál (`via`: `text`, `remote`, `phone`) |
 | `assistant` | `text, channel` | Jarvis válasza vagy üzenete |
 | `tool` | `id, label, status, summary, channel` | egy lépés (`running`, `done`, `failed`) |
 | `info`, `warn`, `error`, `timing` | `text, channel` | megjegyzések |
@@ -275,21 +272,6 @@ Ha nincs új esemény, a kérés legfeljebb `wait` másodpercig vár, aztán ür
 A `channel` mondja meg, melyik menühöz tartozik (`chat` = Beszélgetés, `work` = Munka). A telefonról
 indított kérés eseményein ott a `request_id` is.
 
-## Hang a telefonról
-
-```http
-POST /api/v1/voice?mode=chat&wait=60
-Content-Type: audio/mp4
-
-<a felvétel bájtjai>
-
-200 {"heard": "Milyen idő lesz holnap?", "reply": "Holnap 18 fok lesz, napos idő.", "done": true}
-```
-
-A Jarvis a gépen ugyanazzal a beszédfelismerővel (faster-whisper) alakítja szöveggé, amivel a mikrofonodat
-hallgatja, és ugyanúgy válaszol, mintha mondtad volna. A válasz felolvasása a telefonon:
-`GET /api/v1/tts?text=…&access_token=…` (WAV), vagy a telefon saját felolvasójával.
-
 ## Capacitor tippek
 
 - **HTTPS a Tailscale-lel:** a `tailscale serve` valódi tanúsítványt ad, így Androidon nem kell külön
@@ -301,7 +283,6 @@ hallgatja, és ugyanúgy válaszol, mintha mondtad volna. A válasz felolvasása
   `@capacitor/preferences` vagy egy biztonságos tároló bővítmény.
 - **Kamera:** `Camera.getPhoto({ resultType: CameraResultType.Uri })`, majd
   `fetch(photo.webPath).then(r => r.blob())`, és ezt a blobot küldd a `/photos` végpontra.
-- **Hangfelvétel:** bármelyik felvevő bővítmény jó, ami fájlt vagy base64-et ad (AAC/M4A/WEBM).
 - **Értesítés háttérben:** az események csak akkor jönnek, amíg az app nyitva van. A Jarvis gépe
   napközben fut; ha az app előtérbe kerül, a `/notifications?unread=1` megmutatja, mi történt közben.
 
@@ -318,7 +299,7 @@ hallgatja, és ugyanúgy válaszol, mintha mondtad volna. A válasz felolvasása
 Ugyanezen a porton (a Tailscale-en át) a Jarvis teljes ablaka is elérhető: `GET /` párosítás nélkül a belépő oldal
 (itt a 6 jegyű kóddal párosíthatsz, a kulcs a böngésző tárában marad), a kulccsal (`/?t=<kulcs>`) a gép felülete.
 A felület kérései (`/events`, `/api/...`, kulccsal a címben vagy az `X-Jarvis-Token` fejlécben) a gépen futó
-felülethez mennek tovább; ami csak a gép előtt ülve szabad (kilépés, új párosító kód, a gép mikrofonja), az 403.
+felülethez mennek tovább; ami csak a gép előtt ülve szabad (kilépés, új párosító kód), az 403.
 Telepíthető alkalmazás (PWA): `/manifest.webmanifest`, `/sw.js`, `/icon-192.png`, `/icon-512.png`. Az
 Android-alkalmazás (android/) ezt mutatja, és a `GET /api/v1/events` hosszú lekérdezéssel értesít a háttérben
 (`confirm`, `confirm_done`, `notification`, és a `state` alapján az állandó értesítés Szünet / Folytatás gombja). Egy

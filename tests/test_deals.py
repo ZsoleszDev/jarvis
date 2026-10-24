@@ -351,13 +351,13 @@ class DealTests(HunterCase):
         self.assertEqual(len(self.notices), 1, "egyszer szól")
         self.assertEqual(self.hunter.state()["searches"][0]["market"]["median"], 100000)
 
-    def test_only_five_candidates_per_round_the_rest_next_time(self):
-        self.browser.results = NORMAL + [listing(40 + n, f"RTX 3060 Ti Gamer {n}", 50000 + n * 100) for n in range(7)]
+    def test_only_eight_candidates_per_round_the_rest_next_time(self):
+        self.browser.results = NORMAL + [listing(40 + n, f"RTX 3060 Ti Gamer {n}", 50000 + n * 100) for n in range(10)]
         self.ready()
-        self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: 5 olcsó hirdetés.")
-        self.assertEqual(len(self.browser.looked), 5)
+        self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: 8 olcsó hirdetés.")
+        self.assertEqual(len(self.browser.looked), 8)
         self.assertEqual(self.hunter.run(notify=self.notify, force=True), "1 keresés: 2 olcsó hirdetés.")
-        self.assertEqual(len(self.notices), 7, "a maradék a következő körben, és egyik sem kétszer")
+        self.assertEqual(len(self.notices), 10, "a maradék a következő körben, és egyik sem kétszer")
 
     def test_searches_validate_update_and_a_broken_site_does_not_stop_the_rest(self):
         with self.assertRaises(DealError):

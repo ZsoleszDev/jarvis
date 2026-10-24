@@ -344,7 +344,7 @@ class PublishGapTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = make_cfg(Path(self.tmp.name), self.fake.url)
         self.ui = RecordingUI()
-        self.app = JarvisApp(self.cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(self.cfg, self.ui)
         self.assertTrue(self.app.start())
         self.work = self.app.work
         self.item = self.work.store.create(targets=["vinted"], prompt="póló")

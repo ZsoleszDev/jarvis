@@ -684,7 +684,7 @@ class ReplayHarness:
             patch.start()
         self.ui = RecordingUI()
         self.ui.confirm_answer = True
-        self.app = JarvisApp(cfg, self.ui, use_voice=False, use_speech=False, use_wake_word=False)
+        self.app = JarvisApp(cfg, self.ui)
         self.fake.vram_fit = lambda ctx: 1.0
         self.assertTrue(self.app.start())
         self.work = self.app.work

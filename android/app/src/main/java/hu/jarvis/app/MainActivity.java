@@ -22,7 +22,6 @@ import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.webkit.JavascriptInterface;
-import android.webkit.PermissionRequest;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -55,7 +54,6 @@ import org.json.JSONObject;
  * (assets/setup.html) jön; ha a gép nem érhető el, ugyanaz, a hibával.
  *
  * Indítási kérések (a gép felülete a JarvisApp.pending() hívással kérdezi le, és teljesíti):
- * - hangutasítás: parancsikon, gyorsbeállítás csempe (VoiceTile), az állandó értesítés Hang gombja;
  * - új hirdetés: parancsikon;
  * - megosztás a Jarvisnak: fotók a galériából (az új hirdetéshez; a felület a /__jarvis_shared/ címről kéri le
  *   őket, ezt a WebView-ban mi szolgáljuk ki), vagy szöveg, link (a beszélgetésbe);
@@ -69,7 +67,6 @@ public class MainActivity extends Activity {
     /** Látszik-e az ablak: ilyenkor a háttérszolgáltatás nem értesít (a felületen úgyis látod). */
     static volatile boolean visible;
 
-    static final String ACTION_VOICE = "hu.jarvis.app.VOICE";
     static final String ACTION_NEW_LISTING = "hu.jarvis.app.NEW_LISTING";
     static final String ACTION_SOLD = "hu.jarvis.app.SOLD";
     static final String ACTION_DEAL = "hu.jarvis.app.DEAL";
@@ -81,7 +78,6 @@ public class MainActivity extends Activity {
     private static final String SHARED_PATH = "/__jarvis_shared/";
     private static final int MAX_SHARED = 20;
     private static final int PICK_FILES = 1;
-    private static final int ASK_MIC = 2;
     private static final int ASK_NOTIFY = 3;
     private static final int TAKE_PHOTO = 4;
 
@@ -89,9 +85,7 @@ public class MainActivity extends Activity {
     private Prefs prefs;
     private volatile String currentUrl = "";
     private ValueCallback<Uri[]> filesCallback;
-    private PermissionRequest micRequest;
     // A még nem teljesített indítási kérések (a WebView száláról is olvassuk).
-    private volatile boolean wantVoice;
     private volatile boolean wantListing;
     private volatile String sharedText = "";
     private volatile List<Uri> sharedPhotos = Collections.emptyList();
@@ -147,16 +141,13 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Egy indítás kérése (hang, új hirdetés, megosztás, párosító link); igaz, ha párosító link jött. */
+    /** Egy indítás kérése (új hirdetés, megosztás, párosító link, értesítés); igaz, ha párosító link jött. */
     private boolean take(Intent intent) {
         String action = intent == null ? null : intent.getAction();
         if (action == null) {
             return false;
         }
         switch (action) {
-            case ACTION_VOICE:
-                wantVoice = true;
-                return false;
             case ACTION_NEW_LISTING:
                 wantListing = true;
                 return false;
@@ -451,19 +442,6 @@ public class MainActivity extends Activity {
         filesCallback = null;
     }
 
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
-        super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == ASK_MIC && micRequest != null) {
-            if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
-                micRequest.grant(new String[]{PermissionRequest.RESOURCE_AUDIO_CAPTURE});
-            } else {
-                micRequest.deny();
-            }
-            micRequest = null;
-        }
-    }
-
     private final class Client extends WebViewClient {
         @Override
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -540,28 +518,6 @@ public class MainActivity extends Activity {
                 return false;
             }
         }
-
-        @Override
-        public void onPermissionRequest(PermissionRequest request) {
-            runOnUiThread(() -> {
-                boolean audioOnly = true;
-                for (String resource : request.getResources()) {
-                    if (!PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) {
-                        audioOnly = false;
-                    }
-                }
-                if (!audioOnly || !ours(request.getOrigin())) {
-                    request.deny();
-                    return;
-                }
-                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                    request.grant(new String[]{PermissionRequest.RESOURCE_AUDIO_CAPTURE});
-                } else {
-                    micRequest = request;
-                    requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, ASK_MIC);
-                }
-            });
-        }
     }
 
     /** A beállító oldal (assets/setup.html) és a gép belépő oldala ezen át szól az alkalmazásnak. */
@@ -581,7 +537,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String pending() {
             try {
-                JSONObject result = new JSONObject().put("voice", wantVoice).put("listing", wantListing)
+                JSONObject result = new JSONObject().put("listing", wantListing)
                         .put("text", sharedText);
                 if (photosNew) {
                     result.put("photos", sharedPhotos.size()).put("batch", sharedBatch);
@@ -595,7 +551,6 @@ public class MainActivity extends Activity {
                 if (!wantItem.isEmpty()) {
                     result.put("item", new JSONObject(wantItem));
                 }
-                wantVoice = false;
                 wantListing = false;
                 sharedText = "";
                 photosNew = false;

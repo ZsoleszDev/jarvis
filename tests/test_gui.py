@@ -31,7 +31,7 @@ from jarvis_core.tools import Toolbox  # noqa: E402
 
 
 class GuiHarness:
-    """Jarvis grafikus felülettel, de modell, hang és mikrofon nélkül."""
+    """Jarvis grafikus felülettel, de modell nélkül (a hamis Ollamával)."""
 
     def __init__(self, allow_powershell: bool = False):
         self.fake = FakeOllama()
@@ -40,7 +40,7 @@ class GuiHarness:
         self.cfg.tools.allow_powershell = allow_powershell
         self.bus = EventBus()
         self.ui = GuiUI(self.bus, "Jarvis")
-        self.app = JarvisApp(self.cfg, self.ui, use_voice=False, use_speech=False)
+        self.app = JarvisApp(self.cfg, self.ui)
         self.app.toolbox = Toolbox(self.cfg, notify=self.app.notify, confirm=self.app.confirm)
         self.app.assistant = Assistant(self.cfg, self.app.llm, self.app.toolbox, "rendszer",
                                        on_tool_call=self.app._on_tool_done,
@@ -187,7 +187,7 @@ class EventBusTests(unittest.TestCase):
         bus.publish({"type": "user", "text": "szia"})
         bus.publish({"type": "tool", "id": 1, "status": "running"})
         bus.publish({"type": "tool", "id": 1, "status": "done"})
-        bus.publish({"type": "level", "value": 0.5}, record=False)
+        bus.publish({"type": "delta", "text": "Sz"}, record=False)
         bus.set_state({"type": "state", "state": "idle"})
         client = bus.subscribe()
         events = [client.get_nowait() for _ in range(client.qsize())]
@@ -214,7 +214,7 @@ class GuiBrowserTests(unittest.TestCase):
         self.h = GuiHarness(allow_powershell=True)
         self.page = self.browser.new_page(viewport={"width": 560, "height": 900})
         self.page.goto(self.h.server.url)
-        self.page.wait_for_selector("#examples button")
+        self.page.wait_for_selector("#meta:has-text('qwen')")
 
     def tearDown(self):
         self.page.close()
@@ -226,12 +226,14 @@ class GuiBrowserTests(unittest.TestCase):
         while self.h.app.busy and time.monotonic() < deadline:
             time.sleep(0.02)
 
-    def test_header_and_examples(self):
+    def test_header_and_start(self):
         self.assertEqual(self.page.title(), "Jarvis")
-        self.assertIn("qwen3.8:27b", self.page.inner_text("#meta"))
-        self.assertEqual(self.page.locator("#examples button").count(), 3)
-        self.assertTrue(self.page.is_disabled("#listen"), "mikrofon nélkül a gomb nem nyomható")
+        self.assertEqual(self.page.inner_text("#meta"), "qwen3.8:27b")
         self.assertEqual(self.page.inner_text("#state"), "Készen állok")
+        self.assertEqual(self.page.locator("#listen").count(), 0, "nincs Hallgass meg gomb")
+        self.assertTrue(self.page.locator("#stop").is_hidden(), "az Állj csak dolgozás közben látszik")
+        self.assertTrue(self.page.locator("#home-tiles").is_hidden(), "a Munka menü nélkül nincsenek csempék")
+        self.assertEqual(self.page.inner_text("#empty-hint"), "Kérdezz bármit.")
 
     def test_ask_and_get_streamed_answer_with_tool(self):
         self.h.fake.chat_script = [tool_reply("get_datetime", {}), reply("Most este hét óra van, uram.")]
@@ -259,11 +261,22 @@ class GuiBrowserTests(unittest.TestCase):
         self.assertEqual(self.page.locator(".msg.tool .sep").bounding_box()["width"], 0)
         self.assertTrue(self.page.locator("#empty").is_hidden())
 
-    def test_example_button_sends_question(self):
-        self.h.fake.chat_script = [reply("Holnap napos idő lesz.")]
-        self.page.click("#examples button >> nth=0")
-        self.page.wait_for_selector(".msg.jarvis")
-        self.assertEqual(self.page.inner_text(".msg.you"), "Milyen idő lesz holnap?")
+    def test_the_stop_button_shows_next_to_send_while_working(self):
+        def slow(body):
+            time.sleep(3)
+            return 200, reply("Késő válasz.")
+
+        self.h.fake.chat_script = [slow]
+        self.page.fill("#text", "Lassú kérdés")
+        self.page.press("#text", "Enter")
+        self.page.wait_for_selector("#ask #stop:visible", timeout=5000)
+        boxes = [self.page.locator(sel).bounding_box() for sel in ("#send", "#stop")]
+        self.assertAlmostEqual(boxes[0]["y"], boxes[1]["y"], delta=4, msg="egy sorban a Küldéssel")
+        self.assertGreater(boxes[1]["x"], boxes[0]["x"], "a Küldés után")
+        self.page.click("#stop")
+        self.wait_idle()
+        self.page.wait_for_selector("#stop", state="hidden")
+        self.page.wait_for_selector(".msg.note:has-text('Megszakítva.')")
 
     def test_confirmation_dialog_allow(self):
         self.h.fake.chat_script = [tool_reply("run_powershell", {"command": "Get-Date"}), reply("Kész.")]
@@ -391,7 +404,7 @@ class GuiBrowserTests(unittest.TestCase):
         with mock.patch.object(gpu, "make_reader", return_value=(None, 0.0)):
             self.h.server.gpus = gpu.GpuMonitor()
             self.page.reload()
-            self.page.wait_for_selector("#examples button")
+            self.page.wait_for_selector("#meta:has-text('qwen')")
             self.page.wait_for_timeout(1500)
         self.assertTrue(self.page.locator("#gpus").is_hidden())
         self.assertEqual(self.page.locator("#gpus .gpu").count(), 0)
@@ -458,7 +471,7 @@ class GuiEndToEndTests(unittest.TestCase):
         env = dict(os.environ, PYTHONUTF8="1", NO_COLOR="1", PYTHONUNBUFFERED="1",
                    JARVIS_DATA_DIR=str(Path(tmp.name) / "adat"))
         proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "jarvis.py"), "--text", "--mute", "--no-window",
+            [sys.executable, str(ROOT / "jarvis.py"), "--no-window",
              "--config", str(cfg_path)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
             env=env, cwd=str(ROOT))
