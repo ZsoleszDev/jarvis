@@ -2233,8 +2233,10 @@ class DealHunter:
         rows = self._page_rows(game, watch["url"], platform, watch)
         if not rows:
             return
-        # a licitek elöl (azoknál sürget az idő), aztán a fix árasak, ahogy az oldalon jönnek (a legújabb elöl)
-        batch = sorted(self._triage(game, watch, rows, running), key=lambda r: not r.get("auction"))[:EXPLORE_ROWS]
+        # a licitek elöl (azoknál sürget az idő), aztán a fix árasak, ahogy az oldalon jönnek (a legújabb elöl), a
+        # fizetett kiemelések (az oldal elején, többnyire régiek) a végén: a modellkeret előbb az újakra jut
+        batch = sorted(self._triage(game, watch, rows, running),
+                       key=lambda r: (not r.get("auction"), bool(r.get("promoted"))))[:EXPLORE_ROWS]
         if batch:
             game.ask(partial(self._explore, batch), partial(self._explored, game, watch, batch))
 
@@ -2273,7 +2275,8 @@ class DealHunter:
                 continue
             row = {"site": site.name, "platform": platform, "text": str(entry.get("text") or "")[:180],
                    "price": int(entry["price"]), "url": str(entry["url"]),
-                   **({"title": str(entry["title"])[:160]} if entry.get("title") else {}), **(extra or {})}
+                   **({"title": str(entry["title"])[:160]} if entry.get("title") else {}),
+                   **({"promoted": True} if entry.get("promoted") else {}), **(extra or {})}
             if entry.get("auction"):
                 info = parse_auction(row["text"])
                 if info["left"] is not None and last_chance(now + info["left"], day) - now > window:

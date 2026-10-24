@@ -88,6 +88,33 @@ class ParseTests(unittest.TestCase):
                          [("iPhone", 185000), ("PS5 kontroller", 14500)], "az áthúzott régi ár nem számít")
         self.assertTrue(rows[0]["url"].endswith("_120000001.htm"))
 
+    def test_promoted_cards_are_marked(self):
+        """A fizetett kiemelések jelölve: a kártya osztálya („highlighted”, „kiemelt”…), egy rövid címke („Kiemelt”,
+        „Előresorolt”), vagy a kiemeltek blokkja (egy „Kiemelt hirdetések” fejléc). Ha az oldal nagyobbik része ilyen,
+        az nem kiemelés (pl. minden kártya „premium” osztályú), és egyik sem jelölt."""
+        top = '<div class="featured-block"><h4>Kiemelt hirdetések</h4><ul>' + ha_card(1, "Régi kártya", "90 000 Ft") + \
+            "</ul></div>"
+        badge = ha_card(2, "Felhúzott kártya", "80 000 Ft").replace('<div class="media-body">',
+                                                                  '<div class="media-body"><span>Előresorolt</span>')
+        marked = ha_card(3, "Kiemelt osztályú", "70 000 Ft").replace('class="media"', 'class="media uad-kiemelt"')
+        plain = [ha_card(10 + n, f"Sima kártya {n}", "10 000 Ft") for n in range(4)]
+        rows = parse_listings(ha_page([top, badge, marked] + plain), "https://hardverapro.hu/aprok/x/index.html",
+                              "hardverapro")
+        self.assertEqual([bool(r.get("promoted")) for r in rows], [True] * 3 + [False] * 4)
+        everywhere = [card.replace('class="media"', 'class="media premium"') for card in plain]
+        rows = parse_listings(ha_page(everywhere), "https://hardverapro.hu/aprok/x/index.html", "hardverapro")
+        self.assertFalse(any(r.get("promoted") for r in rows))
+
+    def test_the_newest_order_from_a_select_and_a_chosen_order_stays(self):
+        from jarvis_core.feeds import chosen_sort, newest_link, parse
+        page = """<html><body><form><select name="order"><option value="relevance" selected>Relevancia</option>
+          <option value="refreshed">Frissítve</option><option value="time">Feladás ideje (legújabb elöl)</option></select>
+          </form></body></html>"""
+        self.assertEqual(newest_link(parse(page), "https://www.vatera.hu/listings/index.php?q=ps5&order=relevance"),
+                         "https://www.vatera.hu/listings/index.php?q=ps5&order=time")
+        self.assertTrue(chosen_sort("https://www.vatera.hu/listings/index.php?c=1&ob=ending"))
+        self.assertFalse(chosen_sort("https://hardverapro.hu/aprok/keres.php?stext=rtx"))
+
     def test_structured_data_when_the_cards_have_no_price(self):
         page = """<html><head><script type="application/ld+json">{"@context": "https://schema.org", "@type": "ItemList",
           "itemListElement": [{"@type": "ListItem", "position": 1, "item": {"@type": "Product", "name": "Makita DHP482",
@@ -492,6 +519,29 @@ class InstantTests(InstantCase):
         asked = len(self.net.asked)
         self.watch.tick()
         self.assertEqual(len(self.net.asked), asked + 1, "ismert hirdetések: nem lapoz tovább")
+
+    def test_promoted_listings_do_not_hide_a_full_page_of_new_ones(self):
+        """A kiemelt hirdetések (elöl, mindig ugyanazok, tehát ismertek) nem akadályozzák, hogy észrevegye: az oldal alja
+        is csupa új, lehet, hogy lemaradt valami (eddig csak a teljesen új oldal számított, ilyen pedig a kiemeltek miatt
+        nem volt). Az új kiemelt hirdetés a többi új után kerül sorra."""
+        url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        self.watch.add(url)
+        self.watch.set_enabled(True)
+        top = [ha_card(10 + n, f"Kiemelt kártya {n}", "90 000 Ft").replace('class="media"', 'class="media highlighted"')
+               for n in range(3)]
+        self.results(top + HA_CARDS[:1], "videokartya/index.html")
+        self.watch.tick()
+        self.later()
+        promo = ha_card(19, "Új kiemelt kártya", "90 000 Ft").replace('class="media"', 'class="media highlighted"')
+        first = ha_page([promo] + top + [ha_card(100 + n, f"Videókártya {n}", "1 000 Ft") for n in range(12)]).replace(
+            "<head>", '<head><link rel="next" href="/aprok/hardver/videokartya/index.html?offset=16">')
+        second = ha_page(top + [ha_card(200 + n, f"Videókártya {n}", "1 000 Ft") for n in range(3)] + HA_CARDS[:1])
+        self.net.pages = {"index.html?offset=16": (200, second), "videokartya/index.html": (200, first)}
+        fresh = []
+        self.hunter.appraise = lambda rows, *args, **kwargs: fresh.extend(rows) or []
+        self.watch.tick()
+        self.assertEqual(len([u for _t, u in self.net.asked if u.endswith("?offset=16")]), 1, "a következő oldal is")
+        self.assertEqual(fresh[-1]["title"], "Új kiemelt kártya", "a kiemelt a többi új után")
 
     def test_the_whole_page_is_read(self):
         """A Hardverapró egy oldalon 100 hirdetést mutat (az elején többnyire fizetett kiemelésekkel): az egész oldalt nézi,

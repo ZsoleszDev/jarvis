@@ -656,6 +656,22 @@ class ExploreTests(HunterCase):
         self.assertEqual(self.notices, [], "egy hirdetésről egyszer szól")
         self.assertEqual(len([m for m in self.llm.calls if "Friss hirdetések" in m[1]["content"]]), 1)
 
+    def test_promoted_listings_come_after_the_rest(self):
+        """A fizetett kiemelések (az oldal elején, többnyire régiek) a modellkeret végére kerülnek: egy oldalról
+        EXPLORE_ROWS (20) ismeretlen jut a modellhez, ebből előbb a többi."""
+        promoted = [{"text": f"Kiemelt bolti tárgy {n}", "price": 5000, "promoted": True,
+                     "url": f"https://hardverapro.hu/apro/kiemelt_{n}/friss.html"} for n in range(5)]
+        regular = [{"text": f"Ismeretlen tárgy {n}", "price": 5000,
+                    "url": f"https://hardverapro.hu/apro/ismeretlen_{n}/friss.html"} for n in range(20)]
+        self.browser.results = []
+        self.browser.by_url = [("videokartya", promoted + regular)]
+        self.hunter.add_watch(CATEGORY)
+        self.hunter.set_enabled(True)
+        self.hunter.run(notify=self.notify)
+        [explored] = [m[1]["content"] for m in self.llm.calls if "Friss hirdetések" in m[1]["content"]]
+        self.assertIn("Ismeretlen tárgy 19", explored)
+        self.assertNotIn("Kiemelt bolti tárgy", explored, "a kiemeltekre most nem jutott hely")
+
     def test_a_price_seen_on_one_site_only_is_checked_elsewhere_first(self):
         """Az árbázis csak a Hardverapró 8 árát ismeri (nem elég biztos): mielőtt szólna, a többi oldalon is megnézi.
         Ha ott nincs hasonló, nem szól (a naplóba beírja, miért); ha van, és ott is jóval drágább, szól."""

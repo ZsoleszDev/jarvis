@@ -221,15 +221,38 @@ def newest_link(tree: _TreeBuilder, base_url: str) -> str:
     """Az oldal saját „legújabb elöl” rendezése (egy link vagy egy választó eleme, a felirata szerint: „Legújabb”,
     „Feladás ideje”), ugyanazon az oldalon (csak a paraméterei mások); üres, ha nincs, vagy épp ez van kiválasztva. Így
     nem kell kitalálni, milyen paraméterrel rendez az oldal."""
-    found: list[str] = []
-    for anchor in tree.anchors:
-        label = clean(anchor.text() or anchor.attrs.get("title") or anchor.attrs.get("aria-label") or "")
-        if _NEWEST_TEXT.search(label) and not _NOT_NEWEST.search(label):
-            found.append(anchor.attrs.get("href", ""))
+    links = [(anchor.text() or anchor.attrs.get("title") or anchor.attrs.get("aria-label") or "",
+              anchor.attrs.get("href", "")) for anchor in tree.anchors]
+    options = []
     for option in tree.options:
-        label = clean(option.text())
-        if _NEWEST_TEXT.search(label) and not _NOT_NEWEST.search(label) and "selected" not in option.attrs:
-            found.append(option.attrs.get("value", ""))
+        select = option.parent
+        while select is not None and select.tag != "select":
+            select = select.parent
+        options.append((option.text(), option.attrs.get("value", ""),
+                        select.attrs.get("name", "") if select is not None else "", "selected" in option.attrs))
+    return pick_newest(links, options, base_url)
+
+
+def pick_newest(links: list[tuple[str, str]], options: list[tuple[str, str, str, bool]], base_url: str) -> str:
+    """newest_link a feliratokból: links [(felirat, href)], options [(felirat, value, a választó neve, kiválasztva-e)]
+    (a böngésző is ezzel dönt). Egy választó eleménél a value lehet egy cím, vagy csak egy érték: akkor a választó
+    nevével kerül a címbe (mint egy GET-űrlapnál, pl. ?order=time)."""
+    found: list[str] = []
+    for label, href in links:
+        label = clean(label)
+        if _NEWEST_TEXT.search(label) and not _NOT_NEWEST.search(label):
+            found.append(href)
+    for label, value, name, selected in options:
+        label = clean(label)
+        if selected or not _NEWEST_TEXT.search(label) or _NOT_NEWEST.search(label):
+            continue
+        value = value.strip()
+        if name and value and not re.search(r"[/?=&]", value):
+            parts = urllib.parse.urlsplit(base_url)
+            query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if k != name]
+            found.append(urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query + [(name, value)]))))
+        else:
+            found.append(value)
     base = urllib.parse.urlsplit(base_url)
     for href in found:
         url = urllib.parse.urljoin(base_url, href.strip())
@@ -238,6 +261,54 @@ def newest_link(tree: _TreeBuilder, base_url: str) -> str:
                 and parts.query != base.query:
             return url
     return ""
+
+
+# A keresés címében már megadott rendezés (a te választásod, pl. a Vaterán a „hamarosan lejár”): azt nem írja át.
+_SORT_PARAM = re.compile(r"^(order\w*|sort\w*|ob|sp|rendez\w*)$", re.IGNORECASE)
+
+
+def chosen_sort(url: str) -> bool:
+    """Van-e már rendezés a címben (order=, sort=, ob=…): akkor a letöltő nem vált a „legújabb elöl” rendezésre."""
+    return any(_SORT_PARAM.match(key) for key, _value in
+               urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query, keep_blank_values=True))
+
+
+# Fizetett kiemelés (a találatok elején, többnyire régi hirdetések): az osztálynevéből („highlighted”, „kiemelt”,
+# „featured”…) vagy egy rövid címkéből („Kiemelt”, „Előresorolt”, „Szponzorált”) a kártyán vagy a kiemeltek blokkján.
+_PROMO_CLASS = re.compile(r"(?:^|[\s_-])(?:kiemel\w*|highlight(?:ed)?|featured|promoted|promo|sponsored|premium|"
+                          r"boost(?:ed)?|eloresorol\w*|topad|top-ad)(?=[\s_-]|$)", re.IGNORECASE)
+_PROMO_TEXT = re.compile(r"^(kiemelt( hirdetés(ek)?| ajánlat(ok)?)?|kiemelés|előresorolt|szponzorált|sponsored|"
+                         r"promoted|featured)$", re.IGNORECASE)
+
+
+def _promo_mark(node: Node) -> bool:
+    return bool(_PROMO_CLASS.search(f"{node.attrs.get('class', '')} {node.attrs.get('id', '')}"))
+
+
+def _promoted(card: Node, counts: dict[int, int], total: int) -> bool:
+    """Kiemelt-e a hirdetés: a kártyán (vagy benne egy elemen) kiemelés-osztály vagy -címke, vagy egy olyan blokkban
+    van, ami csak a kártyák kisebbik részét tartalmazza (a kiemeltek blokkja), és annak van ilyen jele (osztálya, egy
+    „Kiemelt hirdetések” fejléce)."""
+    stack: list[Node] = [card]
+    while stack:
+        node = stack.pop()
+        if _promo_mark(node):
+            return True
+        for child in node.children:
+            if isinstance(child, Node):
+                if len(child.text()) <= 30 and _PROMO_TEXT.match(child.text()):
+                    return True
+                stack.append(child)
+    node = card.parent
+    while node is not None and node.tag not in ("body", "#document") and counts.get(id(node), 0) * 2 < total:
+        if _promo_mark(node):
+            return True
+        for child in node.children:
+            if isinstance(child, Node) and not counts.get(id(child)) and len(child.text()) <= 30 \
+                    and _PROMO_TEXT.match(child.text()):
+                return True
+        node = node.parent
+    return False
 
 
 def parse_listings(html: str, base_url: str, platform: str = "") -> list[dict[str, Any]]:
@@ -281,11 +352,17 @@ def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[d
         if known is None or score > known["score"]:
             cards[id(found)] = {"node": found, "href": href, "score": score, "label": label}
     nodes = [card["node"] for card in cards.values()]
+    leaves = [card for card in cards.values()            # egy nagyobb doboz (a lista) nem egy hirdetés
+              if not any(other is not card["node"] and card["node"].contains(other) for other in nodes)]
+    counts: dict[int, int] = {}                          # elemenként: hány hirdetés van benne (a kiemeltek blokkja)
+    for card in leaves:
+        node = card["node"]
+        while node is not None:
+            counts[id(node)] = counts.get(id(node), 0) + 1
+            node = node.parent
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for card in cards.values():
-        if any(other is not card["node"] and card["node"].contains(other) for other in nodes):
-            continue                              # egy nagyobb doboz (a lista), nem egy hirdetés
+    for card in leaves:
         if card["href"] in seen:
             continue
         text = card["node"].text_without_struck()
@@ -304,12 +381,17 @@ def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[d
             entry["title"] = label                # a hirdetés címe magában (az értesítésbe)
         if not FIXED_RE.search(text) and AUCTION_RE.search(text):
             entry["auction"] = True
+        if _promoted(card["node"], counts, len(leaves)):
+            entry["promoted"] = True              # fizetett kiemelés: a figyelő a többi után nézi
         out.append(entry)
         if len(out) >= MAX_ROWS:
             break
     pattern = LISTING_URL.get(platform)
     if pattern is not None and any(pattern.search(e["url"]) for e in out):
         out = [e for e in out if pattern.search(e["url"])]
+    if sum(1 for e in out if e.get("promoted")) * 2 > len(out):
+        for entry in out:                         # a hirdetések többsége nem lehet kiemelt: ez valami más jel
+            entry.pop("promoted", None)
     return out or _ld_listings(tree.ld_json, base_url)
 
 
@@ -562,7 +644,7 @@ class SiteFetcher:
         with self._state_lock:
             self._next_pages[url] = next_page(tree, final)
             if url not in self._sorted:
-                self._sorted[url] = newest_link(tree, final)
+                self._sorted[url] = "" if chosen_sort(url) else newest_link(tree, final)
             for links in (self._next_pages, self._sorted):
                 if len(links) > CACHE_MAX:
                     links.pop(next(iter(links)))

@@ -53,7 +53,8 @@ MAX_SEEN = 500             # figyelőnként ennyi látott hirdetést jegyez meg
 MAX_HITS = 60
 MAX_ROWS = 120             # egy letöltésből ennyi hirdetést néz: az oldal egészét (a Hardverapró 100-at mutat, és az
                            # elején többnyire a fizetett kiemelések vannak); az értékelést a várólista korlátozza
-OVERFLOW_MIN = 10          # ha egy letöltésen legalább ennyi, és csupa új hirdetés van, a következő oldalt is megnézi
+OVERFLOW_MIN = 10          # ha egy letöltésen legalább ennyi (nem kiemelt) hirdetés van, és az oldal alján lévő
+OVERFLOW_TAIL = 5          # ennyi mind új, a következő oldalt is megnézi (a kiemeltek elöl mindig a régiek)
 MAX_WAITING = 60           # ennyi hirdetés várhat a modellre
 WAIT_MAX = 1800            # ennyi ideig (másodperc); ami addig sem került sorra, az kimarad
 TICK = 2.0
@@ -509,6 +510,7 @@ class InstantWatch:
             extra = self._absorb(alert, site, more, now, count=False) if more else None
             if extra is not None:
                 fresh += extra[1]
+        fresh.sort(key=lambda row: bool(row.get("promoted")))         # a kiemeltek a többi új után kerülnek sorra
         if first:
             self.hunter.journal.add(f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): elindult, "
                                     f"{len(rows)} hirdetést már ismerek; innentől minden újat felmérek, és ha megéri, "
@@ -527,7 +529,8 @@ class InstantWatch:
         """A letöltött hirdetések (az elejükből MAX_ROWS, a licitek nélkül); az árbázis is tanul belőlük."""
         name = self.platforms[site].name
         rows = [{"site": name, "platform": site, "text": str(r.get("text") or "")[:180], "price": int(r["price"]),
-                 "url": str(r["url"]), "title": str(r.get("title") or r.get("text") or "")[:120]}
+                 "url": str(r["url"]), "title": str(r.get("title") or r.get("text") or "")[:120],
+                 **({"promoted": True} if r.get("promoted") else {})}
                 for r in rows[:MAX_ROWS] if r.get("url") and not r.get("auction")]
         self.hunter.book.add(rows)            # az árbázis is tanul belőle
         self.hunter.tally("seen", rows)
@@ -554,11 +557,12 @@ class InstantWatch:
             first: bool | str = site not in (stored.get("baseline") or [])
             if first and site in (stored.get("resorted") or []):
                 first = "resort"
-            unseen = 0
+            fresh_rows: list[bool] = []               # a nem kiemelt hirdetések: újak-e (az oldal sorrendjében)
             for row in rows:
                 ident = listing_key(row["url"])
                 old = seen.get(ident)
-                unseen += old is None
+                if not row.get("promoted"):
+                    fresh_rows.append(old is None)
                 seen[ident] = [now, row["price"]]
                 if first:
                     continue
@@ -582,7 +586,9 @@ class InstantWatch:
                 stored["baseline"] = [s for s in stored.get("baseline") or [] if s != site]
                 stored["resorted"] = sorted(set(stored.get("resorted") or []) | {site})
             self._save()
-        overflow = not first and len(rows) >= OVERFLOW_MIN and unseen == len(rows)
+        # ha az oldal alja is csupa új (két letöltés között több jött, mint amennyi elfér rajta), lehet, hogy lemaradt
+        # valami; a kiemelt hirdetések (elöl, többnyire régiek) ebbe nem számítanak
+        overflow = not first and len(fresh_rows) >= OVERFLOW_MIN and all(fresh_rows[-OVERFLOW_TAIL:])
         return first, fresh, overflow
 
     def _next_rows(self, url: str, site: str, now: float) -> list[dict[str, Any]]:
