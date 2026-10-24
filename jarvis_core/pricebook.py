@@ -465,6 +465,10 @@ class PriceBook:
         out.sort(key=lambda kv: (-kv[1]["sold"], kv[1]["days"]))
         return out[:limit]
 
+    def keys(self) -> list[str]:
+        with self._lock:
+            return list(self._keys)
+
     def stats(self) -> dict[str, int]:
         with self._lock:
             return {"products": len(self._keys), "prices": sum(len(e["samples"]) for e in self._keys.values()),

@@ -229,6 +229,19 @@ class WebPushTests(unittest.TestCase):
                          "a kattintás (vagy a gomb) a találat ablakát nyitja meg")
         self.assertEqual(messages["notice-n4"], ("normal", None, None))
 
+    def test_a_haggle_opens_the_offer_but_does_not_alarm(self):
+        """Egy alkuképes hirdetés: a kattintás ugyanúgy a találat ablakát nyitja meg (az ajánlattal), de nem sürgős, és
+        nem riaszt, mint egy megérő találat."""
+        browser = Browser()
+        self.push.subscribe("aaaa1111", browser.subscription())
+        self.push.on_event({"type": "notification", "notice": {
+            "id": "n8", "kind": "haggle", "title": "Alku: RTX 3060 Ti", "text": "Hardverapró: 95 000 Ft, 12 napja fent",
+            "haggle": "h1", "actions": [{"action": "deal", "deal": "h1", "label": "Ajánlat"}]}})
+        self.service.wait()
+        _url, body, headers = self.service.calls[0]
+        message = json.loads(browser.decrypt(body))
+        self.assertEqual((headers["Urgency"], message["deal"], message.get("urgent")), ("normal", "h1", None))
+
     def test_confirm_answer_key_is_single_use(self):
         browser = Browser()
         self.push.subscribe("aaaa1111", browser.subscription())

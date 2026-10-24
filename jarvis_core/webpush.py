@@ -274,6 +274,8 @@ class WebPush:
             if notice.get("deal"):                 # egy megérő találat: a kattintás a találat ablakát nyitja meg
                 message["deal"] = str(notice["deal"])[:16]
                 message["urgent"] = True
+            elif notice.get("haggle"):             # egy alkuképes hirdetés: ugyanaz az ablak, de nem sürgős (nem riaszt)
+                message["deal"] = str(notice["haggle"])[:16]
             if actions:
                 message["actions"] = actions
                 if notice.get("item"):

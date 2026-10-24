@@ -679,6 +679,29 @@
   }
   // Az óvatos eladási ár (deals.safe_sale): a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede (és ha tudjuk,
   // az elkelt hasonlók ára).
+  // Az eladónak szóló üzenet: egy alkuképes hirdetésnél az ajánlat (az {ár} helyén a javasolt összeg), különben az
+  // „Megvan még?”.
+  function messageFor(d) {
+    if (d && d.haggle) return ((deals.haggle || {}).message || "").replaceAll("{ár}", price(d.haggle.offer));
+    return deals.message || "";
+  }
+  // Alkuképes hirdetés: mennyiért van fent, mióta (és leárazták-e), mennyit ajánlj, és akkor mennyi a haszon.
+  function haggleFacts(d) {
+    const h = d.haggle;
+    const since = h.days >= 1 ? `${h.days} napja fent` : "nemrég került fel";
+    const cut = h.cuts && h.p0 > d.price ? ` · már leárazta: ${esc(price(h.p0))} → ${esc(price(d.price))}` : "";
+    const rows = [["Kért ár", `<b>${esc(price(d.price))}</b> · ${esc(d.site)} · ${esc(since)}${cut}`],
+                  ["Ajánlj", `<b>${esc(price(h.offer))}</b>-ot (${esc(Math.round(h.cut * 100))}%-kal kevesebb)`],
+                  ["Ennyit kereshetsz vele", `<b>kb. ${esc(price(d.profit))}</b>, ha ennyiért megkapod (a posta benne van)`],
+                  ["A szokásos ára", `kb. ${esc(price(d.median))}${d.similar ? ` (${esc(d.similar)} hasonló alapján)` : ""}`]];
+    if ((h.flex || []).length) rows.push(["A hirdetésben", esc(h.flex.join(", "))]);
+    if (d.safety) rows.push(["Biztonság", safetyLine(d.safety)]);
+    return `<p class="muted">Alkuképes hirdetés · ${esc(ago(d.at))}</p>
+      <dl class="facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+      ${d.note ? `<p class="muted">${esc(d.note)}</p>` : ""}
+      ${(d.warnings || []).map((w) => `<p class="warn">Figyelj: ${esc(w)}</p>`).join("")}
+      <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(messageFor(d))}</pre>`;
+  }
   // Egy csomag tételei: darabszám, név, darabár, és honnan (mostani hirdetésekből vagy a modell becsléséből).
   function bundleLines(d) {
     const min = (deals.bundles || {}).piece_min || 1500;
@@ -697,10 +720,11 @@
       <dl class="facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
       ${d.note ? `<p class="muted">${esc(d.note)}${d.photos_checked ? " (a hirdetés fotói alapján is)" : ""}</p>` : ""}
       ${(d.warnings || []).map((w) => `<p class="warn">Figyelj: ${esc(w)}</p>`).join("")}
-      <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(deals.message || "")}</pre>`;
+      <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(messageFor(d))}</pre>`;
   }
   function dealFacts(d) {
     if (d.bundle) return bundleFacts(d);
+    if (d.haggle) return haggleFacts(d);
     const sale = d.median ? Math.round(Math.min(d.median * (deals.sale_ratio || 0.9), d.low || Infinity) / 100) * 100 : null;
     const where = (d.sites || []).length ? `, ${d.sites.join(" és ")}` : "";
     const rows = [["Ára", `<b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))} → ${esc(price(d.price))})` : ""} · ${esc(d.site)}${d.auction ? " (licit)" : ""}`],
@@ -715,7 +739,7 @@
       <dl class="facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
       ${d.note ? `<p class="muted">${esc(d.note)}${d.photos_checked ? " (a hirdetés fotói alapján is)" : ""}</p>` : ""}
       ${(d.warnings || []).map((w) => `<p class="warn">Figyelj: ${esc(w)}</p>`).join("")}
-      <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(deals.message || "")}</pre>`;
+      <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(messageFor(d))}</pre>`;
   }
   let dealOpen = null;
   async function openDeal(id) {
@@ -753,12 +777,18 @@
   }
   $("deal-go").addEventListener("click", (event) => {
     if ($("deal-go").getAttribute("href") === "#") { event.preventDefault(); return; }
-    copyText(deals.message || "");           // a hirdetés (a link) utána magától megnyílik
+    copyText(messageFor((deals.deals || []).find((x) => x.id === dealOpen)));   // a hirdetés (a link) utána magától megnyílik
     $("deal-dialog").close();
   });
   // Szakértői tipp: a kérdés (a hirdetés adataival és linkjével) a vágólapra, és megnyílik a ChatGPT (az
   // Android-alkalmazásban a ChatGPT alkalmazás, ha telepítve van), ahol csak be kell illeszteni.
   function expertPrompt(d) {
+    if (d.haggle) {
+      return "Találtam egy hirdetést, ami egy ideje fent van, és kicsit drága; ajánlatot tennék rá, és utána továbbadnám. " +
+        "Szerinted reális az ajánlat, és megérné-e?\n\n" +
+        `${d.title || d.text}\nKért ár: ${price(d.price)} (${d.site}), ${d.haggle.days} napja fent\n` +
+        `Ajánlat: ${price(d.haggle.offer)}\nA hasonlók most kb. ${price(d.median)}-ért mennek.\n` + d.url;
+    }
     if (d.bundle) {
       return "Találtam egy csomagot, amit darabonként eladva többet érne, mint amennyibe kerül. Megnéznéd, hogy tényleg " +
         "jó vétel lenne-e, és reálisak-e a darabárak?\n\n" +
@@ -813,7 +843,7 @@
     // Megvettem: a vételár (alapból a hirdetés ára), a posta, és hogy postán jön-e (akkor „úton” a Vételeim fülön)
     const buyButton = (d) => d.bought ? cancelButton(d.bought, d.text)
       : buying === d.id ? `<span class="row buyform">
-          <label>Vételár <input id="d-paid" type="number" inputmode="numeric" min="1" value="${esc(d.price)}" aria-label="Vételár (Ft)"></label>
+          <label>Vételár <input id="d-paid" type="number" inputmode="numeric" min="1" value="${esc(d.haggle ? d.haggle.offer : d.price)}" aria-label="Vételár (Ft)"></label>
           <label>Posta <input id="d-ship" type="number" inputmode="numeric" min="0" placeholder="0" aria-label="Posta (Ft)"></label>
           <label class="check"><input id="d-transit" type="checkbox" checked> postán jön</label>
           <button type="button" class="small primary" data-deal-paid="${esc(d.id)}">Mentés</button></span>`
@@ -822,11 +852,14 @@
           elfogadja, a Vinted értesít.</small>`
       : d.offer ? `<span class="row"><input id="d-offer-${esc(d.id)}" type="number" min="1" value="${esc(d.offer)}" style="width: 6em"
           aria-label="Ajánlat (Ft)"> Ft <button type="button" class="small primary" data-offer="${esc(d.id)}">Ajánlatot teszek</button></span>` : "";
+    const haggleCard = (d) => `<small class="muted">${esc(d.site)} · <b class="tag">alku</b> · kért ár ${esc(price(d.price))},
+        ajánlj <b>${esc(price(d.haggle.offer))}</b>-ot (${esc(Math.round(d.haggle.cut * 100))}%-kal kevesebb) · ${d.haggle.days >= 1 ? `${esc(d.haggle.days)} napja fent` : "friss"}${d.haggle.cuts ? " · már leárazta" : ""}
+        · akkor kb. <b>${esc(price(d.profit))}</b> haszon</small>`;
     const bundleCard = (d) => `<small class="muted">${esc(d.site)} · csomag · <b>${esc(price(d.price))}</b>, darabonként eladva kb. ${esc(price(d.bundle.value))}
         (${esc(d.bundle.listings)} hirdetés) · várható haszon kb. <b>${esc(price(d.profit))}</b>${d.explore ? " · " + esc(d.explore) : ""}</small>
         <details class="setup"><summary>Mi van benne (${d.bundle.lines.length} tétel)</summary>${bundleLines(d)}</details>`;
-    const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.text)}</a>
-        ${d.bundle ? bundleCard(d) : `<small class="muted">${esc(d.site)}${d.auction ? " (licit)" : ""} · <b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))})` : ""},
+    const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.haggle ? d.title || d.text : d.text)}</a>
+        ${d.bundle ? bundleCard(d) : d.haggle ? haggleCard(d) : `<small class="muted">${esc(d.site)}${d.auction ? " (licit)" : ""} · <b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))})` : ""},
         ${d.auction ? "máshol" : "szokásos ár"} ${esc(price(d.median))}${d.auction ? ` · ${esc(leftText(d))} · legfeljebb <b>${esc(price(d.max_bid))}</b>-ig érdemes licitálni`
           : d.offer ? ` · ajánlattal (${esc(price(d.offer))}) kb. <b>${esc(price(d.profit))}</b> haszon`
           : d.profit !== undefined ? ` · várható haszon kb. <b>${esc(price(d.profit))}</b>` : ` (kb. ${esc(price(d.margin))}-tal olcsóbb)`}
@@ -881,6 +914,11 @@
         <label class="check"><input id="d-safeonly" type="checkbox" ${deals.safe_only !== false ? "checked" : ""}>
           Csak a nyugodt szívvel megvehetőkről szólj</label>
         <div class="row"><button type="button" class="small" id="d-limits">Mentés</button></div>
+        <label class="check"><input id="d-haggle" type="checkbox" ${(deals.haggle || {}).on !== false ? "checked" : ""}>
+          Alkuképes hirdetések is (régóta fent lévő, kicsit drága)</label>
+        <label class="field-label" for="d-haggle-message">Ajánlat az eladónak ({ár} = a javasolt összeg)</label>
+        <textarea id="d-haggle-message" rows="3">${esc((deals.haggle || {}).message || "")}</textarea>
+        <div class="row"><button type="button" class="small" id="d-haggle-save">Mentés</button></div>
         <label class="field-label" for="d-message">Üzenet az eladónak</label>
         <textarea id="d-message" rows="3">${esc(deals.message || "")}</textarea>
         <div class="row"><button type="button" class="small" id="d-message-save">Mentés</button></div>`)}
@@ -1061,6 +1099,11 @@
     for (const b of box.querySelectorAll("[data-offer]")) b.addEventListener("click", () => makeOffer(b.dataset.offer, $(`d-offer-${b.dataset.offer}`).value));
     for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
     for (const b of box.querySelectorAll("[data-deal-open]")) b.addEventListener("click", () => openDeal(b.dataset.dealOpen));
+    $("d-haggle-save").addEventListener("click", async () => {
+      const on = $("d-haggle").checked;
+      if (await dealAction({ action: "haggle", on, message: $("d-haggle-message").value }))
+        J.toast(on ? "Mentve: a régóta fent lévő, kicsit drága hirdetésekre ajánlatot javaslok." : "Kikapcsoltam az alkuképes hirdetéseket.");
+    });
     $("d-message-save").addEventListener("click", async () => {
       if (await dealAction({ action: "message", text: $("d-message").value })) J.toast("Mentve: ezt másolom ki az eladónak.");
     });
