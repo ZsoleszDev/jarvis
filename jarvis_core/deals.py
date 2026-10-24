@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .browser import DECLINED, LISTING_PAGE_JS, BrowserError, is_risky
-from .feeds import FeedError, fetch_image
+from .feeds import FeedError, chosen_sort, fetch_image
 from .listings import BLOCKED, GONE, SOLD, classify
 from .llm import background_calls
 from .journal import Journal, day_of
@@ -84,7 +84,10 @@ EVERY_CHOICES = (30, 60, 180, 360)   # percben: milyen sűrűn nézi meg egy ker
 DEFAULT_EVERY = 60
 SITE_MIN_MINUTES = {"vinted": 120}   # a Vintedet legfeljebb kétóránként (ott a robot-ellenőrzés a kockázat)
 # A legújabb hirdetések elöl: a Vinteden külön kérni kell, a Jófogáson és a Hardverapróban ez az alap.
-NEWEST = {"vinted": "&order=newest_first"}
+# A legújabb hirdetések elöl (a fizetett kiemelések után): a Vinted, a Jófogás és a Vatera találati oldalán a cím
+# paramétere (2026 októberében ellenőrizve). A Hardveraprón a rendezés nem a címben van; ott az alap sorrend a frissítés
+# ideje, abban az új hirdetések is elöl vannak.
+NEWEST = {"vinted": "&order=newest_first", "jofogas": "&sp=3", "vatera": "&ob=5&obd=2"}
 MAX_PAGES = 8              # egy körben legfeljebb ennyi jelölt hirdetés oldalát nyitja meg (a többi a következőre)
 # A gyors oldalak (Hardverapró, Jófogás) találati oldalát, ha az azonnali figyelő ennyi másodpercen belül már letöltötte,
 # a kör nem kéri le újra (feeds.SiteFetcher.listings max_age): ugyanannyi kérésből több idő jut az új hirdetésekre.
@@ -778,6 +781,17 @@ _SIZE_GAP = re.compile(r"(?<=\d)\s+(?=(?:gb|tb)\b)", re.IGNORECASE)
 def _joined_sizes(text: str) -> str:
     """„16 GB” → „16GB”: a kapacitás egy szó, ahogy a keresőszóban is (pricebook.capacities)."""
     return _SIZE_GAP.sub("", text or "")
+
+
+def newest_first(url: str, platform: str) -> str:
+    """A találati oldal címe a legújabb hirdetésekkel elöl (NEWEST), ha a címben nincs már rendezés (a te választásod,
+    pl. a Vaterán a „hamarosan lejár”)."""
+    extra = NEWEST.get(platform, "")
+    if not extra or chosen_sort(url):
+        return url
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit(parts._replace(query="&".join(q for q in (parts.query, extra.lstrip("&")) if q),
+                                                  fragment=""))
 
 
 def matches_query(query: str, text: str, strict_size: bool = False) -> bool:
@@ -1510,9 +1524,9 @@ class DealHunter:
             if platform is None:
                 names = ", ".join(p.name for p in self.platforms.values())
                 raise DealError(f"Ezt az oldalt nem ismerem; ezekről másolj be egy találati oldalt: {names}.")
-            url = target
-            if platform == "vinted" and "order=" not in parts.query:
-                url += ("&" if parts.query else "?") + NEWEST["vinted"].lstrip("&")
+            # a Vinteden és a Jófogáson a legújabb elöl (ha nem adtál meg más rendezést); a Vaterán a te rendezésed
+            # marad (a licitekhez a „hamarosan lejár” a jó)
+            url = newest_first(target, platform) if platform in ("vinted", "jofogas") else target
             segments = [seg for seg in parts.path.split("/") if seg and not seg.startswith("index")
                         and not seg.endswith((".php", ".html"))]
             query = urllib.parse.parse_qs(parts.query)
@@ -1783,7 +1797,7 @@ class DealHunter:
         return text + "."
 
     def _search_url(self, search: dict[str, Any], key: str) -> str:
-        return self.platforms[key].search_url.format(q=urllib.parse.quote(search["query"])) + NEWEST.get(key, "")
+        return newest_first(self.platforms[key].search_url.format(q=urllib.parse.quote(search["query"])), key)
 
     def _fast_loads(self, searches: list[dict[str, Any]], watches: list[dict[str, Any]], now: float,
                     force: bool) -> list[tuple[str, str]]:
@@ -3128,7 +3142,7 @@ class DealHunter:
                 url = target if ours else platform.search_url.format(q=urllib.parse.quote(name))
                 kind = "page"
             else:
-                url, kind = platform.search_url.format(q=urllib.parse.quote(target)) + NEWEST.get(site, ""), "page"
+                url, kind = newest_first(platform.search_url.format(q=urllib.parse.quote(target)), site), "page"
             ident = f"{site}:" + re.sub(r"[^a-z0-9]+", "_", fold(name)).strip("_")
             out.append({"id": ident, "site": site, "name": f"{platform.name}: {name}", "url": url, "kind": kind})
         for ident, lane in self._data["lanes"].items():
@@ -3538,7 +3552,7 @@ class DealHunter:
             platform, name = self.platforms[site], self.book.name(key)
             ident = f"tanult:{key}"
             lanes[ident] = {"kind": "tanult", "site": site, "key": key, "at": now, "name": f"{platform.name}: {name}",
-                            "url": platform.search_url.format(q=urllib.parse.quote(name)) + NEWEST.get(site, "")}
+                            "url": newest_first(platform.search_url.format(q=urllib.parse.quote(name)), site)}
             learned.append(lanes[ident])
             have.add(key)
             notes.append(f"mostantól figyelem: {name} ({ON_SITE.get(site, platform.name)}; {why})")

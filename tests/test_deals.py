@@ -22,7 +22,7 @@ from test_web_browser import HAS_CHROMIUM  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
 from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, assess, careful_low,  # noqa: E402
                                expected_profit, explore_top, highest_ok, last_chance, left_text, market, matches_query,
-                               offer_price, parse_auction, profit_floor, safe_sale, safety_text)
+                               newest_first, offer_price, parse_auction, profit_floor, safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
 from jarvis_core.pricebook import PriceBook, pace, product_key, usable  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
@@ -1404,6 +1404,33 @@ class CapacityTests(HunterCase):
         row = {"text": "Samsung 970 EVO Plus", "price": 15000, "url": "https://hardverapro.hu/apro/ssd/2.html"}
         found = self.hunter._market_of(row, "Samsung 970 EVO Plus", rows)
         self.assertEqual((found["price"], found["n"]), (20000, 3), "az 500 GB-osok (a 2 TB-os egyetlen ára kevés)")
+
+
+class NewestTests(HunterCase):
+    """A legújabb hirdetések elöl: a Vinted, a Jófogás és a Vatera címében (NEWEST), ha nincs benne más rendezés."""
+
+    def test_the_order_in_the_address(self):
+        self.assertEqual(newest_first("https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html#", "vatera"),
+                         "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html?ob=5&obd=2")
+        self.assertEqual(newest_first("https://www.jofogas.hu/magyarorszag/muszaki-cikkek-elektronika", "jofogas"),
+                         "https://www.jofogas.hu/magyarorszag/muszaki-cikkek-elektronika?sp=3")
+        for url, site in (("https://www.jofogas.hu/magyarorszag?q=ps5&sp=1", "jofogas"),
+                          ("https://www.vatera.hu/listings/index.php?c=123&ob=ending", "vatera"),
+                          ("https://hardverapro.hu/aprok/keres.php?stext=rtx", "hardverapro")):
+            self.assertEqual(newest_first(url, site), url, "a választott rendezés marad; a Hardveraprón nincs ilyen")
+
+    def test_searches_and_pasted_pages(self):
+        self.hunter.add_search("PS5 kontroller", ["jofogas", "vatera"], reference=14000)
+        self.hunter.set_enabled(True)
+        self.hunter.run(notify=self.notify)
+        self.assertTrue(any(u.endswith("jofogas.hu/magyarorszag?q=PS5%20kontroller&sp=3") for u in self.browser.urls))
+        self.assertTrue(any(u.endswith("vatera.hu/listings/index.php?q=PS5%20kontroller&ob=5&obd=2")
+                            for u in self.browser.urls))
+        watches = self.hunter.add_watch("https://www.jofogas.hu/magyarorszag/konzol")["watches"]
+        self.assertEqual(watches[-1]["url"], "https://www.jofogas.hu/magyarorszag/konzol?sp=3")
+        watches = self.hunter.add_watch("https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html")["watches"]
+        self.assertEqual(watches[-1]["url"], "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html",
+                         "a Vaterán a te rendezésed (a licitekhez a „hamarosan lejár” a jó)")
 
 
 class MatchTests(unittest.TestCase):

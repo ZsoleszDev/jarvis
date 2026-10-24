@@ -22,7 +22,6 @@ from typing import Any, Callable
 
 from . import web
 from .config import BrowserCfg, data_path, resolve_path
-from .feeds import chosen_sort, pick_newest
 from .humanize import LONG_TEXT, Pace
 from .textutil import fold
 
@@ -748,27 +747,6 @@ LISTINGS_JS = r"""
   // a hirdetések többsége nem lehet kiemelt: az valami más jel
   if (out.filter(e => e.promoted).length * 2 > out.length) for (const e of out) delete e.promoted;
   return out;
-}
-"""
-
-# A találati oldal rendezési lehetőségei (linkek és egy választó elemei) a feliratukkal: ebből választja ki a Python
-# (feeds.pick_newest) a „legújabb elöl” rendezést, ahogy a böngésző nélküli letöltő.
-SORTS_JS = r"""
-() => {
-  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
-  const links = [], options = [];
-  for (const a of document.querySelectorAll('a[href]')) {
-    const text = clean(a.innerText || a.getAttribute('title') || a.getAttribute('aria-label'));
-    if (text && text.length <= 60) links.push([text, a.getAttribute('href') || '']);
-    if (links.length >= 400) break;
-  }
-  for (const o of document.querySelectorAll('select option')) {
-    const select = o.closest('select');
-    options.push([clean(o.textContent), o.getAttribute('value') || '', (select && select.getAttribute('name')) || '',
-                  o.selected]);
-    if (options.length >= 200) break;
-  }
-  return {links, options};
 }
 """
 
@@ -1519,8 +1497,6 @@ class BrowserController:
         # Igaz, amíg egy többlépéses művelet (browser_choose, browser_do) fut: a közbenső hibákhoz nem kell
         # oldalnézet, a végén úgyis egy készül.
         self._batch = False
-        # A találati oldalak „legújabb elöl” rendezése (mint a feeds.SiteFetcher): cím → a rendezett cím (üres: nincs)
-        self._sorted: dict[str, str] = {}
 
     # --- indítás és leállítás ------------------------------------------------------
 
@@ -3077,9 +3053,7 @@ class BrowserController:
             url = web.normalize_url(url, allow_local=self.allow_local)
         except web.WebError as exc:
             raise BrowserError(str(exc)) from None
-        # ha az oldal kínál „legújabb elöl” rendezést (és a címben nincs más rendezés), onnantól azzal: a fizetett
-        # kiemelések után így az újak jönnek, nem a felfrissített régiek
-        page = self._goto(self._sorted.get(url) or url)
+        page = self._goto(url)
         self._settle(page, max_wait=8.0)
         self._glance(page)   # modell nélküli böngészés: egy ember is átfutja a találatokat
         self.pace.read()
@@ -3088,29 +3062,7 @@ class BrowserController:
             found = page.evaluate(LISTINGS_JS)
         except Exception as exc:  # noqa: BLE001
             raise BrowserError(f"Nem tudom beolvasni a találatokat ({_short(exc)}).") from None
-        if url not in self._sorted:
-            self._sorted[url] = "" if chosen_sort(url) else self._newest(page, url)
-            if len(self._sorted) > 200:
-                self._sorted.pop(next(iter(self._sorted)))
         return [entry for entry in found or [] if isinstance(entry, dict) and entry.get("price")]
-
-    def sorted_url(self, url: str) -> str:
-        """Ha a találati oldal (url) kínál „legújabb elöl” rendezést, annak a címe (a beolvasás már azzal megy)."""
-        try:
-            url = web.normalize_url(url, allow_local=self.allow_local)
-        except web.WebError:
-            return ""
-        return self._sorted.get(url, "")
-
-    @staticmethod
-    def _newest(page: Any, url: str) -> str:
-        try:
-            sorts = page.evaluate(SORTS_JS) or {}
-            links = [(str(t), str(h)) for t, h in sorts.get("links") or []]
-            options = [(str(t), str(v), str(n), bool(sel)) for t, v, n, sel in sorts.get("options") or []]
-        except Exception:  # noqa: BLE001
-            return ""
-        return pick_newest(links, options, getattr(page, "url", "") or url)
 
     def look_listing(self, url: str) -> dict[str, Any]:
         """Egy hirdetés oldala a háttérellenőrzéshez (listings.py), csak olvasva (lásd look)."""

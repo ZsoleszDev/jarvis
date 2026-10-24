@@ -1320,9 +1320,7 @@ PAGES = {
 <div class="item"><a href="/items/8-regi-belyeg">Régi bélyeg</a><span>Jelenlegi ár: 300 Ft, 4 licit</span></div>
 </div></main><footer><a href="/kapcsolat">Szállítás 0 Ft</a></footer></body></html>""",
     "kiemeltek.html": """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Találatok</title></head>
-<body><main><label>Rendezés <select name="rendezes"><option value="relevancia" selected>Relevancia</option>
-<option value="frissitve">Frissítettek elöl</option><option value="uj">Legújabb elöl</option></select></label>
-<section class="top-block"><h3>Kiemelt hirdetések</h3>
+<body><main><section class="top-block"><h3>Kiemelt hirdetések</h3>
 <div class="item"><a href="/items/11-regi-kamera">Régi kamera</a><span>40 000 Ft</span></div>
 <div class="item"><a href="/items/12-regi-objektiv">Régi objektív</a><span>30 000 Ft</span></div></section>
 <section class="list">
@@ -1461,21 +1459,12 @@ class BrowserWorkTests(unittest.TestCase):
         self.assertEqual([bool(r.get("auction")) for r in found], [False] * 6 + [True],
                          "csak a villámár nélküli licites kártya jelzett")
 
-    def test_promoted_listings_and_the_newest_first_order(self):
-        """A fizetett kiemelések (a kiemeltek blokkja, egy „Kiemelt” címke, egy kiemelés-osztály) jelölve jönnek; ha az
-        oldal kínál „legújabb elöl” rendezést (itt egy választóval), a következő beolvasás már azzal megy. Ha a címben
-        már van rendezés (a te választásod, pl. a Vaterán a „hamarosan lejár”), azt nem írja át."""
-        url = self.pages.url("kiemeltek.html")
-        found = self.browser.extract_listings(url)
+    def test_promoted_listings(self):
+        """A fizetett kiemelések (a kiemeltek blokkja, egy „Kiemelt” címke, egy kiemelés-osztály) jelölve jönnek."""
+        found = self.browser.extract_listings(self.pages.url("kiemeltek.html"))
         self.assertEqual([(r["url"].rsplit("-", 1)[-1], bool(r.get("promoted"))) for r in found],
                          [("kamera", True), ("objektiv", True), ("kamera", False), ("kamera", True), ("vaku", True),
                           ("allvany", False), ("taska", False), ("szuro", False)])
-        self.assertEqual(self.browser.sorted_url(url), url + "?rendezes=uj")
-        self.browser.extract_listings(url)
-        self.assertEqual(self.browser.page.url, url + "?rendezes=uj", "a legújabb elöl")
-        chosen = url + "?ob=ending"
-        self.browser.extract_listings(chosen)
-        self.assertEqual(self.browser.sorted_url(chosen), "", "a választott rendezés marad")
 
     def test_the_page_view_shows_the_actual_card_price(self):
         view = self.browser.open(self.pages.url("katalogus.html"))

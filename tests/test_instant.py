@@ -578,6 +578,33 @@ class InstantTests(InstantCase):
         self.assertEqual(self.notices, [], "a sorrend váltása nem új hirdetés")
         self.assertEqual(len(self.watch._data["seen"][alert["id"]]), 6)
 
+    def test_the_newest_order_on_jofogas_is_learned_once(self):
+        """A Jófogáson a legújabb elöl rendezéssel tölt (sp=3). Egy korábbi figyelő (a régi, rendezés nélküli címmel
+        jegyezte meg az oldalt) az első ilyen letöltésnél csak megjegyzi az oldalt (a más sorrend nem új hirdetés),
+        utána a szokásos módon szól az újakról."""
+        def page(cards: list[str]) -> tuple[int, str]:
+            return 200, "<html><body>" + "".join(cards) + "</body></html>"
+
+        alert = self.watch.add("PS5 kontroller", ["jofogas"])["alerts"][0]
+        self.watch.set_enabled(True)
+        self.net.pages["jofogas"] = page([jf_card(1, "PS5 kontroller fehér", "14 000")])
+        self.watch.tick()
+        self.assertTrue(self.net.asked[-1][1].endswith("magyarorszag?q=PS5%20kontroller&sp=3"))
+        del self.watch._data["alerts"][0]["urls"]          # mint a frissítés előtt: a régi címmel jegyezte meg
+        fresh = []
+        self.hunter.appraise = lambda rows, *args, **kwargs: fresh.extend(rows) or []
+        self.later()
+        self.net.pages["jofogas"] = page([jf_card(n, f"PS5 kontroller {n}", "14 000") for n in range(2, 6)])
+        self.watch.tick()
+        self.assertEqual(fresh, [], "az új sorrend nem új hirdetés")
+        self.assertIn("a legújabb hirdetések szerint rendezve nézem", self.hunter.journal.entries()[0]["text"])
+        self.later()
+        self.net.pages["jofogas"] = page([jf_card(9, "PS5 kontroller fekete", "14 000")] +
+                                         [jf_card(n, f"PS5 kontroller {n}", "14 000") for n in range(2, 6)])
+        self.watch.tick()
+        self.assertEqual([r["url"].rsplit("_", 1)[-1] for r in fresh], ["120000009.htm"])
+        self.assertEqual(len(self.watch._data["seen"][alert["id"]]), 6)
+
     def test_the_evaluation_waits_while_paused(self):
         """Szünet alatt (vagy ha a háttérmunka tiltva van) az értékelő szál nem dolgozik: a feladat megmarad, nem kérdezi
         a modellt, nem nyitja meg a hirdetést, és nem szól; utána jön. Egy szüneteltetett figyelő hirdetései a
