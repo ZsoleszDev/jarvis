@@ -20,8 +20,9 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
   ablakát mutatja. Az értesítésből közvetlenül semmit nem jelöl meg és nem vesz le. Egy megérő hirdetés (`notice.deal`)
   a „Megérő hirdetés” csatornán szól, akkor is, ha az alkalmazás nyitva van: `FLAG_INSISTENT`-tel két percig rezeg (és
   csenget, ha van hang), aztán tíz percre a csendes csatornára vált, és ha addig nem nyitottad meg, újra (legfeljebb
-  hatszor). Rábökve a `MainActivity` nyílik (`hu.jarvis.app.DEAL`), és a felület a `pending()` `deal` részéből a
-  találat ablakát mutatja; az üzenetet a `JarvisApp.copy()` teszi a vágólapra. A Szakértői tipp gomb a kérdést
+  hatszor). Egy alkuképes hirdetés (`notice.haggle`) a saját „Alkuképes hirdetés” csatornáján egyszer szól (nem riaszt,
+  és csak ha az alkalmazás nincs előtérben). Rábökve mindkettőnél a `MainActivity` nyílik (`hu.jarvis.app.DEAL`), és a
+  felület a `pending()` `deal` részéből a találat ablakát mutatja; az üzenetet a `JarvisApp.copy()` teszi a vágólapra. A Szakértői tipp gomb a kérdést
   szintén így másolja ki, és a `JarvisApp.openChatGpt()` megnyitja a ChatGPT alkalmazást (`com.openai.chatgpt`; a
   manifest `<queries>` része miatt látja, telepítve van-e), vagy ha nincs, a chatgpt.com-ot a böngészőben. Egy
   tárgy kérdésének és a Pro feltöltés Nézd át értesítésének (`notice.item`, `notice.open`) rábökve a `MainActivity`

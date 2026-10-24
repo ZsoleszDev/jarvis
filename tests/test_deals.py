@@ -253,6 +253,20 @@ class DealTests(HunterCase):
         self.assertTrue(deal["checked"])
         self.assertEqual(self.make().state()["deals"][0]["id"], deal["id"], "a gépen megmarad")
 
+    def test_the_day_in_numbers(self):
+        """A mai számok: hány hirdetést látott, hány volt új, mi miért esett ki, hány jelölt és jó találat; egy hirdetés egy
+        nap egy számban egyszer számít (a következő kör nem duplázza)."""
+        self.ready()
+        self.hunter.run(notify=self.notify)
+        counts = self.hunter.state()["funnel"]["counts"]
+        self.assertEqual((counts["seen"], counts["other"], counts["new"], counts["not_cheap"], counts["candidates"],
+                          counts["found"]), (11, 3, 8, 7, 1, 1),
+                         "11 hirdetés: a kereső, a hibás és a táska nem a keresett termék; 8 új, ebből 7 nem elég olcsó")
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual(self.hunter.state()["funnel"]["counts"]["seen"], 11, "ugyanaz a hirdetés egyszer")
+        self.clock.now += 86400
+        self.assertEqual(self.hunter.state()["funnel"]["counts"], {}, "másnap újra nulláról")
+
     def test_the_price_can_be_written_over_and_surveyed_again(self):
         search = self.ready()
         [search] = self.hunter.accept(search["id"], "120 000")["searches"]

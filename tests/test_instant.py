@@ -469,6 +469,54 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.assertEqual((unsure(), self.watch.state()["waiting"]), (5, 0), "a maradék is sorra került")
 
+    def test_a_full_page_of_new_listings_reads_the_next_page_too(self):
+        """Ha két letöltés között több új hirdetés jött, mint amennyi egy oldalon elfér (csupa új az oldal), a következő
+        oldalt is megnézi, ahogy az oldal linkeli (a paraméterét nem kell kitalálni); ha van ismert hirdetés az oldalon,
+        nem."""
+        url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        alert = self.watch.add(url)["alerts"][0]
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:1], "videokartya/index.html")
+        self.watch.tick()
+        self.later()
+        first = ha_page([ha_card(100 + n, f"Videókártya {n}", "1 000 Ft") for n in range(12)]).replace(
+            "<head>", '<head><link rel="next" href="/aprok/hardver/videokartya/index.html?offset=12">')
+        second = ha_page([ha_card(200 + n, f"Videókártya {n}", "1 000 Ft") for n in range(3)] + HA_CARDS[:1])
+        self.net.pages = {"index.html?offset=12": (200, second), "videokartya/index.html": (200, first)}
+        self.watch.tick()
+        self.assertEqual(len([u for _t, u in self.net.asked if u.endswith("?offset=12")]), 1, "a következő oldal is")
+        seen = self.watch._data["seen"][alert["id"]]
+        self.assertEqual(len(seen), 1 + 12 + 3, "a második oldal hirdetéseit is látottnak jegyezte")
+        self.later()
+        self.net.pages = {"videokartya/index.html": (200, first)}
+        asked = len(self.net.asked)
+        self.watch.tick()
+        self.assertEqual(len(self.net.asked), asked + 1, "ismert hirdetések: nem lapoz tovább")
+
+    def test_the_evaluation_runs_beside_the_downloads(self):
+        """Az új hirdetések értékelése (a hirdetés oldala, a modellkérdés) a saját szálán megy: a letöltés szála csak
+        beteszi őket, és mehet tovább."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:2])
+        self.net.pages["_7/friss"] = page_html("Hibátlan.")
+        self.watch.start_worker()
+        try:
+            self.assertEqual(self.watch.tick(), 1)
+            deadline = time.monotonic() + 5
+            while not self.notices and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual"])
+            page = [thread for thread, url in self.net.by_thread if url.endswith("_7/friss.html")]
+            self.assertEqual(page, ["jarvis-azonnali-ertekeles"], "a hirdetés oldalát az értékelő szál nézte meg")
+        finally:
+            self.watch.stop()
+
     def test_waits_for_the_model_while_you_use_jarvis(self):
         """Amíg dolgozol a Jarvisszal, a modellt nem kérdezi: a modell nélkül is felmérhető megérőről rögtön szól (a
         rövid modellkérdés nélkül), a többi vár, és utána jön."""

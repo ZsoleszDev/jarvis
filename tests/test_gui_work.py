@@ -1058,9 +1058,16 @@ class WorkBrowserTests(unittest.TestCase):
                          "median": 99500, "similar": 6, "profit": 5050, "at": time.time() - 60,
                          "explore": "Alkuképes (az árbázisból)",
                          "haggle": {"offer": 83000, "cut": 0.13, "days": 12, "cuts": 1, "p0": 99000, "flex": ["sürgős"]}})
+        for name, amount in (("seen", 1240), ("new", 85), ("candidates", 3), ("not_cheap", 40), ("unsure", 2)):
+            deals.tally(name, amount=amount)
         page = self.page
         page.click("#job-deals")
         page.wait_for_selector('[data-deal-open="al1"]')
+        today = page.inner_text(".funnel")
+        self.assertTrue(today.startswith("Ma: 1") and "240 hirdetés · 85 új · 3 jelölt" in today, today)
+        page.click('summary:has-text("Napló")')
+        self.assertIn("Kiesett: 40 nem elég olcsó, 2 bizonytalan ár.", page.inner_text('details[data-fold="journal"]'))
+        page.click('summary:has-text("Napló")')
         card = page.inner_text('li:has([data-deal-open="al1"])')
         for part in ("alku", "kért ár 95 000 Ft", "ajánlj 83 000 Ft-ot (13%-kal kevesebb)", "12 napja fent", "már leárazta"):
             self.assertIn(part, card)

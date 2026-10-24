@@ -119,6 +119,9 @@ OFFER_CUT = 0.2
 # többnyire enged. Az árbázisból keresi (ott van, mikor láttuk először, és hogy leárazták-e), HAGGLE_EVERY percenként;
 # körönként legfeljebb HAGGLE_CHECKS hirdetés oldalát nyitja meg (elkelt, fix áras, gyanús?), és naponta legfeljebb
 # HAGGLE_PER_DAY-ről szól (a többi csak a listában). Csak ott, ahol üzenetben szokás alkudni (a Vinteden ajánlattal).
+# Napi számok (tally): hány hirdetést látott, hány volt új, hány jelölt, mi miért esett ki, és hány jó találat: ebből
+# látszik, miért nincs találat egy napon. Egy hirdetés egy nap egy számban egyszer számít (legfeljebb TALLY_MAX-ig).
+TALLY_MAX = 60000
 HAGGLE_SITES = ("hardverapro", "jofogas", "vinted")
 HAGGLE_DAYS = 7
 HAGGLE_MAX = 0.25
@@ -985,6 +988,7 @@ class DealHunter:
         self.items: Callable[[], list[Item]] | None = None   # a tárgyak (a havi kerethez; a WorkDesk állítja be)
         self._remaining: tuple[float, int | None] = (0.0, None)   # a havi keretből maradt (pár másodpercig érvényes)
         self._haggle_queue: list[dict[str, Any]] = []   # a legutóbbi átnézés legjobb alkuképes hirdetései (_step_haggle)
+        self._tallied: set[tuple[str, str]] = set()      # ma már beszámolt (szám, hirdetés) párok (tally)
         self._lock = threading.RLock()
         self._data = self._load()
 
@@ -1026,6 +1030,9 @@ class DealHunter:
                 # alkuképes hirdetések: be/ki (alapból be), az üzenet, mikor nézte át az árbázist, a már megnézettek,
                 # és hányról szólt ma
                 "haggle": self._load_haggle(data.get("haggle")),
+                "funnel": {"day": str((data.get("funnel") or {}).get("day") or ""),
+                           "counts": {str(k): int(v) for k, v in ((data.get("funnel") or {}).get("counts") or {}).items()
+                                      if isinstance(v, int)}},
                 "searches": [s for s in data.get("searches") or [] if isinstance(s, dict) and s.get("query")],
                 "watches": [w for w in data.get("watches") or [] if isinstance(w, dict) and w.get("url")],
                 "deals": [d for d in data.get("deals") or [] if isinstance(d, dict) and d.get("url")],
@@ -1076,6 +1083,7 @@ class DealHunter:
                                "status": self._browse_status(self.clock())},
                     "lanes": self._lane_list(), "journal": self.journal.entries(), "journal_days": self.journal.days(),
                     "bundles": self._bundle_state(),
+                    "funnel": self.funnel(),
                     "haggle": {"on": self._data["haggle"]["on"], "message": self._data["haggle"]["message"],
                                "per_day": HAGGLE_PER_DAY, "days": HAGGLE_DAYS, "max_cut": HAGGLE_MAX}}
 
@@ -1831,6 +1839,8 @@ class DealHunter:
             return
         self._to_bundles([row for row in rows if not usable(row["text"])], f"Keresés: {search['query']}")
         kept = self._relevant(search, rows)
+        relevant = {row["url"] for row in kept}
+        self.tally("other", [row for row in rows if row["url"] not in relevant])   # nem a keresett termék, nem eladó
         if status == "fut":
             game.next([partial(self._candidate, game, search, deal) for deal in self._hunt(search, kept)])
             self._drift(search, kept, game.notify)
@@ -1902,6 +1912,8 @@ class DealHunter:
                       **({"title": str(entry["title"])[:160]} if entry.get("title") else {})}
                      for entry in listings[:MAX_PER_SITE] if not entry.get("auction")]   # a licit nem eladási ár
             self.book.add(found)
+            if track:
+                self.tally("seen", found)
             rows += found
         return rows, errors
 
@@ -1958,6 +1970,7 @@ class DealHunter:
         """Gyanús hirdetés: nem szól róla, és a találatok közé sem kerül; látottnak jegyzi, és a naplóba írja, miért
         hagyta ki."""
         self._mark(deal)
+        self.tally("suspicious", [deal])
         self.journal.add(f"Gyanús, nem szóltam róla: „{(deal.get('title') or deal['text'])[:60]}” "
                          f"{format_price(deal['price'])} "
                          f"({deal.get('site') or deal.get('platform') or '?'}) – {deal.get('suspect') or 'gyanús'}.")
@@ -1971,10 +1984,38 @@ class DealHunter:
         if deal["safety"]["level"] != "kockázatos" or not safe_only:
             return False
         self._mark(deal)
+        self.tally("risky", [deal])
         self.journal.add(f"Kockázatos, nem szóltam: „{(deal.get('title') or deal['text'])[:60]}” "
                          f"{format_price(deal['price'])} ({deal.get('site') or deal.get('platform') or '?'}) – "
                          f"{'; '.join(deal['safety']['why'])}.")
         return True
+
+    def tally(self, name: str, rows: list[dict[str, Any]] | tuple = (), amount: int = 0) -> None:
+        """A mai számokhoz: a hirdetések (rows: a webcímük szerint, egy nap egy számban egyszer), vagy egy szám
+        (amount). A mentést a következő mentés végzi."""
+        today = day_of(self.clock())
+        with self._lock:
+            funnel = self._data["funnel"]
+            if funnel["day"] != today:
+                funnel.update(day=today, counts={})
+                self._tallied = set()
+            fresh = amount
+            for row in rows:
+                ident = (name, listing_key(str(row.get("url") or "")))
+                if not ident[1] or ident in self._tallied:
+                    continue
+                if len(self._tallied) < TALLY_MAX:
+                    self._tallied.add(ident)
+                fresh += 1
+            if fresh > 0:
+                funnel["counts"][name] = int(funnel["counts"].get(name) or 0) + fresh
+
+    def funnel(self) -> dict[str, Any]:
+        """A mai számok (a felületnek): {day, counts}; ha ma még nem volt semmi, üres."""
+        today = day_of(self.clock())
+        with self._lock:
+            funnel = self._data["funnel"]
+            return {"day": today, "counts": dict(funnel["counts"]) if funnel["day"] == today else {}}
 
     def _deal_keys(self) -> set[str]:
         """A hirdetések, amelyekről már szóltunk (vagy visszamondtad a vételt): ezekről többé nem szól."""
@@ -2000,6 +2041,7 @@ class DealHunter:
                 if not (new or drop) or (key in deals and not drop) or key in cancelled:
                     prices[key] = row["price"]
                     continue
+                self.tally("new", [row])
                 offer = offer_price(search, row["price"], reference) if row.get("platform") == "vinted" else None
                 if offer and not self._affordable(offer):
                     offer = None               # a vételi limitbe az ajánlat sem fér bele
@@ -2009,8 +2051,10 @@ class DealHunter:
                     out.append(self._deal(search, row, reference, offer=offer, profit=expected_profit(reference, offer)))
                 elif self._cheap(search, row["price"], reference):
                     prices[key] = row["price"]    # olcsó, de a vételi limit fölött: ha emeled, újra jelölt lehet
+                    self.tally("over_limit", [row])
                 else:
                     seen[key], prices[key] = now, row["price"]
+                    self.tally("not_cheap", [row])
             self._prune()
             self._save()
         return sorted(out, key=lambda d: -d["profit"])
@@ -2101,6 +2145,7 @@ class DealHunter:
         modellkérdés a modell-sorban. Ha a kör keretébe már nem fér bele, nem jegyzi látottnak: a következő körben
         újra jelölt."""
         self._lane_count(deal.get("lane"), "candidates")
+        self.tally("candidates", [deal])
         if why := self._suspect(deal):
             deal["suspect"] = why
             self._suspicious(deal)             # gyanúsan olcsó: az oldalát sem nyitja meg
@@ -2123,6 +2168,7 @@ class DealHunter:
                 return
             elif verdict:
                 self._mark(deal)               # elkelt vagy hibás: nem szól róla
+                self.tally("gone" if verdict == "elkelt" else "defect", [deal])
                 return
         if game.lane is None:
             self._conclude(game, search, deal, None)
@@ -2140,12 +2186,15 @@ class DealHunter:
                 self._suspicious(deal)
             else:
                 self._mark(deal)
+                self.tally("model_no", [deal])
             return
         self._mark(deal)
         if self._muted(deal.get("product_key"), self.clock()):
             game.notes.append(f"„{deal['text'][:40]}”: az ilyet elrejtetted, nem szóltam")
+            self.tally("muted", [deal])
             return
         game.found += 1
+        self.tally("found", [deal])
         self._lane_count(deal.get("lane"), "deals")
         self._remember(deal)
         hit = (f"„{deal['text'][:60]}” {format_price(deal['price'])} ({deal['site']}"
@@ -2221,6 +2270,7 @@ class DealHunter:
                 row.update(auction=True, **info)
             rows.append(row)
         self.book.add(rows)                    # a licitet kihagyja (az nem eladási ár)
+        self.tally("seen", rows)
         return rows
 
     def _triage(self, game: _Round, source: dict[str, Any], rows: list[dict[str, Any]],
@@ -2240,10 +2290,12 @@ class DealHunter:
             drop = old is not None and not row.get("auction") and row["price"] <= old * (1 - DROP)
             if (key in seen and not drop) or (key in deals and not drop) or key in cancelled:
                 continue
+            self.tally("new", [row])
             if not usable(row["text"]):
                 lots.append(row)               # nem eladási ár (kereső, csere, csomag, alkatrész…); a csomag felmérhető
                 continue
             if not self._within_reach(row):
+                self.tally("over_limit", [row])
                 continue                       # a vételi limit fölött: nem jegyzi látottnak (ha emeled, sorra kerül)
             search = next((s for s in running if matches_query(s["query"], row["text"])
                            and not excluded(s.get("exclude") or [], row["text"])), None)
@@ -2277,8 +2329,10 @@ class DealHunter:
             else:
                 found.append(({"id": source["id"], "query": reference["name"]}, deal))
         lane = next((row.get("lane_name") for row in lots if row.get("lane_name")), "")
-        skip += self._to_bundles(lots, f"Böngészés közben ({lane})" if lane else f"Figyelt oldal: {source['name']}")
-        self._mark(*skip)
+        self.tally("not_cheap", skip)
+        other = self._to_bundles(lots, f"Böngészés közben ({lane})" if lane else f"Figyelt oldal: {source['name']}")
+        self.tally("other", other)
+        self._mark(*skip, *other)
         game.next([partial(self._candidate, game, search, deal) for search, deal in found] + recheck)
         return unknown
 
@@ -2323,6 +2377,7 @@ class DealHunter:
         """Olcsónak látszott, de a szokásos ára nem elég biztos (kevés hasonló, egy oldalról): nem szól róla, csak a
         naplóba írja (látottnak jegyzi)."""
         self._mark(row)
+        self.tally("unsure", [row])
         basis = (f"csak {found['n']} hasonló árat találtam ({', '.join(self._site_names(found['sites'])) or '?'})"
                  if found else "nem találtam hozzá elég hasonlót")
         self.journal.add(f"Nem biztos, hogy megéri, nem szóltam: „{(row.get('title') or row['text'])[:60]}” "
@@ -2373,6 +2428,7 @@ class DealHunter:
                                  "terméket); mostantól modell nélkül is felismerem.")
         named = {id(row) for row, _q, _b in items}
         skip = [row for row in batch if id(row) not in named]   # egy hirdetést egyszer néz meg
+        self.tally("unknown", skip)            # a modell sem ismerte fel
         steps = []
         for row, query, buy in items:
             product = self.book.key(query)
@@ -2389,6 +2445,7 @@ class DealHunter:
                 steps.append(partial(self._resale, game, watch, row, query))
             elif not (buy and reference is None):
                 skip.append(row)               # a megérő, de a keretbe már nem férő a következő körben újra jön
+                self.tally("not_cheap", [row])
         self._mark(*skip)
         game.next(steps)
 
@@ -2416,10 +2473,14 @@ class DealHunter:
         if not found or not found["sure"]:
             if found is not None and self._explore_deal(watch, row, {**found, "name": query}) is not None:
                 self._unsure(row, query, found)
+            else:
+                self.tally("not_cheap" if found else "unknown", [row])
             return
         deal = self._explore_deal(watch, row, {**found, "name": query})
         if deal is not None:
             game.next([partial(self._candidate, game, probe, deal)])
+        else:
+            self.tally("not_cheap", [row])
 
     def _step_revisit(self, game: _Round) -> None:
         """Eladási sebesség: néhány régebben látott hirdetés oldala újra (csak olvasva; a Vintedet nem): ha eltűnt vagy
@@ -2616,6 +2677,7 @@ class DealHunter:
             quiet = told["n"] > HAGGLE_PER_DAY
             self._save()
         game.haggles += 1
+        self.tally("haggles", [deal])
         title = str(deal.get("title") or deal["text"])[:60]
         self.journal.add(f"Alkuképes: „{title}” {format_price(deal['price'])} ({deal['site']}), "
                          f"{deal['haggle']['days']} napja fent: ajánlj {format_price(offer)}-ot "
@@ -2940,6 +3002,7 @@ class DealHunter:
         self._mark(deal)
         self._remember(deal)
         game.found += 1
+        self.tally("found", [deal])
         hit = f"„{name}” {format_price(deal['price'])} ({deal['site']}, csomag, kb. {format_price(info['profit'])} haszon)"
         game.hits.append(hit)
         self.journal.add(f"Jó csomag: {hit} – {deal['explore']}")
@@ -3731,6 +3794,7 @@ class DealHunter:
                 continue
             if not self._affordable(row["price"]):
                 skip.append(row)
+                self.tally("over_limit", [row])
                 continue
             value = self.quick_value(row, floor)
             if value is None:
@@ -3741,8 +3805,10 @@ class DealHunter:
                 recheck.append((row, self.book.query(row.get("title") or row["text"]) or value["name"]))
             else:
                 skip.append(row)
-        skip += self._to_bundles(lots, f"Azonnali figyelő: {source}")
-        self._mark(*skip)
+                self.tally("not_cheap", [row])
+        other = self._to_bundles(lots, f"Azonnali figyelő: {source}")
+        self.tally("other", other)
+        self._mark(*skip, *other)
         for row, name in recheck[:EXPLORE_PICKS]:
             self._recheck(row, name, search, floor, source, look, can_ask, found)
         later = [row for row, _name in recheck[EXPLORE_PICKS:]]   # a keretbe nem fért: a következő körben
@@ -3750,6 +3816,7 @@ class DealHunter:
         rest: list[dict[str, Any]] = []
         if unknown and self.llm is None:
             self._mark(*unknown)               # modell nélkül az ismeretlenről nem derül ki, mennyit ér
+            self.tally("unknown", unknown)
         elif unknown and not can_ask():
             rest = unknown
         elif unknown:
@@ -3759,7 +3826,9 @@ class DealHunter:
             else:
                 rest = unknown[EXPLORE_ROWS:]
                 done = {id(row) for row, _q, _b in answer}
-                self._mark(*[row for row in unknown[:EXPLORE_ROWS] if id(row) not in done])
+                unnamed = [row for row in unknown[:EXPLORE_ROWS] if id(row) not in done]
+                self._mark(*unnamed)
+                self.tally("unknown", unnamed)
                 named += answer
         if not named:
             return rest + later
@@ -3784,6 +3853,7 @@ class DealHunter:
                 self._settle(row, value, source, look, can_ask, found)
             else:
                 self._mark(row)
+                self.tally("not_cheap", [row])
         # amennyiért máshol adják (a modell szerint megérők elöl, legfeljebb EXPLORE_PICKS)
         elsewhere.sort(key=lambda entry: not entry[2])
         for row, query, _buy in elsewhere[:EXPLORE_PICKS]:
@@ -3802,10 +3872,12 @@ class DealHunter:
         market_now = self._market_of(row, query, others)
         if market_now is None:
             self._mark(row)                    # nincs hasonló: nem tudni, mennyit ér
+            self.tally("unknown", [row])
             return
         value = self._valued(int(row["price"]), market_now, query, floor)
         if not value["cheap"]:
             self._mark(row)
+            self.tally("not_cheap", [row])
         elif not value["sure"]:
             self._unsure(row, query, market_now)
         else:
@@ -3823,6 +3895,7 @@ class DealHunter:
         with self._lock:
             if listing_key(row["url"]) in self._deal_keys():
                 return
+        self.tally("candidates", [deal])
         if why := self._suspect(deal):
             deal["suspect"] = why
             self._suspicious(deal)             # gyanúsan olcsó: az oldalát sem nyitja meg
@@ -3838,14 +3911,17 @@ class DealHunter:
             return
         if verdict not in ("", "captcha") or self._muted(deal.get("product_key"), self.clock()):
             self._mark(deal)
+            self.tally({"elkelt": "gone", "hibás": "defect"}.get(verdict, "muted"), [deal])
             return
         if self.llm is not None and can_ask() and self._confirm(probe, deal) is False:
             if deal.get("suspect"):
                 self._suspicious(deal)
             else:
                 self._mark(deal)
+                self.tally("model_no", [deal])
             return
         self._mark(deal)
+        self.tally("found", [deal])
         self._remember(deal)
         self.journal.add(f"Jó találat (azonnali figyelő): „{deal['text'][:60]}” {format_price(deal['price'])} "
                          f"({deal['site']}, kb. {format_price(deal['profit'])} haszon) – {source}")

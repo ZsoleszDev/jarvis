@@ -679,6 +679,21 @@
   }
   // Az óvatos eladási ár (deals.safe_sale): a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede (és ha tudjuk,
   // az elkelt hasonlók ára).
+  // A mai számok (deals.funnel): mennyit látott, mennyi volt új, hány jelölt és jó találat; a Naplóban az is, mi miért
+  // esett ki (ebből látszik, miért nincs találat egy napon).
+  const FUNNEL_MAIN = [["seen", "hirdetés"], ["new", "új"], ["candidates", "jelölt"], ["found", "jó találat"], ["haggles", "alku"]];
+  const FUNNEL_OUT = [["not_cheap", "nem elég olcsó"], ["other", "nem a keresett termék vagy nem eladó"],
+                      ["over_limit", "a vételi limit fölött"], ["unknown", "ismeretlen termék"], ["unsure", "bizonytalan ár"],
+                      ["suspicious", "gyanús"], ["risky", "kockázatos"], ["gone", "elkelt"], ["defect", "hibás"],
+                      ["model_no", "a modell szerint nem az"], ["muted", "elrejtett termék"]];
+  const thousands = (n) => Number(n).toLocaleString("hu-HU");
+  function funnelLine(full) {
+    const c = (deals.funnel || {}).counts || {};
+    const main = FUNNEL_MAIN.filter(([k]) => c[k] || k === "seen").map(([k, label]) => `${thousands(c[k] || 0)} ${label}`);
+    if (!full) return c.seen ? `Ma: ${main.join(" · ")}` : "";
+    const out = FUNNEL_OUT.filter(([k]) => c[k]).map(([k, label]) => `${thousands(c[k])} ${label}`);
+    return c.seen ? `Ma: ${main.join(" · ")}${out.length ? `. Kiesett: ${out.join(", ")}.` : ""}` : "Ma még nem néztem hirdetést.";
+  }
   // Az eladónak szóló üzenet: egy alkuképes hirdetésnél az ajánlat (az {ár} helyén a javasolt összeg), különben az
   // „Megvan még?”.
   function messageFor(d) {
@@ -902,6 +917,7 @@
       ${deals.money && deals.money.budget ? `<p><small>Havi keret: ${esc(price(deals.money.spent) || "0 Ft")} / ${esc(price(deals.money.budget))}
         (${deals.money.remaining ? `${esc(price(deals.money.remaining))} maradt` : "elfogyott"})</small></p>` : ""}
       ${((deals.money || {}).warnings || []).map((w) => `<p class="warn"><small>${esc(w)}</small></p>`).join("")}
+      ${funnelLine(false) ? `<p class="funnel"><small class="muted">${esc(funnelLine(false))}</small></p>` : ""}
       <h3 class="section-title">Legutóbbi találatok</h3>
       <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>
       ${section("settings", "Beállítások", `
@@ -988,6 +1004,7 @@
         </form>
         ${lookupRows}`)}
       ${section("journal", "Napló", `
+        <p><small class="muted">${esc(funnelLine(true))}</small></p>
         <div class="row"><label>Nap <select id="d-jday"><option value="">Ma</option>${dayOptions}</select></label></div>
         <ul class="dealist">${journalRows}</ul>`)}`;
     for (const fold of box.querySelectorAll("details[data-fold]")) fold.addEventListener("toggle", () => {
