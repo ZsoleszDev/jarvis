@@ -135,6 +135,16 @@ class ParseTests(unittest.TestCase):
         self.assertTrue(chosen_sort("https://www.vatera.hu/listings/index.php?c=1&ob=ending"))
         self.assertFalse(chosen_sort("https://hardverapro.hu/aprok/keres.php?stext=rtx"))
 
+    def test_the_title_when_the_whole_card_is_a_link(self):
+        """Ha az egész kártya egy link (benne az ár, a dátum, az eladó, a település), a cím a kártya fejlécéből jön, nem
+        a kártya teljes szövege (eddig „utász csákány 7 4 500 Ft ma, 16:42 János Magánszemély Eger” lett a neve)."""
+        card = """<div class="list-item"><a href="https://www.jofogas.hu/heves/utasz_csakany_130000007.htm">
+          <img src="/k.jpg" alt=""><h3 class="item-title">utász csákány</h3><span class="price-value">4 500</span>
+          <span class="currency">Ft</span><span class="time">ma, 16:42</span><span>János</span>
+          <span>Magánszemély</span><section class="cityname">Eger</section></a></div>"""
+        [row] = parse_listings(f"<html><body>{card}</body></html>", "https://www.jofogas.hu/magyarorszag?q=x", "jofogas")
+        self.assertEqual((row["title"], row["price"]), ("utász csákány", 4500))
+
     def test_the_list_settings_on_the_page(self):
         """A Hardverapró lista fölötti menüje: a beállító kérés címe, és az aktív menüpontok szerint a mostani sorrend és
         oldalméret (a valódi oldal HTML-je szerint, a hibás "="" attribútummal együtt)."""
@@ -533,7 +543,9 @@ class InstantTests(InstantCase):
                      "fejhallgato/index")
         self.net.pages["_31/friss"] = page_html("Hibátlan, dobozában.")
         self.watch.tick()
-        self.assertEqual(self.notices, [])
+        self.assertEqual([n[1] for n in self.notices], ["Érdemes megnézni: Sony WH-1000XM4 fejhallgató"],
+                         "nem megérő, csak egy bizonytalan árú tipp")
+        self.notices.clear()
         searched = [url for _t, url in self.net.asked if "sony" in url.lower() and "friss" not in url]
         self.assertEqual(len(searched), 2, "mindkét oldalon megnézte")
         self.assertIn("csak 5 hasonló árat találtam (Jófogás)",
@@ -617,6 +629,24 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.assertEqual(len([u for _t, u in self.net.asked if u.endswith("?offset=16")]), 1, "a következő oldal is")
         self.assertEqual(fresh[-1]["title"], "Új kiemelt kártya", "a kiemelt a többi új után")
+
+    def test_the_rounds_keep_part_of_the_hourly_budget(self):
+        """Az azonnali figyelő nem eszi el a letöltő egész óránkénti keretét: ROUND_RESERVE kérés mindig a köröké marad
+        (különben a böngésző nélküli körök üresen futottak)."""
+        from jarvis_core.instant import ROUND_RESERVE
+        self.watch.add("https://hardverapro.hu/aprok/hardver/videokartya/index.html")
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:1], "videokartya/index.html")
+        self.results(HA_CARDS[:1])
+        self.fetcher.hourly = ROUND_RESERVE + 2
+        self.fetcher.listings("https://hardverapro.hu/aprok/keres.php?stext=x", "hardverapro")
+        self.fetcher.listings("https://hardverapro.hu/aprok/keres.php?stext=y", "hardverapro")
+        asked = len(self.net.asked)
+        self.clock.now += 60
+        self.assertEqual(self.watch.tick(), 0, "a maradék a köröké")
+        self.assertEqual(len(self.net.asked), asked)
+        self.fetcher.hourly = ROUND_RESERVE + 10
+        self.assertEqual(self.watch.tick(), 1)
 
     def test_the_whole_page_is_read(self):
         """A Hardverapró egy oldalon 100 hirdetést mutat (az elején többnyire fizetett kiemelésekkel): az egész oldalt nézi,
@@ -1069,6 +1099,18 @@ class TwoLaneTests(InstantCase):
         self.assertEqual({self.hunter._lane_of(site) for site in blocked}, {deals_module.LANE_BROWSER},
                          "a tiltó oldalt a böngésző sora veszi át")
         self.assertEqual(self.browser.urls, [], "a gyors sor akkor sem nyúlt a böngészőhöz")
+
+    def test_the_session_says_what_stopped_it(self):
+        """Ha egy munkamenet alatt kevés vagy semmi nem töltődött be, a végén a naplóban az oka is ott van (pl. elfogyott
+        az óránkénti keret), nem csak a „0 oldal”."""
+        self.fetcher.hourly = 1
+        for _ in range(4):
+            self.hunter.run_fast()
+            self.clock.now += 120
+        self.clock.now += 3600
+        self.hunter.run_fast()
+        [line] = [e["text"] for e in self.hunter.journal.entries() if "Hardverapró:" in e["text"] and "oldal" in e["text"]]
+        self.assertIn("akadály: Ebben az órában már sokat kérdeztem ezt az oldalt", line)
 
     def test_the_thread(self):
         with mock.patch.object(deals_module, "FAST_TICK", 0.05):

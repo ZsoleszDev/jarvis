@@ -420,6 +420,8 @@ def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[d
         label = card["label"]
         summary = f"{label} | {text}" if len(label) > 15 and label not in text else text
         entry: dict[str, Any] = {"text": summary[:240], "price": price, "url": card["href"]}
+        if not (3 < len(label) <= 160 and not PRICE_RE.search(label)):
+            label = _card_title(card["node"])     # az egész kártya egy link (Jófogás): a címe a fejlécéből
         if 3 < len(label) <= 160 and not PRICE_RE.search(label):
             entry["title"] = label                # a hirdetés címe magában (az értesítésbe)
         if not FIXED_RE.search(text) and AUCTION_RE.search(text):
@@ -588,6 +590,17 @@ def fetch_image(url: str, get: Callable[..., Any] | None = None) -> bytes | None
             return body or None
     except requests.RequestException:
         return None
+
+
+_TITLE_CLASS = re.compile(r"title|subject|name|cim", re.IGNORECASE)
+
+
+def _card_title(card: Node) -> str:
+    """Egy kártya címe, ha a link szövege nem az (pl. az egész kártya egy link, benne az ár, a dátum, az eladó): a
+    fejléce (h1–h4), vagy egy „title”/„subject” osztályú eleme; üres, ha nincs."""
+    found = _find(card, lambda n: n.tag in ("h1", "h2", "h3", "h4") or bool(_TITLE_CLASS.search(n.attrs.get("class", ""))
+                                                                           and len(n.text()) <= 160))
+    return clean(found.text()) if found is not None else ""
 
 
 def _find(node: Node, wanted: Callable[[Node], bool]) -> Node | None:

@@ -738,7 +738,12 @@ LISTINGS_JS = r"""
     seen.add(card.href);
     const summary = (card.label.length > 15 && !text.includes(card.label)) ? card.label + ' | ' + text : text;
     const entry = {text: summary.slice(0, 240), price, url: card.href};
-    if (card.label.length > 3 && card.label.length <= 160 && !PRICE.test(card.label)) entry.title = card.label;
+    let title = card.label;
+    if (!(title.length > 3 && title.length <= 160 && !PRICE.test(title))) {   // az egész kártya egy link: a fejléce
+      const head = card.node.querySelector('h1, h2, h3, h4, [class*=title], [class*=subject]');
+      title = head ? clean(head.innerText) : '';
+    }
+    if (title.length > 3 && title.length <= 160 && !PRICE.test(title)) entry.title = title;
     if (!fixed && AUCTION.test(text)) entry.auction = true;
     if (promoted(card.node)) entry.promoted = true;
     out.push(entry);

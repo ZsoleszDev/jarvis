@@ -570,8 +570,8 @@ class DealTests(HunterCase):
                                                                                 "nem tudom, mikor"))
 
     def test_vatera_auctions_known_searches_and_explored_ones(self):
-        self.browser.by_url = [("vatera.hu", AUCTIONS), ("jofogas.hu/magyarorszag?q=Nintendo", SWITCH),
-                               ("vinted.hu/catalog?search_text=Nintendo", SWITCH_VINTED), ("PS5", CONTROLLERS)]
+        self.browser.by_url = [("vatera.hu", AUCTIONS), ("jofogas.hu/magyarorszag?q=Switch", SWITCH),
+                               ("vinted.hu/catalog?search_text=Switch", SWITCH_VINTED), ("PS5", CONTROLLERS)]
         self.hunter.add_search("PS5 kontroller", ["jofogas"], reference=14000)
         self.hunter.add_watch("https://www.vatera.hu/listings/index.php?c=123&ob=ending")
         self.llm.explore = [{"n": 1, "query": "Nintendo Switch OLED", "buy": True}]
@@ -639,8 +639,8 @@ class ExploreTests(HunterCase):
         self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: 2 olcsó hirdetés.")
         notice = {title: text for _kind, title, text, _extra in self.notices}
         rtx = notice["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"]
-        # az oldal szokásos árú RTX-e is az árbázisba került (8 ár)
-        self.assertIn("Máshol kb. 99 000 Ft-ért adják (11 hasonló hirdetés alapján, Hardverapró és Jófogás), a "
+        # az oldal szokásos árú RTX-e is az árbázisba került: 8 szorosan együtt lévő ár egy oldalról már biztos
+        self.assertIn("Máshol kb. 99 000 Ft-ért adják (8 hasonló hirdetés alapján, Hardverapró), a "
                       "várható haszon kb. 17 600 Ft. Figyelt oldal: Hardverapró: videokartya.", rtx)
         sony = notice["Olcsó: Eladó zajszűrős Sony fejhallgató, alig használt"]
         self.assertIn("Máshol kb. 70 000 Ft-ért adják (10 hasonló hirdetés alapján, Jófogás és Vinted), a várható haszon "
@@ -673,28 +673,63 @@ class ExploreTests(HunterCase):
         self.assertNotIn("Kiemelt bolti tárgy", explored, "a kiemeltekre most nem jutott hely")
 
     def test_a_price_seen_on_one_site_only_is_checked_elsewhere_first(self):
-        """Az árbázis csak a Hardverapró 8 árát ismeri (nem elég biztos): mielőtt szólna, a többi oldalon is megnézi.
+        """Az árbázis csak a Hardverapró 5 árát ismeri (nem elég biztos): mielőtt szólna, a többi oldalon is megnézi.
         Ha ott nincs hasonló, nem szól (a naplóba beírja, miért); ha van, és ott is jóval drágább, szól."""
         self.browser.results = []
         self.browser.by_url = [("videokartya", PAGE)]
+        self.hunter = self.make("kevés")
+        self.hunter.book.add([{**r, "platform": "hardverapro"} for r in NORMAL[:4]])
         self.hunter.add_watch(CATEGORY)
         self.hunter.set_enabled(True)
         self.hunter.run(notify=self.notify)
-        self.assertEqual(self.notices, [])
+        [(kind, title, text, extra)] = self.notices
+        self.assertEqual((kind, title), ("deal", "Érdemes megnézni: Gigabyte RTX 3060 Ti Gaming OC"),
+                         "nem megérő találat, csak egy csendes tipp")
+        self.assertIn("Bizonytalan ár: csak 5 hasonló hirdetés (Hardverapró) szerint kb. 98 000 Ft-ért adják", text)
+        self.assertNotIn("urgent", extra)
+        [tip] = self.hunter.state()["tips"]
+        self.assertEqual((tip["price"], tip["n"], tip["key"]), (70000, 5, "3060 rtx ti"))
+        self.notices.clear()
         self.assertTrue(any("jofogas.hu/magyarorszag?q=RTX%203060%20Ti" in u for u in self.browser.urls),
                         "a Jófogáson is megnézte, a cím szavaival (ahogy a hirdetésben írták)")
         self.assertFalse(any("hardverapro.hu" in u and "RTX" in u for u in self.browser.urls), "ahol már ismeri, ott nem")
         [line] = [e["text"] for e in self.hunter.journal.entries() if e["text"].startswith("Nem biztos")]
         self.assertIn("„Gigabyte RTX 3060 Ti Gaming OC” 70 000 Ft", line)
-        self.assertIn("csak 8 hasonló árat találtam (Hardverapró)", line)
+        self.assertIn("csak 5 hasonló árat találtam (Hardverapró)", line)
         other = self.make("masik")
-        other.book.add([{**r, "platform": "hardverapro"} for r in NORMAL])
+        other.book.add([{**r, "platform": "hardverapro"} for r in NORMAL[:4]])
         self.browser.by_url = [("videokartya", PAGE), ("jofogas.hu/magyarorszag?q=", RTX_JOFOGAS)]
         other.add_watch(CATEGORY)
         other.set_enabled(True)
         other.run(notify=self.notify)
         self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"])
-        self.assertIn("11 hasonló hirdetés alapján, Hardverapró és Jófogás", self.notices[0][2])
+        self.assertIn("8 hasonló hirdetés alapján, Hardverapró és Jófogás", self.notices[0][2])
+
+    def test_a_tip_becomes_a_deal_when_enough_prices_come(self):
+        """Egy bizonytalan árú tipp nem vész el: amikor az árbázisban összegyűlik elég hasonló ár, a következő kör
+        letöltés nélkül újra felméri, és ha még mindig megéri, rendes megérő találat lesz belőle (a hirdetés oldala, a
+        modellkérdés); a tipp lekerül a listáról. Az elrejtett tipp nem jön vissza."""
+        self.browser.results = []
+        self.browser.by_url = [("videokartya", PAGE)]
+        self.hunter = self.make("tipp")
+        self.hunter.book.add([{**r, "platform": "hardverapro"} for r in NORMAL[:4]])
+        self.hunter.add_watch(CATEGORY)
+        self.hunter.set_enabled(True)
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(len(self.hunter.state()["tips"]), 1)
+        self.notices.clear()
+        self.hunter.book.add([{**r, "platform": "jofogas"} for r in RTX_JOFOGAS])
+        self.clock.now += 3600
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"])
+        self.assertEqual(self.hunter.state()["tips"], [])
+        other = self.make("rejtett")
+        other.book.add([{**r, "platform": "hardverapro"} for r in NORMAL[:4]])
+        other.add_watch(CATEGORY)
+        other.set_enabled(True)
+        other.run(notify=self.notify)
+        [tip] = other.state()["tips"]
+        self.assertEqual(other.dismiss_tip(tip["id"])["tips"], [])
 
     def test_profit_counts_with_a_careful_sale_price(self):
         """A haszon óvatos: a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede (ha szórnak az árak, a vevő az
@@ -708,6 +743,11 @@ class ExploreTests(HunterCase):
         two_sites = market(list(zip((80000, 90000, 100000, 110000, 120000), ("hardverapro", "jofogas") * 3)))
         self.assertEqual((two_sites["sites"], two_sites["sure"]), (["hardverapro", "jofogas"], True))
         self.assertTrue(market([(100000 + n * 1000, "vinted") for n in range(10)])["sure"], "egy oldalról, de sok ár")
+        tight = [(p, "hardverapro") for p in (60000, 62000, 61000, 64000, 65000, 63000)]
+        self.assertTrue(market(tight)["sure"], "egy oldalról 6 ár, ha szorosan együtt vannak")
+        self.assertFalse(market(tight[:5])["sure"], "5 egy oldalról kevés")
+        self.assertFalse(market([(p, "hardverapro") for p in (40000, 50000, 60000, 70000, 80000, 90000)])["sure"],
+                         "6 ár, de szórnak")
         self.assertFalse(market(list(zip((40000, 60000, 100000, 140000, 160000), ("vinted", "jofogas") * 3)))["sure"],
                          "nagyon szórnak az árak")
         self.assertIsNone(market([]))
@@ -867,6 +907,13 @@ class ExploreTests(HunterCase):
 
 
 class PriceBookTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.clock = Clock()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
     def test_the_title_gives_the_key_and_the_search_word(self):
         """A böngésző nélkül olvasott kártya szövegében a város, a dátum és az eladó neve is ott van („eladó31”): a
         termékkulcs a hirdetés címéből jön. A más oldalon való ellenőrzés keresőszava a cím kulcsszavai, ahogy írták."""
@@ -881,6 +928,60 @@ class PriceBookTests(unittest.TestCase):
             self.assertEqual(book.query("Gigabyte GeForce RTX 3060 Ti Gaming OC"), "RTX 3060 Ti")
             self.assertEqual(book.query("Régi fülhallgató"), "")
 
+    def test_one_product_one_key(self):
+        """Ugyanaz a termék, akárhogy írták, egy kulcs (különben a hasonló árai szétesnek, és sosem lesz biztos ára):
+        a processzor kötőjellel, anélkül és a márkával; a videókártya a kártyagyártó típusnevével (G1, Gaming X); a
+        memóriakészlet „2x8 GB”, „(2x8GB)” alakban. A laptop és a gép a kártyájával más termék."""
+        groups = (
+            ("Intel Core i5-10400F", "Intel Core i5 10400F processzor", "i5-10400F", "Eladó i5 10400f CPU",
+             "Intel i5-10400F 6 mag"),
+            ("Gigabyte GTX 1080 G1 Gaming", "MSI GTX 1080 Gaming X", "Nvidia GeForce GTX 1080", "GTX1080"),
+            ("MSI GeForce GTX 1660 Ti Ventus XS 6GB", "Asus GTX 1660 Ti 6GB"),
+            ("Corsair Vengeance 2x8 GB", "Corsair Vengeance 2x8GB", "Corsair Vengeance 16GB (2x8GB)"),
+            ("AMD Ryzen 5 5600X", "Ryzen 5600X"),
+        )
+        for titles in groups:
+            self.assertEqual(len({product_key(t)[0] for t in titles}), 1, titles)
+        self.assertNotEqual(product_key("Asus TUF F15 laptop RTX 3060")[0], product_key("Asus RTX 3060")[0])
+        self.assertNotEqual(product_key("Gamer PC RTX 3060 i5 12400F")[0], product_key("RTX 3060")[0])
+        self.assertNotEqual(product_key("Lenovo Legion 5 RTX 3060")[0], product_key("RTX 3060")[0],
+                            "a laptopcsalád neve is laptop")
+        self.assertNotEqual(product_key("GTX 1660 Ti")[0], product_key("GTX 1660")[0])
+
+    def test_an_older_price_book_is_rekeyed(self):
+        """A régi (más kulcsokkal mentett) árbázis betöltéskor az új kulcsokra kerül: az egybeeső termékek árai
+        összeadódnak (ugyanaz a hirdetés egyszer)."""
+        import json
+        root = Path(self.tmp.name)
+        now = self.clock()
+        keys = {"i510400f intel": {"name": "intel i510400f", "samples": [
+                    {"p": 30000 + n * 500, "url": f"https://hardverapro.hu/apro/a{n}.html", "site": "hardverapro",
+                     "at": now, "last": now} for n in range(3)]},
+                "10400f i5": {"name": "i5 10400f", "samples": [
+                    {"p": 31000 + n * 500, "url": f"https://hardverapro.hu/apro/b{n}.html", "site": "hardverapro",
+                     "at": now, "last": now} for n in range(3)] + [
+                    {"p": 30000, "url": "https://hardverapro.hu/apro/a0.html", "site": "hardverapro", "at": now,
+                     "last": now - 10}]}}
+        (root / "arbazis.json").write_text(json.dumps({"keys": keys}), encoding="utf-8")
+        book = PriceBook(root, clock=self.clock)
+        self.assertEqual(len(book.samples("10400f i5")), 6)
+        self.assertEqual(book.reference("10400f i5")["n"], 6)
+        book.save()
+        self.assertEqual(json.loads((root / "arbazis.json").read_text(encoding="utf-8"))["kv"], 2)
+
+    def test_a_single_capacity_is_implied(self):
+        """Ha egy termékből csak egy kapacitás-változatot ismerünk (a GTX 1080 mind 8 GB-os), a kapacitás nélküli címek
+        is ahhoz számítanak; ha több van (8 és 16 GB), nem keverednek."""
+        book = PriceBook(Path(self.tmp.name), clock=self.clock)
+        book.add([{"text": f"GTX 1080 {'8GB' if n < 2 else 'Gaming X'}", "price": 60000 + n * 1000,
+                   "url": f"https://hardverapro.hu/apro/g{n}.html", "platform": "hardverapro"} for n in range(6)])
+        self.assertEqual(book.reference("1080 8gb gtx")["n"], 6)
+        self.assertEqual(book.reference("1080 gtx")["n"], 6)
+        book.add([{"text": "GTX 1080 16GB", "price": 90000, "url": f"https://hardverapro.hu/apro/h{n}.html",
+                   "platform": "hardverapro"} for n in range(5)])
+        self.assertEqual(book.reference("1080 8gb gtx"), None, "csak 2 biztos 8 GB-os ár van")
+        self.assertEqual(book.reference("1080 16gb gtx")["n"], 5)
+
     def test_product_keys_from_titles(self):
         cases = {
             "ASUS Dual RTX 3060 Ti 8GB videókártya": "3060 8gb rtx ti", "Gigabyte GeForce RTX 3060 Ti Gaming OC": "3060 rtx ti",
@@ -894,7 +995,7 @@ class PriceBookTests(unittest.TestCase):
             "RTX 5060 Ti 16 GB": "16gb 5060 rtx ti", "Samsung 970 EVO Plus 1000GB": "1tb 970 plus samsung",
             "Corsair Vengeance LPX 16GB DDR4 3200MHz": "16gb corsair ddr4",
             "MacBook Air M1 8GB 256GB": "256gb 8gb air m1 macbook",
-            "Xbox Series S": "seriess xbox", "Nintendo Switch OLED": "oled switch", "Ryzen 5 5600X": "5 5600x ryzen",
+            "Xbox Series S": "seriess xbox", "Nintendo Switch OLED": "oled switch", "Ryzen 5 5600X": "5600x ryzen",
         }
         for title, key in cases.items():
             self.assertEqual(product_key(title)[0], key, title)
@@ -1404,6 +1505,28 @@ class CapacityTests(HunterCase):
         row = {"text": "Samsung 970 EVO Plus", "price": 15000, "url": "https://hardverapro.hu/apro/ssd/2.html"}
         found = self.hunter._market_of(row, "Samsung 970 EVO Plus", rows)
         self.assertEqual((found["price"], found["n"]), (20000, 3), "az 500 GB-osok (a 2 TB-os egyetlen ára kevés)")
+
+
+class ComparableTests(HunterCase):
+    """A hasonló hirdetések a termékkulcs szerint: a modell elnevezésének márka- és típusnév-szavai (MSI, OC, Intel
+    Core) nem zárják ki a többi kártyagyártó és az eltérően írt hirdetéseket (eddig ezért volt csak 2 ár egy GTX 1080-ra)."""
+
+    def test_other_board_makers_and_spellings_count(self):
+        rows = [{**listing(80 + n, title, p), "platform": "hardverapro"} for n, (title, p) in enumerate((
+            ("Gigabyte GTX 1080 G1 Gaming", 62000), ("MSI GTX 1080 Gaming X 8GB", 65000), ("Nvidia GeForce GTX 1080", 60000),
+            ("Asus Strix GTX 1080 OC", 64000), ("Zotac GTX1080 AMP", 61000), ("GTX 1080 Ti", 120000),
+            ("GTX 1080 hűtő", 5000)))]
+        row = {"text": "MSI GeForce GTX 1080 OC 8GB videókártya eredeti dobozával", "price": 43999,
+               "url": "https://hardverapro.hu/apro/msi_1080/1.html"}
+        found = self.hunter._market_of(row, "MSI GTX 1080 OC 8GB", rows)
+        self.assertEqual((found["n"], found["price"]), (5, 62000), "a Ti és a hűtő nem számít")
+        self.assertEqual(self.hunter._probe_text("MSI GeForce GTX 1080 OC 8GB"), "GTX 1080")
+        cpus = [{**listing(90 + n, title, p), "platform": "hardverapro"} for n, (title, p) in enumerate((
+            ("Intel Core i5 10400F processzor", 30000), ("i5-10400F", 29000), ("Eladó i5 10400f CPU", 31000),
+            ("Intel i5-10400F dobozos", 30500), ("Core i5-10400F hűtővel", 32000)))]
+        row = {"text": "Intel Core i5-10400F", "price": 12000, "url": "https://hardverapro.hu/apro/i5/1.html"}
+        self.assertEqual(self.hunter._market_of(row, "Intel Core i5-10400F", cpus)["n"], 5)
+        self.assertEqual(self.hunter._probe_text("Intel Core i5-10400F"), "i5-10400F")
 
 
 class NewestTests(HunterCase):

@@ -683,9 +683,10 @@
   // esett ki (ebből látszik, miért nincs találat egy napon).
   const FUNNEL_MAIN = [["seen", "hirdetés"], ["new", "új"], ["candidates", "jelölt"], ["found", "jó találat"], ["haggles", "alku"]];
   const FUNNEL_OUT = [["not_cheap", "nem elég olcsó"], ["other", "nem a keresett termék vagy nem eladó"],
-                      ["over_limit", "a vételi limit fölött"], ["unknown", "ismeretlen termék"], ["unsure", "bizonytalan ár"],
+                      ["over_limit", "a vételi limit fölött"], ["unknown", "ismeretlen termék"], ["unsure", "bizonytalan ár (Érdemes megnézni)"],
                       ["suspicious", "gyanús"], ["risky", "kockázatos"], ["gone", "elkelt"], ["defect", "hibás"],
-                      ["model_no", "a modell szerint nem az"], ["muted", "elrejtett termék"]];
+                      ["model_no", "a modell szerint nem az"], ["muted", "elrejtett termék"],
+                      ["bundle", "csomag (a csomagbontásnak)"]];
   const thousands = (n) => Number(n).toLocaleString("hu-HU");
   function funnelLine(full) {
     const c = (deals.funnel || {}).counts || {};
@@ -885,6 +886,11 @@
         ${offerBox(d)}</span>
         <span class="row"><button type="button" class="small" data-deal-open="${esc(d.id)}">Részletek</button>${buyButton(d)}
         <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></span></li>`).join("");
+    // Érdemes megnézni (deals.tips): olcsónak látszott, de kevés a hasonló ára; a Jarvis a körökben újra felméri
+    const tips = (deals.tips || []).map((t) => `<li><span><a href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.title)}</a>
+        <small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">bizonytalan ár</b> csak ${esc(t.n)} hasonló
+          (${esc((t.sites || []).join(", ") || "?")}) szerint kb. ${esc(price(t.usual))} · kb. <b>${esc(price(t.profit))}</b> haszon lehet benne</small></span>
+        <span class="row"><button type="button" class="small quiet" data-tip-dismiss="${esc(t.id)}">Elrejtés</button></span></li>`).join("");
     const book = deals.book || { products: 0, prices: 0, ready: 0 };
     const lookupRows = lookupResults === null ? "" : `<ul class="dealist">${lookupResults.map((r) => `<li><span><b>${esc(r.name)}</b>
         <small class="muted">${r.reference ? `kb. <b>${esc(price(r.reference.price))}</b> (${r.reference.n} ár, a többség
@@ -920,6 +926,10 @@
       ${funnelLine(false) ? `<p class="funnel"><small class="muted">${esc(funnelLine(false))}</small></p>` : ""}
       <h3 class="section-title">Legutóbbi találatok</h3>
       <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>
+      ${tips ? `<h3 class="section-title">Érdemes megnézni <small class="muted">bizonytalan ár</small></h3>
+      <p><small class="muted">Olcsónak látszik, de kevés hasonló árat találtam, ezért nem biztos, hogy megéri. Nézd meg magad;
+        ha közben összegyűlik elég ár, újra felmérem, és ha megéri, szólok.</small></p>
+      <ul class="dealist">${tips}</ul>` : ""}
       ${section("settings", "Beállítások", `
         <div class="fields limits">
           <div class="field"><label for="d-maxbuy">Max. vételár (Ft)</label>
@@ -1115,6 +1125,7 @@
     for (const b of box.querySelectorAll("[data-watch-remove]")) b.addEventListener("click", () => dealAction({ action: "watch_remove", id: b.dataset.watchRemove }));
     for (const b of box.querySelectorAll("[data-offer]")) b.addEventListener("click", () => makeOffer(b.dataset.offer, $(`d-offer-${b.dataset.offer}`).value));
     for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
+    for (const b of box.querySelectorAll("[data-tip-dismiss]")) b.addEventListener("click", () => dealAction({ action: "tip_dismiss", id: b.dataset.tipDismiss }));
     for (const b of box.querySelectorAll("[data-deal-open]")) b.addEventListener("click", () => openDeal(b.dataset.dealOpen));
     $("d-haggle-save").addEventListener("click", async () => {
       const on = $("d-haggle").checked;

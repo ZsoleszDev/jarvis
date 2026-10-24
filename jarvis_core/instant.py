@@ -44,6 +44,7 @@ MAX_ALERTS = 12
 EVERY_CHOICES = (2, 3, 5, 10, 15)    # percben
 DEFAULT_EVERY = 3
 INSTANT_HOURLY = 80        # az azonnali figyelő oldalanként óránként legfeljebb ennyit kér (a többi a köröké)
+ROUND_RESERVE = 30         # a letöltő óránkénti keretéből ennyit mindig meghagy a köröknek (különben azok üresen futnak)
 # A Keresések (Automata kereskedés) a Hardveraprón és a Jófogáson az azonnali figyelőben is futnak, ennyi percenként
 # (a tanult ritmus és az óránkénti keret szerint): az új hirdetést így pár percen belül felméri, nem csak a keresés
 # óránkénti körében. A felületen a figyelők között látszanak („a Keresésekből”); a keresés törlésével megszűnnek.
@@ -473,10 +474,19 @@ class InstantWatch:
         return done
 
     def _has_budget(self, site: str, now: float) -> bool:
+        """Kérhet-e most a figyelő ettől az oldaltól: a saját óránkénti kerete (INSTANT_HOURLY), és a letöltő közös
+        keretéből (a körök kérései is ide számítanak) ROUND_RESERVE mindig a köröké marad."""
         recent = self._recent.setdefault(site, deque())
         while recent and now - recent[0] > 3600:
             recent.popleft()
-        return len(recent) < INSTANT_HOURLY
+        if len(recent) >= INSTANT_HOURLY:
+            return False
+        hourly = int(getattr(self.fetcher, "hourly", 0) or 0)
+        if hourly and hasattr(self.fetcher, "status"):
+            used = int((self.fetcher.status().get(site) or {}).get("last_hour") or 0)
+            if used >= hourly - ROUND_RESERVE:
+                return False
+        return True
 
     def _url(self, alert: dict[str, Any], site: str) -> str:
         """A figyelt találati oldal címe, a legújabb hirdetésekkel elöl (deals.NEWEST; a Jófogáson, ha nem adtál meg
@@ -681,6 +691,8 @@ class InstantWatch:
             self._tell(alert, hit)
 
         waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found)
+        if hasattr(self.hunter, "flush_tips"):
+            self.hunter.flush_tips(self.notify)     # a bizonytalan árú tippek („Érdemes megnézni”)
         if waiting:
             now = self.clock()
             with self._lock:
@@ -727,7 +739,8 @@ class InstantWatch:
             except FeedError:
                 return []
             return [{"site": platform.name, "platform": site, "text": str(r.get("text") or "")[:180],
-                     "price": int(r["price"]), "url": str(r["url"])} for r in rows[:MAX_ROWS]
+                     "price": int(r["price"]), "url": str(r["url"]),
+                     **({"title": str(r["title"])[:160]} if r.get("title") else {})} for r in rows[:MAX_ROWS]
                     if r.get("url") and not r.get("auction")]
 
         with ThreadPoolExecutor(max_workers=max(1, len(self.platforms)), thread_name_prefix="jarvis-ar") as pool:

@@ -38,6 +38,9 @@ SLOW_DAYS = 14             # ennyi nap után is fent: lassan kel
 SOLD_MIN = 3               # ennyi elkelt (újranézéskor eltűnt) hirdetés ára kell az elkelt árhoz
 PRICE_CUT = 0.03           # ennyivel olcsóbb lett egy már látott hirdetés: leárazta
 SLOW_RATE = 0.25           # ha az újranézett hirdetéseknek legfeljebb ennyi része tűnt el: lassan kel
+# A termékkulcs képzésének változata: ha a mentett árbázis régebbi, betöltéskor a kulcsokat újraképzi a nevükből, és az
+# így egybeeső termékek árait összevonja (rekey).
+KEY_VERSION = 2
 
 # Márkák (ékezet nélkül, kisbetűvel; a több szavasak egybeírva, lásd _ALIASES).
 BRANDS = {
@@ -67,7 +70,21 @@ SERIES = {"note", "tab", "mi", "buds", "band", "fold", "flip", "gen", "series", 
 # A termék fajtája, ha ugyanaz a család mást is jelölhet (PS5 konzol, kontroller vagy játék).
 TYPE_WORDS = {"kontroller": "kontroller", "controller": "kontroller", "kontroler": "kontroller",
               "dualsense": "kontroller", "dualshock": "kontroller", "joystick": "kontroller", "gamepad": "kontroller",
-              "joycon": "kontroller", "jatek": "jatek", "jatekok": "jatek", "game": "jatek"}
+              "joycon": "kontroller", "jatek": "jatek", "jatekok": "jatek", "game": "jatek",
+              # egy laptop vagy egy egész gép a benne lévő videókártyával vagy processzorral: nem a kártya ára
+              "laptop": "laptop", "notebook": "laptop", "pc": "pc", "szamitogep": "pc", "konfig": "pc",
+              "konfiguracio": "pc", "gamerpc": "pc",
+              # laptopcsaládok (a kártyagyártók típusneveivel nem ütköznek): a „Legion 5 RTX 3060” laptop, nem kártya
+              **{name: "laptop" for name in ("legion", "omen", "zephyrus", "victus", "ideapad", "vivobook", "zenbook",
+                                             "aspire", "pavilion", "latitude", "inspiron", "alienware", "helios",
+                                             "katana", "thinkbook", "elitebook", "probook")}}
+# Videókártya: a lapka (RTX 3060, RX 6600, Arc A770), a jelzője (Ti, Super, XT) és a memória dönti el az árát; a
+# kártyagyártó típusneve (G1, Ventus, Eagle…) csak kicsit, ezért nem kerül a kulcsba (különben a hasonló árak szétesnek).
+GPU_FAMILIES = {"rtx", "gtx", "rx", "arc"}
+_GPU_CHIP = re.compile(r"^[a-z]?\d{3,4}$")
+# Processzor: az „Intel Core i5-10400F” és az „i5 10400F” ugyanaz; az Intel/AMD márka mellette nem kell a kulcsba.
+_CPU_TIER = re.compile(r"^i[3579]$")
+CPU_BRANDS = {"intel", "amd"}
 # A gyakran hamisított márkák: ha feltűnően olcsó, figyelmeztet (nem lelkesedik).
 FAKE_PRONE = {"airpods", "nike", "jordan", "adidas", "northface", "moncler", "stoneisland", "gucci", "rayban",
               "lacoste", "dyson", "lego", "dualsense", "kontroller", "watch", "beats"}
@@ -78,7 +95,14 @@ _ALIASES = ((r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbala
             (r"\btp ?-?link\b", "tplink"), (r"\bsteam deck\b", "steamdeck"), (r"\bjoy ?-?con\w*\b", "joycon"),
             (r"\bde ?'?longhi\b", "delonghi"), (r"\bx ?box\b", "xbox"), (r"\bapple watch\b", "watch"),
             (r"\blevi'?s\b", "levis"), (r"\bmeta quest\b", "quest"), (r"\boculus quest\b", "quest"),
-            (r"\bseries ([xs])\b", r"series\1"), (r"\bxiaomi redmi\b", "redmi"))
+            (r"\bseries ([xs])\b", r"series\1"), (r"\bxiaomi redmi\b", "redmi"), (r"\bgamer ?pc\b", "gamerpc"))
+# Ugyanannak a típusjelnek egy alakja (a kötőjel már ki van véve): az „i5-10400F”, „i5 10400F”, „i510400f” egyaránt
+# „i5 10400f”, az „RTX3060” „rtx 3060”, a memóriakészlet „2x8 GB”, „2 x 8GB”, „2x8” egyaránt „2x8gb”.
+_SPLITS = ((re.compile(r"\bi([3579]) ?(\d{4,5}[a-z]{0,3})\b"), r"i\1 \2"),
+           (re.compile(r"\b(rtx|gtx|rx)(\d{3,4})\b"), r"\1 \2"),
+           (re.compile(r"\b([1-8]) ?x ?(2|4|8|16|32|64) ?gb\b"), r"\1x\2gb"),
+           (re.compile(r"\b([1-8])x(4|8|16|32|64)\b(?! ?(?:cm|mm|m|db)\b)"), r"\1x\2gb"))
+_KIT = re.compile(r"^([1-8])x(\d{1,2})gb$")
 # Ár a címben („95 000 Ft”, „25e”, „25.000,-”): nem a termék része.
 _PRICE_IN_TITLE = re.compile(r"\b\d+(?:[ .]\d{3})*\s*(?:,-|(?:ft|huf|forint|e ?ft|ezer)\b)")
 # Mértékegység vagy méret egy szám után (8gb, 4k, 42es, 38-as, 120hz): nem a típusjel.
@@ -104,6 +128,8 @@ def _words(text: str) -> list[str]:
         folded = re.sub(pattern, replacement, folded)
     folded = _PRICE_IN_TITLE.sub(" ", folded)
     folded = re.sub(r"(?<=[a-z0-9])-(?=[a-z0-9])", "", folded)      # WH-1000XM4 → wh1000xm4, i5-12400 → i512400
+    for pattern, replacement in _SPLITS:                               # i512400 → i5 12400 (mint az „i5 12400”)
+        folded = pattern.sub(replacement, folded)
     return re.findall(r"[a-z0-9]+", folded)
 
 
@@ -163,6 +189,8 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
     words = _words(text)
     picked: list[str] = []
     known = BRANDS | brands if brands else BRANDS
+    if any(_CPU_TIER.match(w) for w in words):
+        known = known - CPU_BRANDS             # „Intel Core i5-10400F” = „i5 10400F”
     families = [w for w in words if w in FAMILIES]
     brand = next((w for w in words if w in known), "") if not families else ""
     model = qualified = False
@@ -201,7 +229,19 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         return None
     if len(picked) == 1 and not (model and len(picked[0]) >= 5 and not picked[0].isdigit()):
         return None
+    if set(families) & GPU_FAMILIES and not {"laptop", "pc"} & set(picked):
+        # videókártya: a lapka, a jelzője és a fajtája marad, a kártyagyártó típusneve (G1, F15…) nem
+        kept = [t for t in picked if t in FAMILIES or t in MODIFIERS or t in TYPE_WORDS.values() or _GPU_CHIP.match(t)]
+        if any(_GPU_CHIP.match(t) for t in kept):
+            picked = kept
+    if any(len(t) >= 4 and re.search(r"\d", t) and not _KIT.match(t) for t in picked):
+        # a hosszú típusjel mellett az egy számjegy csak a szint („Ryzen 5 5600X” = „Ryzen 5600X”)
+        picked = [t for t in picked if not (t.isdigit() and len(t) == 1)]
     sizes = capacities(words)
+    kits = [_KIT.match(t) for t in picked if _KIT.match(t)]
+    for kit in kits:                           # a „16GB (2x8GB)” összege nem külön változat
+        total = f"{int(kit.group(1)) * int(kit.group(2))}gb"
+        sizes = [size for size in sizes if size != total]
     if len(sizes) > 2:
         return None
     return " ".join(sorted(picked + sizes)), " ".join(picked + sizes)
@@ -240,14 +280,34 @@ class PriceBook:
         self._brand_counts: dict[str, int] = {str(k): int(v) for k, v in (data.get("brand_counts") or {}).items()
                                               if isinstance(v, int)}
         self._by_base: dict[str, list[str]] | None = None   # kapacitás nélküli kulcs → a változatai (variants)
+        if data.get("kv") != KEY_VERSION and self._keys:
+            self._rekey()
 
+    def _rekey(self) -> None:
+        """A régi kulcsok újraképzése a nevükből (a mostani product_key szerint), és az így egybeeső termékek árainak
+        összevonása (egy hirdetés egyszer, a legutóbb látott alakjában; termékenként legfeljebb MAX_SAMPLES)."""
+        merged: dict[str, dict[str, Any]] = {}
+        for old, entry in self._keys.items():
+            found = self.key(str(entry.get("name") or old))
+            key, label = found if found is not None else (old, str(entry.get("name") or old))
+            target = merged.setdefault(key, {**entry, "name": label, "samples": []})
+            by_url = {listing_key(str(s.get("url") or "")): s for s in target["samples"]}
+            for sample in entry["samples"]:
+                ident = listing_key(str(sample.get("url") or ""))
+                known = by_url.get(ident)
+                if known is None or float(sample.get("last") or 0) > float(known.get("last") or 0):
+                    by_url[ident] = sample
+            target["samples"] = sorted(by_url.values(), key=lambda s: -float(s.get("last") or 0))[:MAX_SAMPLES]
+            target["seen"] = max(float(target.get("seen") or 0), float(entry.get("seen") or 0))
+        self._keys = merged
+        self._dirty = True
     def save(self) -> None:
         with self._lock:
             if not self._dirty:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"keys": self._keys, "brands": sorted(self.brands),
+            tmp.write_text(json.dumps({"kv": KEY_VERSION, "keys": self._keys, "brands": sorted(self.brands),
                                        "brand_counts": self._brand_counts}, ensure_ascii=False, separators=(",", ":")),
                            encoding="utf-8")
             os.replace(tmp, self.path)
@@ -344,13 +404,31 @@ class PriceBook:
     def reference(self, key: str, exclude: str = "") -> dict[str, Any] | None:
         """A szokásos ár egy termékre (_reference). Ha a kulcsban nincs kapacitás (a címből nem derült ki, pl. „RTX 5060
         Ti”), de a terméknek vannak ilyen változatai („… 8gb”, „… 16gb”), óvatosan a legolcsóbb változat szokásos árával
-        számol (a name és a key azé a változaté): így egy 8 GB-os kártya nem látszik olcsó 16 GB-osnak."""
+        számol (a name és a key azé a változaté): így egy 8 GB-os kártya nem látszik olcsó 16 GB-osnak. Ha csak egy
+        kapacitás-változatot ismerünk (a GTX 1080 mind 8 GB-os), a kapacitás nélküli címek ugyanaz a termék (implied)."""
+        base = " ".join(word for word in key.split() if not is_capacity(word))
+        sized = self.variants(base)
+        if base != key:                        # kapacitásos kulcs: ha nincs más változata, a kapacitás nélküliek is
+            return self._reference(key, exclude, also=[] if [v for v in sized if v != key] else [base])
+        if len(sized) == 1:
+            return self._reference(sized[0], exclude, also=[key])
         found = self._reference(key, exclude)
-        variants = self.variants(key)
-        if not variants:
+        if not sized:
             return found
-        options = [option for option in [found, *(self._reference(v, exclude) for v in variants)] if option]
+        options = [option for option in [found, *(self._reference(v, exclude) for v in sized)] if option]
         return min(options, key=lambda option: option["price"]) if options else None
+
+    def family(self, key: str) -> list[tuple[str, str]]:
+        """Egy termék és a kapacitás-változatai az árbázisban: [(kulcs, kapacitás)], a kapacitás nélkülié üres
+        kapacitással; ha csak egy változatot ismerünk, a kapacitás nélküli is ahhoz számít (implied, lásd reference)."""
+        base = " ".join(word for word in key.split() if not is_capacity(word))
+        sized = self.variants(base)
+        with self._lock:
+            out = [(base, "")] if base in self._keys else []
+        out += [(v, " ".join(w for w in v.split() if is_capacity(w))) for v in sized]
+        if len(sized) == 1:
+            out = [(k, out[-1][1]) for k, _size in out]
+        return out
 
     def variants(self, key: str) -> list[str]:
         """A kapacitás nélküli kulcs változatai a kapacitással (az árbázisban lévők); egy kapacitásos kulcsnak nincs."""
@@ -368,12 +446,20 @@ class PriceBook:
                 self._by_base = index
             return list(self._by_base.get(" ".join(words), []))
 
-    def _reference(self, key: str, exclude: str = "") -> dict[str, Any] | None:
+    def _reference(self, key: str, exclude: str = "", also: list[str] | tuple = ()) -> dict[str, Any] | None:
         """A szokásos ár egy kulcsra: a friss árak középértéke (a kilógók nélkül), ha legalább MIN_SAMPLES van, és
         nem szórnak nagyon (price_stats: megbízható). Az exclude hirdetés (pl. maga a jelölt) nem számít bele. A sites:
         melyik oldalakon láttuk ezeket az árakat; a sold: az elkelt (újranézéskor eltűnt) hirdetések középára, ha
-        legalább SOLD_MIN van (a hirdetési árnál többnyire alacsonyabb: ennyiért kel el ténylegesen)."""
+        legalább SOLD_MIN van (a hirdetési árnál többnyire alacsonyabb: ennyiért kel el ténylegesen). also: ugyanennek
+        a terméknek más kulcsai (a kapacitás nélküli címek, reference), az árai ezekből is (egy hirdetés egyszer)."""
         samples = self.samples(key, exclude)
+        if also:
+            have = {listing_key(sample["url"]) for sample in samples}
+            for other in also:
+                for sample in self.samples(other, exclude):
+                    if listing_key(sample["url"]) not in have:
+                        have.add(listing_key(sample["url"]))
+                        samples.append(sample)
         with self._lock:
             name = (self._keys.get(key) or {}).get("name") or key
         stats = price_stats([s["p"] for s in samples])
