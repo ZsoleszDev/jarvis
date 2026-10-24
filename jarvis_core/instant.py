@@ -33,8 +33,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, deal_action, excluded, matches_query, parse_words,
-                    safety_text)
+from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, deal_action, excluded, matches_query, newest_first,
+                    parse_words, safety_text)
 from .feeds import FAST_SITES, FeedError
 from .llm import background_calls
 from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price
@@ -479,6 +479,11 @@ class InstantWatch:
         return len(recent) < INSTANT_HOURLY
 
     def _url(self, alert: dict[str, Any], site: str) -> str:
+        """A figyelt találati oldal címe, a legújabb hirdetésekkel elöl (deals.NEWEST; a Jófogáson, ha nem adtál meg
+        más rendezést)."""
+        return newest_first(self._plain_url(alert, site), site)
+
+    def _plain_url(self, alert: dict[str, Any], site: str) -> str:
         if alert.get("url"):
             return str(alert["url"])
         return self.platforms[site].search_url.format(q=urllib.parse.quote(alert["query"]))
@@ -501,7 +506,10 @@ class InstantWatch:
             self._failed(alert, site, exc)
             return []
         resorted = self.fetcher.sorted_url(url) if hasattr(self.fetcher, "sorted_url") else ""
-        result = self._absorb(alert, site, rows, now, count=True, resorted=resorted)
+        # a Hardveraprón a sorrend nem a címben van: a lista beállítása (feeds.SiteFetcher.view) is a cím része itt
+        view = self.fetcher.view(site) if hasattr(self.fetcher, "view") else ""
+        result = self._absorb(alert, site, rows, now, count=True, resorted=resorted,
+                              used=f"{url}#{view}" if view else url, plain=self._plain_url(alert, site))
         if result is None:                    # közben törölted
             return []
         first, fresh, overflow = result
@@ -515,8 +523,10 @@ class InstantWatch:
             self.hunter.journal.add(f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): elindult, "
                                     f"{len(rows)} hirdetést már ismerek; innentől minden újat felmérek, és ha megéri, "
                                     "szólok." if first != "resort" else
-                                    f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): a legújabb "
-                                    f"hirdetések szerint rendezve nézem; {len(rows)} hirdetést már ismerek.")
+                                    f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): "
+                                    + (f"a lista beállítása: {view}" if view else
+                                       "a legújabb hirdetések szerint rendezve nézem")
+                                    + f"; {len(rows)} hirdetést már ismerek.")
             return []
         self.hunter.tally("new", fresh)
         if self._worker is not None and self._worker.is_alive():
@@ -541,13 +551,15 @@ class InstantWatch:
         return rows
 
     def _absorb(self, alert: dict[str, Any], site: str, rows: list[dict[str, Any]], now: float,
-                count: bool, resorted: str = "") -> tuple[bool | str, list[dict[str, Any]], bool] | None:
+                count: bool, resorted: str = "", used: str = "",
+                plain: str = "") -> tuple[bool | str, list[dict[str, Any]], bool] | None:
         """A letöltött hirdetések a figyelő látottjai közé; visszaadja: első letöltés-e (akkor csak megjegyzi őket; „resort”,
         ha a rendezés váltása miatt), az új (vagy leárazott), illő hirdetéseket, és hogy csupa új volt-e az oldal
         (overflow: lehet, hogy lemaradt valami). count: ez a figyelő egy letöltése (nem a következő oldal): a számlálók
         és a ritmus ebből tanul. resorted: ha a letöltő a „legújabb elöl” rendezésre vált (sorted_url), a következő
-        letöltés megint csak megjegyzi az oldalt (különben a más sorrend miatt minden újnak látszana). None, ha a
-        figyelőt közben törölted."""
+        letöltés megint csak megjegyzi az oldalt (különben a más sorrend miatt minden újnak látszana). used: a letöltött
+        cím; ha más, mint a legutóbbi (pl. egy frissítés óta a legújabb elöl rendezéssel, plain: a régi, rendezés
+        nélküli cím), ez a letöltés is csak megjegyzi az oldalt. None, ha a figyelőt közben törölted."""
         fresh: list[dict[str, Any]] = []
         with self._lock:
             stored = next((a for a in self._data["alerts"] if a.get("id") == alert["id"]), None)
@@ -557,6 +569,11 @@ class InstantWatch:
             first: bool | str = site not in (stored.get("baseline") or [])
             if first and site in (stored.get("resorted") or []):
                 first = "resort"
+            if used and count:
+                urls = stored.setdefault("urls", {})
+                if not first and urls.get(site, plain or used) != used:
+                    first = "resort"                  # más címről (más sorrendben) jött: most csak megjegyzi
+                urls[site] = used
             fresh_rows: list[bool] = []               # a nem kiemelt hirdetések: újak-e (az oldal sorrendjében)
             for row in rows:
                 ident = listing_key(row["url"])

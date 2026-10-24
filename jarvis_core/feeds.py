@@ -37,6 +37,12 @@ HOURLY = 120               # óránként legfeljebb ennyi kérés oldalanként
 SLOW_RESPONSE = 5.0        # másodperc
 SLOW_STEP, SLOW_EASE, SLOW_MAX = 1.5, 0.9, 4.0
 CACHE_MAX = 64             # ennyi találati oldalt jegyez meg (listings max_age)
+# A Hardverapró a lista beállításait (sorrend, oldalméret) nem a címben, hanem a munkamenetben tartja: a lista fölötti
+# menü (data-rios-action-pref-mod) egy kéréssel állítja (a menüpont data-pref mezőivel), és az oldal kiírja, mi az
+# aktuális (az „active” menüpont). A letöltő ezt állítja be a saját munkamenetének: az új hirdetések elöl, 100 egy
+# oldalon. Ha nem sikerül, PREFS_RETRY másodperc múlva próbálja újra (addig az alap sorrenddel tölt).
+LIST_PREFS = {"order": "time", "dir": "d", "block": 100}
+PREFS_RETRY = 6 * 3600
 TIMEOUT = 15.0
 BLOCK_FIRST = 3600         # tiltás után ennyi szünet (másodperc); ismétlésnél a duplája, legfeljebb BLOCK_MAX
 BLOCK_MAX = 86400
@@ -135,6 +141,7 @@ class _TreeBuilder(HTMLParser):
         self.title = ""
         self.next_link = ""                    # <link rel="next">: a találatok következő oldala
         self.options: list[Node] = []           # <option>: egy rendezés-választó elemei (newest_link)
+        self.pref_menus: list[Node] = []        # a lista beállításainak menüje (list_prefs)
         self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -150,6 +157,8 @@ class _TreeBuilder(HTMLParser):
             self._in_title = True
         if tag == "option":
             self.options.append(node)
+        if "data-rios-action-pref-mod" in node.attrs:
+            self.pref_menus.append(node)
         if tag == "link" and "next" in node.attrs.get("rel", "").lower().split() and not self.next_link:
             self.next_link = node.attrs.get("href", "")
         if tag not in VOID:
@@ -309,6 +318,40 @@ def _promoted(card: Node, counts: dict[int, int], total: int) -> bool:
                 return True
         node = node.parent
     return False
+
+
+def list_prefs(tree: _TreeBuilder) -> tuple[str, dict[str, Any], str]:
+    """A lista beállításai az oldalon (a Hardverapró menüje, LIST_PREFS): (a beállító kérés címe, a mostani értékek
+    az aktív menüpontok szerint, pl. {order: time, dir: d, block: 100}, és a feliratuk, pl. „új hirdetések, 100 db”);
+    ("", {}, "") ha az oldalon nincs ilyen menü."""
+    for menu in tree.pref_menus:
+        current: dict[str, Any] = {}
+        labels: list[str] = []
+        stack: list[Node] = [menu]
+        while stack:
+            node = stack.pop()
+            stack.extend(reversed([child for child in node.children if isinstance(child, Node)]))
+            if "active" not in node.attrs.get("class", "").split() or not node.attrs.get("data-pref"):
+                continue
+            try:
+                pref = json.loads(node.attrs["data-pref"])
+            except ValueError:
+                continue
+            if isinstance(pref, dict):
+                current.update(pref)
+                if "order" in pref or "block" in pref:
+                    labels.append(clean(node.text()))
+        return menu.attrs["data-rios-action-pref-mod"], current, ", ".join(label for label in labels if label)
+    return "", {}, ""
+
+
+def prefs_ok(current: dict[str, Any]) -> bool:
+    """A lista a kívánt beállítással jön-e (LIST_PREFS; ennél nagyobb oldal is jó)."""
+    try:
+        return current.get("order") == LIST_PREFS["order"] and current.get("dir") == LIST_PREFS["dir"] and \
+            int(current.get("block") or 0) >= LIST_PREFS["block"]
+    except (TypeError, ValueError):
+        return False
 
 
 def parse_listings(html: str, base_url: str, platform: str = "") -> list[dict[str, Any]]:
@@ -587,6 +630,8 @@ class SiteFetcher:
         self._cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}   # cím → (mikor, hirdetések)
         self._next_pages: dict[str, str] = {}        # találati oldal → a következő oldala (next_page)
         self._sorted: dict[str, str] = {}            # találati oldal → ugyanez a legújabb elöl (newest_link)
+        self._views: dict[str, str] = {}             # oldal → a lista beállítása a legutóbbi oldalon (list_prefs)
+        self._prefs_failed: dict[str, float] = {}    # oldal → mikor nem sikerült beállítani (PREFS_RETRY)
         self.requests = 0                            # összesen (a felületnek)
 
     def handles(self, platform: str) -> bool:
@@ -640,6 +685,21 @@ class SiteFetcher:
             target = self._sorted.get(url) or url   # ha az oldal kínál „legújabb elöl” rendezést, azzal
         final, html = self._fetch(target, platform, check)
         tree = parse(html)
+        setter, current, view = list_prefs(tree)
+        if setter and not prefs_ok(current) and self._may_set_prefs(platform):
+            # a lista nem az új hirdetésekkel elöl (vagy kevés van egy oldalon): beállítja, és újra letölti
+            if self._set_prefs(urllib.parse.urljoin(final, setter), final, platform, check):
+                final, html = self._fetch(target, platform, check)
+                tree = parse(html)
+                setter, current, view = list_prefs(tree)
+            with self._state_lock:
+                if prefs_ok(current):
+                    self._prefs_failed.pop(platform, None)
+                else:
+                    self._prefs_failed[platform] = self.clock()
+        if setter:
+            with self._state_lock:
+                self._views[platform] = view
         rows = listings_of(tree, final, platform)
         with self._state_lock:
             self._next_pages[url] = next_page(tree, final)
@@ -672,6 +732,32 @@ class SiteFetcher:
         with self._state_lock:
             return self._sorted.get(url, "")
 
+    def view(self, platform: str) -> str:
+        """A lista beállítása a legutóbb letöltött oldalon (pl. „új hirdetések, 100 db”), ha az oldal mutatja; üres, ha
+        nem. Ha változik, a figyelő egyszer csak megjegyzi az oldalt (más sorrend, nem új hirdetések)."""
+        with self._state_lock:
+            return self._views.get(platform, "")
+
+    def _may_set_prefs(self, platform: str) -> bool:
+        with self._state_lock:
+            failed = self._prefs_failed.get(platform)
+        return failed is None or self.clock() - failed >= PREFS_RETRY
+
+    def _set_prefs(self, setter: str, page: str, platform: str, check: Callable[[], None]) -> bool:
+        """A lista beállítása (LIST_PREFS) a saját munkamenetnek, ahogy a menü teszi: egy POST a menüpont mezőivel
+        (a munkamenet sütije a requests.Session-ben marad). Igaz, ha a kérés átment (hogy hatott-e, azt az újra
+        letöltött oldal mutatja meg). Egy elutasított kérés nem tiltás: az oldal az alap sorrenddel tovább megy."""
+        if not self._ours(setter, platform):
+            return False
+        origin = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(page))
+        try:
+            _final, status, _text = self._send(setter, platform, check, data={k: str(v) for k, v in LIST_PREFS.items()},
+                                               extra={"X-Requested-With": "XMLHttpRequest", "Referer": page,
+                                                      "Origin": origin})
+        except FeedError:
+            return False
+        return status < 400
+
     def next_page(self, url: str) -> str:
         """A legutóbb letöltött találati oldal (url) következő oldala, ahogy az oldal linkeli; üres, ha nincs."""
         with self._state_lock:
@@ -688,6 +774,22 @@ class SiteFetcher:
         if not self.usable(platform):
             raise FeedError("Ez az oldal most csak a böngészővel megy (tiltott, vagy nem találtam rajta hirdetést).",
                             "blocked")
+        final, status, html = self._send(url, platform, check)
+        if status in BLOCKED_STATUS or (status < 400 and len(html) < 20000 and CHALLENGE_RE.search(html[:20000])
+                                        and not PRICE_RE.search(html)):
+            self._block(platform, f"robot-ellenőrzés vagy tiltás ({status})")
+            raise FeedError("Az oldal robot-ellenőrzést kér, vagy tilt: egy ideig csak a böngészővel nézem.", "blocked")
+        if status >= 400:
+            raise FeedError(f"Az oldal hibát adott ({status}).", "http")
+        with self._state_lock:
+            if platform in self._blocked:
+                self._blocked[platform]["until"] = 0       # újra megy: a következő tiltás megint rövidebb
+                self._blocked[platform]["strikes"] = max(0, int(self._blocked[platform].get("strikes", 1)) - 1)
+        return final, html
+
+    def _send(self, url: str, platform: str, check: Callable[[], None], data: dict[str, str] | None = None,
+              extra: dict[str, str] | None = None) -> tuple[str, int, str]:
+        """Egy kérés a tempó szerint: oldalanként egyszerre egy, szünettel, az óránkénti kereten belül."""
         with self._locks[platform]:              # oldalanként egyszerre egy kérés
             while True:
                 check()
@@ -707,7 +809,7 @@ class SiteFetcher:
                 self.requests += 1
             started = time.monotonic()
             try:
-                final, status, html = self._download(url, platform)
+                return self._download(url, platform, data, extra)
             finally:
                 with self._state_lock:
                     slow = self._slow.get(platform, 1.0)
@@ -715,17 +817,6 @@ class SiteFetcher:
                         else max(1.0, slow * SLOW_EASE)
                     self._slow[platform] = slow
                     self._next[platform] = self.clock() + self.rng.uniform(*self.gap) * slow
-        if status in BLOCKED_STATUS or (status < 400 and len(html) < 20000 and CHALLENGE_RE.search(html[:20000])
-                                        and not PRICE_RE.search(html)):
-            self._block(platform, f"robot-ellenőrzés vagy tiltás ({status})")
-            raise FeedError("Az oldal robot-ellenőrzést kér, vagy tilt: egy ideig csak a böngészővel nézem.", "blocked")
-        if status >= 400:
-            raise FeedError(f"Az oldal hibát adott ({status}).", "http")
-        with self._state_lock:
-            if platform in self._blocked:
-                self._blocked[platform]["until"] = 0       # újra megy: a következő tiltás megint rövidebb
-                self._blocked[platform]["strikes"] = max(0, int(self._blocked[platform].get("strikes", 1)) - 1)
-        return final, html
 
     def _ours(self, url: str, platform: str) -> bool:
         if self.domains is None:
@@ -735,15 +826,19 @@ class SiteFetcher:
         return parts.scheme in ("http", "https") and any(host == d or host.endswith("." + d)
                                                          for d in self.domains.get(platform, ()))
 
-    def _download(self, url: str, platform: str) -> tuple[str, int, str]:
+    def _download(self, url: str, platform: str, data: dict[str, str] | None = None,
+                  extra: dict[str, str] | None = None) -> tuple[str, int, str]:
         headers = {"User-Agent": USER_AGENT, "Accept-Language": "hu-HU,hu;q=0.9,en;q=0.7",
-                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", **(extra or {})}
         try:
             if self._get is not None:
-                response = self._get(url, headers=headers, timeout=TIMEOUT)
+                response = self._get(url, headers=headers, timeout=TIMEOUT, **({"data": data} if data else {}))
             else:
                 session = self._sessions.setdefault(platform, requests.Session())
-                response = session.get(url, headers=headers, timeout=TIMEOUT, stream=True)
+                if data is not None:     # a lista beállítása (_set_prefs): a munkamenet sütije a Session-ben
+                    response = session.post(url, data=data, headers=headers, timeout=TIMEOUT, stream=True)
+                else:
+                    response = session.get(url, headers=headers, timeout=TIMEOUT, stream=True)
             with response:
                 body = b""
                 for chunk in response.iter_content(65536):
