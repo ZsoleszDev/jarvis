@@ -44,6 +44,9 @@
 - Második átnézés javításai: más kapacitás az árösszehasonlításban sem hasonló (kapacitás nélküli keresésnél a
   legolcsóbb változat); a teljes találati oldal (100 hirdetés) és az oldal saját „legújabb elöl” rendezése; az
   értékelő szál Szünet alatt vár (a feladat megmarad), a szüneteltetett figyelőé a folytatásakor jön.
+- Kiemelt hirdetések: a kártyák jelölése (osztály, „Kiemelt”/„Előresorolt” címke, a kiemeltek blokkja), a következő
+  oldal az oldal alja szerint (a kiemeltek nem számítanak), a kiemeltek a sor végén; a „legújabb elöl” rendezés a
+  böngészős olvasásnál is (Vatera), egy választó értékéből is; a címben megadott rendezést nem írja át.
 
 ## Élesben kipróbálandó
 - Az Android-alkalmazás új része (a megérő hirdetés értesítése: rezgés, hang, ismétlés, a találat ablaka, a vágólap) a
@@ -74,7 +77,10 @@
   link vagy választóelem ugyanazon az oldalon; feeds.newest_link), és ha van, azzal tölt; a teljes oldalt (100
   hirdetés) nézi; és ha egy letöltésen csupa új van, a következő oldal is jön (rel=next vagy „Következő”/„›”).
   Élesben megnézendő, hogy a valódi oldal feliratai illenek-e (a naplóban: „a legújabb hirdetések szerint rendezve
-  nézem”); ha nem, a rendezés paraméterét a keresés címébe kell írni.
+  nézem”); ha nem, a rendezés paraméterét a keresés címébe kell írni (a legjobb: a három oldal „legújabb elöl”
+  címét beírni a deals.NEWEST-be, mint a Vintedét).
+- A kiemelt kártyák jele a valódi oldalakon (feeds._PROMO_CLASS, _PROMO_TEXT): ha egy oldal másképp jelöli, a kiemeltek
+  csak nem kerülnek a sor végére (az újnak látás a webcím szerint megy, arra nincs hatással).
 - Az ármező felismerése („price” osztályú elem a kártyán) a valódi Hardverapró- és Jófogás-kártyákon.
 - Alku: hány ajánlatot fogadnak el; a HAGGLE_DAYS (7 nap), a HAGGLE_MAX (25%) és a 10%-os minimum haszon hangolása.
   Az árbázis régi (kapacitás nélküli) kulcsai vegyesek maradnak, amíg ki nem öregednek (45 nap).
