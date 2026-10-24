@@ -68,6 +68,18 @@ class ParseTests(unittest.TestCase):
         self.assertIn("Budapest", rows[0]["text"])
         self.assertNotIn("auction", rows[0])
 
+    def test_the_time_before_the_price_is_not_part_of_it(self):
+        """A valódi Hardverapró-kártyán az idő az ár előtt is lehet: a „ma 12:54 997 Ft” ára 997 Ft, nem 54 997 (az ármezőből,
+        és ha nincs ilyen, a szövegből is)."""
+        cards = """<ul><li class="media"><a href="https://hardverapro.hu/apro/rtx_1/friss.html" title="RTX 3060">RTX 3060</a>
+          <div class="uad-ultralight">ma 12:54</div><div class="uad-price">997 Ft</div></li>
+          <li class="media"><a href="https://hardverapro.hu/apro/rtx_2/friss.html" title="RTX 3070">RTX 3070</a>
+          <span>tegnap 9:45</span> <span>500 Ft</span></li>
+          <li class="media"><a href="https://hardverapro.hu/apro/rtx_3/friss.html" title="RTX 3080">RTX 3080</a>
+          <span>ma 13:05</span> <span>45 500 Ft</span></li></ul>"""
+        rows = parse_listings(ha_page([cards]), "https://hardverapro.hu/aprok/hardver/index.html", "hardverapro")
+        self.assertEqual([r["price"] for r in rows], [997, 500, 45500])
+
     def test_jofogas_cards_and_the_struck_old_price(self):
         page = "<html><body>" + jf_card(1, "iPhone 13 128GB", "185 000") + jf_card(2, "PS5 kontroller", "14 500") + \
             "</body></html>"
@@ -434,6 +446,76 @@ class InstantTests(InstantCase):
         [(_kind, title, text, _extra)] = self.notices
         self.assertEqual(title, "Megéri: Sony WH-1000XM4 fejhallgató fekete")
         self.assertIn("A szokásos ára kb. 70 800 Ft, 8 hasonló alapján, Hardverapró és Jófogás", text)
+
+    def test_candidates_beyond_the_round_are_kept_for_later(self):
+        """Az ár-ellenőrzésre váró jelöltekből egy körben EXPLORE_PICKS (3) kerül sorra; a többi nem vész el (eddig a
+        figyelő látottnak jegyezte, és többé nem jött elő), hanem a következő körben jön."""
+        for n in range(1, 6):
+            self.hunter.book.add([{"text": f"Makita DHP48{n} fúró {k}", "price": 40000 + k * 500,
+                                   "url": f"https://www.jofogas.hu/b/makita{n}_{k}.htm", "platform": "jofogas"}
+                                  for k in range(5)])
+        self.watch.add("https://hardverapro.hu/aprok/szerszam/index.html")
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi fúró", "2 000 Ft")], "szerszam/index")
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(40 + n, f"Makita DHP48{n} fúró", "20 000 Ft") for n in range(1, 6)], "szerszam/index")
+        self.watch.tick()
+
+        def unsure() -> int:
+            return len([e for e in self.hunter.journal.entries() if e["text"].startswith("Nem biztos")])
+
+        self.assertEqual((unsure(), self.watch.state()["waiting"]), (3, 2), "három most, kettő vár")
+        self.watch.tick()
+        self.assertEqual((unsure(), self.watch.state()["waiting"]), (5, 0), "a maradék is sorra került")
+
+    def test_a_full_page_of_new_listings_reads_the_next_page_too(self):
+        """Ha két letöltés között több új hirdetés jött, mint amennyi egy oldalon elfér (csupa új az oldal), a következő
+        oldalt is megnézi, ahogy az oldal linkeli (a paraméterét nem kell kitalálni); ha van ismert hirdetés az oldalon,
+        nem."""
+        url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        alert = self.watch.add(url)["alerts"][0]
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:1], "videokartya/index.html")
+        self.watch.tick()
+        self.later()
+        first = ha_page([ha_card(100 + n, f"Videókártya {n}", "1 000 Ft") for n in range(12)]).replace(
+            "<head>", '<head><link rel="next" href="/aprok/hardver/videokartya/index.html?offset=12">')
+        second = ha_page([ha_card(200 + n, f"Videókártya {n}", "1 000 Ft") for n in range(3)] + HA_CARDS[:1])
+        self.net.pages = {"index.html?offset=12": (200, second), "videokartya/index.html": (200, first)}
+        self.watch.tick()
+        self.assertEqual(len([u for _t, u in self.net.asked if u.endswith("?offset=12")]), 1, "a következő oldal is")
+        seen = self.watch._data["seen"][alert["id"]]
+        self.assertEqual(len(seen), 1 + 12 + 3, "a második oldal hirdetéseit is látottnak jegyezte")
+        self.later()
+        self.net.pages = {"videokartya/index.html": (200, first)}
+        asked = len(self.net.asked)
+        self.watch.tick()
+        self.assertEqual(len(self.net.asked), asked + 1, "ismert hirdetések: nem lapoz tovább")
+
+    def test_the_evaluation_runs_beside_the_downloads(self):
+        """Az új hirdetések értékelése (a hirdetés oldala, a modellkérdés) a saját szálán megy: a letöltés szála csak
+        beteszi őket, és mehet tovább."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:2])
+        self.net.pages["_7/friss"] = page_html("Hibátlan.")
+        self.watch.start_worker()
+        try:
+            self.assertEqual(self.watch.tick(), 1)
+            deadline = time.monotonic() + 5
+            while not self.notices and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual"])
+            page = [thread for thread, url in self.net.by_thread if url.endswith("_7/friss.html")]
+            self.assertEqual(page, ["jarvis-azonnali-ertekeles"], "a hirdetés oldalát az értékelő szál nézte meg")
+        finally:
+            self.watch.stop()
 
     def test_waits_for_the_model_while_you_use_jarvis(self):
         """Amíg dolgozol a Jarvisszal, a modellt nem kérdezi: a modell nélkül is felmérhető megérőről rögtön szól (a

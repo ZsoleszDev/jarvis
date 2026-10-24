@@ -45,7 +45,8 @@ EMPTY_LIMIT = 3
 MAX_ROWS = 40
 # A hirdetések címe az oldalon (ha ilyen link is van a kártyák között, csak ezek számítanak; ha egy sem, mind).
 LISTING_URL = {"hardverapro": re.compile(r"/apro/[^/]+/"), "jofogas": re.compile(r"_\d+\.htm")}
-_PRICE = r"(\d{1,3}(?:[   .]\d{3})+|\d{2,7})(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])"
+# Az összeg nem kezdődhet egy szám közepén, és nem lehet egy időpont perce: a „ma 12:54 997 Ft” ára 997 Ft, nem 54 997.
+_PRICE = r"(?<![\d:])(\d{1,3}(?:[   .]\d{3})+|\d{2,7})(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])"
 PRICE_RE = re.compile(_PRICE, re.IGNORECASE)
 FIXED_RE = re.compile(r"(?:villámár|fix ?ár|azonnal megvehető|buy it now)\D{0,4}" + _PRICE, re.IGNORECASE)
 AUCTION_RE = re.compile(r"(licit|aukció|árverés|jelenlegi ár|kikiáltási ár|\bbids?\b|auction)", re.IGNORECASE)
@@ -132,6 +133,7 @@ class _TreeBuilder(HTMLParser):
         self.shared_images: list[str] = []
         self.ld_json: list[str] = []
         self.title = ""
+        self.next_link = ""                    # <link rel="next">: a találatok következő oldala
         self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -145,6 +147,8 @@ class _TreeBuilder(HTMLParser):
             self.shared_images.append(node.attrs.get("content", ""))
         if tag == "title":
             self._in_title = True
+        if tag == "link" and "next" in node.attrs.get("rel", "").lower().split() and not self.next_link:
+            self.next_link = node.attrs.get("href", "")
         if tag not in VOID:
             self.stack.append(node)
 
@@ -184,9 +188,32 @@ def _amount(text: str) -> int:
     return int(re.sub(r"\D", "", text) or 0)
 
 
+_NEXT_TEXT = re.compile(r"^(következő( oldal)?|következő »|tovább|next|›|»|>|>>)$", re.IGNORECASE)
+
+
+def next_page(tree: _TreeBuilder, base_url: str) -> str:
+    """A találatok következő oldala, ahogy az oldal maga linkeli (rel="next", vagy egy „Következő”, „›”, „»” feliratú
+    link), ugyanazon a gépen; üres, ha nincs. Így nem kell kitalálni, milyen paraméterrel lapoz az oldal."""
+    found = [tree.next_link] if tree.next_link else []
+    for anchor in tree.anchors:
+        label = clean(anchor.text() or anchor.attrs.get("aria-label") or anchor.attrs.get("title") or "")
+        if "next" in anchor.attrs.get("rel", "").lower().split() or _NEXT_TEXT.match(label):
+            found.append(anchor.attrs.get("href", ""))
+    host = urllib.parse.urlsplit(base_url).hostname
+    for href in found:
+        url = urllib.parse.urljoin(base_url, href.strip())
+        if url.startswith(("http://", "https://")) and url != base_url and urllib.parse.urlsplit(url).hostname == host:
+            return url
+    return ""
+
+
 def parse_listings(html: str, base_url: str, platform: str = "") -> list[dict[str, Any]]:
     """Egy találati oldal hirdetései: [{text, price, url, auction?}], mint a böngészőben (LISTINGS_JS)."""
-    tree = parse(html)
+    return listings_of(parse(html), base_url, platform)
+
+
+def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[dict[str, Any]]:
+    """A parse_listings a már feldolgozott oldalból (így a következő oldal linkje is ugyanebből jön)."""
     cards: dict[int, dict[str, Any]] = {}
     for anchor in tree.anchors:
         href = urllib.parse.urljoin(base_url, anchor.attrs.get("href", ""))
@@ -229,7 +256,8 @@ def parse_listings(html: str, base_url: str, platform: str = "") -> list[dict[st
         if card["href"] in seen:
             continue
         text = card["node"].text_without_struck()
-        match = FIXED_RE.search(text) or PRICE_RE.search(text) or PRICE_RE.search(card["label"])
+        match = FIXED_RE.search(text) or PRICE_RE.search(_price_text(card["node"])) or PRICE_RE.search(text) or \
+            PRICE_RE.search(card["label"])
         if not match:
             continue
         price = _amount(match.group(1))
@@ -250,6 +278,28 @@ def parse_listings(html: str, base_url: str, platform: str = "") -> list[dict[st
     if pattern is not None and any(pattern.search(e["url"]) for e in out):
         out = [e for e in out if pattern.search(e["url"])]
     return out or _ld_listings(tree.ld_json, base_url)
+
+
+_PRICE_CLASS = re.compile(r"price", re.IGNORECASE)
+
+
+def _price_text(card: Node) -> str:
+    """A kártya saját ármezője (egy „price” osztályú elem, pl. a Hardverapró uad-price-a, a Jófogás item-price-a), a
+    régi (áthúzott, „old”) ár nélkül; üres, ha nincs ilyen. Ebből biztosabb az ár, mint a kártya teljes szövegéből (ott
+    egy szomszédos szám, pl. az időpont, összeolvadhat vele)."""
+    queue = [card]
+    while queue:
+        node = queue.pop(0)
+        for child in node.children:
+            if not isinstance(child, Node) or child.tag in NO_TEXT:
+                continue
+            classes = child.attrs.get("class", "")
+            if _PRICE_CLASS.search(classes) and "old" not in classes.lower():
+                text = child.text_without_struck()
+                if PRICE_RE.search(text):
+                    return text
+            queue.append(child)
+    return ""
 
 
 def _ld_listings(blocks: list[str], base_url: str) -> list[dict[str, Any]]:
@@ -420,6 +470,7 @@ class SiteFetcher:
         self._empty_until: dict[str, float] = {}
         self._slow: dict[str, float] = {}            # oldal → a szünetek szorzója (lassú válasz után nagyobb)
         self._cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}   # cím → (mikor, hirdetések)
+        self._next_pages: dict[str, str] = {}        # találati oldal → a következő oldala (next_page)
         self.requests = 0                            # összesen (a felületnek)
 
     def handles(self, platform: str) -> bool:
@@ -470,7 +521,12 @@ class SiteFetcher:
             if cached is not None and now - cached[0] <= max_age:
                 return [dict(row) for row in cached[1]]
         final, html = self._fetch(url, platform, check)
-        rows = parse_listings(html, final, platform)
+        tree = parse(html)
+        rows = listings_of(tree, final, platform)
+        with self._state_lock:
+            self._next_pages[url] = next_page(tree, final)
+            if len(self._next_pages) > CACHE_MAX:
+                self._next_pages.pop(next(iter(self._next_pages)))
         if rows:
             with self._state_lock:
                 self._cache[url] = (self.clock(), [dict(row) for row in rows])
@@ -488,6 +544,11 @@ class SiteFetcher:
         if not rows:
             raise FeedError("A letöltött oldalon nem találtam hirdetést.", "empty")
         return rows
+
+    def next_page(self, url: str) -> str:
+        """A legutóbb letöltött találati oldal (url) következő oldala, ahogy az oldal linkeli; üres, ha nincs."""
+        with self._state_lock:
+            return self._next_pages.get(url, "")
 
     def page(self, url: str, platform: str, check: Callable[[], None] = lambda: None) -> dict[str, Any]:
         """Egy hirdetés oldala böngésző nélkül (mint a browser.look): cím, szöveg, rövid darabok, feliratok."""

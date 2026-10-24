@@ -45,6 +45,7 @@ public class NotifyService extends Service {
     static final String CHANNEL_NEWS = "ertesitesek";
     static final String CHANNEL_DEAL = "megero-hirdetes";
     static final String CHANNEL_DEAL_QUIET = "megero-hirdetes-csendes";
+    static final String CHANNEL_HAGGLE = "alkukepes-hirdetes";
     static final long ALERT_MS = 2 * 60 * 1000;     // ennyi ideig rezeg / csenget egyfolytában
     static final long QUIET_MS = 10 * 60 * 1000;    // utána ennyi szünet
     static final int ALERT_ROUNDS = 6;              // legfeljebb ennyiszer (kb. egy óra), ha addig nem nyitod meg
@@ -100,8 +101,12 @@ public class NotifyService extends Service {
         NotificationChannel dealQuiet = new NotificationChannel(CHANNEL_DEAL_QUIET, "Megérő hirdetés (szünetben)",
                 NotificationManager.IMPORTANCE_LOW);
         dealQuiet.setDescription("A megérő hirdetés értesítése a két riasztás közti szünetben (hang és rezgés nélkül).");
+        NotificationChannel haggle = new NotificationChannel(CHANNEL_HAGGLE, "Alkuképes hirdetés",
+                NotificationManager.IMPORTANCE_DEFAULT);
+        haggle.setDescription("Régóta fent lévő, kicsit drága hirdetés, amire érdemes ajánlatot tenni: egyszer szól, "
+                + "nem riaszt.");
         context.getSystemService(NotificationManager.class).createNotificationChannels(
-                Arrays.asList(link, confirm, news, deal, dealQuiet));
+                Arrays.asList(link, confirm, news, deal, dealQuiet, haggle));
     }
 
     static PendingIntent openApp(Context context) {
@@ -311,6 +316,24 @@ public class NotifyService extends Service {
                 .setAutoCancel(true);
     }
 
+    /** Az alkuképes hirdetés értesítése (saját csatorna, egyszer szól): rábökve a találat ablaka az ajánlattal. */
+    private Notification.Builder haggleBuilder(int id, JSONObject notice) {
+        Intent intent = new Intent(this, MainActivity.class).setAction(MainActivity.ACTION_DEAL)
+                .putExtra("deal", notice.optString("haggle")).putExtra("notification", id)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        PendingIntent open = PendingIntent.getActivity(this, id, intent,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        String text = notice.optString("text");
+        return new Notification.Builder(this, CHANNEL_HAGGLE)
+                .setSmallIcon(R.drawable.ic_notify)
+                .setContentTitle(notice.optString("title", "Alku"))
+                .setContentText(text)
+                .setStyle(new Notification.BigTextStyle().bigText(text))
+                .setContentIntent(open)
+                .setCategory(Notification.CATEGORY_RECOMMENDATION)
+                .setAutoCancel(true);
+    }
+
     /** Riasztás: ALERT_MS ideig ismétlődő rezgés (és hang), aztán szünet (quiet). Fő szálon fut. */
     private void dealAlert(int id, JSONObject notice) {
         NotificationManager manager = getSystemService(NotificationManager.class);
@@ -402,6 +425,13 @@ public class NotifyService extends Service {
             JSONObject notice = event.optJSONObject("notice");
             int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
             timers.post(() -> dealAlert(id, notice));          // megérő hirdetés: akkor is, ha az ablak nyitva van
+        } else if ("notification".equals(type) && event.optJSONObject("notice") != null
+                && !event.optJSONObject("notice").optString("haggle").isEmpty()) {
+            JSONObject notice = event.optJSONObject("notice");
+            if (!MainActivity.visible && !notice.optBoolean("quiet")) {   // alkuképes: egyszer szól, nem riaszt
+                int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
+                manager.notify(id, haggleBuilder(id, notice).build());
+            }
         } else if ("notification".equals(type) && !MainActivity.visible) {
             JSONObject notice = event.optJSONObject("notice");
             if (notice != null && !notice.optBoolean("quiet")) {   // a nem fontos csak az alkalmazás listájában

@@ -36,6 +36,7 @@ REVISIT_AGAIN = 3 * 86400  # ha akkor még fent volt, ennyi múlva újra
 REVISIT_UNTIL = 30 * 86400 # ennyi után már nem nézi (ami egy hónapja fent van, az lassan kel)
 SLOW_DAYS = 14             # ennyi nap után is fent: lassan kel
 SOLD_MIN = 3               # ennyi elkelt (újranézéskor eltűnt) hirdetés ára kell az elkelt árhoz
+PRICE_CUT = 0.03           # ennyivel olcsóbb lett egy már látott hirdetés: leárazta
 SLOW_RATE = 0.25           # ha az újranézett hirdetéseknek legfeljebb ennyi része tűnt el: lassan kel
 
 # Márkák (ékezet nélkül, kisbetűvel; a több szavasak egybeírva, lásd _ALIASES).
@@ -118,11 +119,42 @@ def usable(text: str) -> bool:
     return not any(_FOR_IT.match(w) for w in _words(text))
 
 
+_CAPACITY = re.compile(r"^(\d{1,4})(gb|tb)$")
+
+
+def capacities(words: list[str]) -> list[str]:
+    """A tárhely vagy a memória mérete a cím szavaiból („16gb”, „1tb”; a „16 GB” két szóban is), egységes alakban (1000
+    GB = 1 TB). Ez a termék változata (RTX 5060 Ti 8 vagy 16 GB, 500 GB-os vagy 1 TB-os SSD, 128 vagy 256 GB-os
+    iPhone), ami az árát lényegesen befolyásolja."""
+    out: list[str] = []
+    for index, word in enumerate(words):
+        match = _CAPACITY.match(word)
+        if match:
+            number, unit = int(match.group(1)), match.group(2)
+        elif word.isdigit() and len(word) <= 4 and index + 1 < len(words) and words[index + 1] in ("gb", "tb"):
+            number, unit = int(word), words[index + 1]
+        else:
+            continue
+        if number <= 0:
+            continue
+        if unit == "gb" and number >= 1000 and number % 1000 == 0:
+            number, unit = number // 1000, "tb"
+        token = f"{number}{unit}"
+        if token not in out:
+            out.append(token)
+    return out
+
+
+def is_capacity(word: str) -> bool:
+    return bool(_CAPACITY.match(word))
+
+
 def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> tuple[str, str] | None:
     """A termékkulcs egy hirdetés címéből: (kulcs, név). A kulcs a rendezett szavak (így a sorrend nem számít), a név
     ahogy a címben jönnek. Benne van a termékcsalád (vagy, ha nincs, a márka), a típusjel (szám vagy számot tartalmazó
-    szó), a típus jelzői (Ti, Pro, OLED…) és a fajtája (kontroller, játék). None, ha a címből nem derül ki biztosan a
-    termék (pl. nincs benne típusjel). brands: a tanult márkák (a BRANDS mellé)."""
+    szó), a típus jelzői (Ti, Pro, OLED…), a fajtája (kontroller, játék), és ha a címben benne van, a kapacitás (16gb,
+    1tb: más változat, más ár). None, ha a címből nem derül ki biztosan a termék (pl. nincs benne típusjel), vagy kettőnél
+    több kapacitás van benne (több termék). brands: a tanult márkák (a BRANDS mellé)."""
     words = _words(text)
     picked: list[str] = []
     known = BRANDS | brands if brands else BRANDS
@@ -164,7 +196,10 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         return None
     if len(picked) == 1 and not (model and len(picked[0]) >= 5 and not picked[0].isdigit()):
         return None
-    return " ".join(sorted(picked)), " ".join(picked)
+    sizes = capacities(words)
+    if len(sizes) > 2:
+        return None
+    return " ".join(sorted(picked + sizes)), " ".join(picked + sizes)
 
 
 # Ezek a szavak a modell által adott név elején sem márkák (nem tanulja meg őket).
@@ -199,6 +234,7 @@ class PriceBook:
         self.brands: set[str] = {str(b) for b in data.get("brands") or [] if isinstance(b, str)}
         self._brand_counts: dict[str, int] = {str(k): int(v) for k, v in (data.get("brand_counts") or {}).items()
                                               if isinstance(v, int)}
+        self._by_base: dict[str, list[str]] | None = None   # kapacitás nélküli kulcs → a változatai (variants)
 
     def save(self) -> None:
         with self._lock:
@@ -223,7 +259,10 @@ class PriceBook:
         if found is None:
             return ""
         wanted = set(found[0].split())
-        return " ".join(token for token in text.split() if set(_words(token)) & wanted) or found[1]
+        picked = [token for token in text.split() if set(_words(token)) & wanted]
+        have = set(_words(" ".join(picked)))
+        sizes = [size.upper() for size in capacities(_words(text)) if size not in have]   # a „16 GB” két szóban
+        return " ".join(picked + sizes) if picked else found[1]
 
     def learn_name(self, name: str) -> str:
         """Öntanulás: ha a modell egy terméket olyan márkával nevez meg, amit a kulcsfelismerés nem ismer (és emiatt
@@ -259,12 +298,17 @@ class PriceBook:
                 if found is None:
                     continue
                 key, label = found
+                if key not in self._keys:
+                    self._by_base = None       # új termék: a változatok jegyzéke újraépül
                 entry = self._keys.setdefault(key, {"name": label, "samples": []})
                 ident = listing_key(url)
                 sample = next((s for s in entry["samples"] if listing_key(s.get("url", "")) == ident), None)
                 if sample is None:
                     sample = {"at": now, "url": url, "site": str(row.get("platform") or "")}
                     entry["samples"].append(sample)
+                elif sample.get("p") and price < int(sample["p"]) * (1 - PRICE_CUT):
+                    sample["cuts"] = int(sample.get("cuts") or 0) + 1     # leárazta (az alkuhoz: engedni szokott)
+                    sample.setdefault("p0", int(sample["p"]))
                 sample.update(p=price, last=now)
                 sample.pop("gone", None)
                 if len(entry["samples"]) > MAX_SAMPLES:
@@ -275,22 +319,52 @@ class PriceBook:
             if len(self._keys) > MAX_KEYS:
                 for key in sorted(self._keys, key=lambda k: float(self._keys[k].get("seen") or 0))[:len(self._keys) - MAX_KEYS]:
                     self._keys.pop(key, None)
+                self._by_base = None
             self._dirty = self._dirty or bool(added)
         return added
 
     def samples(self, key: str, exclude: str = "") -> list[dict[str, Any]]:
-        """Egy termék friss árai (MAX_AGE-en belül látva): {p: ár, site: oldal, url}. Az exclude hirdetés (pl. maga a
-        jelölt) nincs köztük."""
+        """Egy termék friss árai (MAX_AGE-en belül látva): {p: ár, site: oldal, url, gone, at: először látva, last:
+        utoljára látva, cuts: hányszor árazta le, p0: az első ára}. Az exclude hirdetés (pl. maga a jelölt) nincs
+        köztük."""
         now = self.clock()
         skip = listing_key(exclude) if exclude else ""
         with self._lock:
             return [{"p": int(s["p"]), "site": str(s.get("site") or ""), "url": str(s.get("url") or ""),
-                     "gone": bool(s.get("gone"))}
+                     "gone": bool(s.get("gone")), "at": float(s.get("at") or 0), "last": float(s.get("last") or 0),
+                     "cuts": int(s.get("cuts") or 0), "p0": int(s.get("p0") or s["p"])}
                     for s in (self._keys.get(key) or {}).get("samples") or []
                     if now - float(s.get("last") or 0) <= MAX_AGE and not (skip and listing_key(s.get("url", "")) == skip)]
 
     def reference(self, key: str, exclude: str = "") -> dict[str, Any] | None:
-        """A szokásos ár egy termékre: a friss árak középértéke (a kilógók nélkül), ha legalább MIN_SAMPLES van, és
+        """A szokásos ár egy termékre (_reference). Ha a kulcsban nincs kapacitás (a címből nem derült ki, pl. „RTX 5060
+        Ti”), de a terméknek vannak ilyen változatai („… 8gb”, „… 16gb”), óvatosan a legolcsóbb változat szokásos árával
+        számol (a name és a key azé a változaté): így egy 8 GB-os kártya nem látszik olcsó 16 GB-osnak."""
+        found = self._reference(key, exclude)
+        variants = self.variants(key)
+        if not variants:
+            return found
+        options = [option for option in [found, *(self._reference(v, exclude) for v in variants)] if option]
+        return min(options, key=lambda option: option["price"]) if options else None
+
+    def variants(self, key: str) -> list[str]:
+        """A kapacitás nélküli kulcs változatai a kapacitással (az árbázisban lévők); egy kapacitásos kulcsnak nincs."""
+        words = key.split()
+        if any(is_capacity(word) for word in words):
+            return []
+        with self._lock:
+            if self._by_base is None:
+                index: dict[str, list[str]] = {}
+                for other in self._keys:
+                    parts = other.split()
+                    base = [word for word in parts if not is_capacity(word)]
+                    if len(base) < len(parts):
+                        index.setdefault(" ".join(base), []).append(other)
+                self._by_base = index
+            return list(self._by_base.get(" ".join(words), []))
+
+    def _reference(self, key: str, exclude: str = "") -> dict[str, Any] | None:
+        """A szokásos ár egy kulcsra: a friss árak középértéke (a kilógók nélkül), ha legalább MIN_SAMPLES van, és
         nem szórnak nagyon (price_stats: megbízható). Az exclude hirdetés (pl. maga a jelölt) nem számít bele. A sites:
         melyik oldalakon láttuk ezeket az árakat; a sold: az elkelt (újranézéskor eltűnt) hirdetések középára, ha
         legalább SOLD_MIN van (a hirdetési árnál többnyire alacsonyabb: ennyiért kel el ténylegesen)."""
@@ -390,6 +464,10 @@ class PriceBook:
                 out.append((key, speed))
         out.sort(key=lambda kv: (-kv[1]["sold"], kv[1]["days"]))
         return out[:limit]
+
+    def keys(self) -> list[str]:
+        with self._lock:
+            return list(self._keys)
 
     def stats(self) -> dict[str, int]:
         with self._lock:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import random
 import re
 import secrets
@@ -51,6 +52,7 @@ LINK_CHECK = 30            # ennyi másodpercenként nézi meg, változtak-e a k
 MAX_SEEN = 500             # figyelőnként ennyi látott hirdetést jegyez meg
 MAX_HITS = 60
 MAX_ROWS = 30              # egy letöltésből ennyi hirdetést néz (az oldal eleje: a legújabbak)
+OVERFLOW_MIN = 10          # ha egy letöltésen legalább ennyi, és csupa új hirdetés van, a következő oldalt is megnézi
 MAX_WAITING = 60           # ennyi hirdetés várhat a modellre
 WAIT_MAX = 1800            # ennyi ideig (másodperc); ami addig sem került sorra, az kimarad
 TICK = 2.0
@@ -103,6 +105,10 @@ class InstantWatch:
         self._linked_at = float("-inf")        # mikor nézte meg utoljára a kereséseket (link_searches)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Az új hirdetések értékelése (árbázis, modell, a hirdetés oldala) a saját szálán, hogy egy lassú értékelés ne
+        # késleltesse a következő letöltést (start; a tesztekben, ha nem indul el, a letöltés szálán megy).
+        self._jobs: queue.Queue = queue.Queue()
+        self._worker: threading.Thread | None = None
         self._data = self._load()
 
     # --- tárolás ---
@@ -306,13 +312,37 @@ class InstantWatch:
         if self._thread is None and self.fetcher is not None and self.platforms:
             self._thread = threading.Thread(target=self._loop, name="jarvis-azonnali", daemon=True)
             self._thread.start()
+            self.start_worker()
+
+    def start_worker(self) -> None:
+        """Az értékelő szál: a letöltés szála csak beteszi az új hirdetéseket, ez méri fel őket (DealHunter.appraise)."""
+        if self._worker is None or not self._worker.is_alive():
+            self._worker = threading.Thread(target=self._evaluate, name="jarvis-azonnali-ertekeles", daemon=True)
+            self._worker.start()
+
+    def _evaluate(self) -> None:
+        with background_calls():       # a modellhívásai háttérhívások: a feltöltés és a beszélgetés előbb jön
+            while not self._stop.is_set():
+                try:
+                    alert, site, rows = self._jobs.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                with self._lock:
+                    if not self._data["enabled"]:
+                        continue               # közben leállítottad: a sorban állók elmaradnak
+                try:
+                    self._report(alert, site, rows)
+                except _Stop:
+                    return
+                except Exception:  # noqa: BLE001 - az értékelés egy hiba miatt ne álljon le
+                    pass
 
     def stop(self) -> None:
         """Leállítja a szálat, és megvárja (legfeljebb pár másodpercig), hogy a mostani letöltését befejezze."""
         self._stop.set()
-        thread = self._thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=5)
+        for thread in (self._thread, self._worker):
+            if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=5)
         try:
             self.hunter.book.save()
         except OSError:
@@ -420,36 +450,74 @@ class InstantWatch:
 
     def poll(self, alert: dict[str, Any], site: str) -> list[dict[str, Any]]:
         """Egy figyelő egy oldala: letölti a találatok elejét, és szól az új (vagy leárazott) hirdetésekről. Az első
-        letöltésnél csak megjegyzi, ami már fent van. Visszaadja az új, illő hirdetéseket."""
+        letöltésnél csak megjegyzi, ami már fent van. Ha az oldalon csupa új hirdetés van (két letöltés között több
+        jött, mint amennyi elfér rajta: lehet, hogy lemaradt valami), a következő oldalt is megnézi (ahogy az oldal
+        linkeli). Visszaadja a megérőket; ha az értékelés a saját szálán megy (start), azok később jönnek, és üres."""
         now = self.clock()
         key = f"{alert['id']}:{site}"
         interval = self._interval(alert, site, now)
         with self._lock:
             self._next[key] = now + interval
             self._recent.setdefault(site, deque()).append(now)
-        name = self.platforms[site].name
+        url = self._url(alert, site)
         try:
-            rows = self.fetcher.listings(self._url(alert, site), site, self._check)
+            rows = self._rows(self.fetcher.listings(url, site, self._check), site)
         except FeedError as exc:
             self._failed(alert, site, exc)
             return []
+        result = self._absorb(alert, site, rows, now, count=True)
+        if result is None:                    # közben törölted
+            return []
+        first, fresh, overflow = result
+        if overflow:
+            more = self._next_rows(url, site, now)
+            extra = self._absorb(alert, site, more, now, count=False) if more else None
+            if extra is not None:
+                fresh += extra[1]
+        if first:
+            self.hunter.journal.add(f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): elindult, "
+                                    f"{len(rows)} hirdetést már ismerek; innentől minden újat felmérek, és ha megéri, "
+                                    "szólok.")
+            return []
+        self.hunter.tally("new", fresh)
+        if self._worker is not None and self._worker.is_alive():
+            if fresh:
+                self._jobs.put((alert, site, fresh))   # az értékelés a saját szálán: a letöltés közben mehet tovább
+            return []
+        return self._report(alert, site, fresh)
+
+    def _rows(self, rows: list[dict[str, Any]], site: str) -> list[dict[str, Any]]:
+        """A letöltött hirdetések (az elejükből MAX_ROWS, a licitek nélkül); az árbázis is tanul belőlük."""
+        name = self.platforms[site].name
         rows = [{"site": name, "platform": site, "text": str(r.get("text") or "")[:180], "price": int(r["price"]),
                  "url": str(r["url"]), "title": str(r.get("title") or r.get("text") or "")[:120]}
                 for r in rows[:MAX_ROWS] if r.get("url") and not r.get("auction")]
         self.hunter.book.add(rows)            # az árbázis is tanul belőle
+        self.hunter.tally("seen", rows)
+        now = self.clock()
         if now - self._book_saved >= BOOK_SAVE:
             self._book_saved = now
             self.hunter.book.save()
+        return rows
+
+    def _absorb(self, alert: dict[str, Any], site: str, rows: list[dict[str, Any]], now: float,
+                count: bool) -> tuple[bool, list[dict[str, Any]], bool] | None:
+        """A letöltött hirdetések a figyelő látottjai közé; visszaadja: első letöltés-e (akkor csak megjegyzi őket), az
+        új (vagy leárazott), illő hirdetéseket, és hogy csupa új volt-e az oldal (overflow: lehet, hogy lemaradt
+        valami). count: ez a figyelő egy letöltése (nem a következő oldal): a számlálók és a ritmus ebből tanul. None,
+        ha a figyelőt közben törölted."""
         fresh: list[dict[str, Any]] = []
         with self._lock:
             stored = next((a for a in self._data["alerts"] if a.get("id") == alert["id"]), None)
-            if stored is None:                # közben törölted
-                return []
+            if stored is None:
+                return None
             seen = self._data["seen"].setdefault(alert["id"], {})
             first = site not in (stored.get("baseline") or [])
+            unseen = 0
             for row in rows:
                 ident = listing_key(row["url"])
                 old = seen.get(ident)
+                unseen += old is None
                 seen[ident] = [now, row["price"]]
                 if first:
                     continue
@@ -459,19 +527,29 @@ class InstantWatch:
             if len(seen) > MAX_SEEN:
                 for ident, _value in sorted(seen.items(), key=lambda kv: float(kv[1][0]))[:len(seen) - MAX_SEEN]:
                     seen.pop(ident, None)
-            stored.setdefault("last", {})[site] = now
-            stored["polls"] = int(stored.get("polls") or 0) + 1
-            (stored.get("errors") or {}).pop(site, None)
+            if count:
+                stored.setdefault("last", {})[site] = now
+                stored["polls"] = int(stored.get("polls") or 0) + 1
+                (stored.get("errors") or {}).pop(site, None)
             if first:
                 stored["baseline"] = sorted(set(stored.get("baseline") or []) | {site})
             elif fresh:
                 self._learn(site, len(fresh), now)
             self._save()
-        if first:
-            self.hunter.journal.add(f"Azonnali figyelő: {alert['name']} ({name}): elindult, {len(rows)} hirdetést már "
-                                    "ismerek; innentől minden újat felmérek, és ha megéri, szólok.")
+        overflow = not first and len(rows) >= OVERFLOW_MIN and unseen == len(rows)
+        return first, fresh, overflow
+
+    def _next_rows(self, url: str, site: str, now: float) -> list[dict[str, Any]]:
+        """A találatok következő oldala (ha az oldal linkeli, és belefér az óránkénti keretbe); üres, ha nem sikerült."""
+        following = self.fetcher.next_page(url) if hasattr(self.fetcher, "next_page") else ""
+        if not following or not self._has_budget(site, now):
             return []
-        return self._report(alert, site, fresh)
+        with self._lock:
+            self._recent.setdefault(site, deque()).append(now)
+        try:
+            return self._rows(self.fetcher.listings(following, site, self._check), site)
+        except FeedError:
+            return []
 
     @staticmethod
     def _fits(alert: dict[str, Any], row: dict[str, Any]) -> bool:
@@ -555,8 +633,12 @@ class InstantWatch:
         for alert_id, site, row, _at in waiting:
             if alert_id in alerts:
                 groups.setdefault((alert_id, site), []).append(row)
+        threaded = self._worker is not None and self._worker.is_alive()
         for (alert_id, site), rows in groups.items():
-            self._report(alerts[alert_id], site, rows)
+            if threaded:
+                self._jobs.put((alerts[alert_id], site, rows))
+            else:
+                self._report(alerts[alert_id], site, rows)
 
     def _look(self, row: dict[str, Any]) -> dict[str, Any] | None:
         """Egy hirdetés oldala böngésző nélkül (None, ha most nem sikerült)."""

@@ -1047,6 +1047,48 @@ class WorkBrowserTests(unittest.TestCase):
         for item in parts:
             self.h.store.delete(item.id)
 
+    def test_a_haggle_find_and_its_offer(self):
+        """Alkuképes hirdetés: a kártyán „alku” jelöléssel, a kért és a javasolt árral; az ablakában az ajánlat (az üzenet
+        a javasolt összeggel), és a Megvettem az ajánlott árral kezd; a Beállításokban kikapcsolható, és az üzenet
+        átírható."""
+        deals = self.h.app.work.deals
+        self.h.app.work.instant.allowed = lambda: False
+        deals._remember({"id": "al1", "url": "https://hardverapro.hu/apro/asus/900001.html", "site": "Hardverapró",
+                         "platform": "hardverapro", "text": "rtx 3060 ti", "title": "ASUS RTX 3060 Ti Dual", "price": 95000,
+                         "median": 99500, "similar": 6, "profit": 5050, "at": time.time() - 60,
+                         "explore": "Alkuképes (az árbázisból)",
+                         "haggle": {"offer": 83000, "cut": 0.13, "days": 12, "cuts": 1, "p0": 99000, "flex": ["sürgős"]}})
+        for name, amount in (("seen", 1240), ("new", 85), ("candidates", 3), ("not_cheap", 40), ("unsure", 2)):
+            deals.tally(name, amount=amount)
+        page = self.page
+        page.click("#job-deals")
+        page.wait_for_selector('[data-deal-open="al1"]')
+        today = page.inner_text(".funnel")
+        self.assertTrue(today.startswith("Ma: 1") and "240 hirdetés · 85 új · 3 jelölt" in today, today)
+        page.click('summary:has-text("Napló")')
+        self.assertIn("Kiesett: 40 nem elég olcsó, 2 bizonytalan ár.", page.inner_text('details[data-fold="journal"]'))
+        page.click('summary:has-text("Napló")')
+        card = page.inner_text('li:has([data-deal-open="al1"])')
+        for part in ("alku", "kért ár 95 000 Ft", "ajánlj 83 000 Ft-ot (13%-kal kevesebb)", "12 napja fent", "már leárazta"):
+            self.assertIn(part, card)
+        page.click('[data-deal-open="al1"]')
+        page.wait_for_selector("#deal-dialog[open]")
+        body = page.inner_text("#deal-body")
+        for part in ("Kért ár", "99 000 Ft → 95 000 Ft", "Ajánlj", "83 000 Ft-ot", "sürgős"):
+            self.assertIn(part, body)
+        self.assertEqual(page.inner_text(".msgpreview"), "Szia!\nMegvan még? 83 000 Ft-ért odaadnád?\nKöszi előre is\nÜdv, Zsolt")
+        page.click("#deal-bought")
+        page.wait_for_selector("#d-paid")
+        self.assertEqual(page.input_value("#d-paid"), "83000", "az ajánlott árral kezd")
+        if not page.locator("#d-haggle").is_visible():
+            page.click('summary:has-text("Beállítások")')
+        page.fill("#d-haggle-message", "Szia! {ár}-ért elvinném.")
+        page.uncheck("#d-haggle")
+        page.click("#d-haggle-save")
+        page.wait_for_selector('.toast:has-text("Kikapcsoltam az alkuképes hirdetéseket.")')
+        self.assertEqual((deals.state()["haggle"]["on"], deals.state()["haggle"]["message"]),
+                         (False, "Szia! {ár}-ért elvinném."))
+
     def test_flags_filter_last_check_and_a_false_flag(self):
         store = self.h.store
         item = self.h.ready_item(("vinted", "hardverapro", "jofogas"), price=5000)

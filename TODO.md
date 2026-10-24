@@ -34,6 +34,14 @@
   alapján kettőt választ, a leírásból és a fotókból tételesen felsorolja; darabár az árbázisból, a gyors oldalakról
   vagy óvatos becslésből; értesítés, kártya és ablak; Megvettem után a darabok külön tárgyak (a vételár szétosztva).
 
+- Javítások egy külső átnézés alapján: az azonnali figyelő ár-ellenőrzésre váró, a körbe nem férő jelöltjei nem vesznek
+  el; az ár előtti időpont perce nem olvad az árba; a kapacitás (GB/TB) a termékkulcsban; olcsó terméknél arányos
+  min. haszon.
+- Alkuképes hirdetések: az árbázisból (régóta fent, leárazva, kicsit drága), külön „Alku:” értesítés (nem riaszt,
+  saját Android-csatorna, napi 6), ajánló üzenet a javasolt összeggel.
+- Mai számok (látott, új, jelölt, miért esett ki, jó találat); azonnali figyelő: a következő oldal, ha csupa új jött, és
+  az értékelés a saját szálán.
+
 ## Élesben kipróbálandó
 - Az Android-alkalmazás új része (a megérő hirdetés értesítése: rezgés, hang, ismétlés, a találat ablaka, a vágólap) a
   GitHub Actions fordításában megy át, telefonon nincs kipróbálva; a rezgés a gyártói energiatakarékos módoktól is függ.
@@ -56,6 +64,15 @@
 - Csomagbontás a valódi oldalakon: a modell darabszám- és darabár-becslése a fotókról (ruhánál, Legónál), hogy a
   csomaghirdetések címéből (bundle_like) mennyi jön, és hogy a GUESS_RATIO (60%), a PIECE_MIN (1 500 Ft), a
   PIECE_COST (300 Ft) és a BUNDLE_ROI (50%) jó-e; a Vinted csomagjainak oldala (fotók, leírás) a böngészővel.
+
+- A Hardverapró találati oldalának rendezése: egy átnézés szerint a „frissítettek” az alap (az előresorolt régi
+  hirdetések is elöl vannak), nem a „legújabb”. A rendezés paraméterét innen nem lehetett ellenőrizni (a környezet
+  nem éri el az oldalt), ezért helyette: ha egy letöltésen csupa új van, a következő oldal is jön (az oldal saját
+  „következő” linkjéből: rel=next vagy „Következő”/„›” felirat). Élesben megnézendő, hogy van-e ilyen link, és ha a
+  rendezés paramétere ismert, a keresés címébe kell.
+- Az ármező felismerése („price” osztályú elem a kártyán) a valódi Hardverapró- és Jófogás-kártyákon.
+- Alku: hány ajánlatot fogadnak el; a HAGGLE_DAYS (7 nap), a HAGGLE_MAX (25%) és a 10%-os minimum haszon hangolása.
+  Az árbázis régi (kapacitás nélküli) kulcsai vegyesek maradnak, amíg ki nem öregednek (45 nap).
 
 ## Kisebb javítások (ismertek, nem sürgősek)
 ### Begyakorolt lépések (replay.py)
@@ -91,6 +108,14 @@
 - Készenlétben a böngészés miatt a böngésző újraindul; egy app-szintű teszt (a kereskedés munkája készenlétben, valódi böngészővel) még hiányzik, csak az ütemezőé van meg.
 - Az indulóoldalak súlya csak nő vagy csökken; ha egy oldal hetekig nem hoz semmit, a régi sikerei miatt még sokáig előre kerül.
 - Ami csak a termékcsaládot nevezi meg típus nélkül („PS5 konzol”, „Nintendo Switch”), nem kap kulcsot (a játékkal, kiegészítővel keveredne): ezeket csak a modell nevezi meg, vagy egy keresés méri.
+
+### Alku és mai számok (deals.py)
+- Az alkuképes hirdetések csak az árbázisban lévő (termékkulccsal felismert) hirdetésekből jönnek; a kulcs nélküli
+  (pl. ruha) hirdetésekre nincs alku.
+- A mai számok egy hirdetést egy nap egy számban egyszer számolnak, de újraindítás után újra (a memóriában
+  jegyzi, mit számolt már).
+- A Hardverapró/Jófogás egy kategóriájának egyszeri letöltése több keresésre (összevont gyűjtés) még nincs: minden
+  keresés külön kérés (az óránkénti keret ezt korlátozza).
 
 ### Csomagbontás (deals.py)
 - A Vatera csomag-licitjeit nem méri fel (csak a fix árasakat); a licit mostani ára még nő.
