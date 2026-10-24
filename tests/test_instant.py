@@ -44,6 +44,26 @@ def ha_page(cards: list[str]) -> str:
       <footer><a href="/aszf.html">ÁSZF</a></footer></body></html>"""
 
 
+def ha_menu(order: str = "time", block: int = 25) -> str:
+    """A Hardverapró lista fölötti beállító menüje (ahogy a valódi oldalon, 2026 októberében): a sorrend és a lista
+    mérete; az aktív menüpont a mostani beállítás."""
+    orders = (("time", "d", "új hirdetések"), ("lstup", "d", "frissítettek"), ("price", "a", "olcsók"),
+              ("price", "d", "drágák"))
+    items = "".join(f'<a class="dropdown-item{" active" if key == order and i != 3 else ""}" href="javascript:;" '
+                    f'data-pref="{{&quot;order&quot;:&quot;{key}&quot;,&quot;dir&quot;:&quot;{way}&quot;}}">{label}</a>'
+                    for i, (key, way, label) in enumerate(orders))
+    sizes = "".join(f'<a class="dropdown-item{" active" if n == block else ""}" "="" href="javascript:;" '
+                    f'data-pref="{{&quot;block&quot;:{n}}}">{n} db</a>' for n in (25, 50, 100, 200))
+    return f"""<ul class="nav navbar-nav nav-settings">
+      <li class="dropdown" data-rios-action-pref-mod="/muvelet/beallitasok/modosit.php?mode=uad&amp;url=%2Faprok%2Fhardver%2Fmonitor%2Findex.html">
+        <a class="btn dropdown-toggle" data-toggle="dropdown" role="button" href="javascript:;"><b>?</b></a>
+        <div class="dropdown-menu"><h4 class="dropdown-header">Sorrend</h4>{items}
+          <h4 class="dropdown-header">Lista mérete</h4>{sizes}
+          <h4 class="dropdown-header">Nézet</h4>
+          <a class="dropdown-item active" href="javascript:;" data-pref="{{&quot;mode&quot;:&quot;normal&quot;}}">normál</a>
+        </div></li></ul>"""
+
+
 def jf_card(n: int, title: str, price: str) -> str:
     url = f"https://www.jofogas.hu/budapest/{title.lower().replace(' ', '-')}_{120000000 + n}.htm"
     return f"""<div class="list-item"><div class="contentArea">
@@ -114,6 +134,18 @@ class ParseTests(unittest.TestCase):
                          "https://www.vatera.hu/listings/index.php?q=ps5&order=time")
         self.assertTrue(chosen_sort("https://www.vatera.hu/listings/index.php?c=1&ob=ending"))
         self.assertFalse(chosen_sort("https://hardverapro.hu/aprok/keres.php?stext=rtx"))
+
+    def test_the_list_settings_on_the_page(self):
+        """A Hardverapró lista fölötti menüje: a beállító kérés címe, és az aktív menüpontok szerint a mostani sorrend és
+        oldalméret (a valódi oldal HTML-je szerint, a hibás "="" attribútummal együtt)."""
+        from jarvis_core.feeds import list_prefs, parse, prefs_ok
+        setter, current, view = list_prefs(parse(ha_page([ha_menu("lstup", 25)] + HA_CARDS)))
+        self.assertEqual(setter, "/muvelet/beallitasok/modosit.php?mode=uad&url=%2Faprok%2Fhardver%2Fmonitor%2Findex.html")
+        self.assertEqual(current, {"order": "lstup", "dir": "d", "block": 25, "mode": "normal"})
+        self.assertEqual(view, "frissítettek, 25 db")
+        self.assertFalse(prefs_ok(current))
+        self.assertTrue(prefs_ok(list_prefs(parse(ha_page([ha_menu("time", 100)])))[1]))
+        self.assertEqual(list_prefs(parse(ha_page(HA_CARDS))), ("", {}, ""), "más oldalon nincs ilyen menü")
 
     def test_structured_data_when_the_cards_have_no_price(self):
         page = """<html><head><script type="application/ld+json">{"@context": "https://schema.org", "@type": "ItemList",
@@ -194,17 +226,23 @@ class FakeNet:
 
     def __init__(self, clock: Clock):
         self.clock, self.pages, self.asked, self.threads, self.by_thread = clock, {}, [], set(), []
+        self.posted: list[tuple] = []              # a POST-kérések (a lista beállítása): (cím, adatok, fejlécek)
+        self.on_post = None
         self.running = self.most = 0
         self.delay = 0.0
         self._lock = threading.Lock()
 
-    def __call__(self, url, headers, timeout):
+    def __call__(self, url, headers, timeout, data=None):
         with self._lock:
             self.running += 1
             self.most = max(self.most, self.running)
             self.asked.append((self.clock(), url))
             self.threads.add(threading.current_thread().name)
             self.by_thread.append((threading.current_thread().name, url))
+            if data is not None:
+                self.posted.append((url, data, headers))
+                if self.on_post is not None:
+                    self.on_post()
         try:
             time.sleep(self.delay)
             for part, (status, body) in self.pages.items():
@@ -265,6 +303,43 @@ class FetcherTests(unittest.TestCase):
         with self.assertRaises(FeedError):
             self.fetcher.listings("https://www.jofogas.hu/magyarorszag?q=ps5", "jofogas")
         self.assertFalse(self.fetcher.usable("jofogas"), "a robot-ellenőrző köztes oldal is tiltás")
+
+    def test_the_hardverapro_list_is_set_to_newest_first_and_100_a_page(self):
+        """A Hardveraprón a sorrend és az oldalméret a munkamenetben van, nem a címben: ha az oldal nem az új
+        hirdetésekkel elöl, 100-asával jön, a letöltő beállítja (egy POST a menü címére, ahogy a menü teszi, a
+        szünetek és a keret szerint), és újra letölti az oldalt; utána már nem állítja újra."""
+        url = "https://hardverapro.hu/aprok/hardver/monitor/index.html"
+        self.net.pages["monitor/index.html"] = (200, ha_page([ha_menu("lstup", 25)] + HA_CARDS))
+        self.net.pages["modosit.php"] = (200, "{}")
+        self.net.on_post = lambda: self.net.pages.update(
+            {"monitor/index.html": (200, ha_page([ha_menu("time", 100)] + HA_CARDS))})
+        self.assertEqual(len(self.fetcher.listings(url, "hardverapro")), 4)
+        [(posted, data, headers)] = self.net.posted
+        self.assertEqual(posted, "https://hardverapro.hu/muvelet/beallitasok/modosit.php?mode=uad&url=%2Faprok%2F"
+                                 "hardver%2Fmonitor%2Findex.html")
+        self.assertEqual(data, {"order": "time", "dir": "d", "block": "100"})
+        self.assertEqual((headers["Referer"], headers["X-Requested-With"]), (url, "XMLHttpRequest"))
+        self.assertEqual([u.split("/")[-1] for _t, u in self.net.asked], ["index.html", posted.split("/")[-1],
+                                                                         "index.html"])
+        self.assertGreaterEqual(self.net.asked[2][0] - self.net.asked[1][0], 6, "a beállítás is a tempó szerint")
+        self.assertEqual(self.fetcher.view("hardverapro"), "új hirdetések, 100 db")
+        self.fetcher.listings(url, "hardverapro")
+        self.assertEqual(len(self.net.posted), 1, "beállítva: nem küldi újra")
+
+    def test_a_refused_list_setting_is_not_a_block(self):
+        """Ha a beállítás nem sikerül (elutasítja, vagy nem hat), az nem tiltás: az alap sorrenddel tölt tovább, és
+        hat óra múlva próbálja újra."""
+        url = "https://hardverapro.hu/aprok/hardver/monitor/index.html"
+        self.net.pages["monitor/index.html"] = (200, ha_page([ha_menu("lstup", 25)] + HA_CARDS))
+        self.net.pages["modosit.php"] = (403, "tilos")
+        self.assertEqual(len(self.fetcher.listings(url, "hardverapro")), 4)
+        self.assertTrue(self.fetcher.usable("hardverapro"), "nem tiltás")
+        self.assertEqual(self.fetcher.view("hardverapro"), "frissítettek, 25 db")
+        self.fetcher.listings(url, "hardverapro")
+        self.assertEqual(len(self.net.posted), 1, "hat óráig nem próbálja újra")
+        self.clock.now += 6 * 3600
+        self.fetcher.listings(url, "hardverapro")
+        self.assertEqual(len(self.net.posted), 2)
 
     def test_pages_without_listings_send_it_back_to_the_browser(self):
         self.net.pages["keres"] = (200, "<html><body><div id='app'></div></body></html>")
@@ -604,6 +679,33 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.assertEqual([r["url"].rsplit("_", 1)[-1] for r in fresh], ["120000009.htm"])
         self.assertEqual(len(self.watch._data["seen"][alert["id"]]), 6)
+
+    def test_a_new_list_setting_on_hardverapro_is_learned_once(self):
+        """Ha a Hardverapró lista beállítása megváltozik (pl. a beállítás csak később sikerül: új hirdetések elöl,
+        100-asával), az első így letöltött oldalt csak megjegyzi (a más sorrend és a több hirdetés nem új), utána a
+        szokásos módon szól az újakról."""
+        url = "https://hardverapro.hu/aprok/hardver/monitor/index.html"
+        self.watch.add(url)
+        self.watch.set_enabled(True)
+        old = [ha_card(10 + n, f"Monitor {n}", "30 000 Ft") for n in range(3)]
+        self.net.pages = {"monitor/index.html": (200, ha_page([ha_menu("lstup", 25)] + old)),
+                          "modosit.php": (403, "tilos")}
+        self.watch.tick()
+        fresh = []
+        self.hunter.appraise = lambda rows, *args, **kwargs: fresh.extend(rows) or []
+        self.clock.now += 6 * 3600
+        more = [ha_card(20 + n, f"Régebbi monitor {n}", "30 000 Ft") for n in range(5)]
+        self.net.pages["modosit.php"] = (200, "{}")
+        self.net.on_post = lambda: self.net.pages.update(
+            {"monitor/index.html": (200, ha_page([ha_menu("time", 100)] + old + more))})
+        self.watch.tick()
+        self.assertEqual(fresh, [], "a más sorrend és a több hirdetés nem új")
+        self.assertIn("a lista beállítása: új hirdetések, 100 db", self.hunter.journal.entries()[0]["text"])
+        self.later()
+        self.net.pages["monitor/index.html"] = (200, ha_page([ha_menu("time", 100), ha_card(99, "Új monitor", "30 000 Ft")]
+                                                             + old + more))
+        self.watch.tick()
+        self.assertEqual([r["title"] for r in fresh], ["Új monitor"])
 
     def test_the_evaluation_waits_while_paused(self):
         """Szünet alatt (vagy ha a háttérmunka tiltva van) az értékelő szál nem dolgozik: a feladat megmarad, nem kérdezi

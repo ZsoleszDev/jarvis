@@ -85,8 +85,8 @@ DEFAULT_EVERY = 60
 SITE_MIN_MINUTES = {"vinted": 120}   # a Vintedet legfeljebb kétóránként (ott a robot-ellenőrzés a kockázat)
 # A legújabb hirdetések elöl: a Vinteden külön kérni kell, a Jófogáson és a Hardverapróban ez az alap.
 # A legújabb hirdetések elöl (a fizetett kiemelések után): a Vinted, a Jófogás és a Vatera találati oldalán a cím
-# paramétere (2026 októberében ellenőrizve). A Hardveraprón a rendezés nem a címben van; ott az alap sorrend a frissítés
-# ideje, abban az új hirdetések is elöl vannak.
+# paramétere (2026 októberében ellenőrizve). A Hardveraprón a rendezés nem a címben, hanem a munkamenetben van: azt a
+# böngésző nélküli letöltő állítja be magának (feeds.LIST_PREFS: új hirdetések elöl, 100 egy oldalon).
 NEWEST = {"vinted": "&order=newest_first", "jofogas": "&sp=3", "vatera": "&ob=5&obd=2"}
 MAX_PAGES = 8              # egy körben legfeljebb ennyi jelölt hirdetés oldalát nyitja meg (a többi a következőre)
 # A gyors oldalak (Hardverapró, Jófogás) találati oldalát, ha az azonnali figyelő ennyi másodpercen belül már letöltötte,

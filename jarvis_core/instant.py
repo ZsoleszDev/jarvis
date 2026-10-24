@@ -506,8 +506,10 @@ class InstantWatch:
             self._failed(alert, site, exc)
             return []
         resorted = self.fetcher.sorted_url(url) if hasattr(self.fetcher, "sorted_url") else ""
-        result = self._absorb(alert, site, rows, now, count=True, resorted=resorted, used=url,
-                              plain=self._plain_url(alert, site))
+        # a Hardveraprón a sorrend nem a címben van: a lista beállítása (feeds.SiteFetcher.view) is a cím része itt
+        view = self.fetcher.view(site) if hasattr(self.fetcher, "view") else ""
+        result = self._absorb(alert, site, rows, now, count=True, resorted=resorted,
+                              used=f"{url}#{view}" if view else url, plain=self._plain_url(alert, site))
         if result is None:                    # közben törölted
             return []
         first, fresh, overflow = result
@@ -521,8 +523,10 @@ class InstantWatch:
             self.hunter.journal.add(f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): elindult, "
                                     f"{len(rows)} hirdetést már ismerek; innentől minden újat felmérek, és ha megéri, "
                                     "szólok." if first != "resort" else
-                                    f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): a legújabb "
-                                    f"hirdetések szerint rendezve nézem; {len(rows)} hirdetést már ismerek.")
+                                    f"Azonnali figyelő: {alert['name']} ({self.platforms[site].name}): "
+                                    + (f"a lista beállítása: {view}" if view else
+                                       "a legújabb hirdetések szerint rendezve nézem")
+                                    + f"; {len(rows)} hirdetést már ismerek.")
             return []
         self.hunter.tally("new", fresh)
         if self._worker is not None and self._worker.is_alive():
