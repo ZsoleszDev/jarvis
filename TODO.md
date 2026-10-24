@@ -41,6 +41,9 @@
   saját Android-csatorna, napi 6), ajánló üzenet a javasolt összeggel.
 - Mai számok (látott, új, jelölt, miért esett ki, jó találat); azonnali figyelő: a következő oldal, ha csupa új jött, és
   az értékelés a saját szálán.
+- Második átnézés javításai: más kapacitás az árösszehasonlításban sem hasonló (kapacitás nélküli keresésnél a
+  legolcsóbb változat); a teljes találati oldal (100 hirdetés) és az oldal saját „legújabb elöl” rendezése; az
+  értékelő szál Szünet alatt vár (a feladat megmarad), a szüneteltetett figyelőé a folytatásakor jön.
 
 ## Élesben kipróbálandó
 - Az Android-alkalmazás új része (a megérő hirdetés értesítése: rezgés, hang, ismétlés, a találat ablaka, a vágólap) a
@@ -67,9 +70,11 @@
 
 - A Hardverapró találati oldalának rendezése: egy átnézés szerint a „frissítettek” az alap (az előresorolt régi
   hirdetések is elöl vannak), nem a „legújabb”. A rendezés paraméterét innen nem lehetett ellenőrizni (a környezet
-  nem éri el az oldalt), ezért helyette: ha egy letöltésen csupa új van, a következő oldal is jön (az oldal saját
-  „következő” linkjéből: rel=next vagy „Következő”/„›” felirat). Élesben megnézendő, hogy van-e ilyen link, és ha a
-  rendezés paramétere ismert, a keresés címébe kell.
+  nem éri el az oldalt), ezért a letöltő az oldal saját rendezését keresi (egy „Legújabb”, „Feladás ideje” feliratú
+  link vagy választóelem ugyanazon az oldalon; feeds.newest_link), és ha van, azzal tölt; a teljes oldalt (100
+  hirdetés) nézi; és ha egy letöltésen csupa új van, a következő oldal is jön (rel=next vagy „Következő”/„›”).
+  Élesben megnézendő, hogy a valódi oldal feliratai illenek-e (a naplóban: „a legújabb hirdetések szerint rendezve
+  nézem”); ha nem, a rendezés paraméterét a keresés címébe kell írni.
 - Az ármező felismerése („price” osztályú elem a kártyán) a valódi Hardverapró- és Jófogás-kártyákon.
 - Alku: hány ajánlatot fogadnak el; a HAGGLE_DAYS (7 nap), a HAGGLE_MAX (25%) és a 10%-os minimum haszon hangolása.
   Az árbázis régi (kapacitás nélküli) kulcsai vegyesek maradnak, amíg ki nem öregednek (45 nap).

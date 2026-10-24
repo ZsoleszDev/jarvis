@@ -61,7 +61,7 @@ from .feeds import FeedError, fetch_image
 from .listings import BLOCKED, GONE, SOLD, classify
 from .llm import background_calls
 from .journal import Journal, day_of
-from .pricebook import SOLD_MIN, PriceBook, fake_prone, pace, speed_text, usable
+from .pricebook import SOLD_MIN, PriceBook, fake_prone, is_capacity, pace, sizes_of, speed_text, usable
 from .replay import norm_text
 from .selling import (_PARTS_RE, _SALE_RE, _SWAP_RE, _WANTED_RE, ON_SITE, Item, ItemError, Platform, _shared, _tokens,
                       format_price, listing_key, parse_price, prefilter, price_stats, round_price, vision_jpeg)
@@ -73,7 +73,7 @@ from .web import UNTRUSTED_NOTE
 DEAL_SITES = ("vinted", "jofogas", "vatera", "hardverapro")
 RESALE_SITES = ("vinted", "jofogas", "hardverapro")   # egy licit viszonteladási árához ezeken keres
 MAX_SEARCHES = 20
-MAX_PER_SITE = 30          # egy keresés egy oldalán ennyi találatot néz meg (az első oldal)
+MAX_PER_SITE = 120         # egy keresés egy oldalán ennyi találatot néz meg (az első oldal egésze; a Hardverapró 100-at mutat)
 MIN_PRICES = 5             # az ármozgás figyeléséhez legalább ennyi hasonló ár kell egy körben
 DEFAULT_DISCOUNT = 30      # ennyi %-kal a szokásos ár (medián) alatt számít olcsónak
 FLOOR = 0.15               # a medián 15%-a alatti ár többnyire nem valódi ár (1 Ft, „ár megegyezés szerint”)
@@ -156,6 +156,7 @@ FAKE_RATIO = 0.6
 # hasonló áron alapul, legalább két oldalról (ha csak egy oldalon láttuk, ott legalább SURE_ALONE áron). Ha ennyi nincs,
 # előbb a többi oldalon is megnézi, mennyiért adják (oldalanként egy keresés, böngésző nélkül, ahol lehet).
 SURE_MIN = 5
+MARKET_GROUP_MIN = 3       # egy kapacitás-változat ára ennyi hasonlóból számít (_market_of)
 SURE_ALONE = 10
 # Nyugodt szívvel megvehető-e (assess): a haszon a befektetett pénzhez képest (SAFE_ROI fölött biztos, RISKY_ROI alatt
 # kockázatos: egy kis árcsökkenés elviszi), mennyire szórnak a hasonlók árai (WIDE_SPREAD: az alsó és a felső negyed
@@ -779,14 +780,22 @@ def _joined_sizes(text: str) -> str:
     return _SIZE_GAP.sub("", text or "")
 
 
-def matches_query(query: str, text: str) -> bool:
+def matches_query(query: str, text: str, strict_size: bool = False) -> bool:
     """A hirdetés tényleg a keresett dolog-e: a keresés minden szava (vagy a rokon szava, SYNONYMS) benne van; négy
-    szónál hosszabb keresésnél egy hiányozhat. Így a „PS5 kontroller” keresésre a PS5-játék nem jelölt."""
+    szónál hosszabb keresésnél egy hiányozhat, de a kapacitás nem: ha a keresésben van (500GB, 1TB), és a hirdetésben
+    más szerepel, az más termék (más ár). strict_size (az árösszehasonlításhoz): a keresett kapacitásnak benne is kell
+    lennie a hirdetésben (a kapacitás nélküli hirdetés is lehet más változat). Így a „PS5 kontroller” keresésre a
+    PS5-játék nem jelölt, és egy 500 GB-os SSD ára nem az 1 TB-osokéból jön."""
     query, text = _joined_sizes(query), _joined_sizes(text)
     wanted = _tokens(query)
     have = _tokens(text)
     if not wanted:
         return True
+    want_sizes = sizes_of(query)
+    if want_sizes:
+        has_sizes = sizes_of(text)
+        if has_sizes - want_sizes or (strict_size and not want_sizes <= has_sizes):
+            return False
     hits = sum(1 for word in wanted if _shared({word, *SYNONYMS.get(word, ())}, have))
     if hits < (len(wanted) if len(wanted) <= 4 else len(wanted) - 1):
         return False
@@ -1917,10 +1926,12 @@ class DealHunter:
             rows += found
         return rows, errors
 
-    def _relevant(self, search: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _relevant(self, search: dict[str, Any], rows: list[dict[str, Any]],
+                  strict_size: bool = False) -> list[dict[str, Any]]:
         """Modell nélkül, ami biztosan nem a keresett termék, kiesik: kereső-, csere- és csomaghirdetés, alkatrész
-        (selling.prefilter), ha a keresés valamelyik szava hiányzik, kiegészítő (matches_query), egy kizáró szó van
-        benne, vagy a minimum ár alatt van. Ugyanaz a hirdetés (webcím) egyszer."""
+        (selling.prefilter), ha a keresés valamelyik szava hiányzik, más a kapacitása, kiegészítő (matches_query), egy
+        kizáró szó van benne, vagy a minimum ár alatt van. Ugyanaz a hirdetés (webcím) egyszer. strict_size: lásd
+        matches_query (az árösszehasonlításhoz)."""
         probe = Item(id="kereses", created=0.0, updated=0.0, title=search["query"], search_query=search["query"])
         # az azonos című, hasonló árú hirdetések itt nem ismétlések (egy népszerű termékből sok van): a webcím dönt
         kept, _dropped = prefilter(probe, rows, limit=len(rows) or 1, dedupe=False)
@@ -1928,7 +1939,7 @@ class DealHunter:
         for row in kept:
             unique.setdefault(listing_key(row["url"]) if row["url"] else row["text"], row)
         words, low = search.get("exclude") or [], search.get("min_price")
-        return [row for row in unique.values() if matches_query(search["query"], row["text"])
+        return [row for row in unique.values() if matches_query(search["query"], row["text"], strict_size)
                 and not excluded(words, row["text"]) and not (low and row["price"] < low)]
 
     @staticmethod
@@ -2257,7 +2268,7 @@ class DealHunter:
         with self._lock:
             day = tuple(self._data["day"])
         rows: list[dict[str, Any]] = []
-        for entry in listings[:MAX_PER_SITE * 2]:
+        for entry in listings[:MAX_PER_SITE]:
             if not entry.get("url"):
                 continue
             row = {"site": site.name, "platform": platform, "text": str(entry.get("text") or "")[:180],
@@ -2364,14 +2375,31 @@ class DealHunter:
 
     def _market_of(self, row: dict[str, Any], query: str, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Mennyiért adják biztosan: az árbázis friss árai (ha a terméket ismeri) és a most talált hasonlók (rows: ami a
-        keresőszóra illik), hirdetésenként egyszer, a jelölt nélkül (market)."""
+        keresőszóra illik, ugyanazzal a kapacitással), hirdetésenként egyszer, a jelölt nélkül (market). A kapacitások
+        nem keverednek: ha a keresőszóban nincs kapacitás, a változatok (8/16 GB, 500 GB/1 TB) külön számítanak, és a
+        legolcsóbb (legalább MARKET_GROUP_MIN árral) dönt, így egy ismeretlen kapacitású hirdetés nem látszik olcsónak a
+        drágább változathoz mérve."""
         product = self.book.key(query)
-        known = self.book.samples(product[0], exclude=row["url"]) if product else []
-        merged = {listing_key(s["url"]): (s["p"], s["site"], s["gone"]) for s in known if s["url"]}
-        merged.update({listing_key(r["url"]): (int(r["price"]), str(r.get("platform") or ""))
-                       for r in self._relevant({"id": "ellenorzes", "query": query}, rows) if r.get("url")})
-        merged.pop(listing_key(row["url"]), None)
-        return market(list(merged.values()))
+        groups: dict[str, dict[str, tuple[Any, ...]]] = {}
+        for key in ([product[0], *self.book.variants(product[0])] if product else []):
+            size = " ".join(word for word in key.split() if is_capacity(word))
+            for sample in self.book.samples(key, exclude=row["url"]):
+                if sample["url"]:
+                    groups.setdefault(size, {})[listing_key(sample["url"])] = (sample["p"], sample["site"],
+                                                                                  sample["gone"])
+        for found in self._relevant({"id": "ellenorzes", "query": query}, rows, strict_size=True):
+            if found.get("url"):
+                size = " ".join(sorted(sizes_of(found["text"])))
+                groups.setdefault(size, {})[listing_key(found["url"])] = (int(found["price"]),
+                                                                          str(found.get("platform") or ""))
+        for group in groups.values():
+            group.pop(listing_key(row["url"]), None)
+        markets = [market(list(group.values())) for group in groups.values() if group]
+        markets = [found for found in markets if found]
+        if len(markets) <= 1:
+            return markets[0] if markets else None
+        enough = [found for found in markets if found["n"] >= MARKET_GROUP_MIN]
+        return min(enough, key=lambda found: found["price"]) if enough else max(markets, key=lambda f: f["n"])
 
     def _unsure(self, row: dict[str, Any], query: str, found: dict[str, Any] | None) -> None:
         """Olcsónak látszott, de a szokásos ára nem elég biztos (kevés hasonló, egy oldalról): nem szól róla, csak a

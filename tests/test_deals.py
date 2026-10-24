@@ -21,8 +21,8 @@ from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
 from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
 from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, assess, careful_low,  # noqa: E402
-                               expected_profit, explore_top, highest_ok, last_chance, left_text, market, offer_price,
-                               parse_auction, profit_floor, safe_sale, safety_text)
+                               expected_profit, explore_top, highest_ok, last_chance, left_text, market, matches_query,
+                               offer_price, parse_auction, profit_floor, safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
 from jarvis_core.pricebook import PriceBook, pace, product_key, usable  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
@@ -1357,6 +1357,37 @@ class OfferTests(unittest.TestCase):
         with self.assertRaisesRegex(DealError, "csak a Vinteden"):
             self.hunter.make_offer(self.deal("/items/1-ps5", platform="jofogas"), None, confirm=self.confirm)
         self.assertEqual((self.site.posts, self.prompts), ([], []))
+
+
+class CapacityTests(HunterCase):
+    def test_a_different_capacity_is_not_the_same_product(self):
+        """A négy szónál hosszabb keresésben egy szó hiányozhat, de a kapacitás nem: egy 500 GB-os SSD ára nem jöhet az 1
+        TB-osokéból (eddig öt 1 TB-os hirdetésből „biztos” árat mondott)."""
+        query = "Samsung 970 EVO Plus 500GB"
+        self.assertFalse(matches_query(query, "Samsung 970 EVO Plus 1TB"))
+        self.assertTrue(matches_query(query, "Samsung 970 EVO Plus 500 GB NVMe"))
+        self.assertTrue(matches_query(query, "Samsung 970 EVO Plus"), "a kapacitás nélküli hirdetés keresésnek jó")
+        self.assertFalse(matches_query(query, "Samsung 970 EVO Plus", strict_size=True), "árösszehasonlításnak nem")
+        self.assertTrue(matches_query("Samsung 970 EVO Plus", "Samsung 970 EVO Plus 1TB"))
+        row = {"text": "Samsung 970 EVO Plus 500GB", "price": 12000, "url": "https://hardverapro.hu/apro/ssd/1.html"}
+        terabytes = [{**listing(60 + n, f"Samsung 970 EVO Plus 1TB {n}", p, site), "platform": platform}
+                     for n, (p, site, platform) in enumerate(((30000, "hardverapro.hu", "hardverapro"),
+                                                              (31000, "www.jofogas.hu", "jofogas"),
+                                                              (29000, "hardverapro.hu", "hardverapro"),
+                                                              (30500, "www.jofogas.hu", "jofogas"),
+                                                              (29500, "hardverapro.hu", "hardverapro")))]
+        self.assertIsNone(self.hunter._market_of(row, query, terabytes), "az 1 TB-osok nem számítanak")
+
+    def test_without_capacity_the_cheapest_variant_counts(self):
+        """Ha a keresőszóban nincs kapacitás, a változatok külön számítanak, és a legolcsóbb (legalább három árral) dönt:
+        egy ismeretlen kapacitású hirdetés nem látszik olcsónak a drágább változathoz mérve."""
+        rows = [{**listing(70 + n, f"Samsung 970 EVO Plus {size} {n}", p), "platform": "hardverapro"}
+                for n, (size, p) in enumerate((("500GB", 20000), ("500GB", 21000), ("500GB", 19500),
+                                               ("1TB", 34000), ("1TB", 35000), ("1TB", 33000), ("1TB", 36000),
+                                               ("2TB", 9000)))]
+        row = {"text": "Samsung 970 EVO Plus", "price": 15000, "url": "https://hardverapro.hu/apro/ssd/2.html"}
+        found = self.hunter._market_of(row, "Samsung 970 EVO Plus", rows)
+        self.assertEqual((found["price"], found["n"]), (20000, 3), "az 500 GB-osok (a 2 TB-os egyetlen ára kevés)")
 
 
 class MatchTests(unittest.TestCase):
