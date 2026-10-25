@@ -108,7 +108,22 @@
   böngészőben a Hardverapró, alap sorrenddel). A hardveraprós és jófogásos Figyelt oldalak az azonnali figyelőben is
   (link_searches, ötpercenként).
 
+- Javítások egy átnézés után: a többtermékes szűrő egy termék szavait egynek veszi (i5 + 10400F, DDR4/CL16/AM4/GDDR6,
+  évszám, mértékegység előtti szám nem típusjel), és a hirdetés címét nézi, nem a kártya szövegét (eladó neve); egy
+  hirdetésnek egy ára van a friss állapota szerint (PriceBook._drop, _market_of: a most látott állapot felülírja a
+  tároltat); az eladó többi hirdetésénél minden darabra a vételi ellenőrzések (valódi ár, gyanús, hamisítvány, vételi
+  limit, a közös végösszeg is a limiten belül).
+- Licitlista (Vatera): a még napokig futó, megérő licit csendes értesítéssel a listára kerül (a javasolt legmagasabb
+  ajánlattal), az ára frissül, ha újra látja; a zárás előtt a kör megnézi, és szól (_follow_auction, _step_auctions).
+  A Vatera böngészése a Műszaki cikk és mobil főkategóriát is nézi.
+- Android: saját értesítési hangok (res/raw/jarvis_alert, jarvis_ping), új csatornaazonosítók (-2).
+
 ## Élesben kipróbálandó
+- Licitlista: a Vatera-kártyák hátralévő ideje (parse_auction) a valódi oldalon; ha nincs meg, a licit nem kerül a
+  listára. A „hamarosan lejár” rendezés címe (ob=…&obd=…) nem ismert: ha megvan, a böngészés licites oldalai azzal is
+  mehetnének. Hány licitértesítés jön naponta (AUCTION_TIPS_PER_DAY 10).
+- Android: a saját hang a telefonon (hangerő, hossz; a FLAG_INSISTENT ismétli), és hogy a régi csatornák törlése után a
+  beállítások rendben vannak-e.
 - Ruha felismerése (pricebook._WEAR_RE) valódi címeken: ha egy nem ruha kiesik (pl. egy márkanév más termék nevében),
   vagy egy ruha átjut, a listát kell szűkíteni vagy bővíteni (a napló „ruha, cipő” sorából látszik).
 - Az eladó többi hirdetésének linkje (feeds.SELLER_TEXT_RE, SELLER_HREF_RE, a böngészőben a LISTING_PAGE_JS) a valódi

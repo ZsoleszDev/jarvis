@@ -645,6 +645,24 @@ class InstantTests(InstantCase):
         self.assertEqual(spawned["profit"], spawned["resale"] - spawned["price"] - spawned["costs"],
                          "a haszon az óvatos eladási árból, a költség után")
 
+    def test_a_title_with_a_comma_is_still_one_product(self):
+        """Az „Intel Core i5-10400F, dobozos” egy termék (az i5 és a 10400F egy típusjel, a „dobozos” nem termék): nem esik
+        ki többtermékesként, az oldalát megnyitja, és ha megéri, szól."""
+        self.hunter.book.add([{"text": f"Intel Core i5-10400F processzor {n}", "price": 30000 + n * 500,
+                               "url": f"https://hardverapro.hu/apro/cpu_{n}/friss.html", "platform": "hardverapro"}
+                              for n in range(10)])
+        self.watch.add("https://hardverapro.hu/aprok/hardver/processzor/index.html")
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi processzor", "1 000 Ft")], "processzor/index")
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(41, "Intel Core i5-10400F, dobozos", "15 000 Ft"), ha_card(1, "Régi processzor", "1 000 Ft")],
+                     "processzor/index")
+        self.net.pages["_41/friss"] = page_html("Hibátlan, dobozában, számlával.")
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Intel Core i5-10400F, dobozos"])
+        self.assertTrue([u for _t, u in self.net.asked if "_41/friss" in u], "az oldalát megnyitotta")
+
     def test_an_unfinished_check_of_a_found_listing_can_come_again(self):
         """Ha az árkutatás közben talált jelölt (B) ellenőrzése félbemarad (most elfogyott a keret), az eredetivel (A)
         együtt vár, és nem számít „már megnézettnek”: amikor A újra sorra kerül, B is újra jelölt, és mindkettő megvan."""

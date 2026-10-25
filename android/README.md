@@ -33,6 +33,10 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
 - Kamera (Pro feltöltés): a felület `<input capture>` mezőjére a `MainActivity` a kamera-alkalmazást indítja
   (`ACTION_IMAGE_CAPTURE`); a fotó a `PhotoProvider`-en át az alkalmazás gyorsítótárába kerül (nem a galériába), onnan
   olvassa be a WebView. Kamera-engedély nem kell hozzá (a kamera-alkalmazás fényképez).
+- Saját hang: a megérő hirdetés csatornájáé `res/raw/jarvis_alert.wav` (emelkedő harangjáték), a jóváhagyásé, az
+  értesítéseké és az alkué `res/raw/jarvis_ping.wav` (rövid, kéthangú jelzés). A hangokat a `make_sounds.py` állítja
+  elő; ha változnak, a csatornák azonosítóját is növelni kell (`NotifyService`), mert az Android egy már létrehozott
+  csatorna hangját nem cseréli le (a régieket az `OLD_CHANNELS` szerint törli).
 - `ActionReceiver`: a jóváhagyás gombjai az értesítésben (`/api/v1/confirm`), és az állandó értesítés Szünet /
   Folytatás gombja (`/api/v1/pause`, `/api/v1/resume`).
 - `res/xml/shortcuts.xml`: parancsikon (Új hirdetés).

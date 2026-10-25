@@ -887,6 +887,25 @@ class WorkBrowserTests(unittest.TestCase):
         page.click("#reset")
         page.wait_for_selector("#home-tiles", state="visible")
 
+    def test_the_auction_list(self):
+        """A licitlista (Vatera) a találatok alatt: a licit, a legutóbbi ára, mikor zárul, és legfeljebb mennyiért
+        érdemes licitálni; az Elrejtés gombbal lekerül."""
+        deals = self.h.app.work.deals
+        with deals._lock:
+            deals._data["auctions"] = [{"id": "a1", "url": "https://www.vatera.hu/termek/1", "site": "Vatera",
+                                        "platform": "vatera", "title": "PS5 DualSense kontroller", "text": "PS5",
+                                        "price": 1, "max_bid": 9800, "median": 14000, "ends": time.time() + 2 * 86400,
+                                        "hours": 6, "search": "s", "query": "PS5 kontroller", "at": time.time()}]
+        page = self.page
+        page.click("#job-deals")
+        page.wait_for_selector("text=Licitlista")
+        box = page.inner_text("#w-deals")
+        self.assertIn("PS5 DualSense kontroller", box)
+        self.assertIn("legfeljebb 9 800 Ft-ig érdemes licitálni", box)
+        page.click('[data-auction-dismiss="a1"]')
+        page.wait_for_selector("text=Licitlista", state="detached")
+        self.assertEqual(deals.state()["auctions"], [])
+
     def test_trading_sections_are_folded_except_the_finds(self):
         """Az Automata kereskedés fülön az Indítás és a legutóbbi találatok látszanak, a többi blokk (beállítások,
         keresések, azonnali figyelő, böngészés, figyelt oldalak, Mennyit ér?, napló) össze van csukva, magyarázó
