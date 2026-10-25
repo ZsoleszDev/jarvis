@@ -23,17 +23,18 @@ from jarvis_core.deals import (BUNDLE_INBOX, LEFTOVER_RATIO, PIECE_COST, SHIPPIN
 from jarvis_core.selling import round_price  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
 
-# A „ruhacsomag” keresés a Jófogáson: egy keresőhirdetés, egy márkás csomag és egy babaruha-csomag.
-WANTED = listing(1, "Keresek ruhacsomagot", 5000, "www.jofogas.hu")
-BRANDED = listing(2, "Márkás ruhacsomag 10 db", 6000, "www.jofogas.hu")
-BABY = listing(3, "Babaruha csomag 56-os", 3000, "www.jofogas.hu")
-CLOTHES = [WANTED, BRANDED, BABY]
+# A „konzolcsomag” keresés a Jófogáson: egy keresőhirdetés, egy márkás csomag és egy gyerekjáték-csomag (a ruha
+# nincs köztük: azzal az automata kereskedés nem foglalkozik).
+WANTED = listing(1, "Keresek konzolcsomagot", 5000, "www.jofogas.hu")
+BRANDED = listing(2, "Márkás konzolcsomag 10 db", 6000, "www.jofogas.hu")
+BABY = listing(3, "Gyerekjáték csomag", 3000, "www.jofogas.hu")
+CONSOLES = [WANTED, BRANDED, BABY]
 # Amit a modell a márkás csomagban lát (a fotókról és a leírásból): darabonként a becsült ára.
-LINES = [{"name": "Nike pulóver", "query": "Nike pulóver", "count": 3, "estimate": 8000},
-         {"name": "Zara póló", "query": "Zara póló", "count": 5, "estimate": 2500},
-         {"name": "Zokni", "query": "", "count": 4, "estimate": 500}]
-BRANDED_PAGE = {"title": "Márkás ruhacsomag 10 db", "images": ["https://img.jofogas.hu/1.jpg"],
-                "text": "Márkás ruhacsomag: 3 Nike pulóver, 5 Zara póló, pár zokni. Szép állapotban. Eladó: Kata "
+LINES = [{"name": "PS4 kontroller", "query": "PS4 kontroller", "count": 3, "estimate": 8000},
+         {"name": "PS4 játék", "query": "PS4 játék", "count": 5, "estimate": 2500},
+         {"name": "Kábel", "query": "", "count": 4, "estimate": 500}]
+BRANDED_PAGE = {"title": "Márkás konzolcsomag 10 db", "images": ["https://img.jofogas.hu/1.jpg"],
+                "text": "Márkás konzolcsomag: 3 PS4 kontroller, 5 PS4 játék, pár kábel. Szép állapotban. Eladó: Kata "
                         "(25 értékelés)"}
 
 
@@ -57,7 +58,7 @@ class BundleLlm(FakeLlm):
         if "lines" in schema["properties"]:
             self.calls.append(messages)
             return {"bundle": self.bundle, "lines": self.lines, "suspicious": self.shady,
-                    "reason": "Nike pulóverek és Zara pólók."}
+                    "reason": "PS4 kontrollerek és játékok."}
         return super()._answer(messages, schema)
 
     def asked(self, word: str) -> list:
@@ -70,7 +71,7 @@ class BundleCase(HunterCase):
         self.llm = BundleLlm()
         self.hunter = self.make()
         self.browser.results = []
-        self.browser.by_url = [("ruhacsomag", CLOTHES)]
+        self.browser.by_url = [("konzolcsomag", CONSOLES)]
         self.browser.pages[BRANDED["url"]] = BRANDED_PAGE
 
     def make(self, sub: str = "", llm="default") -> DealHunter:
@@ -79,8 +80,8 @@ class BundleCase(HunterCase):
         hunter.set_day(0, 24)
         return hunter
 
-    def clothes(self) -> dict:
-        state = self.hunter.add_bundle_search("ruhacsomag", ["jofogas"])
+    def consoles(self) -> dict:
+        state = self.hunter.add_bundle_search("konzolcsomag", ["jofogas"])
         self.hunter.set_enabled(True)
         return state["bundles"]["searches"][-1]
 
@@ -90,19 +91,19 @@ class BundleCase(HunterCase):
 
 class BundleMathTests(unittest.TestCase):
     def test_what_looks_like_a_bundle(self):
-        for text in ("Márkás ruhacsomag 10 db", "Lego ömlesztve 3 kg", "PC alkatrészek egyben", "15 db póló",
+        for text in ("Márkás konzolcsomag 10 db", "Lego ömlesztve 3 kg", "PC alkatrészek egyben", "15 db póló",
                      "Videojátékok egyben eladók", "Ruhák csomagban, 38-as", "Lego gyűjtemény"):
             self.assertTrue(bundle_like(text), text)
-        for text in ("Keresek ruhacsomagot", "Lego 42115 szett", "Eredeti csomagolásában, bontatlan",
+        for text in ("Keresek konzolcsomagot", "Lego 42115 szett", "Eredeti csomagolásában, bontatlan",
                      "Csomagautomatába is küldöm", "RTX 3060 Ti", "2 db ventilátorral"):
             self.assertFalse(bundle_like(text), text)
 
     def test_the_value_piece_by_piece(self):
         """A PIECE_MIN alatti darabok egy maradék csomagban (az értékük fele), a többi egyenként; költség: a vétel postája
         és darabonként a csomagolás."""
-        lines = [{"name": "Nike pulóver", "count": 3, "unit": 4800, "source": "piac"},
-                 {"name": "Zara póló", "count": 5, "unit": 1500, "source": "becslés"},
-                 {"name": "Zokni", "count": 4, "unit": 300, "source": "becslés"}]
+        lines = [{"name": "PS4 kontroller", "count": 3, "unit": 4800, "source": "piac"},
+                 {"name": "PS4 játék", "count": 5, "unit": 1500, "source": "becslés"},
+                 {"name": "Kábel", "count": 4, "unit": 300, "source": "becslés"}]
         value = bundle_value(lines, 6000)
         leftover = round(4 * 300 * LEFTOVER_RATIO)
         self.assertEqual((value["value"], value["leftover"], value["small"], value["listings"]),
@@ -129,19 +130,19 @@ class BundleMathTests(unittest.TestCase):
 
     def test_a_bought_bundle_splits_into_items(self):
         """A vételár és a posta az értékük arányában oszlik szét, forintra pontosan; az apróságok egy tárgyban."""
-        deal = {"text": "Márkás ruhacsomag 10 db", "price": 6000, "bundle": {
-            "lines": [{"name": "Nike pulóver", "query": "Nike pulóver", "count": 3, "unit": 4800},
-                      {"name": "Zara póló", "query": "Zara póló", "count": 1, "unit": 1500},
-                      {"name": "Zokni", "query": "", "count": 4, "unit": 300}],
+        deal = {"text": "Márkás konzolcsomag 10 db", "price": 6000, "bundle": {
+            "lines": [{"name": "PS4 kontroller", "query": "PS4 kontroller", "count": 3, "unit": 4800},
+                      {"name": "PS4 játék", "query": "PS4 játék", "count": 1, "unit": 1500},
+                      {"name": "Kábel", "query": "", "count": 4, "unit": 300}],
             "leftover": 600, "small": 4}}
         parts = bundle_parts(deal, 6001, 1500)
-        self.assertEqual([p["prompt"] for p in parts], ["Nike pulóver, 3 db, 4800 Ft", "Zara póló, 1500 Ft",
+        self.assertEqual([p["prompt"] for p in parts], ["PS4 kontroller, 3 db, 4800 Ft", "PS4 játék, 1500 Ft",
                                                         "Apróságok egyben a csomagból (4 db), 600 Ft"])
         self.assertEqual([p["target_price"] for p in parts], [14400, 1500, 600])
         self.assertEqual(sum(p["bought_price"] for p in parts), 6001)
         self.assertEqual(sum(p["bought_shipping"] for p in parts), 1500)
         self.assertEqual(parts[1]["bought_price"], 6001 * 1500 // 16500)
-        self.assertIn("Csomagból („Márkás ruhacsomag 10 db”): 3 db, darabonként kb. 4800 Ft", parts[0]["trade_note"])
+        self.assertIn("Csomagból („Márkás konzolcsomag 10 db”): 3 db, darabonként kb. 4800 Ft", parts[0]["trade_note"])
         self.assertEqual(bundle_parts({**deal, "bundle": {"lines": [], "leftover": 0}}, 1000), [])
 
 
@@ -149,35 +150,35 @@ class BundleSearchTests(BundleCase):
     def test_a_bundle_search_finds_a_bundle_worth_more_in_pieces(self):
         """Csomagkeresés: a találatokból (a keresőhirdetés nélkül) a modell a márkásat választja; az oldala, a leírása és
         a fotója alapján a modell felsorolja, mi van benne; darabonként eladva megéri, ezért szól róla."""
-        search = self.clothes()
-        self.assertEqual((search["query"], search["sites"], search["every"]), ("ruhacsomag", ["jofogas"], 60))
+        search = self.consoles()
+        self.assertEqual((search["query"], search["sites"], search["every"]), ("konzolcsomag", ["jofogas"], 60))
         self.assertTrue(self.hunter.state()["bundles"]["on"], "a csomagkeresés bekapcsolja a csomagbontást")
         self.assertTrue(self.hunter.available())
         self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: 1 olcsó hirdetés.")
         [picked] = self.llm.asked("legfeljebb kettőt")
         self.assertNotIn("Keresek", picked[1]["content"], "a keresőhirdetés meg sem jön")
-        self.assertIn("Babaruha csomag 56-os – 3 000 Ft", picked[1]["content"])
+        self.assertIn("Gyerekjáték csomag – 3 000 Ft", picked[1]["content"])
         self.assertEqual(self.browser.looked, [BRANDED["url"]], "csak a kiválasztott csomag oldalát nyitotta meg")
         [itemized] = self.llm.asked("tételenként")
-        self.assertIn("3 Nike pulóver, 5 Zara póló", itemized[1]["content"], "a modell a leírást is látja")
+        self.assertIn("3 PS4 kontroller, 5 PS4 játék", itemized[1]["content"], "a modell a leírást is látja")
         self.assertEqual(len(itemized[1]["images"]), 1, "és a fotót is")
-        # Nike: 8 000 × 60% = 4 800, Zara: 2 500 × 60% = 1 500 (még egyenként), zokni: 300 (egyben, a fele)
+        # kontroller: 8 000 × 60% = 4 800, játék: 2 500 × 60% = 1 500 (még egyenként), kábel: 300 (egyben, a fele)
         [(_kind, title, text, extra)] = self.notices
-        self.assertEqual(title, "Csomag: Márkás ruhacsomag 10 db")
-        self.assertIn("Darabonként eladva kb. 22 500 Ft (9 hirdetés): 3 db Nike pulóver (kb. 4 800 Ft/db); 5 db Zara "
-                      "póló (kb. 1 500 Ft/db); 4 apróság egyben kb. 600 Ft. A várható haszon kb. 12 300 Ft", text)
+        self.assertEqual(title, "Csomag: Márkás konzolcsomag 10 db")
+        self.assertIn("Darabonként eladva kb. 22 500 Ft (9 hirdetés): 3 db PS4 kontroller (kb. 4 800 Ft/db); 5 db PS4 "
+                      "játék (kb. 1 500 Ft/db); 4 apróság egyben kb. 600 Ft. A várható haszon kb. 12 300 Ft", text)
         self.assertIn("Jó vétel, de figyelj: a darabárak egy része csak becslés.", text)
-        self.assertIn("Csomagkeresés: ruhacsomag.", text)
+        self.assertIn("Csomagkeresés: konzolcsomag.", text)
         self.assertTrue(extra["urgent"])
         [deal] = self.hunter.state()["deals"]
         self.assertEqual((deal["bundle"]["value"], deal["profit"], deal["bundle"]["listings"], deal["photos_checked"]),
                          (22500, 12300, 9, 1))
         self.assertEqual([(l["name"], l["unit"], l["source"]) for l in deal["bundle"]["lines"]],
-                         [("Nike pulóver", 4800, "becslés"), ("Zara póló", 1500, "becslés"), ("Zokni", 300, "becslés")])
+                         [("PS4 kontroller", 4800, "becslés"), ("PS4 játék", 1500, "becslés"), ("Kábel", 300, "becslés")])
         self.assertNotIn("images", deal, "a fotók címe csak a modellkérdéshez kellett")
-        self.assertTrue(any(t.startswith("Jó csomag: „Márkás ruhacsomag 10 db” 6 000 Ft (Jófogás, csomag, kb. 12 300 Ft "
-                                         "haszon) – Csomagkeresés: ruhacsomag") for t in self.journal()))
-        self.assertEqual(self.hunter.state()["bundles"]["waiting"], 0, "a babaruhát is látottnak jegyezte")
+        self.assertTrue(any(t.startswith("Jó csomag: „Márkás konzolcsomag 10 db” 6 000 Ft (Jófogás, csomag, kb. 12 300 Ft "
+                                         "haszon) – Csomagkeresés: konzolcsomag") for t in self.journal()))
+        self.assertEqual(self.hunter.state()["bundles"]["waiting"], 0, "a gyerekjáték-csomagot is látottnak jegyezte")
 
         self.notices.clear()
         calls = len(self.llm.calls)
@@ -185,32 +186,32 @@ class BundleSearchTests(BundleCase):
         self.assertEqual((self.notices, len(self.llm.calls)), ([], calls), "egy csomagról egyszer szól")
 
     def test_not_worth_it_or_not_a_bundle(self):
-        self.browser.by_url = [("ruhacsomag", [{**BRANDED, "price": 20000}])]
-        self.clothes()
+        self.browser.by_url = [("konzolcsomag", [{**BRANDED, "price": 20000}])]
+        self.consoles()
         self.hunter.run(notify=self.notify)
         self.assertEqual(self.notices, [])
-        self.assertIn("Csomag, nem éri meg: „Márkás ruhacsomag 10 db” 20 000 Ft (Jófogás) – darabonként kb. 22 500 Ft "
+        self.assertIn("Csomag, nem éri meg: „Márkás konzolcsomag 10 db” 20 000 Ft (Jófogás) – darabonként kb. 22 500 Ft "
                       "(9 hirdetés), a haszon kb. -1 700 Ft.", self.journal())
-        other = listing(4, "Márkás ruhák egyben eladók", 3000, "www.jofogas.hu")
-        self.browser.by_url = [("ruhacsomag", [other])]
+        other = listing(4, "Márkás konzolok egyben eladók", 3000, "www.jofogas.hu")
+        self.browser.by_url = [("konzolcsomag", [other])]
         self.browser.pages[other["url"]] = BRANDED_PAGE
         self.llm.bundle = False
         self.hunter.run(notify=self.notify, force=True)
         self.assertEqual(self.notices, [])
-        self.assertIn("Nem csomag (vagy nem derül ki, mi van benne): „Márkás ruhák egyben eladók” 3 000 Ft.",
+        self.assertIn("Nem csomag (vagy nem derül ki, mi van benne): „Márkás konzolok egyben eladók” 3 000 Ft.",
                       self.journal())
 
     def test_a_risky_bundle_is_not_told_unless_you_want_it(self):
         """Csak becsült darabárak, és nem hozza a dupláját: kockázatos; erről csak akkor szól, ha a „csak nyugodt szívvel”
         ki van kapcsolva."""
-        self.browser.by_url = [("ruhacsomag", [{**BRANDED, "price": 9500}])]
-        self.clothes()
+        self.browser.by_url = [("konzolcsomag", [{**BRANDED, "price": 9500}])]
+        self.consoles()
         self.hunter.run(notify=self.notify)
         self.assertEqual(self.notices, [])
         self.assertTrue(any(t.startswith("Kockázatos csomag, nem szóltam") for t in self.journal()))
         self.hunter.set_limits(safe_only=False)
-        other = listing(5, "Márkás ruhacsomag 11 db", 9500, "www.jofogas.hu")
-        self.browser.by_url = [("ruhacsomag", [other])]
+        other = listing(5, "Márkás konzolcsomag 11 db", 9500, "www.jofogas.hu")
+        self.browser.by_url = [("konzolcsomag", [other])]
         self.browser.pages[other["url"]] = BRANDED_PAGE
         self.hunter.run(notify=self.notify, force=True)
         [(_kind, _title, text, _extra)] = self.notices
@@ -218,10 +219,10 @@ class BundleSearchTests(BundleCase):
 
     def test_a_suspicious_bundle_is_left_out(self):
         self.llm.shady = True
-        self.clothes()
+        self.consoles()
         self.hunter.run(notify=self.notify)
         self.assertEqual((self.notices, self.hunter.state()["deals"]), ([], []))
-        self.assertTrue(any(t.startswith("Gyanús, nem szóltam róla: „Márkás ruhacsomag 10 db”") for t in self.journal()))
+        self.assertTrue(any(t.startswith("Gyanús, nem szóltam róla: „Márkás konzolcsomag 10 db”") for t in self.journal()))
 
     def test_market_prices_are_used_where_known(self):
         """Ha az árbázis ismeri egy tétel termékét, a mostani hirdetési árakból számol (óvatosan, de legfeljebb a becslés
@@ -229,9 +230,9 @@ class BundleSearchTests(BundleCase):
         self.hunter.book.add([{**r, "platform": "jofogas"} for r in SWITCH] +
                              [{**r, "platform": "vinted"} for r in SWITCH_VINTED])
         self.llm.lines = [{"name": "Nintendo Switch OLED", "query": "Nintendo Switch OLED", "count": 1, "estimate": 70000},
-                          {"name": "Zokni", "query": "", "count": 2, "estimate": 500}]
-        self.browser.by_url = [("ruhacsomag", [{**BRANDED, "price": 40000}])]
-        self.clothes()
+                          {"name": "Kábel", "query": "", "count": 2, "estimate": 500}]
+        self.browser.by_url = [("konzolcsomag", [{**BRANDED, "price": 40000}])]
+        self.consoles()
         self.hunter.run(notify=self.notify)
         [deal] = self.hunter.state()["deals"]
         switch = deal["bundle"]["lines"][0]
@@ -242,8 +243,8 @@ class BundleSearchTests(BundleCase):
         self.assertEqual(deal["bundle"]["sure"], round(switch["unit"] / deal["bundle"]["value"], 2))
         self.assertIn("az érték nagy része egy tételen múlik: nézd meg a fotón, tényleg az-e", deal["safety"]["why"])
         self.llm.lines[0]["estimate"] = 30000
-        other = listing(6, "Márkás ruhacsomag 12 db", 20000, "www.jofogas.hu")
-        self.browser.by_url = [("ruhacsomag", [other])]
+        other = listing(6, "Márkás konzolcsomag 12 db", 20000, "www.jofogas.hu")
+        self.browser.by_url = [("konzolcsomag", [other])]
         self.browser.pages[other["url"]] = BRANDED_PAGE
         self.hunter.run(notify=self.notify, force=True)
         self.assertEqual(self.hunter.state()["deals"][0]["bundle"]["lines"][0]["unit"], 60000,
@@ -251,7 +252,7 @@ class BundleSearchTests(BundleCase):
 
     def test_the_model_not_answering_keeps_the_bundle_for_later(self):
         self.llm.silent = True
-        self.clothes()
+        self.consoles()
         self.hunter.run(notify=self.notify)
         self.assertEqual(self.hunter.state()["bundles"]["waiting"], 2, "a modell nem válaszolt: vár")
         self.hunter.run(notify=self.notify, force=True)
@@ -261,28 +262,45 @@ class BundleSearchTests(BundleCase):
         self.assertEqual(self.notices, [], "látottnak jegyezte")
 
     def test_only_two_bundles_a_round(self):
-        rows = [listing(10 + n, f"Márkás ruhacsomag {n}", 6000, "www.jofogas.hu") for n in range(4)]
-        self.browser.by_url = [("ruhacsomag", rows)]
+        rows = [listing(10 + n, f"Márkás konzolcsomag {n}", 6000, "www.jofogas.hu") for n in range(4)]
+        self.browser.by_url = [("konzolcsomag", rows)]
         for row in rows:
             self.browser.pages[row["url"]] = BRANDED_PAGE
-        self.clothes()
+        self.consoles()
         self.hunter.run(notify=self.notify)
         self.assertEqual((len(self.notices), len(self.browser.looked)), (2, 2))
         self.assertEqual(self.hunter.state()["bundles"]["waiting"], 2, "a többi a következő körre vár")
         self.hunter.run(notify=self.notify)
         self.assertEqual(len(self.notices), 4)
 
+    def test_no_clothing_bundles(self):
+        """Ruhával nem kereskedik: ruhás csomagkeresést nem vesz fel, a régi (a „Ruhacsomag” alapbeállításból) betöltéskor
+        kimarad, az alapbeállítások között sincs, és a körök ruhás csomaghirdetése sem kerül a csomagbontásnak."""
+        with self.assertRaisesRegex(DealError, "Ruhával és cipővel nem kereskedem"):
+            self.hunter.add_bundle_search("ruhacsomag")
+        self.consoles()
+        with self.hunter._lock:
+            self.hunter._data["bundles"]["searches"].append({"id": "bregi", "query": "ruhacsomag", "sites": ["jofogas"]})
+            self.hunter._save()
+        reloaded = self.make()
+        self.assertEqual([s["query"] for s in reloaded.state()["bundles"]["searches"]], ["konzolcsomag"])
+        self.assertNotIn("Ruhacsomag", [p["name"] for p in reloaded.state()["bundles"]["presets"]])
+        rest = self.hunter._to_bundles([listing(7, "Márkás ruhacsomag 10 db", 6000, "www.jofogas.hu"),
+                                        listing(8, "Lego ömlesztve 3 kg", 6000, "www.jofogas.hu")], "teszt")
+        self.assertEqual([r["text"] for r in rest], ["Márkás ruhacsomag 10 db"], "a ruhás csomag nem megy oda")
+        self.assertEqual(self.hunter.state()["bundles"]["waiting"], 1)
+
     def test_settings_and_limits(self):
-        self.clothes()
+        self.consoles()
         with self.assertRaises(DealError):
-            self.hunter.add_bundle_search("Ruhacsomag")
+            self.hunter.add_bundle_search("Konzolcsomag")
         for n in range(7):
             self.hunter.add_bundle_search(f"csomag {n}")
         with self.assertRaises(DealError):
             self.hunter.add_bundle_search("még egy")
         state = self.hunter.set_bundles(min_profit="12 000")
         self.assertEqual(state["bundles"]["min_profit"], 12000)
-        self.assertEqual([p["name"] for p in state["bundles"]["presets"]][:2], ["Ruhacsomag", "Lego ömlesztve"])
+        self.assertEqual([p["name"] for p in state["bundles"]["presets"]][:2], ["Lego ömlesztve", "Videojáték-csomag"])
         search = state["bundles"]["searches"][0]
         self.assertEqual(len(self.hunter.remove_bundle_search(search["id"])["bundles"]["searches"]), 7)
         self.hunter.set_bundles(on=False)
@@ -291,13 +309,13 @@ class BundleSearchTests(BundleCase):
 
     def test_the_buy_limit_and_the_inbox_size(self):
         self.hunter.set_limits(max_buy=5000)
-        self.clothes()
-        self.llm.pick_words = ["Babaruha", "Márkás"]
+        self.consoles()
+        self.llm.pick_words = ["Gyerekjáték", "Márkás"]
         self.hunter.run(notify=self.notify)
         [picked] = self.llm.asked("legfeljebb kettőt")
         self.assertNotIn("Márkás", picked[1]["content"], "a vételi limit fölötti csomag meg sem jön")
         self.hunter.set_limits(max_buy="")
-        rows = [listing(100 + n, f"Ruhacsomag {n}", 5000, "www.jofogas.hu") for n in range(BUNDLE_INBOX + 5)]
+        rows = [listing(100 + n, f"Konzolcsomag {n}", 5000, "www.jofogas.hu") for n in range(BUNDLE_INBOX + 5)]
         self.assertEqual(self.hunter._to_bundles(rows, "teszt"), [])
         self.assertEqual(self.hunter.state()["bundles"]["waiting"], BUNDLE_INBOX, "a legrégebbiek kiesnek")
 

@@ -26,9 +26,9 @@ from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, 
                                expected_profit, explore_top, highest_ok, last_chance, left_text, market, matches_query,
                                newest_first, offer_price, parse_auction, profit_floor, safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
-from jarvis_core.pricebook import PriceBook, pace, product_key, sized, usable  # noqa: E402
+from jarvis_core.pricebook import PriceBook, pace, product_key, sized, unusable, usable, wearable  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
-from jarvis_core.selling import PLATFORMS  # noqa: E402
+from jarvis_core.selling import PLATFORMS, listing_key  # noqa: E402
 
 
 def listing(n: int, text: str, price: int, site: str = "hardverapro.hu") -> dict:
@@ -658,6 +658,126 @@ class ExploreTests(HunterCase):
         self.assertEqual(self.notices, [], "egy hirdetésről egyszer szól")
         self.assertEqual(len([m for m in self.llm.calls if "Friss hirdetések" in m[1]["content"]]), 1)
 
+    def test_a_cheaper_listing_found_while_checking_the_price_becomes_a_candidate(self):
+        """A kör árkutatása (a figyelt oldal hirdetésének ára máshol) közben talált olcsó hirdetés is jelölt: a többihez
+        mérve, saját maga nélkül megéri, ezért a hirdetés oldala és a modellkérdés után szól róla is, az eredetivel együtt
+        (a nagyobb haszon előbb); a jelölt mellett ott van, mihez mérte (az eredeti is, mert a címe szerint ugyanaz)."""
+        cheap = listing(89, "Sony WH-1000XM4 fekete", 45000, "www.jofogas.hu")
+        self.browser.results = []
+        self.browser.by_url = [("videokartya", PAGE), ("jofogas.hu/magyarorszag?q=Sony", HEADPHONES + [cheap]),
+                               ("vinted.hu/catalog?search_text=Sony", HEADPHONES_VINTED),
+                               ("jofogas.hu/magyarorszag?q=", RTX_JOFOGAS)]
+        self.hunter.add_watch(CATEGORY)
+        self.llm.explore = [{"n": 1, "query": "Sony WH-1000XM4", "buy": True}]
+        self.hunter.set_enabled(True)
+        self.hunter.run(notify=self.notify)
+        titles = [t for _k, t, _x, _e in self.notices]
+        self.assertIn("Olcsó: Sony WH-1000XM4 fekete", titles, "az árkutatás közben talált is jelölt lett")
+        self.assertLess(titles.index("Olcsó: Eladó zajszűrős Sony fejhallgató, alig használt"),
+                        titles.index("Olcsó: Sony WH-1000XM4 fekete"), "a nagyobb haszon előbb")
+        deal = next(d for d in self.hunter.state()["deals"] if d["url"] == cheap["url"])
+        self.assertTrue(deal["spawned"])
+        self.assertIn("árkutatás közben", deal["explore"])
+        self.assertIn("Máshol kb.", next(x for _k, t, x, _e in self.notices if t == "Olcsó: Sony WH-1000XM4 fekete"))
+        used = [e["u"] for e in deal["basis"]["used"]]
+        self.assertNotIn(cheap["url"], used, "saját maga nélkül")
+        self.assertEqual(len(used), 10, "a Jófogás és a Vinted 5-5 szokásos ára (az eredeti címe nem kulcsos: nincs köztük)")
+        looked = list(self.browser.looked)
+        self.assertEqual(looked.count(cheap["url"]), 1)
+        self.assertEqual(self.hunter._peers({"url": "https://hardverapro.hu/apro/1.html", "text": "x", "price": 1},
+                                            {"group": [], "peers": [{"u": cheap["url"], "p": 45000, "s": "jofogas",
+                                                                     "row": cheap}]},
+                                            lambda peer, ref: (1.0, peer)), [], "egy hirdetést egyszer vesz jelöltnek")
+
+    def test_a_found_listing_that_does_not_fit_the_round_comes_next(self):
+        """Ha az árkutatás közben talált jelölt a kör keretébe már nem fér bele, nem vész el: a következő kör ezzel kezd
+        (egyszer nézi meg). Ami túl sokáig várt (CARRY_TTL), lekerül, és egy későbbi árkutatásnál újra jelölt lehet."""
+        cheap = listing(89, "Sony WH-1000XM4 fekete", 45000, "www.jofogas.hu")
+        self.browser.results = []
+        self.browser.by_url = [("videokartya", PAGE), ("jofogas.hu/magyarorszag?q=Sony", HEADPHONES + [cheap]),
+                               ("vinted.hu/catalog?search_text=Sony", HEADPHONES_VINTED),
+                               ("jofogas.hu/magyarorszag?q=", RTX_JOFOGAS)]
+        self.hunter.add_watch(CATEGORY)
+        self.llm.explore = [{"n": 1, "query": "Sony WH-1000XM4", "buy": True}]
+        self.hunter.set_enabled(True)
+        with mock.patch.object(deals_module, "MAX_PAGES", 2):   # az eredeti még belefér, a talált már nem
+            self.hunter.run(notify=self.notify)
+        titles = lambda: [t for _k, t, _x, _e in self.notices]  # noqa: E731
+        self.assertIn("Olcsó: Eladó zajszűrős Sony fejhallgató, alig használt", titles())
+        self.assertNotIn("Olcsó: Sony WH-1000XM4 fekete", titles())
+        self.assertEqual(list(self.hunter._carry), [listing_key(cheap["url"])])
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertIn("Olcsó: Sony WH-1000XM4 fekete", titles(), "a következő kör ezzel kezdett")
+        self.assertEqual(self.browser.looked.count(cheap["url"]), 1)
+        self.assertEqual(self.hunter._carry, {})
+        # ami túl sokáig várt, lekerül (és újra jelölt lehet)
+        late = {**listing(90, "Sony WH-1000XM4 ezüst", 46000, "www.jofogas.hu"), "id": "x1", "site": "Jófogás",
+                "platform": "jofogas", "median": 70000, "profit": 15000, "spawned": True}
+        self.hunter._spawned[listing_key(late["url"])] = self.clock.now
+        self.hunter._carry_over({"id": "w", "query": "Sony WH-1000XM4"}, late)
+        self.clock.now += deals_module.CARRY_TTL + 60
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual((self.hunter._carry, listing_key(late["url"]) in self.hunter._spawned), ({}, False))
+        self.assertNotIn(late["url"], self.browser.looked)
+
+    def test_a_lower_market_level_wins_over_older_prices(self):
+        """Ha a most talált hirdetések jóval olcsóbbak a korábban látottaknál, lejjebb ment az árszint: azokhoz mér (és
+        ezt meg is mondja), a régebbi árak a kizártak között („régebbi ár”). Így egy sok hasonlóan olcsó hirdetés között
+        az egyik nem látszik kivételes ajánlatnak."""
+        self.hunter.book.add([{**listing(200 + n, f"Makita DHP482 {n}", 40000 + n * 500), "platform": "hardverapro"}
+                              for n in range(5)])
+        fresh = [{**listing(210 + n, f"Makita DHP482 fúró {n}", 30000 + n * 500, "www.jofogas.hu"), "platform": "jofogas"}
+                 for n in range(4)]
+        row = {**listing(220, "Makita DHP482", 25000, "www.jofogas.hu"), "platform": "jofogas"}
+        found = self.hunter._market_of(row, "Makita DHP482", fresh)
+        self.assertEqual((found["price"], found["n"]), (30800, 4))
+        self.assertEqual(found["basis"]["note"], "a mostani hirdetések olcsóbbak a korábban látottaknál: azokhoz mértem")
+        self.assertEqual({e["why"] for e in found["basis"]["out"]}, {"régebbi ár (azóta lejjebb ment az árszint)"})
+
+    def test_clothing_is_left_out_of_trading(self):
+        """Ruhával nem kereskedik: a figyelt oldal ruháját és cipőjét kihagyja (a modellhez sem kerül, a mai számokban:
+        „ruha, cipő”), amit a modell ruhának nevez meg, az is kimarad, és ruhára nem alkuszik; a kifejezett keresésed
+        (pl. egy cipőre) ettől még megy."""
+        for text in ("Nike Air Max 90 42-es", "Carhartt dzseki L", "Babaruha csomag", "Levi's 501 farmer", "Női csizma",
+                     "H&M felső"):
+            self.assertTrue(wearable(text), text)
+        for text in ("RTX 3060 Ti", "Laptop táska", "Bosch ruhaszárító", "VW Polo", "Boss DS-1 pedál", "AirPods Pro 2",
+                     "HMD Nokia telefon"):
+            self.assertFalse(wearable(text), text)
+        clothes = [listing(60, "Nike Air Max 90 42-es", 15000), listing(61, "Carhartt dzseki L", 9000),
+                   listing(62, "Retró kütyü", 9000)]
+        self.browser.results = []
+        self.browser.by_url = [("videokartya", PAGE + clothes)]
+        self.hunter.add_watch(CATEGORY)
+        self.hunter.set_enabled(True)
+        self.llm.explore = [{"n": 3, "query": "Zara blézer", "buy": True}]
+        self.hunter.run(notify=self.notify)
+        [(system, explored)] = [(m[0]["content"], m[1]["content"]) for m in self.llm.calls
+                                if "Friss hirdetések" in m[1]["content"]]
+        self.assertNotIn("Nike", explored)
+        self.assertNotIn("Carhartt", explored)
+        self.assertIn("A ruhát, a cipőt és a divatárut hagyd ki", system)
+        self.assertEqual(self.hunter.funnel()["counts"]["clothing"], 3, "a két ruha, és amit a modell blézernek nevezett")
+        self.assertFalse([u for u in self.browser.urls if "Zara" in u], "a ruhának nevezett árát sem keresi máshol")
+        shoes = self.make("cipo")
+        shoes.add_search("Nike Air Max 90", ["hardverapro"], reference=40000)
+        shoes.set_enabled(True)
+        self.browser.by_url = [("Nike", [listing(70, "Nike Air Max 90 42-es", 27000)])]
+        shoes.run(notify=self.notify)
+        self.assertIn("Olcsó: Nike Air Max 90 42-es", [t for _k, t, _x, _e in self.notices], "a kifejezett keresés megy")
+        # alku: ugyanolyan régóta fent lévő, kicsit drága hirdetések; a fúrógépre szól, a cipőre nem
+        for name, base in (("Nike Air Max 90", 80), ("Makita DHP482", 90)):
+            rows = [{**listing(base + n, f"{name} {n}", p), "platform": "hardverapro"}
+                    for n, p in enumerate((40000, 41000, 39000, 42000, 40500, 39500, 31000))]
+            shoes.book.add(rows)
+        self.clock.now += 8 * 86400
+        for name, base in (("Nike Air Max 90", 80), ("Makita DHP482", 90)):
+            shoes.book.add([{**listing(base + n, f"{name} {n}", p), "platform": "hardverapro"}
+                            for n, p in enumerate((40000, 41000, 39000, 42000, 40500, 39500, 31000))])
+        found = {c["key"] for c in shoes.haggle_candidates()}
+        self.assertTrue([k for k in found if "makita" in k], "a fúrógépre alkudna (a teszt helyes)")
+        self.assertFalse([k for k in found if "nike" in k], "ruhára nem alkuszik")
+
     def test_promoted_listings_come_after_the_rest(self):
         """A fizetett kiemelések (az oldal elején, többnyire régiek) a modellkeret végére kerülnek: egy oldalról
         EXPLORE_ROWS (20) ismeretlen jut a modellhez, ebből előbb a többi."""
@@ -754,6 +874,43 @@ class ExploreTests(HunterCase):
         self.hunter.run(notify=self.notify, force=True)
         self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"])
         self.assertEqual(self.hunter.state()["tips"], [], "az ellenőrzés lezárult: lekerült")
+
+    def test_two_lanes_never_make_two_deals_of_one_tip(self):
+        """A gyors sor és a böngésző sora egyszerre nézi a tippeket: ugyanazt csak az egyik foglalhatja le (a kiválasztás
+        és a lefoglalás egy zárolt lépés; eddig mindkettő szabadnak láthatta, és két találat, két értesítés lett
+        belőle). Mentéskor is: egy hirdetésből (webcím) egy találat, és csak egyszer szól róla."""
+        self.browser.results = []
+        self.browser.by_url = [("videokartya", PAGE)]
+        hunter = self.hunter = self.make("ket-sor")
+        hunter.book.add([{**r, "platform": "hardverapro"} for r in NORMAL[:4]])
+        hunter.add_watch(CATEGORY)
+        hunter.set_enabled(True)
+        hunter.run(notify=self.notify)
+        [tip] = hunter.state()["tips"]
+        self.notices.clear()
+        hunter.book.add([{**r, "platform": "jofogas"} for r in RTX_JOFOGAS])
+        first = deals_module._Round(lambda: None, self.notify, None)
+        second = deals_module._Round(lambda: None, self.notify, None)
+        explore = hunter._explore_deal
+
+        def racing(*args, **kwargs):
+            hunter._explore_deal = explore     # a másik sor épp most, az első kiválasztása és foglalása között
+            hunter._step_tips(second)
+            return explore(*args, **kwargs)
+
+        hunter._explore_deal = racing
+        hunter._step_tips(first)
+        self.assertEqual((len(first.tips), len(second.tips)), (0, 1), "csak az egyik sor foglalta le")
+        self.assertEqual((len(first.work), len(second.work)), (0, 1), "és csak annak lett belőle jelölt")
+        row = {"site": tip["site"], "platform": tip["platform"], "text": tip["title"], "title": tip["title"],
+               "price": int(tip["price"]), "url": tip["url"]}
+        search = {"id": "tipp", "query": tip["query"]}
+        deal = hunter._deal(search, row, 98000)
+        hunter._conclude(first, search, dict(deal), True)
+        hunter._conclude(second, search, {**deal, "id": "masik"}, True)
+        self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"], "egyszer szól")
+        self.assertEqual([d["id"] for d in hunter.state()["deals"] if d["url"] == tip["url"]], [deal["id"]],
+                         "egy találat a hirdetésből")
 
     def test_profit_counts_with_a_careful_sale_price(self):
         """A haszon óvatos: a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede (ha szórnak az árak, a vevő az
@@ -930,6 +1087,63 @@ class ExploreTests(HunterCase):
         self.assertIn("Eladási sebesség: gyorsan kel", self.notices[-1][2])
 
 
+class SellerTests(HunterCase):
+    def test_a_bundle_from_the_same_seller(self):
+        """Az eladó többi hirdetése (seller_bundle): ami külön is eladható haszonnal (biztos áron, nem lassan kelő), azt
+        hozzáveszi; a Vinteden egy posta és a vevővédelmi díj (kb. fix + 5%) a végösszegre egyszer; darabonként a
+        csomagolás és a meghirdetés; összeveti a csak ezt vennéd és a külön-külön vennéd esettel; a ruha, a csomag, a
+        kiegészítő, a hibás kimarad, az ismeretlen árú csak számít."""
+        self.hunter.book.add(AIRPODS)
+        deal = {"id": "d1", "url": "https://www.vinted.hu/items/1-switch", "platform": "vinted", "site": "Vinted",
+                "title": "Nintendo Switch OLED", "text": "Nintendo Switch OLED", "price": 60000, "median": 100000,
+                "low": 90000, "resale": 90000, "profit": 28500, "at": self.clock(),
+                "seller_url": "https://www.vinted.hu/member/5-anna"}
+        self.hunter._remember(deal)
+        rows = [{**listing(1, "Nintendo Switch OLED", 60000, "www.vinted.hu"), "url": deal["url"]},
+                listing(2, "Apple AirPods Pro 2 fehér", 30000, "www.vinted.hu"),
+                listing(3, "Apple AirPods Pro 2 doboz nélkül", 46000, "www.vinted.hu"),
+                listing(4, "Nike pulóver", 5000, "www.vinted.hu"), listing(5, "3 db póló", 3000, "www.vinted.hu"),
+                listing(6, "AirPods Pro 2 tok", 2000, "www.vinted.hu"), listing(7, "Apple AirPods Pro 2 hibás", 9000,
+                                                                               "www.vinted.hu"),
+                listing(8, "Retró kütyü X100", 3000, "www.vinted.hu")]
+        summary = self.hunter.seller_bundle(deal, rows)
+        fee = lambda amount: round(300 + 0.05 * amount)  # noqa: E731
+        self.assertEqual([(i["t"], i["pick"], i.get("why", "")) for i in summary["items"]],
+                         [("Apple AirPods Pro 2 fehér", True, ""),
+                          ("Apple AirPods Pro 2 doboz nélkül", False, "külön nem éri meg")])
+        self.assertEqual((summary["total"], summary["fee"], summary["unknown"]), (90000, fee(90000), 1))
+        self.assertEqual(summary["single"], 90000 - 60000 - 1500 - fee(60000) - 300)
+        self.assertEqual(summary["profit"], 90000 + 45000 - 90000 - 1500 - fee(90000) - 2 * 300)
+        self.assertEqual(summary["separately"], summary["single"] + 45000 - 30000 - 1500 - fee(30000) - 300)
+        self.assertGreater(summary["profit"], summary["separately"], "a közös vétel jobb, mint külön-külön")
+        self.assertEqual((summary["worth"], summary["listings"], summary["minutes"], summary["offer"]),
+                         (True, 2, 20, 81000))
+        self.assertEqual(self.hunter.get("d1")["seller"]["profit"], summary["profit"], "a találatba is beírja")
+        text = self.hunter.seller_text(deal, summary)
+        self.assertIn("a Vinted vevővédelmi díja kb. 4 800 Ft a végösszegre egyszer", text)
+        self.assertIn("Közös vételre ajánlj kb. 81 000 Ft-ot (csomagajánlat).", text)
+        self.assertIsNone(self.hunter.seller_bundle(deal, rows[:1]), "nincs más hirdetése")
+
+    def test_the_round_looks_at_the_sellers_other_listings(self):
+        """A kör egy jó találata után (egy oldalbetöltés a kör keretéből) az eladó többi hirdetése is: együtt jobban
+        megéri, ezért csendesen szól."""
+        self.hunter.book.add(AIRPODS)
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        row = listing(10, "Gigabyte RTX 3060 Ti Gaming OC", 55000)
+        seller = "https://hardverapro.hu/aprok/hirdeto/peti/index.html"
+        self.browser.results = [row]
+        self.browser.pages[row["url"]] = {"title": "Gigabyte RTX 3060 Ti Gaming OC", "seller": seller,
+                                          "text": "RTX 3060 Ti. Hibátlan, dobozában. Eladó: Peti (12 értékelés)"}
+        self.browser.by_url = [("hirdeto/peti", [row, listing(11, "Apple AirPods Pro 2 fehér", 30000)])]
+        self.hunter.run(notify=self.notify)
+        self.assertEqual([t for _k, t, _x, _e in self.notices],
+                         ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC", "Ugyanettől az eladótól: Gigabyte RTX 3060 Ti Gaming OC"])
+        self.assertTrue(self.notices[1][3]["quiet"])
+        self.assertIn(seller, self.browser.urls)
+        self.assertEqual(self.hunter.state()["deals"][0]["seller"]["picked"], 1)
+
+
 class PriceBookTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -937,6 +1151,36 @@ class PriceBookTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_only_really_comparable_prices_count(self):
+        """Csak az számít összehasonlítónak (és kerül az árbázisba), ami egy működő, egy darab, meghatározott termék ára;
+        a kizárásnak oka van (a találat ablakában látszik). A készlet változat: a 2×4 GB nem a 2×8 GB."""
+        for text, why in (("RTX 3060 Ti 90 000 Ft-tól", "„-tól” ár: nem egy meghatározott darab ára"),
+                          ("25e-től RTX kártyák", "„-tól” ár: nem egy meghatározott darab ára"),
+                          ("RTX 3060 / 3070 / 3080 videókártyák", "több termék egy hirdetésben"),
+                          ("Ryzen 5 5600X + B550 alaplap", "több termék egy hirdetésben"),
+                          ("RTX 3070 és RTX 3080 eladó", "több termék egy hirdetésben"),
+                          ("2 db RTX 3060", "csomag vagy több darab egy áron"),
+                          ("RTX 3060 hibás", "alkatrész vagy hibás"), ("Keresek RTX 3060-at", "kereső- vagy cserehirdetés"),
+                          ("iPhone 13 tok", "kiegészítő, nem maga a termék")):
+            self.assertEqual(unusable(text), why, text)
+        for text in ("RTX 3060 Ti", "2019-től használt Makita DHP482", "Hétfőtől átvehető RTX 3070",
+                     "Kingston Fury Beast 16GB (2x8GB) DDR4 3200MHz", "RTX 3060 Ti 12GB GDDR6", "PS5 + 2 játék"):
+            self.assertEqual(unusable(text), "", text)
+        self.assertNotEqual(product_key("Kingston Fury 2x4GB DDR4")[0], product_key("Kingston Fury 2x8GB DDR4")[0])
+        self.assertEqual(product_key("Kingston Fury 16GB (2x8GB) DDR4")[0], product_key("Kingston Fury 2x8GB DDR4")[0])
+        book = PriceBook(Path(self.tmp.name), self.clock)
+        self.assertEqual(book.add([{"text": "RTX 3060 Ti 90 000 Ft-tól", "price": 90000, "url": "https://x.hu/1"},
+                                   {"text": "RTX 3060 / 3070 / 3080", "price": 90000, "url": "https://x.hu/2"}]), 0)
+        book.add([{"text": f"RTX 3060 Ti {n}", "price": 95000 + n * 1000, "url": f"https://x.hu/{10 + n}",
+                   "platform": "hardverapro"} for n in range(6)] +
+                 [{"text": "RTX 3060 Ti olcsón", "price": 30000, "url": "https://x.hu/30", "platform": "hardverapro"}])
+        reference = book.reference(book.key("RTX 3060 Ti")[0])
+        self.assertEqual(([e["p"] for e in reference["basis"]["used"]][:2], reference["basis"]["out"]),
+                         ([95000, 96000], [{"t": "RTX 3060 Ti olcsón", "p": 30000, "s": "hardverapro",
+                                            "u": "https://x.hu/30", "src": "árbázis",
+                                            "why": "kilógó ár (kimaradt a szokásos árból)"}]),
+                         "mihez mérte, és mi maradt ki (a címével)")
 
     def test_the_title_gives_the_key_and_the_search_word(self):
         """A böngésző nélkül olvasott kártya szövegében a város, a dátum és az eladó neve is ott van („eladó31”): a
@@ -1140,17 +1384,20 @@ class BrowseTests(HunterCase):
         self.assertTrue(self.journal()[1].startswith("Jó találat: „Gigabyte RTX 3060 Ti Gaming OC”"))
         self.assertFalse(self.hunter.available(), "egy rövid szünet, és vált")
         self.assertEqual(self.hunter.note(), "Hamarosan: Vinted.")
-        # a következő oldal (nem vár a Hardverapró pihenőjére): a Vinteden a kezdőoldallal kezd, és megnyit egy hirdetést
-        feed = [listing(40, "Nike pulóver", 8000, "www.vinted.hu"), listing(41, "Zara kabát", 12000, "www.vinted.hu")]
+        # a következő oldal (nem vár a Hardverapró pihenőjére): a Vinteden is tárgyakat keres (a kezdőoldal és a
+        # ruhamárkák helyett), és a ruhát kihagyja (azzal nem kereskedik)
+        feed = [listing(40, "Nike pulóver", 8000, "www.vinted.hu"), listing(41, "Zara kabát", 12000, "www.vinted.hu"),
+                listing(42, "Retró kütyü X100", 9000, "www.vinted.hu")]
         self.browser.by_url = [("vinted.hu", feed)]
         self.clock.now += 61
         self.assertTrue(self.hunter.available())
         self.hunter.run(notify=self.notify)
-        self.assertEqual(self.browser.urls[-1], "https://www.vinted.hu/")
-        self.assertIn(self.browser.looked[-1], {r["url"] for r in feed})
-        self.assertEqual(len(self.hunter._pending), 4, "az ismeretlenek a következő kötegre várnak")
-        self.assertTrue(any(r["text"].startswith("Hirdetés – ") for r in self.hunter._pending),
-                        "a megnyitott hirdetés címével együtt")
+        self.assertRegex(self.browser.urls[-1],
+                         r"^https://www\.vinted\.hu/catalog\?search_text=(lego|airpods|nintendo|playstation|iphone)")
+        pending = [r["text"] for r in self.hunter._pending]
+        self.assertEqual(len(pending), 3, "az ismeretlen kütyü a következő kötegre vár")
+        self.assertFalse([t for t in pending if "Nike" in t or "Zara" in t], "a ruhát kihagyta")
+        self.assertEqual(self.hunter.funnel()["counts"]["clothing"], 2)
 
     def test_unknown_listings_go_to_the_model_in_batches(self):
         many = [listing(200 + n, f"Eladó holmi {n}", 5000 + n, "hardverapro.hu") for n in range(25)]
@@ -1174,6 +1421,37 @@ class BrowseTests(HunterCase):
         self.hunter.run(notify=self.notify)
         self.assertEqual(len(self.explored()), 2)
         self.assertIn("Canon EOS 600D", self.explored()[-1])
+
+    def test_turbo_names_the_unknowns_after_every_page(self):
+        """Turbó (az Indítás melletti gomb): az ismeretleneket minden oldal után megnevezteti (nem várja meg a 20-at), és
+        a munkamenet végén a maradékot is; a weboldalaktól nem kér többet. Megmarad a következő indításra is;
+        kikapcsolva a régi kötegelés jön vissza."""
+        self.assertFalse(self.hunter.state()["turbo"], "alapból ki van kapcsolva")
+        self.hunter.set_browse(on=True, sites=["hardverapro", "vinted"])
+        self.hunter.run(notify=self.notify)
+        self.assertEqual((self.explored(), len(self.hunter._pending)), ([], 2), "Turbó nélkül a kötegre vár")
+        self.assertTrue(self.hunter.set_turbo(True)["turbo"])
+        self.assertIn("Bekapcsoltad a Turbót", self.journal()[0])
+        self.assertTrue(self.make().turbo, "megmarad")
+        loaded = len(self.browser.urls)
+        self.clock.now += 26 * 60
+        self.hunter.run(notify=self.notify)    # a munkamenet vége: Turbóban a két maradék is a modellhez megy
+        self.assertEqual(len(self.explored()), 1)
+        self.assertIn("Laptop táska", self.explored()[0])
+        self.assertEqual(self.hunter._pending, [])
+        self.assertEqual(len(self.browser.urls), loaded, "ehhez nem töltött le semmit")
+        self.browser.by_url = [("vinted.hu", [listing(42, "Retró kütyü X100", 9000, "www.vinted.hu")])]
+        self.clock.now += 61
+        self.hunter.run(notify=self.notify)    # a következő oldal (Vinted): egyetlen ismeretlen, rögtön a modellhez
+        self.assertEqual(len(self.explored()), 2)
+        self.assertIn("Retró kütyü X100", self.explored()[-1])
+        self.hunter.set_turbo(False)
+        self.assertIn("Kikapcsoltad a Turbót", self.journal()[0])
+        self.browser.by_url = [("vinted.hu", [listing(43, "Retró kütyü X200", 9500, "www.vinted.hu")])]
+        self.clock.now += 121
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(len(self.explored()), 2, "kikapcsolva újra kötegben")
+        self.assertEqual(len(self.hunter._pending), 1)
 
     def test_a_captcha_stops_that_site_for_the_day(self):
         self.browser.challenge = {"vinted.hu"}
@@ -1501,7 +1779,7 @@ class OfferTests(unittest.TestCase):
         with self.assertRaisesRegex(DealError, "kevesebb a kért árnál"):
             self.hunter.make_offer(self.deal("/items/1-ps5"), 16000, confirm=self.confirm)
         with self.assertRaisesRegex(DealError, "csak a Vinteden"):
-            self.hunter.make_offer(self.deal("/items/1-ps5", platform="jofogas"), None, confirm=self.confirm)
+            self.hunter.make_offer(self.deal("/items/5-jofogas", platform="jofogas"), None, confirm=self.confirm)
         self.assertEqual((self.site.posts, self.prompts), ([], []))
 
 

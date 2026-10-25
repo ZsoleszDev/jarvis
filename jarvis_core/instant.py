@@ -35,6 +35,7 @@ from typing import Any, Callable
 from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, Deferred, deal_action, excluded, matches_query,
                     newest_first, parse_words, safety_text)
 from .feeds import FAST_SITES, FeedError, Quota
+from .pricebook import wearable
 from .llm import background_calls
 from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price
 from .textutil import fold
@@ -83,6 +84,11 @@ class InstantError(DealError):
 
 class _Stop(Exception):
     """A figyelő leáll (kilépés)."""
+
+
+class _Off(Exception):
+    """Közben leállítottad a figyelőt (Automata kereskedés: Leállítás), vagy törölted ezt a figyelőjét: a futó értékelés
+    hátralévő része elmarad (se letöltés, se modellkérdés, se értesítés)."""
 
 
 class InstantWatch:
@@ -397,13 +403,29 @@ class InstantWatch:
                 (self._data["seen"].get(entry[0]) or {}).pop(listing_key(entry[2]["url"]), None)
             self._save()
 
-    def _go(self) -> None:
-        """Az értékelés közben (DealHunter.appraise: minden hirdetés letöltése, modellkérdése és a szólás előtt):
-        Szünetben, kikapcsolt háttérmunkával vagy az üzemidőn kívül megáll (Deferred: a hátralévő hirdetések
-        megmaradnak, és a folytatáskor jönnek); leállításkor kilép."""
+    def _go(self, alert_id: str | None = None) -> None:
+        """Az értékelés közben (DealHunter.appraise: minden hirdetés letöltése, modellkérdése és a szólás előtt): ha
+        közben leállítottad a figyelőt (vagy törölted ezt a figyelőjét, `alert_id`), a hátralévő rész elmarad (_Off); ha
+        ezt a figyelőt szünetelteted, Szünetben, kikapcsolt háttérmunkával vagy az üzemidőn kívül megáll (Deferred: a
+        hátralévő hirdetések megmaradnak, és a folytatáskor jönnek); kilépéskor kilép."""
         self._check()
+        if not self._on(alert_id):
+            raise _Off()
+        if alert_id is not None and self._paused(alert_id):
+            raise Deferred("szünet")
         if not self._may_work():
             raise Deferred("szünet")
+
+    def _on(self, alert_id: str | None = None) -> bool:
+        """Be van-e kapcsolva a figyelő (az Indítás után, a Leállításig), és megvan-e még ez a figyelője."""
+        with self._lock:
+            if not self._data["enabled"]:
+                return False
+            return alert_id is None or any(a.get("id") == alert_id for a in self._data["alerts"])
+
+    def _paused(self, alert_id: str) -> bool:
+        with self._lock:
+            return any(a.get("id") == alert_id and a.get("off") for a in self._data["alerts"])
 
     def _room(self, sites: list[str] | tuple[str, ...]) -> bool:
         """Van-e hely ezeken az oldalakon a figyelő keretében (_has_budget); a kérést a letöltő is ellenőrzi (QUOTA)."""
@@ -437,6 +459,12 @@ class InstantWatch:
     def _check(self) -> None:
         if self._stop.is_set():
             raise _Stop()
+
+    def _check_on(self) -> None:
+        """A letöltő ezt hívja a kérés előtti várakozás közben: a kilépés és a Leállítás is megállítja (_Off)."""
+        self._check()
+        if not self._on():
+            raise _Off()
 
     def active(self) -> bool:
         """Most dolgozhat-e: be van kapcsolva, van figyelő, nincs Szünet, és a gép üzemideje van."""
@@ -506,7 +534,10 @@ class InstantWatch:
         for alert, site in self.due(now):
             if not self._has_budget(site, now) or not self.fetcher.ready(site):
                 continue
-            self.poll(alert, site)
+            try:
+                self.poll(alert, site)
+            except _Off:                       # közben leállítottad: a többi figyelő sem jön
+                return done
             done += 1
         return done
 
@@ -542,7 +573,7 @@ class InstantWatch:
             self._next[key] = now + interval
         url = self._url(alert, site)
         try:
-            rows = self._rows(self.fetcher.listings(url, site, self._check, quota=QUOTA), site)
+            rows = self._rows(self.fetcher.listings(url, site, self._check_on, quota=QUOTA), site)
         except FeedError as exc:
             self._failed(alert, site, exc)
             return []
@@ -655,17 +686,20 @@ class InstantWatch:
         if not following or not self._has_budget(site, now):
             return []
         try:
-            return self._rows(self.fetcher.listings(following, site, self._check, quota=QUOTA), site)
+            return self._rows(self.fetcher.listings(following, site, self._check_on, quota=QUOTA), site)
         except FeedError:
             return []
 
     @staticmethod
     def _fits(alert: dict[str, Any], row: dict[str, Any]) -> bool:
         """Illik-e a figyelőhöz: a keresőszó (ha van) minden szava benne van, nincs benne kizáró szó, az ársávban van,
-        és nem kereső hirdetés („Keresek…”)."""
+        és nem kereső hirdetés („Keresek…”). Egy keresőszó nélküli (oldalcímes) figyelőnél a ruha és a cipő kimarad:
+        azzal nem kereskedik (a ruhára szóló keresőszavad ettől még megy)."""
         if _WANTED_RE.search(fold(row["text"])):
             return False
         if alert.get("query") and not matches_query(alert["query"], row["text"]):
+            return False
+        if not alert.get("query") and wearable(str(row.get("title") or row["text"])):
             return False
         if excluded(alert.get("exclude") or [], row["text"]):
             return False
@@ -702,6 +736,8 @@ class InstantWatch:
         hits: list[dict[str, Any]] = []
 
         def found(deal: dict[str, Any]) -> None:
+            if not self._on(alert["id"]):      # közben leállítottad (vagy törölted a figyelőt): nem szól
+                raise _Off()
             hit = {"id": secrets.token_hex(5), "alert": alert["id"], "alert_name": alert["name"], "at": self.clock(),
                    "deal": deal["id"], "cheap": True,
                    **{k: deal.get(k) for k in ("site", "platform", "text", "title", "price", "url", "drop", "note")},
@@ -718,9 +754,16 @@ class InstantWatch:
                         stored["found_at"] = self.clock()
                 self._save()
             self._tell(alert, hit)
+            self._seller(deal)                 # az eladó többi hirdetése: közös vétellel jobban megéri?
 
-        # go: Szünetben (vagy ha a kéréskeret elfogyott: _look, _search) az értékelés megáll, a többi megmarad
-        waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found, go=self._go)
+        # go: Szünetben (vagy ha a kéréskeret elfogyott: _look, _search) az értékelés megáll, a többi megmarad; ha
+        # közben leállítottad a figyelőt, a hátralévő rész elmarad (minden letöltés, modellkérdés és szólás előtt nézi)
+        try:
+            waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found,
+                                           go=lambda: self._go(alert["id"]),
+                                           wear=wearable(str(alert.get("query") or "")))
+        except _Off:
+            return hits
         if hasattr(self.hunter, "flush_tips"):
             self.hunter.flush_tips(self.notify)     # a bizonytalan árú tippek („Érdemes megnézni”)
         if waiting:
@@ -767,7 +810,7 @@ class InstantWatch:
         if not self._room([site]):
             raise Deferred("kéréskeret", sites=[site])
         try:
-            return self.fetcher.page(row["url"], site, self._check, quota=QUOTA)
+            return self.fetcher.page(row["url"], site, self._check_on, quota=QUOTA)
         except FeedError as exc:
             if exc.kind == "busy":                 # a letöltő szerint sincs hely: a hirdetés vár
                 raise Deferred("kéréskeret", sites=[site]) from None
@@ -784,8 +827,8 @@ class InstantWatch:
 
         def one(site: str, platform: Platform) -> list[dict[str, Any]]:
             try:
-                rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site, self._check,
-                                             quota=QUOTA)
+                rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site,
+                                             self._check_on, quota=QUOTA)
             except FeedError as exc:
                 if exc.kind == "busy":
                     raise
@@ -801,6 +844,27 @@ class InstantWatch:
                 return [row for job in jobs for row in job.result()]
             except FeedError:                      # a letöltő szerint nincs hely: a hirdetés vár
                 raise Deferred("kéréskeret", sites=sites) from None
+
+    def _seller(self, deal: dict[str, Any]) -> None:
+        """Egy jó találat eladójának többi hirdetése (a hirdetés oldaláról: seller_url), a figyelő kéréskeretéből: ha
+        ezekből is megéri még valami, és együtt több a haszon (DealHunter.seller_bundle), csendesen szól róla."""
+        url, site = str(deal.get("seller_url") or ""), str(deal.get("platform") or "")
+        if not url or site not in self.platforms or deal.get("auction") or not self._room([site]):
+            return
+        try:
+            listings = self.fetcher.listings(url, site, self._check_on, quota=QUOTA)
+        except FeedError:
+            return
+        name = self.platforms[site].name
+        rows = [{"site": name, "platform": site, "text": str(r.get("text") or "")[:180], "price": int(r["price"]),
+                 "url": str(r["url"]), **({"title": str(r["title"])[:160]} if r.get("title") else {})}
+                for r in listings[:MAX_ROWS] if r.get("url") and not r.get("auction")]
+        self.hunter.book.add(rows)
+        summary = self.hunter.seller_bundle(deal, rows)
+        if summary and summary["worth"]:
+            self.notify("deal", f"Ugyanettől az eladótól: {str(deal.get('title') or deal['text'])[:50]}",
+                        self.hunter.seller_text(deal, summary), url=url, actions=[deal_action(deal["id"])],
+                        deal=deal["id"], quiet=True)
 
     def _tell(self, alert: dict[str, Any], hit: dict[str, Any]) -> None:
         warn = "".join(f" Figyelj: {w}." for w in hit.get("warnings") or [])

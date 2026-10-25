@@ -59,6 +59,10 @@ DESCRIPTION_FOOTERS = (
     "többet viszel egyben, csomagban olcsóbb.",
 )
 DESCRIPTION_FOOTER = DESCRIPTION_FOOTERS[0]
+# A leírásba alapból csak a zárószöveg (és a kulcsszavak) kerül: a tárgyról magáról a Jarvis csak akkor ír, ha a
+# leírásodban (Pro: a megjegyzésben) kifejezetten kéred (pl. „a leírásba írd bele, hogy…”, „írd oda, hogy…”).
+_DESCRIBE_RE = re.compile(r"leiras|\b(?:ird|irj|irjad|irjal|irjon)\s+(?:(?:bele|oda|hozza|rola|valamit|be)\b|"
+                          r"(?:meg|azt),?\s+hogy\b)|\b(?:emlitsd|emeld ki|jelezd)\b")
 TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200, "brand": 80,
                "size": 40, "gender": 20, "condition": 40, "color": 60, "material": 120, "location": 80,
                "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20, "source": 300, "bought_from": 80,
@@ -539,7 +543,21 @@ class ItemStore:
             return self._changed(item)
 
     def _apply(self, item: Item, values: dict[str, Any]) -> list[str]:
+        """Beírja a mezőket a tárgyba; visszaadja, melyik változott. Előbb mindet ellenőrzi (_clean): ha egy is hibás
+        (pl. egy új cím mellett egy hibás ár), ItemError, és a tárgyból semmi nem változik (egy későbbi mentés se írhassa
+        ki a félig beírt adatot)."""
         changed = []
+        for key, value in self._clean(values).items():
+            if getattr(item, key) != value:
+                setattr(item, key, value)
+                changed.append(key)
+        if item.bought_price is not None and not item.bought_at:
+            item.bought_at = time.time()      # a vételár első megadásakor: ma vetted (a Vételeim fülön átírható)
+        return changed
+
+    def _clean(self, values: dict[str, Any]) -> dict[str, Any]:
+        """A mezők ellenőrizve, egységes alakban (a tárgyhoz nem nyúl); hibás adatnál ItemError."""
+        clean: dict[str, Any] = {}
         for key, value in values.items():
             if key in AMOUNT_FIELDS:
                 value = parse_price(value)
@@ -574,12 +592,8 @@ class ItemStore:
                 value = text[:TEXT_LIMITS[key]]
             else:
                 raise ItemError(f"Ezt nem lehet módosítani: {key}")
-            if getattr(item, key) != value:
-                setattr(item, key, value)
-                changed.append(key)
-        if item.bought_price is not None and not item.bought_at:
-            item.bought_at = time.time()      # a vételár első megadásakor: ma vetted (a Vételeim fülön átírható)
-        return changed
+            clean[key] = value
+        return clean
 
     def update(self, item_id: str, user: bool = False, **values: Any) -> Item:
         """Módosítás. `user=True`: a felhasználó írta át, ezért Jarvis később nem írja felül."""
@@ -591,6 +605,14 @@ class ItemStore:
             if user:
                 item.edited = sorted(set(item.edited) | {k for k in changed if k in (*LISTING_FIELDS, "price")})
             return self._changed(item)
+
+    def update_if(self, item_id: str, still: Callable[[Item], bool], **values: Any) -> Item | None:
+        """Mint az update (Jarvis írja), de csak ha a zár alatt `still(tárgy)` még igaz (pl. a modellhívás közben nem
+        változott a leírás vagy a fotók); különben semmit nem ír, és None."""
+        with self._lock:
+            if not still(self.get(item_id)):
+                return None
+            return self.update(item_id, **values)
 
     def set_busy(self, item_id: str, text: str) -> None:
         with self._lock:
@@ -916,11 +938,10 @@ EXTRACT_SYSTEM = (
     "- title: rövid, természetes cím, ahogy egy ember írná: a márka és hogy mi ez (pl. „Sinsay trikó”, „Zara "
     "farmerdzseki”, „Nike Air Max 90”, „RTX 3060 Ti videókártya”), legfeljebb 40 karakter. A szín, a méret és az "
     "állapot ne legyen benne (azok külön mezőben látszanak), és ne írd nagybetűvel a köznevet.\n"
-    "- description: az eladó nevében, egyes szám első személyben (pl. „Egyszer hordtam.”), soha nem harmadik "
-    "személyben („az eladó szerint”). A tárgy adatait (márka, méret, szín, állapot) ne ismételd, azok külön "
-    "látszanak; csak ha a leírás hibát vagy fontos részletet említ (folt, kopás, hiányzó tartozék), azt írd meg "
-    "egy-két rövid mondatban, különben üres. Ne ígérj olyat, amit az eladó nem mondott (szállítás, garancia, "
-    "alku, csere), és ne írj árat.\n"
+    "- description: alapból üres. Csak akkor írj bele, ha az eladó kifejezetten kéri, hogy valami a hirdetés "
+    "leírásába kerüljön (pl. „a leírásba írd bele, hogy…”, „írd oda, hogy…”): akkor pontosan azt, amit kér, egy-két "
+    "rövid mondatban, az ő nevében, egyes szám első személyben (soha nem harmadik személyben, „az eladó szerint”). "
+    "Ne ígérj olyat, amit az eladó nem mondott (szállítás, garancia, alku, csere), és ne írj árat.\n"
     "- keywords: 5–8 rövid kulcsszó vesszővel, amire a vevők a Vinteden keresnek: márka, típus, szín, anyag, "
     "stílus, alkalom vagy évszak (pl. „zara, póló, fekete, pamut, basic, nyári”). Csak a leírásból.\n"
     "- gender: ruhánál, cipőnél, kiegészítőnél: női, férfi, gyerek vagy uniszex, csak ha a leírásból kiderül "
@@ -977,9 +998,10 @@ PRO_SYSTEM = (
     "férfi, gyerek vagy uniszex, ha a fazon vagy a címke egyértelművé teszi, különben üres.\n"
     "- title: rövid, természetes cím, ahogy egy ember írná: a márka és hogy mi ez (pl. „Zara farmerdzseki”, „Nike "
     "Air Max 90”), legfeljebb 40 karakter, a szín, a méret és az állapot nélkül.\n"
-    "- description: az eladó nevében, egyes szám első személyben, egy-két rövid mondat a fotón látható fontos "
-    "részletről (pl. egy kisebb folt, a hiányzó tartozék, eredeti doboz), különben üres. Ne találj ki használatot "
-    "(„egyszer hordtam”), és ne írj árat.\n"
+    "- description: alapból üres. Csak akkor írj bele, ha az eladó megjegyzésében kifejezetten kéri, hogy valami a "
+    "hirdetés leírásába kerüljön (pl. „a leírásba írd bele, hogy…”): akkor pontosan azt, amit kér, egy-két rövid "
+    "mondatban, az ő nevében, egyes szám első személyben. Ne találj ki használatot („egyszer hordtam”), és ne írj "
+    "árat.\n"
     "- keywords: 5–8 rövid kulcsszó vesszővel (márka, típus, szín, anyag, stílus), amire a vevők keresnek.\n"
     "- category: a legvalószínűbb kategóriaút, pl. „Ruhák > Kabátok” vagy „Számítástechnika > Videókártyák”.\n"
     "- search_query: 2–4 szó a hasonló hirdetések kereséséhez (márka és típus, méret nélkül).\n"
@@ -1023,10 +1045,19 @@ def vision_images(store: ItemStore, item_id: str, limit: int = PRO_PHOTOS, side:
 
 
 # Ha az EXTRACT_SYSTEM vagy a séma érdemben változik, emeld: a régi kiolvasások egyszer újra lefutnak.
-EXTRACT_VERSION = "3"
+EXTRACT_VERSION = "4"
+# Ha a modellhívás közben megváltozik a leírás (vagy a Pro fotói), a régi válasz nem kerül a tárgyba: ennyiszer olvassa
+# ki újra a frisset, utána szól (ItemError).
+STALE_RETRIES = 2
 # Ha a hirdetés már fent van valahol, ezeket Jarvis magától nem írja át (a többi oldalon is ugyanaz a
 # hirdetés legyen, és a begyakorolt lépések kulcsa se változzon); kézzel persze átírhatod.
 FROZEN_WHEN_POSTED = ("title", "description", "category", "product", "kind")
+
+
+def wants_description(prompt: str) -> bool:
+    """Kérted-e, hogy a Jarvis a tárgyról is írjon a leírásba (pl. „a leírásba írd bele, hogy a bal ujján folt van”).
+    Ha nem, a leírás csak a zárószöveg és a kulcsszavak (compose_description)."""
+    return bool(_DESCRIBE_RE.search(fold(prompt or "")))
 
 
 def extract_signature(prompt: str) -> str:
@@ -1064,11 +1095,22 @@ class ListingExtractor:
         return False
 
     def extract(self, item_id: str, only: list[str] | None = None) -> Item:
-        """Kiolvassa az adatokat. `only`: csak ezeket a mezőket (pl. a visszakérdezett állapotot és várost)."""
+        """Kiolvassa az adatokat. `only`: csak ezeket a mezőket (pl. a visszakérdezett állapotot és várost). Ha a
+        modellhívás közben megváltozott a leírás (pl. a telefonról átírtad), a régi válasz nem kerül a tárgyba (és nem is
+        számít naprakésznek): az új leírásból olvassa ki újra."""
+        for _attempt in range(STALE_RETRIES + 1):
+            item = self._extract_once(item_id, list(only) if only else None)
+            if item is not None:
+                return item
+        raise ItemError("A leírás a kiolvasás közben többször is megváltozott; próbáld újra.")
+
+    def _extract_once(self, item_id: str, only: list[str] | None) -> Item | None:
+        """Egy kiolvasás; None, ha közben megváltozott a leírás (ilyenkor semmit nem írt a tárgyba)."""
         item = self.store.get(item_id)
-        if not item.prompt.strip():
+        prompt = item.prompt                # ebből olvas ki: ha közben átírják, ez a válasz már nem az övé
+        if not prompt.strip():
             raise ItemError("Írd le röviden, mit adsz el (pl. „Zara L-es fekete póló, 500 Ft”).")
-        schema, request = EXTRACT_SCHEMA, f"Az eladó leírása:\n{item.prompt}"
+        schema, request = EXTRACT_SCHEMA, f"Az eladó leírása:\n{prompt}"
         if only:
             only = [key for key in dict.fromkeys(only) if key in EXTRACT_SCHEMA["properties"]]
             schema = {"type": "object", "required": only,
@@ -1084,8 +1126,9 @@ class ListingExtractor:
             values["price"] = None
         kind = (values.get("kind") if not only or "kind" in only else "") or item.kind
         if not only or "description" in only:
-            values["description"] = compose_description(values["description"], str(data.get("keywords") or ""), kind,
-                                                        seed=item.id)
+            # a tárgyról csak akkor ír, ha kérted; különben a leírás a zárószöveg és a kulcsszavak
+            text = values["description"] if wants_description(prompt) else ""
+            values["description"] = compose_description(text, str(data.get("keywords") or ""), kind, seed=item.id)
         if values.get("title") and (not only or "title" in only):
             values["title"] = tidy_title(values["title"], values.get("brand") or item.brand, kind,
                                          values.get("size") or item.size, values.get("color") or item.color)
@@ -1102,17 +1145,31 @@ class ListingExtractor:
             values = {k: v for k, v in values.items() if k in only}
         if any(e.get("status") == POSTED for e in item.platforms.values()):
             values = {k: v for k, v in values.items() if k not in FROZEN_WHEN_POSTED}
-        return self.store.update(item_id, **values, extracted_sig=extract_signature(item.prompt))
+        return self.store.update_if(item_id, lambda now: now.prompt == prompt, **values,
+                                    extracted_sig=extract_signature(prompt))
 
 
     def from_photos(self, item_id: str, images: list[str]) -> tuple[Item, int | None]:
         """Pro feltöltés: a hirdetés adatai a fotókról (egy modellhívás, a képekkel); ha az eladó írt megjegyzést (a
         leírás), azt is figyelembe veszi. Amit nem lát biztosan, üresen marad: arra a feltöltés rákérdez. A kézzel
-        átírt mezőket nem írja felül. Visszaadja a tárgyat és a modell árbecslését (None, ha nem tudta)."""
+        átírt mezőket nem írja felül. Visszaadja a tárgyat és a modell árbecslését (None, ha nem tudta). Ha a
+        modellhívás közben megváltoztak a fotók vagy a megjegyzés, a régi válasz nem kerül a tárgyba: a mostani fotókkal
+        újra megnézi."""
+        for attempt in range(STALE_RETRIES + 1):
+            if attempt:
+                images = vision_images(self.store, item_id)
+            done = self._from_photos_once(item_id, images)
+            if done is not None:
+                return done
+        raise ItemError("A fotók vagy a megjegyzés az átnézés közben többször is megváltoztak; próbáld újra.")
+
+    def _from_photos_once(self, item_id: str, images: list[str]) -> tuple[Item, int | None] | None:
+        """Egy átnézés; None, ha közben megváltoztak a fotók vagy a megjegyzés (ilyenkor semmit nem írt a tárgyba)."""
         item = self.store.get(item_id)
         if not images:
             raise ItemError("Ehhez a tárgyhoz még nincs fotó.")
-        note = f"\nAz eladó megjegyzése: {item.prompt}" if item.prompt.strip() else ""
+        prompt, seen = item.prompt, photo_signature(item)   # ezekből dolgozik: ha közben változnak, ez már nem az övé
+        note = f"\nAz eladó megjegyzése: {prompt}" if prompt.strip() else ""
         messages = [{"role": "system", "content": PRO_SYSTEM},
                     {"role": "user", "content": f"Az eladásra szánt tárgy fotói ({len(images)} db).{note}",
                      "images": images}]
@@ -1120,8 +1177,8 @@ class ListingExtractor:
         values: dict[str, Any] = {key: str(data.get(key) or "").strip() for key in PRO_FIELDS}
         values["kind"] = str(data.get("kind") or "").strip()
         kind = values["kind"] or item.kind
-        values["description"] = compose_description(values["description"], str(data.get("keywords") or ""), kind,
-                                                    seed=item.id)
+        text = values["description"] if wants_description(prompt) else ""   # a tárgyról csak kérésre
+        values["description"] = compose_description(text, str(data.get("keywords") or ""), kind, seed=item.id)
         if values["title"]:
             values["title"] = tidy_title(values["title"], values["brand"] or item.brand, kind,
                                          values["size"] or item.size, values["color"] or item.color)
@@ -1135,7 +1192,9 @@ class ListingExtractor:
             estimate = parse_price(data.get("price_estimate")) or None
         except ItemError:
             estimate = None
-        return self.store.update(item_id, **values, price_estimate=estimate, pro_sig=photo_signature(item)), estimate
+        saved = self.store.update_if(item_id, lambda now: now.prompt == prompt and photo_signature(now) == seen,
+                                     **values, price_estimate=estimate, pro_sig=seen)
+        return None if saved is None else (saved, estimate)
 
 
 def compose_description(text: str, keywords: str, kind: str, seed: str = "") -> str:

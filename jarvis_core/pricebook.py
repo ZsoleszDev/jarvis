@@ -29,6 +29,7 @@ from .textutil import fold
 
 MAX_KEYS = 1500            # ennyi terméket őriz (a legrégebben látottak esnek ki)
 MAX_SAMPLES = 30           # termékenként ennyi árat (a legújabbakat)
+TITLE_KEEP = 70            # egy ár mellé a hirdetés címének eleje (a találatnál látszik, mihez mérte)
 MAX_AGE = 45 * 86400       # ennél régebben látott ár már nem számít a szokásos árba
 MIN_SAMPLES = 5            # legalább ennyi ár kell egy szokásos árhoz
 REVISIT_AFTER = 2 * 86400  # egy hirdetést legkorábban ennyi idő múlva néz meg újra (elkelt-e)
@@ -122,6 +123,31 @@ _ACCESSORY = re.compile(r"\b(tolto\w*|dokkolo\w*|tok|tokja|tokok|vedotok\w*|bori
                         r"folia|szij\w*|pant)\b")
 
 
+# Ruha, cipő és a divatmárkák (ékezet nélkül): ezekkel az automata kereskedés nem foglalkozik (nem veszi meg, hogy
+# drágábban eladja), a felhasználó így döntött. A kifejezett keresésed (Keresések, azonnali figyelő keresőszóval) ettől
+# még mehet; a böngészés, a figyelt oldalak, a csomagbontás és az alku kihagyja őket.
+_WEAR_RE = re.compile(
+    r"\b(?:(?<!vw )(?<!volkswagen )polo\w{0,3}|pulover\w*|pulcsi\w*|hoodie\w*|kapucnis\w*|sweatshirt\w*|"
+    r"melegito\w*|kardigan\w*|cardigan\w*|kabat\w*|dzseki\w*|jacket\w*|parka\w*|anorak\w*|melleny\w*|"
+    r"\w*nadrag\w*|farmer\w*|jeans|"
+    r"leggings?|szoknya\w*|\w*ruha(?:k|t|ja|i|csomag\w*)?|bluz\w*|ing|ingek|triko\w{0,2}|zokni\w*|harisnya\w*|"
+    r"fehernemu\w*|melltarto\w*|bugyi\w*|pizsama\w*|bikini\w*|overal\w*|kezeslabas\w*|kosztum\w*|zako\w*|"
+    r"oltony\w*|blezer\w*|tunika\w*|sal|salat|sapka\w*|kesztyu\w*|nyakkendo\w*|t[ -]?shirt\w*|sweater\w*|"
+    r"\w*cipo\w*|csizma\w*|bakancs\w*|papucs\w*|szandal\w*|sneaker\w*|magassarku\w*|balerina\w*|mokaszin\w*|"
+    r"air max|air force|yeezy|dunk (?:low|high)|stan smith|old skool|chuck taylor|"
+    r"zara|h ?& ?m|bershka|stradivarius|pull ?(?:and|&) ?bear|mango|primark|sinsay|carhartt|ralph lauren|lacoste|"
+    r"tommy hilfiger|levi'?s|north ?face|patagonia|moncler|stone island|gucci|prada|versace|armani|burberry|"
+    r"balenciaga|louis vuitton|michael kors|calvin klein|superdry|hollister|abercrombie|uniqlo|ellesse|converse|"
+    r"vans|dr\.? ?martens|timberland|ugg|crocs|birkenstock|skechers|new ?balance|asics|reebok|jordan|nike|adidas|"
+    r"puma)\b")
+
+
+def wearable(text: str) -> bool:
+    """Ruha, cipő vagy divatmárka-e (a hirdetés címe vagy egy keresőszó alapján): az automata kereskedés ezekkel nem
+    foglalkozik (_WEAR_RE)."""
+    return bool(_WEAR_RE.search(fold(text or "")))
+
+
 def _words(text: str) -> list[str]:
     folded = fold(text or "")
     for pattern, replacement in _ALIASES:
@@ -134,15 +160,56 @@ def _words(text: str) -> list[str]:
 
 
 def usable(text: str) -> bool:
-    """Az ára egy működő, egy darab termék ára-e (és nem kereső-, csere- vagy csomaghirdetés, alkatrész, hibás,
-    kiegészítő)."""
+    """Az ára egy működő, egy darab, meghatározott termék ára-e (unusable: miért nem)."""
+    return not unusable(text)
+
+
+def unusable(text: str) -> str:
+    """Miért nem egy működő, egy darab, meghatározott termék ára (az összehasonlításnál ez a kizárás oka): kereső- vagy
+    cserehirdetés, csomag vagy több darab, alkatrész vagy hibás, kiegészítő, „-tól” ár, vagy több termék egy hirdetésben.
+    Üres, ha az ára használható."""
     folded = fold(text or "")
     if _WANTED_RE.search(folded) or (_SWAP_RE.search(folded) and not _SALE_RE.search(folded)):
+        return "kereső- vagy cserehirdetés"
+    if _LOT_RE.search(folded) or _PIECES.search(folded) or _HEAP.search(folded):
+        return "csomag vagy több darab egy áron"
+    if _PARTS_RE.search(folded):
+        return "alkatrész vagy hibás"
+    if _ACCESSORY.search(folded) or any(_FOR_IT.match(w) for w in _words(text)):
+        return "kiegészítő, nem maga a termék"
+    if from_price(text):
+        return "„-tól” ár: nem egy meghatározott darab ára"
+    if several_products(text):
+        return "több termék egy hirdetésben"
+    return ""
+
+
+# „-tól” ár („90 000 Ft-tól”, „25e-től”, „árak 5000-től”): több darab vagy változat közül a legolcsóbb ára, nem egy
+# meghatározott darabé. Az évszám („2019-től használom”) és a kis szám („10-től 18-ig”) nem ilyen.
+_FROM_PRICE = re.compile(r"(\d[\d .]*\d|\d)\s*(ft|huf|e|ezer|,-)?\s*-?\s*tol\b")
+
+
+def from_price(text: str) -> bool:
+    for match in _FROM_PRICE.finditer(fold(text or "")):
+        number = int(re.sub(r"\D", "", match.group(1)) or 0)
+        if match.group(2) or (number >= 100 and not 1900 <= number <= 2099):
+            return True
+    return False
+
+
+def several_products(text: str) -> bool:
+    """Több különböző termék egy hirdetésben, egy áron („RTX 3060 / 3070 / 3080”, „Ryzen 5 5600X + B550 alaplap”): az
+    ár nem egy meghatározott darabé, és a címből nem rendelhető egyértelműen egyikhez sem. Két különböző típusjel kell
+    hozzá: két videókártya-lapka, vagy két típusjel felsorolva (/, +, vessző, „és”, „vagy”)."""
+    words = _words(text)
+    models = list(dict.fromkeys(w for w in words if re.search(r"\d", w) and not _UNIT.match(w)
+                                and not _CAPACITY.match(w) and not _KIT.match(w)
+                                and not (w.isdigit() and (len(w) <= 2 or len(w) > 5))))
+    if len(models) < 2:
         return False
-    if _LOT_RE.search(folded) or _PIECES.search(folded) or _HEAP.search(folded) or _PARTS_RE.search(folded) \
-            or _ACCESSORY.search(folded):
-        return False
-    return not any(_FOR_IT.match(w) for w in _words(text))
+    if sum(1 for w in models if _GPU_CHIP.match(w)) >= 2 and set(words) & GPU_FAMILIES:
+        return True
+    return bool(re.search(r"[/+,]|\b(?:es|vagy)\b", fold(text or "")))
 
 
 _CAPACITY = re.compile(r"^(\d{1,4})(gb|tb)$")
@@ -364,6 +431,16 @@ _NOT_BRANDS = {"elado", "uj", "hasznalt", "eredeti", "gyari", "noi", "ferfi", "g
 LEARN_AFTER = 3            # ennyiszer kell egy ismeretlen márkának előfordulnia a modell elnevezéseiben
 
 
+def basis_entry(sample: dict[str, Any], source: str = "árbázis") -> dict[str, Any]:
+    """Egy összehasonlító ár a találat „mihez mérte” listájához: cím, ár, oldal (kulcs), webcím, és honnan (az árbázisból,
+    vagy most találta: „most”); ha azóta eltűnt (elkelt), azt is."""
+    entry = {"t": str(sample.get("t") or ""), "p": int(sample["p"]), "s": str(sample.get("site") or ""),
+             "u": str(sample.get("url") or ""), "src": source}
+    if sample.get("gone"):
+        entry["gone"] = True
+    return entry
+
+
 def fake_prone(key: str) -> bool:
     return bool(set(key.split()) & FAKE_PRONE)
 
@@ -484,7 +561,7 @@ class PriceBook:
                 elif sample.get("p") and price < int(sample["p"]) * (1 - PRICE_CUT):
                     sample["cuts"] = int(sample.get("cuts") or 0) + 1     # leárazta (az alkuhoz: engedni szokott)
                     sample.setdefault("p0", int(sample["p"]))
-                sample.update(p=price, last=now)
+                sample.update(p=price, last=now, t=" ".join(str(row.get("title") or text).split())[:TITLE_KEEP])
                 sample.pop("gone", None)
                 if len(entry["samples"]) > MAX_SAMPLES:
                     entry["samples"].sort(key=lambda s: -float(s.get("last") or 0))
@@ -500,14 +577,14 @@ class PriceBook:
 
     def samples(self, key: str, exclude: str = "") -> list[dict[str, Any]]:
         """Egy termék friss árai (MAX_AGE-en belül látva): {p: ár, site: oldal, url, gone, at: először látva, last:
-        utoljára látva, cuts: hányszor árazta le, p0: az első ára}. Az exclude hirdetés (pl. maga a jelölt) nincs
-        köztük."""
+        utoljára látva, cuts: hányszor árazta le, p0: az első ára, t: a hirdetés címének eleje}. Az exclude hirdetés
+        (pl. maga a jelölt) nincs köztük."""
         now = self.clock()
         skip = listing_key(exclude) if exclude else ""
         with self._lock:
             return [{"p": int(s["p"]), "site": str(s.get("site") or ""), "url": str(s.get("url") or ""),
                      "gone": bool(s.get("gone")), "at": float(s.get("at") or 0), "last": float(s.get("last") or 0),
-                     "cuts": int(s.get("cuts") or 0), "p0": int(s.get("p0") or s["p"])}
+                     "cuts": int(s.get("cuts") or 0), "p0": int(s.get("p0") or s["p"]), "t": str(s.get("t") or "")}
                     for s in (self._keys.get(key) or {}).get("samples") or []
                     if now - float(s.get("last") or 0) <= MAX_AGE and not (skip and listing_key(s.get("url", "")) == skip)]
 
@@ -584,7 +661,11 @@ class PriceBook:
             return None
         kept = [s for s in samples if stats["min"] <= s["p"] <= stats["max"]]   # a kilógók (és oldaluk) nem számít
         found = {"price": round_price(stats["median"]), "n": stats["n"], "p25": stats["p25"], "p75": stats["p75"],
-                 "name": name, "key": key, "sites": sorted({s["site"] for s in kept if s["site"]})}
+                 "name": name, "key": key, "sites": sorted({s["site"] for s in kept if s["site"]}),
+                 # mihez mérte: a beszámított árak, és a kilógók (nagyon olcsó vagy drága: kimaradt a szokásos árból)
+                 "basis": {"used": [basis_entry(s) for s in sorted(kept, key=lambda s: s["p"])],
+                           "out": [{**basis_entry(s), "why": "kilógó ár (kimaradt a szokásos árból)"}
+                                   for s in sorted(samples, key=lambda s: s["p"]) if s not in kept]}}
         sold = [s["p"] for s in kept if s["gone"]]
         if len(sold) >= SOLD_MIN:
             found["sold"] = {"n": len(sold), "median": round_price(statistics.median(sold))}

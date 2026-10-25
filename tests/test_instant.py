@@ -4,6 +4,7 @@ hogy az automata kereskedés köre a gyors oldalakat a böngészővel párhuzamo
 from __future__ import annotations
 
 import random
+import re
 import sys
 import tempfile
 import threading
@@ -238,6 +239,7 @@ class FakeNet:
         self.clock, self.pages, self.asked, self.threads, self.by_thread = clock, {}, [], set(), []
         self.posted: list[tuple] = []              # a POST-kérések (a lista beállítása): (cím, adatok, fejlécek)
         self.on_post = None
+        self.on_get = None                         # minden kéréskor (a címmel), pl. hogy a teszt közben leállítson valamit
         self.running = self.most = 0
         self.delay = 0.0
         self._lock = threading.Lock()
@@ -253,6 +255,8 @@ class FakeNet:
                 self.posted.append((url, data, headers))
                 if self.on_post is not None:
                     self.on_post()
+        if self.on_get is not None:
+            self.on_get(url)
         try:
             time.sleep(self.delay)
             for part, (status, body) in self.pages.items():
@@ -493,6 +497,44 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.assertEqual(len(self.notices), 1, "ugyanarról kétszer nem szól")
 
+    def test_the_sellers_other_listings_can_make_a_better_buy(self):
+        """Egy jó találat után megnézi az eladó többi hirdetését (a hirdetés oldalán lévő „további hirdetései” linkről, a
+        figyelő keretéből): amit külön is haszonnal lehetne továbbadni (itt egy AirPods az árbázis biztos ára alatt), azzal
+        együtt több a haszon (egy posta), ezért csendesen szól róla, és a találatba is beírja (a ruha, a tok kimarad, az
+        ismeretlen árút csak megszámolja)."""
+        self.hunter.book.add([{"text": f"Apple AirPods Pro 2 {n}", "price": p, "platform": site,
+                               "url": f"https://www.{site}.hu/a/{900 + n}.htm"}
+                              for n, (p, site) in enumerate(zip((50000, 48000, 52000, 49000, 51000),
+                                                                ("vinted", "jofogas") * 3))])
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:2])
+        self.net.pages["_7/friss"] = (200, """<html><body><main><h1>Palit RTX 3060 Ti Dual</h1><p>Hibátlan, dobozában.</p>
+            <p>Eladó: Peti (40 értékelés) <a href="/aprok/hirdeto/peti/index.html">A hirdető további hirdetései</a></p>
+            </main></body></html>""")
+        self.net.pages["hirdeto/peti"] = (200, ha_page([
+            ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft"), ha_card(71, "Apple AirPods Pro 2 fehér", "30 000 Ft"),
+            ha_card(72, "Nike pulóver L", "5 000 Ft"), ha_card(73, "AirPods Pro 2 tok", "2 000 Ft"),
+            ha_card(74, "Retró kütyü X100", "3 000 Ft")]))
+        self.watch.tick()
+        titles = [n[1] for n in self.notices]
+        self.assertEqual(titles, ["Megéri: Palit RTX 3060 Ti Dual", "Ugyanettől az eladótól: Palit RTX 3060 Ti Dual"])
+        _kind, _title, text, extra = self.notices[1]
+        self.assertTrue(extra["quiet"], "a fő értesítés után csendesen")
+        self.assertIn("„Apple AirPods Pro 2 fehér” 30 000 Ft (külön is eladható, kb. 14 700 Ft haszon)", text)
+        self.assertIn("Együtt 82 000 Ft (egy posta: 1 500 Ft)", text)
+        self.assertIn("Munka: 2 hirdetés, kb. 20 perc. Közös vételre ajánlj kb. 73 800 Ft-ot.", text)
+        [deal] = self.hunter.state()["deals"]
+        seller = deal["seller"]
+        self.assertEqual((seller["picked"], seller["unknown"], seller["listings"], seller["fee"]), (1, 1, 2, 0),
+                         "a ruha és a tok kimaradt, a kütyü ára ismeretlen, a Hardveraprón nincs vevővédelmi díj")
+        self.assertEqual(seller["profit"] - seller["single"], 45000 - 30000 - 300, "az AirPods hozama (a posta közös)")
+
     def test_the_model_names_what_it_does_not_know_and_checks_the_price_elsewhere(self):
         """Amit az árbázis a címből nem ismer fel, azt a modell nevezi meg (egy hívás az egészre). Ha így ismert, ahhoz
         méri; ha nem, megnézi, mennyiért adják a többi oldalon (akkor is, ha a modell szerint nem érné meg)."""
@@ -560,6 +602,120 @@ class InstantTests(InstantCase):
         [(_kind, title, text, _extra)] = self.notices
         self.assertEqual(title, "Megéri: Sony WH-1000XM4 fejhallgató fekete")
         self.assertIn("A szokásos ára kb. 70 800 Ft, 8 hasonló alapján, Hardverapró és Jófogás", text)
+
+    def test_a_cheaper_listing_found_while_checking_the_price_is_checked_too(self):
+        """Árkutatás közben talált olcsóbb hirdetés (B) önálló jelölt: a többihez mérve, saját maga nélkül megéri (a
+        szokásos árból kilógóként kimaradt, de jelöltként megmaradt), és mivel több haszon van benne, előbb ellenőrzi,
+        mint az eredetit (A); A vizsgálata is megmarad (az is megéri, utána jön). A „-tól” áras hirdetés nem számít bele
+        (a kizártak között, az okkal)."""
+        self.hunter.book.add([{"text": f"Sony WH-1000XM4 fejhallgató {n}", "price": 70000 + n * 500,
+                               "url": f"https://www.jofogas.hu/b/sony_{n}.htm", "platform": "jofogas"} for n in range(5)])
+        self.watch.add("https://hardverapro.hu/aprok/hang/fejhallgato/index.html")
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi fülhallgató", "2 000 Ft")], "fejhallgato/index")
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(31, "Sony WH-1000XM4 fejhallgató", "56 000 Ft"), ha_card(1, "Régi fülhallgató", "2 000 Ft")],
+                     "fejhallgato/index")
+        self.net.pages["_31/friss"] = page_html("Hibátlan.")
+        found = ([ha_card(60, "Sony WH-1000XM4 fekete", "40 000 Ft")] +
+                 [ha_card(61 + n, f"Sony WH-1000XM4 {n}", f"{68 + n} 000 Ft") for n in range(3)] +
+                 [ha_card(70, "Sony WH-1000XM4 fejhallgatók 50 000 Ft-tól", "50 000 Ft")])
+        self.net.pages["stext=Sony"] = (200, ha_page(found))
+        self.net.pages["_60/friss"] = page_html("Hibátlan, dobozában.")
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Sony WH-1000XM4 fekete", "Megéri: Sony WH-1000XM4 fejhallgató"],
+                         "B (több haszon) előbb, és A is megmaradt")
+        deals = {d["title"]: d for d in self.hunter.state()["deals"]}
+        spawned, original = deals["Sony WH-1000XM4 fekete"], deals["Sony WH-1000XM4 fejhallgató"]
+        self.assertEqual((spawned.get("spawned"), original.get("spawned")), (True, None))
+        self.assertIn("árkutatás közben („Sony WH-1000XM4 fejhallgató” mellett)", spawned["explore"])
+        used = spawned["basis"]["used"]
+        self.assertNotIn(spawned["url"], [entry["u"] for entry in used], "a saját szokásos ára saját maga nélkül")
+        self.assertEqual(len(used), 9, "az árbázis 5, a most talált 3 szokásos árú, és maga A (a címe szerint ugyanaz)")
+        self.assertEqual({e["s"] for e in used}, {"Jófogás", "Hardverapró"}, "az oldalak nevével")
+        out = {e["t"]: e["why"] for e in spawned["basis"]["out"]}
+        [from_price] = [why for title, why in out.items() if title.startswith("Sony WH-1000XM4 fejhallgatók 50 000 Ft-tól")]
+        self.assertEqual(from_price, "„-tól” ár: nem egy meghatározott darab ára")
+        self.assertEqual({e["t"]: e["why"] for e in original["basis"]["out"]}["Sony WH-1000XM4 fekete"],
+                         "kilógó ár (kimaradt a szokásos árból)", "A szokásos árából a kilógóan olcsó B kimaradt")
+        self.assertEqual((spawned["band"][0] <= 70000 <= spawned["band"][1], spawned["resale"], spawned["costs"]),
+                         (True, round(min(spawned["median"] * 0.9, spawned["low"])), 1500))
+        self.assertEqual(spawned["profit"], spawned["resale"] - spawned["price"] - spawned["costs"],
+                         "a haszon az óvatos eladási árból, a költség után")
+
+    def test_an_unfinished_check_of_a_found_listing_can_come_again(self):
+        """Ha az árkutatás közben talált jelölt (B) ellenőrzése félbemarad (most elfogyott a keret), az eredetivel (A)
+        együtt vár, és nem számít „már megnézettnek”: amikor A újra sorra kerül, B is újra jelölt, és mindkettő megvan."""
+        self.hunter.book.add([{"text": f"Sony WH-1000XM4 fejhallgató {n}", "price": 70000 + n * 500,
+                               "url": f"https://www.jofogas.hu/b/sony_{n}.htm", "platform": "jofogas"} for n in range(5)])
+        self.watch.add("https://hardverapro.hu/aprok/hang/fejhallgato/index.html")
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi fülhallgató", "2 000 Ft")], "fejhallgato/index")
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(31, "Sony WH-1000XM4 fejhallgató", "56 000 Ft"), ha_card(1, "Régi fülhallgató", "2 000 Ft")],
+                     "fejhallgato/index")
+        self.net.pages["_31/friss"] = page_html("Hibátlan.")
+        found = ([ha_card(60, "Sony WH-1000XM4 fekete", "40 000 Ft")] +
+                 [ha_card(61 + n, f"Sony WH-1000XM4 {n}", f"{68 + n} 000 Ft") for n in range(3)])
+        self.net.pages["stext=Sony"] = (200, ha_page(found))
+        self.net.pages["_60/friss"] = page_html("Hibátlan, dobozában.")
+        look, refused = self.watch._look, []
+
+        def short_of_requests(row):
+            if "_60/" in row["url"] and not refused:
+                refused.append(row["url"])
+                raise deals_module.Deferred("kéréskeret", sites=["hardverapro"])
+            return look(row)
+
+        self.watch._look = short_of_requests
+        self.watch.tick()
+        self.assertEqual((refused and self.notices), [], "B félbemaradt, A előtte nem zárult le: mindkettő vár")
+        self.assertEqual(self.hunter._spawned, {}, "B nem számít megnézettnek")
+        self.later(1)
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Sony WH-1000XM4 fekete", "Megéri: Sony WH-1000XM4 fejhallgató"])
+
+    def test_an_unclear_variant_is_read_from_the_description(self):
+        """Ha egy összehasonlító hirdetés címéből nem derül ki a változat (kapacitás), és a biztos összehasonlításhoz
+        kellene, legfeljebb kettőnek elolvassa a leírását: a 16 GB-osat beszámítja, a 8 GB-osat kizárja, a harmadik
+        (nem olvasta el) nem számít bele. Így lesz elég biztos az ár (a 8 GB-osok külön változatként maradnak ki)."""
+        self.hunter.book.add([{"text": f"RTX 5060 Ti 16GB {n}", "price": 140000 + n * 1000,
+                               "url": f"https://www.jofogas.hu/v/rtx_{n}.htm", "platform": "jofogas"} for n in range(2)])
+        self.watch.add("https://hardverapro.hu/aprok/hardver/videokartya/index.html")
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi kártya", "1 000 Ft")], "videokartya/index")
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(40, "Videókártya eladó", "100 000 Ft"), ha_card(1, "Régi kártya", "1 000 Ft")],
+                     "videokartya/index")
+        self.hunter.llm.explore = [{"n": 1, "query": "RTX 5060 Ti 16GB", "buy": True}]
+        self.net.pages["_40/friss"] = page_html("RTX 5060 Ti 16GB, hibátlan.")
+        found = ([ha_card(50 + n, "RTX 5060 Ti 16GB", f"{139 + 3 * n} 000 Ft") for n in range(2)] +
+                 [ha_card(55 + n, "Gigabyte RTX 5060 Ti Gaming OC", f"{100 + 5 * n} 000 Ft") for n in range(3)] +
+                 [ha_card(60 + n, "RTX 5060 Ti 8GB", f"{110 + n} 000 Ft") for n in range(3)])
+        self.net.pages["stext=RTX"] = (200, ha_page(found))
+        self.net.pages["_55/friss"] = page_html("Gigabyte RTX 5060 Ti Gaming OC, 16 GB GDDR7 memória, hibátlan.")
+        self.net.pages["_56/friss"] = page_html("Gigabyte RTX 5060 Ti Gaming OC, 8 GB GDDR7 memória.")
+        self.net.pages["_57/friss"] = page_html("Gigabyte RTX 5060 Ti Gaming OC, 16 GB.")
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Videókártya eladó",
+                                                        "Érdemes megnézni: Gigabyte RTX 5060 Ti Gaming OC"],
+                         "a leírásából 16 GB-osnak bizonyult kártya maga is olcsó: saját maga nélkül még nem biztos az "
+                         "ára, ezért tipp")
+        self.assertEqual([u for _t, u in self.net.asked if re.search(r"_5[5-7]/friss", u)],
+                         [u for u in (re.search(r'href="([^"]*_5[56]/friss[^"]*)"', c).group(1) for c in found[2:4])],
+                         "a két legolcsóbb bizonytalan leírását olvasta el")
+        deal = self.hunter.state()["deals"][0]
+        self.assertEqual(deal["similar"], 5)
+        read = [e for e in deal["basis"]["used"] if e.get("read")]
+        self.assertEqual([(e["t"], e["p"]) for e in read], [("Gigabyte RTX 5060 Ti Gaming OC", 100000)])
+        out = {(e["t"], e["p"]): e["why"] for e in deal["basis"]["out"]}
+        self.assertEqual(out[("Gigabyte RTX 5060 Ti Gaming OC", 105000)], "más változat (a leírása szerint 8GB)")
+        self.assertEqual(out[("Gigabyte RTX 5060 Ti Gaming OC", 110000)],
+                         "a címből nem derül ki, melyik változat (kapacitás)")
+        self.assertEqual(out[("RTX 5060 Ti 8GB", 110000)], "más változat (8GB)")
 
     def test_candidates_beyond_the_round_are_kept_for_later(self):
         """Az ár-ellenőrzésre váró jelöltekből egy körben EXPLORE_PICKS (3) kerül sorra; a többi nem vész el (eddig a
@@ -785,6 +941,69 @@ class InstantTests(InstantCase):
         self.watch.notify = lambda kind, title, text, **extra: self.notices.append((kind, title, text, extra))
         self.watch.tick()
         self.assertEqual(len(self.notices), 3, "a folytatáskor jött a többi")
+
+    def test_clothing_only_when_you_watch_for_it(self):
+        """Ruhával nem kereskedik: egy oldalcímes (keresőszó nélküli) figyelő a ruhát és a cipőt kihagyja, és az
+        értékelés a modell által ruhának nevezettet is kihagyja; egy ruhára szóló keresőszavas figyelő ettől még megy."""
+        page = {"id": "a1", "name": "Jófogás: elektronika", "url": "https://www.jofogas.hu/magyarorszag/elektronika"}
+        shoes = {"id": "a2", "name": "Nike Air Max 90", "query": "Nike Air Max 90"}
+        self.assertFalse(InstantWatch._fits(page, {"text": "Nike Air Max 90 42-es", "price": 20000}))
+        self.assertTrue(InstantWatch._fits(page, {"text": "Retró kütyü", "price": 20000}))
+        self.assertTrue(InstantWatch._fits(shoes, {"text": "Nike Air Max 90 42-es", "price": 20000}))
+        asked = []
+        self.hunter.appraise = lambda *args, **kwargs: asked.append(kwargs.get("wear")) or []
+        row = {"text": "Nike Air Max 90 42-es", "price": 20000, "url": "https://www.jofogas.hu/1234567.htm"}
+        self.watch._report(shoes, "jofogas", [row])
+        self.watch._report(page, "jofogas", [{**row, "text": "Retró kütyü"}])
+        self.assertEqual(asked, [True, False])
+
+    def test_what_the_model_calls_clothing_is_left_out(self):
+        """Amit a modell ruhának nevez meg (a kártyán csak „Márkás holmi” állt), az kimarad: az árát sem keresi máshol."""
+        self.watch.add("https://hardverapro.hu/aprok/hardver/videokartya/index.html")
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi kártya", "1 000 Ft")], "videokartya/index.html")
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(2, "Márkás holmi", "9 000 Ft"), ha_card(1, "Régi kártya", "1 000 Ft")],
+                     "videokartya/index.html")
+        self.hunter.llm.explore = [{"n": 1, "query": "Zara blézer", "buy": True}]
+        asked = len(self.net.asked)
+        self.watch.tick()
+        self.assertEqual(self.hunter.funnel()["counts"].get("clothing"), 1)
+        self.assertFalse([u for _t, u in self.net.asked[asked:] if "Zara" in u or "blezer" in u.lower()],
+                         "a ruhának nevezett árát nem keresi máshol")
+
+    def test_stopping_the_watch_stops_the_running_evaluation(self):
+        """Automata kereskedés › Leállítás az értékelés közben (az első hirdetés oldalának letöltése alatt): utána se
+        letöltés, se modellkérdés, se értesítés (eddig még egy hirdetést letöltött, és két értesítést küldött). Ez nem a
+        Szünet: a figyelő ki van kapcsolva, a hátralévő rész elmarad."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        cheap = [ha_card(70 + n, f"Palit RTX 3060 Ti Dual {n}", f"{50 + n} 000 Ft") for n in range(3)]
+        self.results(cheap + HA_CARDS[:2])
+        for n in range(3):
+            self.net.pages[f"_{70 + n}/friss"] = page_html("Hibátlan.")
+        opened: list[str] = []
+
+        def on_get(url: str) -> None:
+            if "/friss" in url:
+                opened.append(url)
+                if len(opened) == 1:
+                    self.watch.set_enabled(False)     # az első hirdetés letöltése közben: Leállítás
+
+        self.net.on_get = on_get
+        asked = len(self.hunter.llm.calls)
+        self.watch.tick()
+        self.assertEqual(len(opened), 1, "a következő hirdetést már nem töltötte le")
+        self.assertEqual(self.notices, [], "nem szólt")
+        self.assertEqual(len(self.hunter.llm.calls), asked, "a modellt sem kérdezte")
+        self.assertEqual(self.watch.state()["hits"], [])
+        self.assertEqual(self.watch.state()["waiting"], 0, "a hátralévő rész elmaradt (nem vár a folytatásra)")
 
     def test_the_whole_page_is_read(self):
         """A Hardverapró egy oldalon 100 hirdetést mutat (az elején többnyire fizetett kiemelésekkel): az egész oldalt nézi,
@@ -1216,6 +1435,16 @@ class TwoLaneTests(InstantCase):
         self.assertIn("Most: Hardverapró", status)
         self.assertIn("Most: Vinted", status)
         self.assertEqual(self.hunter.run_fast(), "", "a gyors sor is tart szünetet két oldal között")
+
+    def test_the_fast_lane_names_its_own_unknowns(self):
+        """A gyors sor ismeretlenjei a saját sorába kerülnek, és a saját körében mennek a modellhez (egy hívás 20-anként),
+        nem a böngésző sorában várnak (amikor az pihen, ott sokáig elakadtak volna)."""
+        cards = [ha_card(10 + n, f"Ismeretlen kütyü X{n}", f"{20 + n} 000 Ft") for n in range(25)]
+        self.net.pages["hardverapro.hu/aprok/hardver"] = (200, ha_page(cards))
+        self.hunter.run_fast()
+        named = [m for m in self.hunter.llm.calls if "Friss hirdetések" in m[1]["content"]]
+        self.assertEqual(len(named), 1, "a gyors sor maga kérdezte a modellt")
+        self.assertEqual((len(self.hunter._fast_pending), self.hunter._pending), (5, []))
 
     def test_the_fast_lane_never_touches_the_browser(self):
         """Ha a gyors oldal most nem olvasható böngésző nélkül (pl. az óránkénti keret miatt), a gyors sor kihagyja, nem a
