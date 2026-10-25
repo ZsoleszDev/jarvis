@@ -42,6 +42,9 @@ RUNNER_CRASH_RE = re.compile(
     r"error reading llama-server|wsarecv|forcibly closed|kényszerítetten bezárta|connection (was )?reset|"
     r"post predict|\bEOF\b", re.IGNORECASE)
 RESTART_PAUSE = 1.0   # ennyit vár az újrapróbálás előtt (az Ollama közben észreveszi, hogy leállt)
+# Turbó (az automata kereskedés gombja): a háttér a tartalék modellhelyet is megkaphatja, ha legalább ennyi másodperce
+# nem kérdezte a modellt beszélgetés vagy eladás (egy épp folyó beszélgetésben így nem lassul a következő válasz).
+TURBO_IDLE = 60.0
 
 
 def is_runner_crash(error: BaseException | str) -> bool:
@@ -126,7 +129,8 @@ class ModelGate:
     kapja. A háttérhívás (kereskedés) csak akkor indul, ha nem vár elsőbbségi; ha egynél több hely van, egy mindig
     szabadon marad az elsőbbséginek (így a feltöltés nem vár a kereskedésre), ha csak egy, akkor a háttér addig nem
     kérdez, amíg elsőbbségi munka folyik (session: a hívásai közti szünetekben sem, különben minden lépése egy
-    kereskedési hívást várna ki)."""
+    kereskedési hívást várna ki). Turbóban (turbo) a tartalék hely is a háttéré, amíg nincs elsőbbségi munka, és
+    TURBO_IDLE másodperce nem is volt: ha ekkor jön egy feltöltés, legfeljebb egy épp futó kereskedési hívást vár ki."""
 
     def __init__(self, slots: int = 1):
         self.slots = max(1, int(slots or 1))
@@ -135,6 +139,9 @@ class ModelGate:
         self.background = 0      # ebből háttérhívás
         self.waiting = 0         # helyre váró elsőbbségi hívások
         self.sessions = 0        # folyamatban lévő elsőbbségi munkák (beszélgetés, eladás)
+        # Turbó be van-e kapcsolva: függvény (a kereskedés beállítása; zár nélkül olvasható) vagy érték
+        self.turbo: bool | Callable[[], bool] = False
+        self._priority_at = -TURBO_IDLE   # mikor ért véget a legutóbbi elsőbbségi hívás vagy munka (time.monotonic)
 
     def set_slots(self, slots: int) -> None:
         with self._cond:
@@ -148,7 +155,12 @@ class ModelGate:
             return True
         if self.waiting or (self.slots == 1 and self.sessions):
             return False
-        return self.background < self.slots - 1 or (self.slots == 1 and self.background == 0)
+        return self.background < self.slots - (0 if self._spare() else 1) or (self.slots == 1 and self.background == 0)
+
+    def _spare(self) -> bool:
+        """Turbó: a háttér a tartalék helyet is megkaphatja (nincs elsőbbségi munka, és TURBO_IDLE óta nem is volt)."""
+        turbo = self.turbo() if callable(self.turbo) else self.turbo
+        return bool(turbo) and not self.sessions and time.monotonic() - self._priority_at >= TURBO_IDLE
 
     def background_ok(self) -> bool:
         """Indulhatna-e most egy háttérhívás (várakozás nélkül): a háttér ebből dönti el, hogy most kérdezze-e a
@@ -166,6 +178,7 @@ class ModelGate:
         finally:
             with self._cond:
                 self.sessions -= 1
+                self._priority_at = time.monotonic()
                 self._cond.notify_all()
 
     @contextlib.contextmanager
@@ -192,6 +205,8 @@ class ModelGate:
             with self._cond:
                 self.active -= 1
                 self.background -= background
+                if not background:
+                    self._priority_at = time.monotonic()
                 self._cond.notify_all()
 
 

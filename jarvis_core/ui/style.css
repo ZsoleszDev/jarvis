@@ -753,6 +753,9 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
 /* Indítás / Leállítás: egy nagy gomb, mellette az állapot */
 .runbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
 .runbar button { min-width: 9.5em; padding: 10px 22px; font-size: 16px; font-weight: 600; }
+.runbar .turbo { min-width: 0; padding: 10px 16px; font-weight: 500; }
+.runbar .turbo.on { border-color: var(--white); color: var(--white); }
+.turbonote small { color: var(--ash); }
 .runstate { display: grid; gap: 2px; font-size: 14.5px; }
 .runstate small { color: var(--ash); font-size: 13px; }
 .deals .limits { max-width: 520px; }
@@ -813,6 +816,8 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
   /* a számmezők a telefonon nagyobbak: könnyebb eltalálni őket, és az iOS sem nagyít rájuk */
   .lform input, .lform textarea, #l-add input { font-size: 16px; }
   .runbar button { flex: 1 1 100%; }
+  .runbar .turbo { flex: 0 0 auto; }
+  .runbar #d-run-toggle { flex: 1 1 0; }
 }
 
 /* --- egy megérő találat ablaka ----------------------------------------------------------------------------- */
@@ -826,6 +831,10 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
 .dealbox .msgpreview { margin: 0 0 16px; padding: 8px 10px; border: 1px solid var(--rule); border-radius: 6px;
                        background: var(--graphite-hi); font: 14px/1.45 var(--ui); white-space: pre-wrap; }
 .dealbox .row { flex-wrap: wrap; }
+.dealbox details.basis { margin: 0 0 14px; font-size: 13.5px; }
+.dealbox details.basis summary { cursor: pointer; color: var(--ash); }
+.dealbox details.basis .dealrows { max-height: 260px; overflow-y: auto; }
+.dealbox details.basis a { overflow-wrap: anywhere; }
 #deal-go { text-align: center; }
 @media (max-width: 640px) {
   .dealbox .facts { grid-template-columns: minmax(0, 1fr); gap: 0 0; }

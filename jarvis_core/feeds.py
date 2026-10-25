@@ -27,6 +27,7 @@ from typing import Any, Callable, NamedTuple
 
 import requests
 
+from .textutil import fold
 from .web import MAX_DOWNLOAD_BYTES, USER_AGENT, _decode
 
 FAST_SITES = ("hardverapro", "jofogas")
@@ -534,7 +535,31 @@ def parse_page(html: str, url: str) -> dict[str, Any]:
         if len(labels) >= 150:
             break
     return {"title": clean(tree.title), "url": url, "text": " ".join(parts)[:4000], "short": short, "labels": labels,
-            "captcha": False, "images": page_images(tree, root, url)}
+            "captcha": False, "images": page_images(tree, root, url), "seller": seller_link(tree, url)}
+
+
+# Az eladó többi hirdetésének linkje egy hirdetés oldalán („A hirdető további hirdetései”, „Összes hirdetése”, a Vinteden
+# a tag oldala): egy jó találatnál ebből áll össze az ugyanattól az eladótól vehető csomag (deals.seller_bundle).
+SELLER_TEXT_RE = re.compile(r"\b(?:tovabbi|osszes|tobbi|minden) (?:hirdetes|termek)\w*|\bhirdetesei\b|\btermekei\b|"
+                            r"\bmore from\b|\bmember.?s items\b|\ball items\b")
+SELLER_HREF_RE = re.compile(r"/member/\d+")
+
+
+def seller_link(tree: _TreeBuilder, base_url: str) -> str:
+    """Az eladó többi hirdetésének linkje (ugyanazon az oldalon): előbb a felirata szerint, aztán a Vinted tagoldala;
+    üres, ha nincs."""
+    host = (urllib.parse.urlsplit(base_url).hostname or "").removeprefix("www.")
+    member = ""
+    for anchor in tree.anchors:
+        href = anchor.attrs.get("href", "")
+        url = urllib.parse.urljoin(base_url, href)
+        if not href or (urllib.parse.urlsplit(url).hostname or "").removeprefix("www.") != host:
+            continue
+        if SELLER_TEXT_RE.search(fold(clean(anchor.text() or anchor.attrs.get("aria-label", "")))):
+            return url
+        if not member and SELLER_HREF_RE.search(href):
+            member = url
+    return member
 
 
 _ICON_RE = re.compile(r"(logo|icon|avatar|sprite|placeholder|badge|flag)", re.IGNORECASE)

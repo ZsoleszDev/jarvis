@@ -80,8 +80,39 @@
 - A hirdetés leírása alapból csak a zárószöveg és a kulcsszavak; a tárgyról csak akkor ír, ha a leírásban (Pro: a
   megjegyzésben) kéred (selling.wants_description: „leírás”, „írd bele/oda”, „írd meg, hogy”, „említsd”…). A modell
   szövegét kérés nélkül el is hagyja. EXTRACT_VERSION 4: a még fel nem töltött tárgyaké a következő kiolvasáskor így lesz.
+- Ruha kivéve az automata kereskedésből (pricebook.wearable: ruhaszavak, cipő, divatmárkák; a VW Polo nem): a
+  böngészés, a figyelt oldalak, a csomagbontás (a régi „Ruhacsomag” keresés és alapgomb törölve, ruhás csomagkeresés nem
+  vehető fel), az alku, a tippek és a modell megnevezése után is kiesik („ruha, cipő” a napi számokban); a Vinted
+  indulóoldalai tárgyak. A kifejezett kérés (egy Keresés vagy egy azonnali figyelő keresőszava maga ruha) megmarad.
+- Összehasonlíthatóság: a szokásos árba csak az egyező típus, változat, kapacitás, darabszám és állapot számít; a
+  „-tól” áras és a több terméket felsoroló hirdetés kimarad (pricebook.unusable); a bizonytalan változatnál legfeljebb
+  két leírást olvas el (_clarify); a mostani alacsonyabb árszint felülírja a régebbi árakat (FRESH_GAP).
+- Az árkutatás közben talált hirdetések önálló jelöltek (_peers): saját maguk nélkül mérve, a kilógó olcsó ár is
+  jelölt marad, a várható haszon és a megbízhatóság szerinti sorrendben, árkutatásonként legfeljebb SPAWN_MAX,
+  hirdetésenként SPAWN_TTL-enként egyszer, a közös kéréskeretből; az eredeti vizsgálata is megmarad. Az azonnali
+  figyelőben is (_recheck). A keretbe nem férő jelölt nem vész el: a körökben a következő kör ezzel kezd (_carry,
+  CARRY_TTL), az azonnali figyelőben önálló hirdetésként vár (Deferred.extra); a biztos árúak a haszon szerint jönnek.
+- A találat ablakában „Mihez mértem?”: a beszámított és a kizárt hirdetések az okkal (legfeljebb 15-15), kínálati
+  ársáv, óvatos eladási ár, költség, haszon a költség után.
+- Az eladó többi hirdetése (seller_bundle): egy jó találatnál az eladó oldala (feeds/browser seller_link), a darabok
+  külön is eladhatók-e, közös vétel egy postával, a Vinteden a vevővédelmi díj a végösszegre egyszer, munka (hirdetés,
+  perc), javasolt közös ajánlat; csendes értesítés, ha legalább SELLER_GAIN-nel jobb.
+- Turbó (az Indítás mellett, megmarad): a böngészés ismeretlenjei minden oldal után a modellhez (TURBO_ROWS), a
+  munkamenet végén a maradék is; a modellkapu a tartalék helyet is a kereskedésnek adja, ha TURBO_IDLE óta nincs
+  elsőbbségi munka (llm.ModelGate._spare). A weboldalakra nem kér többet.
+- Hiba javítva: a gyors sor (Hardverapró, Jófogás) ismeretlenjei a böngésző sorába kerültek (a _step_browse-ban a
+  `lane` változó az indulóoldal lett), és ott vártak, amíg a böngésző sora meg nem nevezte őket (pihenőben sokáig).
 
 ## Élesben kipróbálandó
+- Ruha felismerése (pricebook._WEAR_RE) valódi címeken: ha egy nem ruha kiesik (pl. egy márkanév más termék nevében),
+  vagy egy ruha átjut, a listát kell szűkíteni vagy bővíteni (a napló „ruha, cipő” sorából látszik).
+- Az eladó többi hirdetésének linkje (feeds.SELLER_TEXT_RE, SELLER_HREF_RE, a böngészőben a LISTING_PAGE_JS) a valódi
+  Hardverapró-, Jófogás-, Vinted- és Vatera-oldalakon; a Vinted vevővédelmi díja (VINTED_FEE_FIXED 300 Ft,
+  VINTED_FEE_RATE 5%) a valódi díjszabás szerint hangolandó, és a 10 perc/hirdetés munkaidő is.
+- A leírások elolvasása a bizonytalan változatnál (DETAIL_READS 2) a kéréskeretből megy: ha sok kör üresen fut, vagy a
+  napló szerint sokszor „a leírásából sem derül ki”, csökkentendő.
+- Turbó élesben: mennyivel több modellhívás (és mennyi melegedés), és hogy egy feltöltés tényleg csak pár másodpercet
+  vár-e (TURBO_IDLE 60 mp); ha a kereskedés két hívása együtt túl lassú, a Turbó egyik része külön kapcsolóra tehető.
 - Pro feltöltés készenlétből: a felébredés az előkészítő szálon, miközben a kereskedés szála böngészik (a modell
   betöltése a kereskedés egy modellhívása közben); ha egyszerre ébresztené a beszélgetés is, egyszer tölt be.
 - Az Android-alkalmazás új része (a megérő hirdetés értesítése: rezgés, hang, ismétlés, a találat ablaka, a vágólap) a

@@ -35,6 +35,7 @@ from typing import Any, Callable
 from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, Deferred, deal_action, excluded, matches_query,
                     newest_first, parse_words, safety_text)
 from .feeds import FAST_SITES, FeedError, Quota
+from .pricebook import wearable
 from .llm import background_calls
 from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price
 from .textutil import fold
@@ -692,10 +693,13 @@ class InstantWatch:
     @staticmethod
     def _fits(alert: dict[str, Any], row: dict[str, Any]) -> bool:
         """Illik-e a figyelőhöz: a keresőszó (ha van) minden szava benne van, nincs benne kizáró szó, az ársávban van,
-        és nem kereső hirdetés („Keresek…”)."""
+        és nem kereső hirdetés („Keresek…”). Egy keresőszó nélküli (oldalcímes) figyelőnél a ruha és a cipő kimarad:
+        azzal nem kereskedik (a ruhára szóló keresőszavad ettől még megy)."""
         if _WANTED_RE.search(fold(row["text"])):
             return False
         if alert.get("query") and not matches_query(alert["query"], row["text"]):
+            return False
+        if not alert.get("query") and wearable(str(row.get("title") or row["text"])):
             return False
         if excluded(alert.get("exclude") or [], row["text"]):
             return False
@@ -750,12 +754,14 @@ class InstantWatch:
                         stored["found_at"] = self.clock()
                 self._save()
             self._tell(alert, hit)
+            self._seller(deal)                 # az eladó többi hirdetése: közös vétellel jobban megéri?
 
         # go: Szünetben (vagy ha a kéréskeret elfogyott: _look, _search) az értékelés megáll, a többi megmarad; ha
         # közben leállítottad a figyelőt, a hátralévő rész elmarad (minden letöltés, modellkérdés és szólás előtt nézi)
         try:
             waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found,
-                                           go=lambda: self._go(alert["id"]))
+                                           go=lambda: self._go(alert["id"]),
+                                           wear=wearable(str(alert.get("query") or "")))
         except _Off:
             return hits
         if hasattr(self.hunter, "flush_tips"):
@@ -838,6 +844,27 @@ class InstantWatch:
                 return [row for job in jobs for row in job.result()]
             except FeedError:                      # a letöltő szerint nincs hely: a hirdetés vár
                 raise Deferred("kéréskeret", sites=sites) from None
+
+    def _seller(self, deal: dict[str, Any]) -> None:
+        """Egy jó találat eladójának többi hirdetése (a hirdetés oldaláról: seller_url), a figyelő kéréskeretéből: ha
+        ezekből is megéri még valami, és együtt több a haszon (DealHunter.seller_bundle), csendesen szól róla."""
+        url, site = str(deal.get("seller_url") or ""), str(deal.get("platform") or "")
+        if not url or site not in self.platforms or deal.get("auction") or not self._room([site]):
+            return
+        try:
+            listings = self.fetcher.listings(url, site, self._check_on, quota=QUOTA)
+        except FeedError:
+            return
+        name = self.platforms[site].name
+        rows = [{"site": name, "platform": site, "text": str(r.get("text") or "")[:180], "price": int(r["price"]),
+                 "url": str(r["url"]), **({"title": str(r["title"])[:160]} if r.get("title") else {})}
+                for r in listings[:MAX_ROWS] if r.get("url") and not r.get("auction")]
+        self.hunter.book.add(rows)
+        summary = self.hunter.seller_bundle(deal, rows)
+        if summary and summary["worth"]:
+            self.notify("deal", f"Ugyanettől az eladótól: {str(deal.get('title') or deal['text'])[:50]}",
+                        self.hunter.seller_text(deal, summary), url=url, actions=[deal_action(deal["id"])],
+                        deal=deal["id"], quiet=True)
 
     def _tell(self, alert: dict[str, Any], hit: dict[str, Any]) -> None:
         warn = "".join(f" Figyelj: {w}." for w in hit.get("warnings") or [])

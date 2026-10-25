@@ -513,7 +513,7 @@
     box.innerHTML = `
       <button type="button" class="hometile${running ? " on" : ""}" id="tile-trade" ${deals.browser || deals.instant ? "" : "disabled"}>
         <span class="hometile-title">${running ? "A kereskedés fut" : "Kereskedés indítása"}</span>
-        <span class="hometile-sub">${running ? `${deals.started ? `${esc(hhmmOf(deals.started))} óta · ` : ""}bökj rá a leállításhoz`
+        <span class="hometile-sub">${running ? `${deals.started ? `${esc(hhmmOf(deals.started))} óta · ` : ""}${deals.turbo ? "Turbó · " : ""}bökj rá a leállításhoz`
           : "Keresem a megérő hirdetéseket, és szólok"}</span></button>
       <button type="button" class="hometile" id="tile-new">
         <span class="hometile-title">Új tárgy közzététele</span>
@@ -686,7 +686,7 @@
                       ["over_limit", "a vételi limit fölött"], ["unknown", "ismeretlen termék"], ["unsure", "bizonytalan ár (Érdemes megnézni)"],
                       ["suspicious", "gyanús"], ["risky", "kockázatos"], ["gone", "elkelt"], ["defect", "hibás"],
                       ["model_no", "a modell szerint nem az"], ["muted", "elrejtett termék"],
-                      ["bundle", "csomag (a csomagbontásnak)"]];
+                      ["bundle", "csomag (a csomagbontásnak)"], ["clothing", "ruha, cipő (azzal nem kereskedem)"]];
   const thousands = (n) => Number(n).toLocaleString("hu-HU");
   function funnelLine(full) {
     const c = (deals.funnel || {}).counts || {};
@@ -738,21 +738,59 @@
       ${(d.warnings || []).map((w) => `<p class="warn">Figyelj: ${esc(w)}</p>`).join("")}
       <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(messageFor(d))}</pre>`;
   }
+  // Mihez mérte: a beszámított hirdetések (a cím, az ár, az oldal, a link), és a kizártak az okkal (pl. más változat,
+  // kilógó ár, „-tól” ár): így látszik, ha egy drágább változathoz mérte volna.
+  const SOURCE = { "most": "most találtam", "árbázis": "korábban láttam", "felmérés": "a felmérésből" };
+  function basisRow(e) {
+    const link = safeUrl(e.u) ? `<a href="${esc(e.u)}" target="_blank" rel="noopener noreferrer">${esc(e.t || "a hirdetés")}</a>` : esc(e.t || "?");
+    const tags = [e.s, SOURCE[e.src] || "", e.read ? "a leírásából" : "", e.gone ? "azóta elkelt" : ""].filter(Boolean);
+    return `<li>${link}: <b>${esc(price(e.p))}</b> <small class="muted">${esc(tags.join(" · "))}</small>${e.why ? `<br><small class="warn">${esc(e.why)}</small>` : ""}</li>`;
+  }
+  function basisBlock(d) {
+    const b = d.basis;
+    if (!b || !((b.used || []).length || (b.out || []).length || b.note)) return "";
+    const nUsed = b.n_used || (b.used || []).length, nOut = b.n_out || (b.out || []).length;
+    return `<details class="basis"><summary>Mihez mértem? ${esc(nUsed)} hirdetés${nOut ? ` · ${esc(nOut)} kizárva` : ""}</summary>
+      ${b.note ? `<p class="muted">${esc(b.note)}</p>` : ""}
+      ${(b.used || []).length ? `<ul class="dealrows">${b.used.map(basisRow).join("")}</ul>${nUsed > b.used.length ? `<p class="muted">…és még ${esc(nUsed - b.used.length)}.</p>` : ""}` : ""}
+      ${(b.out || []).length ? `<p class="muted">Kizártam (ezek nem számítottak bele):</p><ul class="dealrows">${b.out.map(basisRow).join("")}</ul>` : ""}
+    </details>`;
+  }
+  // Az eladó többi hirdetése (egy jó találatnál): mi éri meg még (külön is eladható-e), együtt mennyi a haszon (egy
+  // posta, a Vinteden a vevővédelmi díj a végösszegre egyszer), mennyi munka meghirdetni, és mennyit ajánlj együtt.
+  function sellerBlock(d) {
+    const s = d.seller;
+    if (!s || !((s.items || []).length || s.unknown)) return "";
+    const items = (s.items || []).map((i) => `<li>${safeUrl(i.u) ? `<a href="${esc(i.u)}" target="_blank" rel="noopener noreferrer">${esc(i.t)}</a>` : esc(i.t)}:
+      <b>${esc(price(i.p))}</b> <small class="${i.pick ? "muted" : "warn"}">${i.pick ? `külön is eladható, kb. ${esc(price(i.margin))} haszon` : esc(i.why || "")}${i.n ? ` · ${esc(i.n)} hasonló alapján` : ""}${i.pace === "gyors" ? " · gyorsan kel" : ""}</small></li>`).join("");
+    const fee = s.fee ? `; Vinted vevővédelmi díj kb. ${esc(price(s.fee))} a végösszegre egyszer` : "";
+    const offer = s.offer ? ` Közös vételre ajánlj kb. ${esc(price(s.offer))}-ot${s.vinted ? " (csomagajánlat)" : ""}.` : "";
+    const sums = s.picked
+      ? `<p>Együtt <b>${esc(price(s.total))}</b> (egy posta: ${esc(price(s.shipping))}${fee}): kb. <b>${esc(price(s.profit))}</b> haszon (csak ez: kb. ${esc(price(s.single))}; külön-külön véve: kb. ${esc(price(s.separately))}). Munka: ${esc(s.listings)} hirdetés, kb. ${esc(s.minutes)} perc.${offer}</p>`
+      : `<p class="muted">Külön egyik sem éri meg biztosan.</p>`;
+    return `<details class="basis seller"${s.worth ? " open" : ""}><summary>Az eladó többi hirdetése: ${s.picked ? `még ${esc(s.picked)} darab megérheti` : "nincs köztük megérő"}</summary>
+      ${items ? `<ul class="dealrows">${items}</ul>` : ""}${s.unknown ? `<p class="muted">${esc(s.unknown)} hirdetésének az árát nem ismerem.</p>` : ""}${sums}
+      ${safeUrl(s.url) ? `<p><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">Az eladó hirdetései</a></p>` : ""}</details>`;
+  }
   function dealFacts(d) {
     if (d.bundle) return bundleFacts(d);
     if (d.haggle) return haggleFacts(d);
-    const sale = d.median ? Math.round(Math.min(d.median * (deals.sale_ratio || 0.9), d.low || Infinity) / 100) * 100 : null;
+    const sale = d.resale || (d.median ? Math.round(Math.min(d.median * (deals.sale_ratio || 0.9), d.low || Infinity) / 100) * 100 : null);
     const where = (d.sites || []).length ? `, ${d.sites.join(" és ")}` : "";
     const rows = [["Ára", `<b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))} → ${esc(price(d.price))})` : ""} · ${esc(d.site)}${d.auction ? " (licit)" : ""}`],
                   [d.auction ? "Máshol ennyiért adják" : "Most ennyiért mennek", `kb. ${esc(price(d.median))}${d.similar ? ` (${esc(d.similar)} hasonló alapján${esc(where)})` : ""}`]];
+    if ((d.band || []).length === 2) rows.push(["Kínálati ársáv", `${esc(price(d.band[0]))} – ${esc(price(d.band[1]))} <small class="muted">(a hasonlók többsége)</small>`]);
+    if (sale && !d.auction) rows.push(["Óvatos eladási ár", `kb. ${esc(price(sale))} <small class="muted">(a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede)</small>`]);
+    if (d.costs && !d.auction) rows.push(["Költség", `posta kb. ${esc(price(d.costs))}`]);
     if (d.auction) rows.push(["Meddig licitálj", `legfeljebb <b>${esc(price(d.max_bid))}</b>-ig${d.left ? ` · ${esc(leftText(d))}` : ""}`]);
     else if (d.offer) rows.push(["Ajánlattal", `ha ${esc(price(d.offer))}-ért megkapod, kb. <b>${esc(price(d.profit))}</b> a haszon`]);
-    else rows.push(["Ennyit kereshetsz vele", `<b>kb. ${esc(price(d.profit))}</b>${sale ? ` (ha kb. ${esc(price(sale))}-ért eladod; a posta benne van)` : ""}`]);
+    else rows.push(["Ennyit kereshetsz vele", `<b>kb. ${esc(price(d.profit))}</b>${sale ? ` (ha kb. ${esc(price(sale))}-ért eladod, a költség után)` : ""}`]);
     if (d.sold) rows.push(["Elkelt hasonlók", `kb. ${esc(price(d.sold.median))} (${esc(d.sold.n)} db alapján)`]);
     if (d.speed) rows.push(["Eladási sebesség", esc(d.speed)]);
     if (d.safety) rows.push(["Biztonság", safetyLine(d.safety)]);
     return `<p class="muted">Megtaláltam: ${esc(ago(d.at))}${d.explore ? ` · ${esc(d.explore)}` : ""}</p>
       <dl class="facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+      ${sellerBlock(d)}${basisBlock(d)}
       ${d.note ? `<p class="muted">${esc(d.note)}${d.photos_checked ? " (a hirdetés fotói alapján is)" : ""}</p>` : ""}
       ${(d.warnings || []).map((w) => `<p class="warn">Figyelj: ${esc(w)}</p>`).join("")}
       <p class="muted">Ezt másolom ki neked:</p><pre class="msgpreview">${esc(messageFor(d))}</pre>`;
@@ -880,6 +918,7 @@
           : d.offer ? ` · ajánlattal (${esc(price(d.offer))}) kb. <b>${esc(price(d.profit))}</b> haszon`
           : d.profit !== undefined ? ` · várható haszon kb. <b>${esc(price(d.profit))}</b>` : ` (kb. ${esc(price(d.margin))}-tal olcsóbb)`}
         ${d.calibration ? " · a felmérés közben" : ""}${d.explore ? " · " + esc(d.explore) : ""}${d.note ? " · " + esc(d.note) : ""}</small>`}
+        ${d.seller && d.seller.worth ? `<small><b class="tag">+${esc(d.seller.picked)} az eladótól</b> együtt kb. <b>${esc(price(d.seller.profit))}</b> haszon (Részletek)</small>` : ""}
         ${d.speed ? `<small class="muted">Eladási sebesség: ${esc(d.speed)}</small>` : ""}
         ${d.safety ? `<small class="${d.safety.level === "kockázatos" ? "warn" : "muted"}">${safetyLine(d.safety)}</small>` : ""}
         ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}
@@ -916,9 +955,13 @@
     box.innerHTML = `
       <div class="runbar">
         <button type="button" id="d-run-toggle" class="${running ? "" : "primary"}" ${deals.browser || deals.instant ? "" : "disabled"}>${running ? "Leállítás" : "Indítás"}</button>
+        <button type="button" id="d-turbo" class="turbo${deals.turbo ? " on" : ""}" aria-pressed="${deals.turbo ? "true" : "false"}"
+          title="Gyakrabban kérdezem a modellt, hogy hamarabb kiderüljön, mi éri meg">Turbó${deals.turbo ? " be" : ""}</button>
         <span class="runstate"><span><b>${running ? "Fut" : "Áll"}</b>${running && deals.started ? ` · ${esc(hhmmOf(deals.started))} óta` : ""}</span>
           ${running && b.status ? `<small>${esc(b.status)}</small>` : ""}</span>
       </div>
+      ${deals.turbo ? `<p class="turbonote"><small>Turbó: minden oldal ismeretlen hirdetéseit rögtön megnevezem a modellel, és
+        amíg nem dolgozol velem, a modell mindkét helyét a kereskedés használja. A weboldalaktól nem kérek többet.</small></p>` : ""}
       ${deals.browser ? "" : '<p class="warn"><small>A Vintedhez és a Vaterához Jarvis saját böngészője kell.</small></p>'}
       ${deals.money && deals.money.budget ? `<p><small>Havi keret: ${esc(price(deals.money.spent) || "0 Ft")} / ${esc(price(deals.money.budget))}
         (${deals.money.remaining ? `${esc(price(deals.money.remaining))} maradt` : "elfogyott"})</small></p>` : ""}
@@ -977,7 +1020,7 @@
         ${bd.on && bd.waiting ? `<p><small>${esc(bd.waiting)} csomag vár felmérésre.</small></p>` : ""}
         <ul class="dealist">${bundleSearches || '<li class="muted">Még nincs csomagkeresés.</li>'}</ul>
         <form id="db-add" class="compose" autocomplete="off">
-          <input id="db-query" placeholder="Pl. ruhacsomag, lego ömlesztve">
+          <input id="db-query" placeholder="Pl. lego ömlesztve, videojáték csomag (ruhával nem kereskedem)">
           <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="db-site" value="${esc(s.key)}" checked> ${esc(s.name)}</label>`).join("")}</div>
           <div class="row">
             <label>Legfeljebb <input id="db-max" type="number" inputmode="numeric" min="0" placeholder="bármennyi" style="width: 7em"> Ft</label>
@@ -1025,6 +1068,11 @@
       const start = !running;
       if (await dealAction({ action: start ? "start" : "stop" }))
         J.toast(start ? "Elindítottam: keresek, és ha valami megéri, szólok." : "Leállítottam.");
+    });
+    $("d-turbo").addEventListener("click", async () => {
+      const on = !deals.turbo;
+      if (await dealAction({ action: "turbo", on }))
+        J.toast(on ? "Turbó bekapcsolva: gyakrabban kérdezem a modellt." : "Turbó kikapcsolva.");
     });
     $("d-limits").addEventListener("click", async () => {
       if (await dealAction({ action: "limits", max_buy: $("d-maxbuy").value, min_profit: $("d-minprofit").value,

@@ -801,8 +801,17 @@ LISTING_PAGE_JS = r"""
     if (!images.includes(src)) images.push(src);
     if (images.length >= 4) break;
   }
+  // az eladó többi hirdetésének linkje (egy jó találatnál az eladótól összeállítható csomaghoz; feeds.seller_link)
+  const SELLER = /\b(tovabbi|osszes|tobbi|minden) (hirdetes|termek)\w*|\bhirdetesei\b|\btermekei\b|\bmore from\b|\bmember.?s items\b|\ball items\b/;
+  const fold = (s) => (s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  let seller = '', member = '';
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (a.host !== location.host) continue;
+    if (SELLER.test(fold(clean(a.innerText || a.getAttribute('aria-label'))))) { seller = a.href; break; }
+    if (!member && /\/member\/\d+/.test(a.getAttribute('href') || '')) member = a.href;
+  }
   return {title: document.title, url: location.href, text: parts.join(' ').slice(0, 4000), short, labels,
-          images: images.slice(0, 4), captcha: """ + CAPTCHA_FRAME_JS + r"""};
+          images: images.slice(0, 4), captcha: """ + CAPTCHA_FRAME_JS + r""", seller: seller || member};
 }
 """
 

@@ -489,6 +489,9 @@ class JarvisApp:
             # Párhuzamos böngészés: a Hardverapró és a Jófogás böngésző nélkül, a saját szálán, amíg a böngésző a
             # Vintedet és a Vaterát nézi (a Szünet ezt is megállítja, a készenlét nem).
             trading.start_fast_lane(self._instant_allowed, self.llm.gate.background_ok, self._quick_notify)
+            # Turbó (az Indítás melletti gomb): a modellkapu a tartalék helyet is a kereskedésnek adja, amíg nem
+            # dolgozol a Jarvisszal (llm.TURBO_IDLE)
+            self.llm.gate.turbo = lambda: trading.turbo
         deals = self.work.deals if self.work is not None else None
         if deals is not None and deals.browser is not None:
             # Olcsó hirdetések keresése: modell nélkül (csak a kevés jelöltre egy rövid kérdés), a böngésző kell hozzá.

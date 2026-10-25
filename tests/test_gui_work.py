@@ -151,7 +151,7 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertEqual((status, data["browse"]["on"], data["browse"]["sites"], data["browse"]["min_profit"]),
                          (200, True, ["hardverapro", "vinted"], 8000))
         self.assertEqual(data["journal"][0]["text"], "Bekapcsoltad a napközbeni böngészést.")
-        self.assertTrue(any(lane["name"] == "Vinted: Kezdőoldal" for lane in data["lanes"]))
+        self.assertTrue(any(lane["name"] == "Vinted: Lego" for lane in data["lanes"]))
         self.assertEqual(self.post("/api/work/deals", {"action": "browse", "sites": []})[0], 400, "legalább egy oldal")
         status, data = self.post("/api/work/deals", {"action": "journal", "day": data["journal_days"][0]})
         self.assertEqual((status, data["entries"][0]["text"]), (200, "Bekapcsoltad a napközbeni böngészést."))
@@ -220,12 +220,12 @@ class WorkSecurityTests(unittest.TestCase):
         vásárlás, egy tárgy, a kiadás is egyszer számít; a csomag is egyszer bomlik darabokra. Az ismétlés a meglévő
         tárgyat kapja vissza."""
         deals = self.h.app.work.deals
-        url, bundle_url = "https://hardverapro.hu/apro/dupla.html", "https://www.jofogas.hu/ruha/88888.htm"
+        url, bundle_url = "https://hardverapro.hu/apro/dupla.html", "https://www.jofogas.hu/konzol/88888.htm"
         deals._remember({"id": "dd", "url": url, "text": "RTX 3060 Ti", "site": "Hardverapró", "price": 55000,
                          "median": 100000, "margin": 45000, "at": time.time()})
-        lines = [{"name": "Nike pulóver", "query": "Nike pulóver", "count": 3, "unit": 4800, "source": "becslés"},
-                 {"name": "Zara póló", "query": "Zara póló", "count": 5, "unit": 1500, "source": "becslés"}]
-        deals._remember({"id": "dbd", "url": bundle_url, "site": "Jófogás", "text": "Márkás ruhacsomag", "price": 6000,
+        lines = [{"name": "PS4 kontroller", "query": "PS4 kontroller", "count": 3, "unit": 4800, "source": "becslés"},
+                 {"name": "PS4 játék", "query": "PS4 játék", "count": 5, "unit": 1500, "source": "becslés"}]
+        deals._remember({"id": "dbd", "url": bundle_url, "site": "Jófogás", "text": "Márkás konzolcsomag", "price": 6000,
                          "profit": 12300, "value": 21900, "at": time.time(),
                          "bundle": {"value": 21900, "leftover": 0, "small": 0, "listings": 8, "profit": 12300,
                                     "sure": 0.0, "top": 0.21, "lines": lines}})
@@ -292,29 +292,32 @@ class WorkSecurityTests(unittest.TestCase):
         """Csomagbontás: a beállítások és a csomagkeresések; a megvett csomag darabjai külön eladandó tárgyak, a vételár
         és a posta az értékük arányában szétosztva; a visszamondás a csomag minden darabját törli (ha egy sem kelt el)."""
         deals = self.h.app.work.deals
+        status, data = self.post("/api/work/deals", {"action": "bundle_add", "query": "konzolcsomag"})
+        self.assertEqual((status, data["bundles"]["on"], data["bundles"]["searches"][0]["query"]), (200, True, "konzolcsomag"))
+        self.assertEqual(self.post("/api/work/deals", {"action": "bundle_add", "query": "Konzolcsomag"})[0], 400)
         status, data = self.post("/api/work/deals", {"action": "bundle_add", "query": "ruhacsomag"})
-        self.assertEqual((status, data["bundles"]["on"], data["bundles"]["searches"][0]["query"]), (200, True, "ruhacsomag"))
-        self.assertEqual(self.post("/api/work/deals", {"action": "bundle_add", "query": "Ruhacsomag"})[0], 400)
+        self.assertEqual((status, data["error"]), (400, "Ruhával és cipővel nem kereskedem (ezt kérted): válassz más "
+                                                       "csomagot."), "ruhával nem kereskedik")
         status, data = self.post("/api/work/deals", {"action": "bundles", "on": False, "min_profit": "10 000"})
         self.assertEqual((status, data["bundles"]["on"], data["bundles"]["min_profit"]), (200, False, 10000))
         status, data = self.post("/api/work/deals", {"action": "bundle_remove", "id": data["bundles"]["searches"][0]["id"]})
         self.assertEqual((status, data["bundles"]["searches"]), (200, []))
-        lines = [{"name": "Nike pulóver", "query": "Nike pulóver", "count": 3, "unit": 4800, "source": "becslés"},
-                 {"name": "Zara póló", "query": "Zara póló", "count": 5, "unit": 1500, "source": "becslés"},
-                 {"name": "Zokni", "query": "", "count": 4, "unit": 300, "source": "becslés"}]
+        lines = [{"name": "PS4 kontroller", "query": "PS4 kontroller", "count": 3, "unit": 4800, "source": "becslés"},
+                 {"name": "PS4 játék", "query": "PS4 játék", "count": 5, "unit": 1500, "source": "becslés"},
+                 {"name": "Kábel", "query": "", "count": 4, "unit": 300, "source": "becslés"}]
         for deal_id, number in (("db", 77777), ("db2", 77778)):
-            deals._remember({"id": deal_id, "url": f"https://www.jofogas.hu/ruha/{number}.htm", "site": "Jófogás",
-                             "text": "Márkás ruhacsomag", "price": 6000, "profit": 12300, "value": 22500,
+            deals._remember({"id": deal_id, "url": f"https://www.jofogas.hu/konzol/{number}.htm", "site": "Jófogás",
+                             "text": "Márkás konzolcsomag", "price": 6000, "profit": 12300, "value": 22500,
                              "at": time.time(), "bundle": {"value": 22500, "leftover": 600, "small": 4, "listings": 9,
                                                            "profit": 12300, "sure": 0.0, "top": 0.21, "lines": lines}})
         status, data = self.post("/api/work/deals", {"action": "bought", "id": "db", "price": "6 001", "shipping": "1500"})
         self.assertEqual(status, 200, data)
         items = [self.h.store.get(i) for i in data["items"]]
-        self.assertEqual([i.prompt for i in items], ["Nike pulóver, 3 db, 4800 Ft", "Zara póló, 5 db, 1500 Ft",
+        self.assertEqual([i.prompt for i in items], ["PS4 kontroller, 3 db, 4800 Ft", "PS4 játék, 5 db, 1500 Ft",
                                                      "Apróságok egyben a csomagból (4 db), 600 Ft"])
         self.assertEqual((sum(i.bought_price for i in items), sum(i.bought_shipping or 0 for i in items)), (6001, 1500))
         self.assertEqual([i.target_price for i in items], [14400, 7500, 600])
-        self.assertEqual([i.search_query for i in items], ["Nike pulóver", "Zara póló", ""])
+        self.assertEqual([i.search_query for i in items], ["PS4 kontroller", "PS4 játék", ""])
         self.assertTrue(all(i.in_transit and i.source.endswith("/77777.htm") for i in items))
         bought = next(d for d in data["deals"] if d["id"] == "db")
         self.assertEqual((bought["bought"], bought["bought_items"]), (items[0].id, data["items"]))
@@ -930,6 +933,20 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector('#d-run-toggle:has-text("Leállítás")')
         self.assertTrue(deals.state()["running"] and deals.state()["browse"]["on"] and instant.state()["enabled"])
         self.assertIn("Fut", page.inner_text(".runstate"))
+        # Turbó: az Indítás mellett (telefonon is egy sorban), be- és kikapcsolható; a modellkapu is ebből dönt
+        self.assertEqual(page.get_attribute("#d-turbo", "aria-pressed"), "false")
+        page.click("#d-turbo")
+        page.wait_for_selector('#d-turbo[aria-pressed="true"]')
+        self.assertTrue(deals.state()["turbo"])
+        self.assertTrue(self.h.app.llm.gate.turbo(), "a modellkapu is tudja")
+        self.assertIn("A weboldalaktól nem kérek többet", page.inner_text(".turbonote"))
+        run, turbo = page.locator("#d-run-toggle").bounding_box(), page.locator("#d-turbo").bounding_box()
+        self.assertAlmostEqual(run["y"], turbo["y"], delta=2, msg="egy sorban az Indítással")
+        self.assertGreater(turbo["x"], run["x"])
+        page.click("#d-turbo")
+        page.wait_for_selector('#d-turbo[aria-pressed="false"]')
+        self.assertFalse(deals.state()["turbo"] or self.h.app.llm.gate.turbo())
+        self.assertEqual(page.locator(".turbonote").count(), 0)
         self.assertTrue(page.locator("#d-maxbuy").is_hidden(), "a beállítások alapból össze vannak csukva")
         page.click('summary:has-text("Beállítások")')
         page.fill("#d-maxbuy", "30000")
@@ -989,7 +1006,23 @@ class WorkBrowserTests(unittest.TestCase):
                          "price": 52000, "median": 100000, "similar": 12, "profit": 31500, "at": time.time() - 150,
                          "low": 85000, "sites": ["Hardverapró", "Jófogás"], "sold": {"n": 4, "median": 88000},
                          "safety": {"level": "biztos", "why": [], "good": ["61% haszon", "gyorsan kel el"]},
-                         "quick": True, "note": "Ugyanaz a kártya.", "explore": "azonnali figyelő: Videókártyák"})
+                         "quick": True, "note": "Ugyanaz a kártya.", "explore": "azonnali figyelő: Videókártyák",
+                         "band": [92000, 106000], "resale": 85000, "costs": 1500,
+                         "basis": {"used": [{"t": "MSI RTX 3060 Ti Ventus", "p": 98000, "s": "Jófogás",
+                                             "u": "https://www.jofogas.hu/1234567.htm", "src": "most"},
+                                            {"t": "RTX 3060 Ti", "p": 101000, "s": "Hardverapró", "u": "", "src": "árbázis",
+                                             "read": True}],
+                                   "out": [{"t": "RTX 3060 Ti 16GB", "p": 140000, "s": "Hardverapró", "u": "",
+                                            "src": "most", "why": "más változat (16GB)"}],
+                                   "n_used": 2, "n_out": 1},
+                         "seller": {"url": "https://hardverapro.hu/aprok/hirdeto/peti/index.html", "picked": 1,
+                                    "items": [{"t": "Apple AirPods Pro 2 fehér", "p": 30000, "u": "", "resale": 45000,
+                                               "margin": 14700, "n": 5, "pace": "gyors", "pick": True},
+                                              {"t": "Logitech G502", "p": 15000, "u": "", "resale": 14000, "margin": -1300,
+                                               "n": 6, "pace": "", "pick": False, "why": "külön nem éri meg"}],
+                                    "total": 82000, "shipping": 1500, "fee": 0, "profit": 43700, "single": 29000,
+                                    "separately": 42200, "listings": 2, "minutes": 20, "unknown": 1, "vinted": False,
+                                    "offer": 73800, "worth": True}})
         context = self.browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True,
                                            user_agent="Mozilla/5.0 (Linux; Android 14) Chrome/141.0 Mobile JarvisAndroid/1")
         context.add_init_script("""(() => {
@@ -1005,8 +1038,25 @@ class WorkBrowserTests(unittest.TestCase):
         body = page.inner_text("#deal-body")
         for part in ("52 000 Ft", "Most ennyiért mennek", "kb. 100 000 Ft (12 hasonló alapján, Hardverapró és Jófogás)",
                      "Ennyit kereshetsz vele", "kb. 31 500 Ft (ha kb. 85 000 Ft-ért eladod", "Ugyanaz a kártya.", "3 perce",
-                     "Elkelt hasonlók", "kb. 88 000 Ft (4 db alapján)", "Biztos befektetés: 61% haszon; gyorsan kel el"):
+                     "Elkelt hasonlók", "kb. 88 000 Ft (4 db alapján)", "Biztos befektetés: 61% haszon; gyorsan kel el",
+                     "Kínálati ársáv", "92 000 Ft – 106 000 Ft", "Óvatos eladási ár", "Költség", "posta kb. 1 500 Ft",
+                     "Mihez mértem? 2 hirdetés · 1 kizárva"):
             self.assertIn(part, body)
+        seller = page.inner_text("details.seller")   # az eladó többi hirdetése (nyitva: együtt jobban megéri)
+        for part in ("Az eladó többi hirdetése: még 1 darab megérheti", "Apple AirPods Pro 2 fehér: 30 000 Ft",
+                     "külön is eladható, kb. 14 700 Ft haszon · 5 hasonló alapján · gyorsan kel",
+                     "Logitech G502: 15 000 Ft", "külön nem éri meg", "1 hirdetésének az árát nem ismerem.",
+                     "Együtt 82 000 Ft (egy posta: 1 500 Ft): kb. 43 700 Ft haszon (csak ez: kb. 29 000 Ft",
+                     "Munka: 2 hirdetés, kb. 20 perc. Közös vételre ajánlj kb. 73 800 Ft-ot.", "Az eladó hirdetései"):
+            self.assertIn(part, seller)
+        page.click("details.basis:not(.seller) > summary")   # mihez mérte: a beszámítottak és a kizártak az okkal
+        basis = page.inner_text("details.basis:not(.seller)")
+        for part in ("MSI RTX 3060 Ti Ventus: 98 000 Ft", "Jófogás · most találtam", "korábban láttam · a leírásából",
+                     "Kizártam (ezek nem számítottak bele):", "RTX 3060 Ti 16GB: 140 000 Ft", "más változat (16GB)"):
+            self.assertIn(part, basis)
+        self.assertEqual(page.get_attribute('details.basis:not(.seller) a', "href"), "https://www.jofogas.hu/1234567.htm")
+        self.assertEqual(page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), True,
+                         "telefonon sem lóg ki")
         self.assertEqual(page.inner_text(".msgpreview"), "Szia!\nMegvan még a termék?\nKöszi előre is\nÜdv, Zsolt")
         self.assertEqual(page.get_attribute("#deal-go", "href"), listing)
         with context.expect_page() as opened:
@@ -1045,12 +1095,12 @@ class WorkBrowserTests(unittest.TestCase):
         csomag darabjai külön eladandó tárgyak."""
         deals = self.h.app.work.deals
         self.h.app.work.instant.allowed = lambda: False
-        lines = [{"name": "Nike pulóver", "query": "Nike pulóver", "count": 3, "unit": 4800, "source": "becslés"},
-                 {"name": "Zara póló", "query": "Zara póló", "count": 5, "unit": 1500, "source": "piac", "n": 7},
-                 {"name": "Zokni", "query": "", "count": 4, "unit": 300, "source": "becslés"}]
-        deals._remember({"id": "cs1", "url": "https://www.jofogas.hu/ruha/55555.htm", "text": "Márkás ruhacsomag 10 db",
+        lines = [{"name": "PS4 kontroller", "query": "PS4 kontroller", "count": 3, "unit": 4800, "source": "becslés"},
+                 {"name": "PS4 játék", "query": "PS4 játék", "count": 5, "unit": 1500, "source": "piac", "n": 7},
+                 {"name": "Kábel", "query": "", "count": 4, "unit": 300, "source": "becslés"}]
+        deals._remember({"id": "cs1", "url": "https://www.jofogas.hu/konzol/55555.htm", "text": "Márkás konzolcsomag 10 db",
                          "site": "Jófogás", "platform": "jofogas", "price": 6000, "profit": 12300, "value": 22500,
-                         "at": time.time(), "explore": "Csomagkeresés: ruhacsomag",
+                         "at": time.time(), "explore": "Csomagkeresés: konzolcsomag",
                          "bundle": {"value": 22500, "leftover": 600, "small": 4, "listings": 9, "profit": 12300,
                                     "sure": 0.33, "top": 0.21, "lines": lines},
                          "safety": {"level": "jó", "why": ["a darabárak egy része csak becslés"], "good": ["205% haszon"]}})
@@ -1061,7 +1111,7 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertIn("csomag · 6 000 Ft, darabonként eladva kb. 22 500 Ft", page.inner_text(card))
         self.assertIn("várható haszon kb. 12 300 Ft", page.inner_text(card))
         page.click(f'{card} summary:has-text("Mi van benne")')
-        self.assertIn("3 db Nike pulóver: kb. 4 800 Ft/db", page.inner_text(card))
+        self.assertIn("3 db PS4 kontroller: kb. 4 800 Ft/db", page.inner_text(card))
         self.assertIn("(7 hirdetés alapján)", page.inner_text(card))
         page.click('[data-deal-open="cs1"]')
         page.wait_for_selector("#deal-dialog[open]")
@@ -1073,11 +1123,11 @@ class WorkBrowserTests(unittest.TestCase):
         page.click("#deal-close")
         page.click('details[data-fold="bundles"] > summary')
         page.click('[data-bundle-preset="0"]')
-        page.wait_for_selector('.toast:has-text("Felvettem: Ruhacsomag.")')
+        page.wait_for_selector('.toast:has-text("Felvettem: Lego ömlesztve.")')
         state = deals.state()["bundles"]
         self.assertEqual((state["on"], state["searches"][0]["query"], state["searches"][0]["sites"]),
-                         (True, "ruhacsomag", [k for k in ("vinted", "jofogas") if k in deals.platforms]))
-        page.wait_for_selector('#w-deals .dealist li:has-text("ruhacsomag")')
+                         (True, "lego ömlesztve", [k for k in ("jofogas", "vatera") if k in deals.platforms]))
+        page.wait_for_selector('#w-deals .dealist li:has-text("lego ömlesztve")')
         page.uncheck("#db-on")
         page.click("#db-save")
         page.wait_for_selector('.toast:has-text("Kikapcsoltam a csomagbontást.")')

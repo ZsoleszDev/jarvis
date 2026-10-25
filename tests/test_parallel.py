@@ -26,6 +26,7 @@ from test_streaming import RecordingUI  # noqa: E402
 from jarvis_core.app import AFTER_WORK, JarvisApp  # noqa: E402
 from jarvis_core.config import LlmCfg  # noqa: E402
 from jarvis_core.gui import EventBus, GuiUI  # noqa: E402
+from jarvis_core import llm as llm_module  # noqa: E402
 from jarvis_core.llm import Cancelled, ModelGate, OllamaClient, background_calls, in_background  # noqa: E402
 from jarvis_core.memory import OllamaProcess  # noqa: E402
 from jarvis_core.ollama_log import server_parallel, set_user_setting  # noqa: E402
@@ -85,6 +86,71 @@ class ModelGateTests(unittest.TestCase):
         two.set_slots(1)
         with two.session():
             self.assertFalse(two.background_ok())
+
+    def test_turbo_gives_the_spare_slot_to_the_trading_while_you_do_not_work(self):
+        """Turbó: amíg nincs beszélgetés vagy eladás (és TURBO_IDLE óta nem is volt), a kereskedés mindkét helyet
+        használhatja; amíg egy feltöltés dolgozik, meg utána még TURBO_IDLE-ig, a második hely újra az elsőbbségié.
+        Kikapcsolva a régi szabály marad."""
+        gate = ModelGate(2)
+        on = [True]
+        gate.turbo = lambda: on[0]
+        with gate.hold(background=True):
+            self.assertTrue(gate.background_ok(), "Turbóban a második hely is a kereskedésé")
+            with gate.hold(background=True):
+                self.assertEqual((gate.active, gate.background), (2, 2))
+                self.assertFalse(gate.background_ok(), "több hely nincs")
+            on[0] = False
+            self.assertFalse(gate.background_ok(), "kikapcsolva a második hely az elsőbbségié")
+            on[0] = True
+            with gate.session():               # egy feltöltés dolgozik (a hívásai közti szünetben is)
+                self.assertFalse(gate.background_ok())
+                with gate.hold(background=False):
+                    pass
+            self.assertFalse(gate.background_ok(), "közvetlenül utána még nem: hátha jön a következő lépése")
+            gate._priority_at -= llm_module.TURBO_IDLE - 1      # (az idő múlása)
+            self.assertFalse(gate.background_ok())
+            gate._priority_at -= 2
+            self.assertTrue(gate.background_ok(), "TURBO_IDLE múlva újra a kereskedésé")
+        one = ModelGate(1)
+        one.turbo = True
+        with one.hold(background=True):
+            self.assertFalse(one.background_ok(), "egy hellyel a Turbó sem ad többet")
+
+    def test_in_turbo_an_upload_waits_for_one_running_trading_call_at_most(self):
+        gate = ModelGate(2)
+        gate.turbo = True
+        order: list[str] = []
+        first, second = threading.Event(), threading.Event()
+
+        def trading(name: str, done: threading.Event) -> None:
+            with background_calls(), gate.hold():
+                order.append(name)
+                done.wait(5)
+
+        one = threading.Thread(target=trading, args=("kereskedés 1", first))
+        two = threading.Thread(target=trading, args=("kereskedés 2", second))
+        one.start()
+        two.start()
+        self.assertTrue(wait_until(lambda: gate.background == 2))
+        holder: list[str] = []
+
+        def call() -> None:
+            with gate.hold(background=False):
+                holder.append("feltöltés")
+
+        upload = threading.Thread(target=call)
+        upload.start()
+        self.assertTrue(wait_until(lambda: gate.waiting == 1))
+        late = threading.Thread(target=trading, args=("kereskedés 3", threading.Event()))
+        first.set()                            # az egyik kereskedési hívás véget ér: a feltöltés jön, nem a harmadik
+        self.assertTrue(wait_until(lambda: holder == ["feltöltés"]))
+        late.start()
+        time.sleep(0.1)
+        self.assertNotIn("kereskedés 3", order, "a feltöltés után TURBO_IDLE-ig a második hely az elsőbbségié")
+        second.set()
+        self.assertTrue(wait_until(lambda: "kereskedés 3" in order))
+        for thread in (one, two, upload, late):
+            thread.join(5)
 
     def test_a_waiting_call_can_be_stopped(self):
         gate = ModelGate(1)

@@ -805,6 +805,8 @@ class _Handler(BaseHTTPRequestHandler):
                         and "deals" in app.scheduler.jobs and deals.available():
                     app.run_job_now("deals")
                 return self._json(200, {"ok": True, **state, "instant": instant_state})
+            if action == "turbo":       # Turbó be/ki (az Indítás mellett): gyakrabban kérdezi a modellt
+                return self._json(200, {"ok": True, **deals.set_turbo(body.get("on"))})
             if action == "message":     # az eladónak szóló üzenet (a megérő találat ablakának gombja másolja ki)
                 return self._json(200, {"ok": True, **deals.set_message(body.get("text"))})
             if action == "limits":      # legfeljebb ennyiért vegyen, legalább ennyi haszonnal (minden keresésre)
