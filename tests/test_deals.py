@@ -26,7 +26,7 @@ from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, 
                                expected_profit, explore_top, highest_ok, last_chance, left_text, market, matches_query,
                                newest_first, offer_price, parse_auction, profit_floor, safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
-from jarvis_core.pricebook import PriceBook, pace, product_key, usable  # noqa: E402
+from jarvis_core.pricebook import PriceBook, pace, product_key, sized, usable  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
 
@@ -1613,6 +1613,22 @@ class SizeKindTests(unittest.TestCase):
         self.assertFalse(matches_query("Samsung 970 EVO Plus 500GB", "Samsung 970 EVO Plus 1TB"))
         self.assertFalse(matches_query("iPhone 13 128GB", "iPhone 13 4GB RAM"),
                          "a tárhely nélküli hirdetés nem biztos, hogy ez a változat")
+
+
+class SizeOrderTests(unittest.TestCase):
+    def test_one_kind_word_labels_one_size(self):
+        """Egy fajtát jelölő szó („RAM”, „SSD”) csak az egyik szomszédos méretet írja le: a „8GB RAM 256GB” címben a
+        256 GB a tárhely (eddig ezt is memóriának vette, és a „MacBook Air M1 8GB 256GB” keresésből kizárta)."""
+        self.assertEqual(sized("MacBook Air M1 8GB RAM 256GB"), [("8gb", "ram"), ("256gb", "storage")])
+        self.assertEqual(sized("MacBook Air M1 256GB SSD 8GB"), [("256gb", "storage"), ("8gb", "ram")])
+        self.assertEqual(sized("RAM: 16GB, SSD: 512GB"), [("16gb", "ram"), ("512gb", "storage")])
+        self.assertEqual(sized("SSD 512GB RAM 16GB"), [("512gb", "storage"), ("16gb", "ram")])
+        self.assertEqual(sized("16GB RAM 512GB SSD"), [("16gb", "ram"), ("512gb", "storage")])
+        for title in ("MacBook Air M1 8GB RAM 256GB", "MacBook Air M1 256GB SSD 8GB", "MacBook Air M1 SSD 256GB RAM 8GB",
+                      "MacBook Air M1 8GB RAM, 256GB SSD"):
+            self.assertTrue(matches_query("MacBook Air M1 8GB 256GB", title), title)
+        self.assertFalse(matches_query("MacBook Air M1 8GB 256GB", "MacBook Air M1 8GB RAM 512GB"), "más tárhely")
+        self.assertFalse(matches_query("MacBook Air M1 8GB 256GB", "MacBook Air M1 16GB RAM 256GB"), "más RAM")
 
 
 class MatchTests(unittest.TestCase):

@@ -54,7 +54,7 @@ from collections import Counter, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from .browser import DECLINED, LISTING_PAGE_JS, BrowserError, is_risky
 from .feeds import FeedError, chosen_sort, fetch_image
@@ -741,7 +741,13 @@ class ModelLane:
 
 class Deferred(Exception):
     """Az értékelés most nem folytatható (Szünet, vagy elfogyott az azonnali figyelő kéréskerete): a még le nem zárt
-    hirdetések megmaradnak, és később újra sorra kerülnek (appraise)."""
+    hirdetések megmaradnak, és később újra sorra kerülnek (appraise). sites: melyik oldal(ak) kerete fogyott el (ezekre
+    vár az a hirdetés, aminél megállt: row)."""
+
+    def __init__(self, reason: str = "", sites: Iterable[str] = ()) -> None:
+        super().__init__(reason)
+        self.sites = tuple(sites)
+        self.row: dict[str, Any] | None = None
 
 
 class _Round:
@@ -4048,13 +4054,20 @@ class DealHunter:
         names: dict[int, str] = {}             # amit a modell már megnevezett
         try:
             return self._appraise(rows, source, look, search, can_ask, found, go, floor, known, done, names)
-        except Deferred:
+        except Deferred as exc:
+            # amelyik hirdetésnél elfogyott a keret, az azokra az oldalakra vár; a többi a saját oldalára (a hirdetés
+            # oldalát mindenképp meg kell nyitni), így egy másik oldal kerete nem akasztja meg (wait_for)
+            blocked = listing_key(exc.row["url"]) if exc.row is not None and exc.sites else ""
             pending = []
             for row in rows:
                 if id(row) in done or listing_key(row["url"]) in known:
                     continue
                 name = names.get(id(row)) or row.get("named")
-                pending.append({**row, "named": name} if name else row)
+                item = {**row, "named": name} if name else dict(row)
+                if exc.sites:
+                    item["wait_for"] = list(exc.sites) if listing_key(row["url"]) == blocked else \
+                        [str(row.get("platform") or "")]
+                pending.append(item)
             return pending
 
     def _appraise(self, rows: list[dict[str, Any]], source: str, look: Callable[[dict[str, Any]], dict[str, Any] | None],
@@ -4062,6 +4075,16 @@ class DealHunter:
                   found: Callable[[dict[str, Any]], None], go: Callable[[], None], floor: int, known: set[str],
                   done: set[int], names: dict[int, str]) -> list[dict[str, Any]]:
         """Az appraise lépései; amit lezár (látottnak jegyez, felmér, a csomagbontásnak ad), azt done-ba teszi."""
+        def attempt(row: dict[str, Any], call: Callable[[], None]) -> None:
+            go()
+            try:
+                call()
+            except Deferred as exc:
+                if exc.row is None:
+                    exc.row = row              # ennél a hirdetésnél állt meg (erre vár: exc.sites)
+                raise
+            done.add(id(row))
+
         unknown, skip, recheck, lots, named_before, settle = [], [], [], [], [], []
         for row in rows:
             if listing_key(row["url"]) in known:
@@ -4089,13 +4112,9 @@ class DealHunter:
         self._mark(*skip, *other)
         done.update(id(row) for row in (*skip, *lots))
         for row, value in settle:              # a biztos árúak előbb (letöltés csak a hirdetés oldalához kell)
-            go()
-            self._settle(row, value, source, look, can_ask, found, go)
-            done.add(id(row))
+            attempt(row, partial(self._settle, row, value, source, look, can_ask, found, go))
         for row, name in recheck[:EXPLORE_PICKS]:
-            go()
-            self._recheck(row, name, search, floor, source, look, can_ask, found, go)
-            done.add(id(row))
+            attempt(row, partial(self._recheck, row, name, search, floor, source, look, can_ask, found, go))
         later = [row for row, _name in recheck[EXPLORE_PICKS:]]   # a keretbe nem fért: a következő körben
         named: list[tuple[dict[str, Any], str, bool]] = [(row, str(row["named"]), True) for row in named_before]
         names.update({id(row): str(row["named"]) for row in named_before})
@@ -4140,18 +4159,15 @@ class DealHunter:
                 elsewhere.append((row, query, buy or value is not None))
         for row, value in priced:              # a biztos árúak előbb (ezekhez nem kell letöltés)
             if value["cheap"]:
-                go()
-                self._settle(row, value, source, look, can_ask, found, go)
+                attempt(row, partial(self._settle, row, value, source, look, can_ask, found, go))
             else:
                 self._mark(row)
                 self.tally("not_cheap", [row])
-            done.add(id(row))
+                done.add(id(row))
         # amennyiért máshol adják (a modell szerint megérők elöl, legfeljebb EXPLORE_PICKS)
         elsewhere.sort(key=lambda entry: not entry[2])
         for row, query, _buy in elsewhere[:EXPLORE_PICKS]:
-            go()
-            self._recheck(row, query, search, floor, source, look, can_ask, found, go)
-            done.add(id(row))
+            attempt(row, partial(self._recheck, row, query, search, floor, source, look, can_ask, found, go))
         later += [{**row, "named": query} for row, query, _buy in elsewhere[EXPLORE_PICKS:]]
         return rest + later
 

@@ -673,6 +673,47 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual"], "a keret után jön")
 
+    def test_the_needed_site_decides_when_a_waiting_listing_continues(self):
+        """Egy váró Hardverapró-hirdetés, amihez már csak a saját oldalát kell megnyitni (ismert az ára), a Hardverapró
+        keretén múlik, nem a Jófogásén (eddig a Jófogás elfogyott kerete ezt is megakasztotta)."""
+        from jarvis_core.instant import ROUND_RESERVE
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:2])
+        self.net.pages["_7/friss"] = page_html("Hibátlan.")
+        used = int(self.fetcher.status()["hardverapro"]["last_hour"])
+        self.fetcher.hourly = used + 1 + ROUND_RESERVE       # a Hardverapró kerete a letöltéssel elfogy: a hirdetés vár
+        self.watch.tick()
+        self.assertEqual((self.notices, self.watch.state()["waiting"]), ([], 1))
+        self.fetcher.hourly = 200                            # a Hardveraprón van hely, a Jófogáson nincs
+        self.fetcher._recent["jofogas"].extend([self.clock()] * 200)
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual"],
+                         "a Jófogás kerete nem akasztotta meg")
+
+    def test_the_reserve_holds_for_every_request_of_a_list_setting(self):
+        """A Hardverapró lista beállítása egy letöltésen belül három kérés is lehet (lista, beállítás, újratöltés): a
+        köröknek fenntartott 30 mindegyiknél érvényes, a közös letöltőben (eddig 88-ról 91-re nőtt, és csak 29 maradt).
+        Ha az újratöltés most nem fér bele, az oldal az alap sorrenddel jön, és a beállítást nem jegyzi sikertelennek."""
+        from jarvis_core.instant import ROUND_RESERVE
+        self.watch.add("https://hardverapro.hu/aprok/hardver/monitor/index.html")
+        self.watch.set_enabled(True)
+        self.net.pages["monitor/index.html"] = (200, ha_page([ha_menu("lstup", 25)] + HA_CARDS))
+        self.net.pages["modosit.php"] = (200, "{}")
+        self.net.on_post = lambda: self.net.pages.update(
+            {"monitor/index.html": (200, ha_page([ha_menu("time", 100)] + HA_CARDS))})
+        self.fetcher._recent["hardverapro"].extend([self.clock()] * 88)   # a körök már 88-at kértek ebben az órában
+        self.watch.tick()
+        self.assertEqual(int(self.fetcher.status()["hardverapro"]["last_hour"]), self.fetcher.hourly - ROUND_RESERVE,
+                         "a 30 a köröké maradt")
+        self.assertEqual(self.watch.state()["alerts"][0]["polls"], 1, "az oldal megjött (az alap sorrenddel)")
+        self.assertEqual(self.fetcher._prefs_failed, {}, "a beállítást legközelebb újra próbálja")
+
     def test_a_full_page_waiting_for_the_model_is_not_lost(self):
         """Ha a modell épp nem kérdezhető (pl. beszélgetsz a Jarvisszal), egy teljes oldal (100) új hirdetés mind
         megvárja (eddig a várakozók listája 60-nál levágta a többit, és azok látottként elvesztek). Ami túl sokáig vár

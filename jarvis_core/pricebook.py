@@ -200,6 +200,7 @@ def sized(text: str) -> list[tuple[str, str]]:
     a másik fajta, és ha egyikét sem, de nagyon különböznek („8GB 256GB”), a kisebb a RAM."""
     words = _words(text)
     out: list[tuple[str, str]] = []
+    used: set[int] = set()                     # a már egy méretet leíró szavak (egy szó csak egy méretet jelöl)
     for index, word in enumerate(words):
         match = _CAPACITY.match(word)
         span = 1
@@ -209,12 +210,18 @@ def sized(text: str) -> list[tuple[str, str]]:
         if match is None or int(match.group(1)) <= 0:
             continue
         size = capacities([match.group(0)])[0]
-        after = words[index + span] if index + span < len(words) else ""
-        before = words[index - 1] if index else ""
-        follows = index + span + 1 < len(words) and bool(_CAPACITY.match(words[index + span + 1])
-                                                         or words[index + span + 1].isdigit())
+        before, after = index - 1, index + span
+        before_kind = _kind_of(words[before]) if before >= 0 and before not in used else ""
+        after_kind = _kind_of(words[after]) if after < len(words) else ""
+        follows = after + 1 < len(words) and bool(_CAPACITY.match(words[after + 1]) or words[after + 1].isdigit())
         # „RAM: 16GB, SSD: 512GB”: az utána álló szó a következő méreté, ha utána egy újabb méret jön
-        kind = _kind_of(before) if _kind_of(before) and (not _kind_of(after) or follows) else _kind_of(after)
+        if before_kind and (not after_kind or follows):
+            kind = before_kind
+            used.add(before)
+        else:
+            kind = after_kind
+            if after_kind:
+                used.add(after)
         if all(size != known for known, _k in out):
             out.append((size, kind))
     if len(out) == 2:

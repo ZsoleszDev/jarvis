@@ -56,6 +56,9 @@
   ellenőrzés után kerül le; a figyelő minden kérése (oldal, árkeresés) a keretéből megy, kerethiánynál az értékelés
   vár; a várólista 300 (két teljes oldal), és ami kiesik vagy lejár, azt a figyelő elfelejti (újra jön); a RAM és a
   tárhely külön számít a szűrésnél (pricebook.sized, size_conflict); a Szünet egy köteg közben is megállít.
+- Második átnézés (335bed5 után): a váró hirdetés csak a szükséges oldal keretére vár (Deferred.sites, wait_for); egy
+  „RAM” szó csak egy méretet jelöl (8GB RAM 256GB); a figyelő tartaléka a közös letöltőben, minden tényleges kérésnél
+  (feeds.Quota: címke, saját keret, tartalék; a lista beállításának POST-ja és újratöltése is).
 - Hardverapró: a böngésző nélküli letöltő a munkamenetében beállítja a listát (új hirdetések elöl, 100 egy oldalon),
   az oldalon ellenőrzi, és ha a beállítás megváltozik, a figyelő egyszer csak megjegyzi az oldalt.
 - Legújabb elöl a címben: Jófogás `sp=3`, Vatera `ob=5&obd=2` (a felhasználó ellenőrizte, 2026. október), a Vinted

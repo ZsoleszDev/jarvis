@@ -28,14 +28,13 @@ import secrets
 import threading
 import time
 import urllib.parse
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
 from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, Deferred, deal_action, excluded, matches_query,
                     newest_first, parse_words, safety_text)
-from .feeds import FAST_SITES, FeedError
+from .feeds import FAST_SITES, FeedError, Quota
 from .llm import background_calls
 from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price
 from .textutil import fold
@@ -45,6 +44,9 @@ EVERY_CHOICES = (2, 3, 5, 10, 15)    # percben
 DEFAULT_EVERY = 3
 INSTANT_HOURLY = 80        # az azonnali figyelő oldalanként óránként legfeljebb ennyit kér (a többi a köröké)
 ROUND_RESERVE = 30         # a letöltő óránkénti keretéből ennyit mindig meghagy a köröknek (különben azok üresen futnak)
+# A figyelő része a közös letöltő keretéből: minden tényleges kérése (a lista beállításáé is) ezzel a címkével számít, és a
+# letöltő érvényesíti (feeds.Quota).
+QUOTA = Quota("azonnali", cap=INSTANT_HOURLY, reserve=ROUND_RESERVE)
 # A Keresések (Automata kereskedés) a Hardveraprón és a Jófogáson az azonnali figyelőben is futnak, ennyi percenként
 # (a tanult ritmus és az óránkénti keret szerint): az új hirdetést így pár percen belül felméri, nem csak a keresés
 # óránkénti körében. A felületen a figyelők között látszanak („a Keresésekből”); a keresés törlésével megszűnnek.
@@ -100,10 +102,10 @@ class InstantWatch:
         self.allowed: Callable[[], bool] = lambda: True
         # Kérdezheti-e most a modellt (nem, amíg épp dolgozol a Jarvisszal: addig a hirdetés vár, lásd _waiting).
         self.model_ok: Callable[[], bool] = lambda: True
-        self._waiting: list[tuple[str, str, dict[str, Any], float]] = []   # (figyelő, oldal, hirdetés, mióta vár)
+        # (figyelő, oldal, hirdetés, mióta vár, melyik oldal kerete kell hozzá: üres, ha egyiké sem, pl. a modellre vár)
+        self._waiting: list[tuple[str, str, dict[str, Any], float, tuple[str, ...]]] = []
         self._lock = threading.RLock()
         self._next: dict[str, float] = {}           # figyelő:oldal → mikor jön legközelebb (a memóriában)
-        self._recent: dict[str, deque] = {k: deque() for k in self.platforms}
         self._told_blocked: dict[str, float] = {}   # oldal → mikor szóltunk, hogy tilt (naponta egyszer)
         self._book_saved = 0.0
         self._linked_at = float("-inf")        # mikor nézte meg utoljára a kereséseket (link_searches)
@@ -371,23 +373,28 @@ class InstantWatch:
         self._keep_waiting(alert_id, site, rows)
 
     def _keep_waiting(self, alert_id: str, site: str, rows: list[dict[str, Any]]) -> None:
-        """Hirdetések a várakozók közé (legfeljebb MAX_WAITING; a régebbiek esnek ki, és azokat a figyelő elfelejti)."""
+        """Hirdetések a várakozók közé (legfeljebb MAX_WAITING; a régebbiek esnek ki, és azokat a figyelő elfelejti).
+        A hirdetés wait_for mezője (DealHunter.appraise): melyik oldal kerete kell a folytatásához."""
         now = self.clock()
         with self._lock:
-            queued = {row["url"] for _a, _s, row, _t in self._waiting}
-            self._waiting += [(alert_id, site, row, now) for row in rows if row["url"] not in queued]
+            queued = {entry[2]["url"] for entry in self._waiting}
+            for row in rows:
+                if row["url"] not in queued:
+                    needs = tuple(row.get("wait_for") or ())
+                    self._waiting.append((alert_id, site, {k: v for k, v in row.items() if k != "wait_for"}, now,
+                                          needs))
             overflow = self._waiting[:max(0, len(self._waiting) - MAX_WAITING)]
             del self._waiting[:len(overflow)]
         self._forget(overflow)
 
-    def _forget(self, entries: list[tuple[str, str, dict[str, Any], float]]) -> None:
+    def _forget(self, entries: list[tuple[str, str, dict[str, Any], float, tuple[str, ...]]]) -> None:
         """Amire nem került sor (túl sok várt, vagy túl régóta): a figyelő nem jegyzi látottnak, így ha még fent van, a
         következő letöltésnél újra új hirdetésként jön (nem vész el)."""
         if not entries:
             return
         with self._lock:
-            for alert_id, _site, row, _at in entries:
-                (self._data["seen"].get(alert_id) or {}).pop(listing_key(row["url"]), None)
+            for entry in entries:
+                (self._data["seen"].get(entry[0]) or {}).pop(listing_key(entry[2]["url"]), None)
             self._save()
 
     def _go(self) -> None:
@@ -398,16 +405,10 @@ class InstantWatch:
         if not self._may_work():
             raise Deferred("szünet")
 
-    def _reserve(self, sites: list[str]) -> bool:
-        """Egy figyelőből induló kérés (a hirdetés oldala, az árkeresés) helye a figyelő keretében (_has_budget: a
-        köröknek fenntartott rész nem fogy); ha van, lefoglalja."""
+    def _room(self, sites: list[str] | tuple[str, ...]) -> bool:
+        """Van-e hely ezeken az oldalakon a figyelő keretében (_has_budget); a kérést a letöltő is ellenőrzi (QUOTA)."""
         now = self.clock()
-        with self._lock:
-            if not all(self._has_budget(site, now) for site in sites):
-                return False
-            for site in sites:
-                self._recent.setdefault(site, deque()).append(now)
-        return True
+        return all(self._has_budget(site, now) for site in sites)
 
     def stop(self) -> None:
         """Leállítja a szálat, és megvárja (legfeljebb pár másodpercig), hogy a mostani letöltését befejezze."""
@@ -509,20 +510,15 @@ class InstantWatch:
             done += 1
         return done
 
-    def _has_budget(self, site: str, now: float) -> bool:
+    def _has_budget(self, site: str, now: float | None = None) -> bool:
         """Kérhet-e most a figyelő ettől az oldaltól: a saját óránkénti kerete (INSTANT_HOURLY), és a letöltő közös
-        keretéből (a körök kérései is ide számítanak) ROUND_RESERVE mindig a köröké marad."""
-        recent = self._recent.setdefault(site, deque())
-        while recent and now - recent[0] > 3600:
-            recent.popleft()
-        if len(recent) >= INSTANT_HOURLY:
-            return False
+        keretéből (a körök kérései is ide számítanak) ROUND_RESERVE mindig a köröké marad. A tényleges kéréseket a
+        közös letöltő számolja és korlátozza (QUOTA: a lista beállítása miatti plusz kéréseket is)."""
+        used = getattr(self.fetcher, "used", None)
+        if used is None:
+            return True
         hourly = int(getattr(self.fetcher, "hourly", 0) or 0)
-        if hourly and hasattr(self.fetcher, "status"):
-            used = int((self.fetcher.status().get(site) or {}).get("last_hour") or 0)
-            if used >= hourly - ROUND_RESERVE:
-                return False
-        return True
+        return used(site, QUOTA.tag) < INSTANT_HOURLY and (not hourly or used(site) < hourly - ROUND_RESERVE)
 
     def _url(self, alert: dict[str, Any], site: str) -> str:
         """A figyelt találati oldal címe, a legújabb hirdetésekkel elöl (deals.NEWEST; a Jófogáson, ha nem adtál meg
@@ -544,10 +540,9 @@ class InstantWatch:
         interval = self._interval(alert, site, now)
         with self._lock:
             self._next[key] = now + interval
-            self._recent.setdefault(site, deque()).append(now)
         url = self._url(alert, site)
         try:
-            rows = self._rows(self.fetcher.listings(url, site, self._check), site)
+            rows = self._rows(self.fetcher.listings(url, site, self._check, quota=QUOTA), site)
         except FeedError as exc:
             self._failed(alert, site, exc)
             return []
@@ -659,10 +654,8 @@ class InstantWatch:
         following = self.fetcher.next_page(url) if hasattr(self.fetcher, "next_page") else ""
         if not following or not self._has_budget(site, now):
             return []
-        with self._lock:
-            self._recent.setdefault(site, deque()).append(now)
         try:
-            return self._rows(self.fetcher.listings(following, site, self._check), site)
+            return self._rows(self.fetcher.listings(following, site, self._check, quota=QUOTA), site)
         except FeedError:
             return []
 
@@ -746,15 +739,17 @@ class InstantWatch:
             expired = [entry for entry in self._waiting if now - entry[3] >= WAIT_MAX]
             self._waiting = [entry for entry in self._waiting if now - entry[3] < WAIT_MAX]
         self._forget(expired)
-        if not self.model_ok() or not all(self._has_budget(site, now) for site in self.platforms):
+        if not self.model_ok():
             return
         with self._lock:
-            waiting = self._waiting
-            # a szüneteltetett figyelő hirdetései várnak (a folytatásáig, WAIT_MAX-ig)
-            self._waiting = [entry for entry in waiting if (alerts.get(entry[0]) or {}).get("off")]
-            waiting = [entry for entry in waiting if not (alerts.get(entry[0]) or {}).get("off")]
+            # a szüneteltetett figyelő hirdetései várnak (a folytatásáig, WAIT_MAX-ig), és az is, amelyikhez szükséges
+            # oldal kerete még nem szabadult fel (csak a sajátja számít: egy másik oldalé nem akasztja meg)
+            ready = [entry for entry in self._waiting
+                     if not (alerts.get(entry[0]) or {}).get("off") and self._room(entry[4])]
+            taken = {id(entry) for entry in ready}
+            self._waiting = [entry for entry in self._waiting if id(entry) not in taken]
         groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for alert_id, site, row, _at in waiting:
+        for alert_id, site, row, _at, _needs in ready:
             if alert_id in alerts:
                 groups.setdefault((alert_id, site), []).append(row)
         threaded = self._worker is not None and self._worker.is_alive()
@@ -768,11 +763,14 @@ class InstantWatch:
         """Egy hirdetés oldala böngésző nélkül (None, ha most nem sikerült). A figyelő keretéből megy: ha nincs hely
         (vagy Szünet van), Deferred (a hirdetés vár)."""
         self._go()
-        if not self._reserve([row.get("platform") or ""]):
-            raise Deferred("kéréskeret")
+        site = str(row.get("platform") or "")
+        if not self._room([site]):
+            raise Deferred("kéréskeret", sites=[site])
         try:
-            return self.fetcher.page(row["url"], row.get("platform", ""), self._check)
-        except FeedError:
+            return self.fetcher.page(row["url"], site, self._check, quota=QUOTA)
+        except FeedError as exc:
+            if exc.kind == "busy":                 # a letöltő szerint sincs hely: a hirdetés vár
+                raise Deferred("kéréskeret", sites=[site]) from None
             return None
 
     def _search(self, query: str) -> list[dict[str, Any]]:
@@ -780,13 +778,17 @@ class InstantWatch:
         letöltő oldalanként egy kérést enged, a szünetekkel). A figyelő keretéből megy (mindkét oldalon): ha nincs hely
         (vagy Szünet van), Deferred (a hirdetés vár)."""
         self._go()
-        if not self._reserve(list(self.platforms)):
-            raise Deferred("kéréskeret")
+        sites = list(self.platforms)
+        if not self._room(sites):
+            raise Deferred("kéréskeret", sites=sites)
 
         def one(site: str, platform: Platform) -> list[dict[str, Any]]:
             try:
-                rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site, self._check)
-            except FeedError:
+                rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site, self._check,
+                                             quota=QUOTA)
+            except FeedError as exc:
+                if exc.kind == "busy":
+                    raise
                 return []
             return [{"site": platform.name, "platform": site, "text": str(r.get("text") or "")[:180],
                      "price": int(r["price"]), "url": str(r["url"]),
@@ -795,7 +797,10 @@ class InstantWatch:
 
         with ThreadPoolExecutor(max_workers=max(1, len(self.platforms)), thread_name_prefix="jarvis-ar") as pool:
             jobs = [pool.submit(one, site, platform) for site, platform in self.platforms.items()]
-            return [row for job in jobs for row in job.result()]
+            try:
+                return [row for job in jobs for row in job.result()]
+            except FeedError:                      # a letöltő szerint nincs hely: a hirdetés vár
+                raise Deferred("kéréskeret", sites=sites) from None
 
     def _tell(self, alert: dict[str, Any], hit: dict[str, Any]) -> None:
         warn = "".join(f" Figyelj: {w}." for w in hit.get("warnings") or [])
