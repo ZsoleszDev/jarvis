@@ -1053,6 +1053,7 @@ class DealHunter:
         self._tip_notices: list[tuple[tuple, dict]] = []   # a kiküldendő „Érdemes megnézni” értesítések (flush_tips)
         self._tips_busy: set[str] = set()     # az épp ellenőrzött tippek (egyszerre csak az egyik sor nézi)
         self._lock = threading.RLock()
+        self._buy_lock = threading.Lock()     # a Megvettem egyszerre egy: egy találatból egy vásárlás (buy)
         self._data = self._load()
 
     # --- tárolás ---
@@ -1651,6 +1652,23 @@ class DealHunter:
         if found is not None:
             self.journal.add(f"Megvetted: „{found['text'][:60]}” ({format_price(found['price'])}).")
         return self.state()
+
+    def buy(self, deal_id: str, exists: Callable[[str], bool],
+            create: Callable[[dict[str, Any]], list[str]]) -> tuple[list[str], bool]:
+        """Megvettem, egyszer: egy zár alatt nézi meg, hogy ebből a találatból készült-e már vásárlás (a dupla
+        kattintás, egy újraküldött kérés ne könyvelje kétszer ugyanazt). Ha igen, és a tárgyai megvannak (`exists`), azokat
+        adja vissza (False: nem új); ha nem, a `create` hozza létre a tárgyakat (egy csomagnál a darabjait, az első a
+        fő), és megjelöli a találatot (mark_bought). Visszaadja a tárgyak azonosítóit, és hogy most készültek-e."""
+        with self._buy_lock:
+            deal = self.get(deal_id)
+            done = list(deal.get("bought_items") or ([deal["bought"]] if deal.get("bought") else []))
+            if done and all(exists(item_id) for item_id in done):
+                return done, False
+            items = create(deal)
+            if not items:
+                raise DealError("Ebből a találatból nem lett tárgy.")
+            self.mark_bought(deal_id, items[0], items if deal.get("bundle") else None)
+            return items, True
 
     def cancel_bought(self, item_id: str, name: str = "") -> dict[str, Any] | None:
         """Visszamondtad a vételt (a tárgyat a hívó törli): a találat, amiből lett, kikerül a találatok közül, a jó pontja
@@ -2275,10 +2293,11 @@ class DealHunter:
             game.notes.append(f"„{deal['text'][:40]}”: az ilyet elrejtetted, nem szóltam")
             self.tally("muted", [deal])
             return finish()
+        if not self._remember(deal):          # a másik sor már szólt róla (ugyanaz a hirdetés): nem még egyszer
+            return finish()
         game.found += 1
         self.tally("found", [deal])
         self._lane_count(deal.get("lane"), "deals")
-        self._remember(deal)
         hit = (f"„{deal['text'][:60]}” {format_price(deal['price'])} ({deal['site']}"
                + (f", licit, legfeljebb {format_price(deal['max_bid'])}" if deal.get("auction") else
                   f", kb. {format_price(deal['profit'])} haszon") + ")")
@@ -2609,6 +2628,10 @@ class DealHunter:
             if drop:
                 self._data["tips"] = [t for t in self._data["tips"] if t.get("id") not in drop]
                 self._save()
+            # a foglalás egy lépésben a mostani állapottal: amit közben a másik sor lefoglalt (vagy lezárt), azt kihagyja,
+            # így egy tippből nem lehet két jelölt (két találat, két értesítés)
+            listed = {t.get("id") for t in self._data["tips"]}
+            promote = [entry for entry in promote if entry[0] in listed and entry[0] not in self._tips_busy]
             self._tips_busy.update(tip_id for tip_id, _w, _q, _d in promote)
         game.tips += [tip_id for tip_id, _w, _q, _d in promote]
         game.next([partial(self._candidate, game, {"id": watch["id"], "query": query}, deal,
@@ -2910,7 +2933,8 @@ class DealHunter:
             return
         deal["at"] = self.clock()
         self._mark(deal)
-        self._remember(deal)
+        if not self._remember(deal):
+            return
         today = day_of(self.clock())
         with self._lock:
             told = self._data["haggle"]["told"]
@@ -3242,11 +3266,9 @@ class DealHunter:
             self.journal.add(f"Kockázatos csomag, nem szóltam: „{name}” {format_price(deal['price'])} ({deal['site']}) "
                              f"– {summary}; {'; '.join(deal['safety']['why'])}.")
             return
-        with self._lock:
-            if listing_key(deal["url"]) in self._deal_keys():
-                return
         self._mark(deal)
-        self._remember(deal)
+        if not self._remember(deal):          # közben már elmentette (egy másik sor): nem szól újra
+            return
         game.found += 1
         self.tally("found", [deal])
         hit = f"„{name}” {format_price(deal['price'])} ({deal['site']}, csomag, kb. {format_price(info['profit'])} haszon)"
@@ -3979,10 +4001,14 @@ class DealHunter:
                 continue
         return out
 
-    def _remember(self, deal: dict[str, Any]) -> None:
+    def _remember(self, deal: dict[str, Any]) -> bool:
+        """Egy találat a találatok közé. Egy hirdetésből (webcím) egy: ha egy másik sor (vagy a figyelő) közben már
+        elmentette, nem lesz belőle még egy, és False (a hívó ilyenkor nem szól róla újra)."""
         # a leírás és a fotók címe csak a modellkérdéshez kellett
         deal = {k: v for k, v in deal.items() if k not in ("details", "images") and v is not None}
         with self._lock:
+            if listing_key(deal["url"]) in self._deal_keys():
+                return False
             deals = [deal] + self._data["deals"]
             haggles = [d for d in deals if d.get("haggle") and not d.get("bought")]
             if len(haggles) > MAX_HAGGLES:     # az alkuképesek ne szorítsák ki a megérő találatokat
@@ -3990,6 +4016,7 @@ class DealHunter:
                 deals = [d for d in deals if id(d) not in old]
             self._data["deals"] = deals[:MAX_DEALS]
             self._save()
+        return True
 
     # --- az azonnali figyelőnek (instant.py): egy friss hirdetés értéke, modell nélkül ---
 
@@ -4234,8 +4261,9 @@ class DealHunter:
             return
         go()
         self._mark(deal)
+        if not self._remember(deal):          # közben egy kör már megtalálta: nem szól róla még egyszer
+            return
         self.tally("found", [deal])
-        self._remember(deal)
         self.journal.add(f"Jó találat (azonnali figyelő): „{deal['text'][:60]}” {format_price(deal['price'])} "
                          f"({deal['site']}, kb. {format_price(deal['profit'])} haszon) – {source}")
         found(deal)

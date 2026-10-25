@@ -85,6 +85,11 @@ class _Stop(Exception):
     """A figyelő leáll (kilépés)."""
 
 
+class _Off(Exception):
+    """Közben leállítottad a figyelőt (Automata kereskedés: Leállítás), vagy törölted ezt a figyelőjét: a futó értékelés
+    hátralévő része elmarad (se letöltés, se modellkérdés, se értesítés)."""
+
+
 class InstantWatch:
     """Az azonnali figyelők (munka/azonnali.json) és a háttérszál, ami letölti őket."""
 
@@ -397,13 +402,29 @@ class InstantWatch:
                 (self._data["seen"].get(entry[0]) or {}).pop(listing_key(entry[2]["url"]), None)
             self._save()
 
-    def _go(self) -> None:
-        """Az értékelés közben (DealHunter.appraise: minden hirdetés letöltése, modellkérdése és a szólás előtt):
-        Szünetben, kikapcsolt háttérmunkával vagy az üzemidőn kívül megáll (Deferred: a hátralévő hirdetések
-        megmaradnak, és a folytatáskor jönnek); leállításkor kilép."""
+    def _go(self, alert_id: str | None = None) -> None:
+        """Az értékelés közben (DealHunter.appraise: minden hirdetés letöltése, modellkérdése és a szólás előtt): ha
+        közben leállítottad a figyelőt (vagy törölted ezt a figyelőjét, `alert_id`), a hátralévő rész elmarad (_Off); ha
+        ezt a figyelőt szünetelteted, Szünetben, kikapcsolt háttérmunkával vagy az üzemidőn kívül megáll (Deferred: a
+        hátralévő hirdetések megmaradnak, és a folytatáskor jönnek); kilépéskor kilép."""
         self._check()
+        if not self._on(alert_id):
+            raise _Off()
+        if alert_id is not None and self._paused(alert_id):
+            raise Deferred("szünet")
         if not self._may_work():
             raise Deferred("szünet")
+
+    def _on(self, alert_id: str | None = None) -> bool:
+        """Be van-e kapcsolva a figyelő (az Indítás után, a Leállításig), és megvan-e még ez a figyelője."""
+        with self._lock:
+            if not self._data["enabled"]:
+                return False
+            return alert_id is None or any(a.get("id") == alert_id for a in self._data["alerts"])
+
+    def _paused(self, alert_id: str) -> bool:
+        with self._lock:
+            return any(a.get("id") == alert_id and a.get("off") for a in self._data["alerts"])
 
     def _room(self, sites: list[str] | tuple[str, ...]) -> bool:
         """Van-e hely ezeken az oldalakon a figyelő keretében (_has_budget); a kérést a letöltő is ellenőrzi (QUOTA)."""
@@ -437,6 +458,12 @@ class InstantWatch:
     def _check(self) -> None:
         if self._stop.is_set():
             raise _Stop()
+
+    def _check_on(self) -> None:
+        """A letöltő ezt hívja a kérés előtti várakozás közben: a kilépés és a Leállítás is megállítja (_Off)."""
+        self._check()
+        if not self._on():
+            raise _Off()
 
     def active(self) -> bool:
         """Most dolgozhat-e: be van kapcsolva, van figyelő, nincs Szünet, és a gép üzemideje van."""
@@ -506,7 +533,10 @@ class InstantWatch:
         for alert, site in self.due(now):
             if not self._has_budget(site, now) or not self.fetcher.ready(site):
                 continue
-            self.poll(alert, site)
+            try:
+                self.poll(alert, site)
+            except _Off:                       # közben leállítottad: a többi figyelő sem jön
+                return done
             done += 1
         return done
 
@@ -542,7 +572,7 @@ class InstantWatch:
             self._next[key] = now + interval
         url = self._url(alert, site)
         try:
-            rows = self._rows(self.fetcher.listings(url, site, self._check, quota=QUOTA), site)
+            rows = self._rows(self.fetcher.listings(url, site, self._check_on, quota=QUOTA), site)
         except FeedError as exc:
             self._failed(alert, site, exc)
             return []
@@ -655,7 +685,7 @@ class InstantWatch:
         if not following or not self._has_budget(site, now):
             return []
         try:
-            return self._rows(self.fetcher.listings(following, site, self._check, quota=QUOTA), site)
+            return self._rows(self.fetcher.listings(following, site, self._check_on, quota=QUOTA), site)
         except FeedError:
             return []
 
@@ -702,6 +732,8 @@ class InstantWatch:
         hits: list[dict[str, Any]] = []
 
         def found(deal: dict[str, Any]) -> None:
+            if not self._on(alert["id"]):      # közben leállítottad (vagy törölted a figyelőt): nem szól
+                raise _Off()
             hit = {"id": secrets.token_hex(5), "alert": alert["id"], "alert_name": alert["name"], "at": self.clock(),
                    "deal": deal["id"], "cheap": True,
                    **{k: deal.get(k) for k in ("site", "platform", "text", "title", "price", "url", "drop", "note")},
@@ -719,8 +751,13 @@ class InstantWatch:
                 self._save()
             self._tell(alert, hit)
 
-        # go: Szünetben (vagy ha a kéréskeret elfogyott: _look, _search) az értékelés megáll, a többi megmarad
-        waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found, go=self._go)
+        # go: Szünetben (vagy ha a kéréskeret elfogyott: _look, _search) az értékelés megáll, a többi megmarad; ha
+        # közben leállítottad a figyelőt, a hátralévő rész elmarad (minden letöltés, modellkérdés és szólás előtt nézi)
+        try:
+            waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found,
+                                           go=lambda: self._go(alert["id"]))
+        except _Off:
+            return hits
         if hasattr(self.hunter, "flush_tips"):
             self.hunter.flush_tips(self.notify)     # a bizonytalan árú tippek („Érdemes megnézni”)
         if waiting:
@@ -767,7 +804,7 @@ class InstantWatch:
         if not self._room([site]):
             raise Deferred("kéréskeret", sites=[site])
         try:
-            return self.fetcher.page(row["url"], site, self._check, quota=QUOTA)
+            return self.fetcher.page(row["url"], site, self._check_on, quota=QUOTA)
         except FeedError as exc:
             if exc.kind == "busy":                 # a letöltő szerint sincs hely: a hirdetés vár
                 raise Deferred("kéréskeret", sites=[site]) from None
@@ -784,8 +821,8 @@ class InstantWatch:
 
         def one(site: str, platform: Platform) -> list[dict[str, Any]]:
             try:
-                rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site, self._check,
-                                             quota=QUOTA)
+                rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site,
+                                             self._check_on, quota=QUOTA)
             except FeedError as exc:
                 if exc.kind == "busy":
                     raise

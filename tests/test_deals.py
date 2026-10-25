@@ -755,6 +755,43 @@ class ExploreTests(HunterCase):
         self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"])
         self.assertEqual(self.hunter.state()["tips"], [], "az ellenőrzés lezárult: lekerült")
 
+    def test_two_lanes_never_make_two_deals_of_one_tip(self):
+        """A gyors sor és a böngésző sora egyszerre nézi a tippeket: ugyanazt csak az egyik foglalhatja le (a kiválasztás
+        és a lefoglalás egy zárolt lépés; eddig mindkettő szabadnak láthatta, és két találat, két értesítés lett
+        belőle). Mentéskor is: egy hirdetésből (webcím) egy találat, és csak egyszer szól róla."""
+        self.browser.results = []
+        self.browser.by_url = [("videokartya", PAGE)]
+        hunter = self.hunter = self.make("ket-sor")
+        hunter.book.add([{**r, "platform": "hardverapro"} for r in NORMAL[:4]])
+        hunter.add_watch(CATEGORY)
+        hunter.set_enabled(True)
+        hunter.run(notify=self.notify)
+        [tip] = hunter.state()["tips"]
+        self.notices.clear()
+        hunter.book.add([{**r, "platform": "jofogas"} for r in RTX_JOFOGAS])
+        first = deals_module._Round(lambda: None, self.notify, None)
+        second = deals_module._Round(lambda: None, self.notify, None)
+        explore = hunter._explore_deal
+
+        def racing(*args, **kwargs):
+            hunter._explore_deal = explore     # a másik sor épp most, az első kiválasztása és foglalása között
+            hunter._step_tips(second)
+            return explore(*args, **kwargs)
+
+        hunter._explore_deal = racing
+        hunter._step_tips(first)
+        self.assertEqual((len(first.tips), len(second.tips)), (0, 1), "csak az egyik sor foglalta le")
+        self.assertEqual((len(first.work), len(second.work)), (0, 1), "és csak annak lett belőle jelölt")
+        row = {"site": tip["site"], "platform": tip["platform"], "text": tip["title"], "title": tip["title"],
+               "price": int(tip["price"]), "url": tip["url"]}
+        search = {"id": "tipp", "query": tip["query"]}
+        deal = hunter._deal(search, row, 98000)
+        hunter._conclude(first, search, dict(deal), True)
+        hunter._conclude(second, search, {**deal, "id": "masik"}, True)
+        self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"], "egyszer szól")
+        self.assertEqual([d["id"] for d in hunter.state()["deals"] if d["url"] == tip["url"]], [deal["id"]],
+                         "egy találat a hirdetésből")
+
     def test_profit_counts_with_a_careful_sale_price(self):
         """A haszon óvatos: a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede (ha szórnak az árak, a vevő az
         olcsóbbakat találja meg előbb). Biztos ár: legalább 5 hasonló, két oldalról (vagy egy oldalról legalább 10)."""
@@ -1501,7 +1538,7 @@ class OfferTests(unittest.TestCase):
         with self.assertRaisesRegex(DealError, "kevesebb a kért árnál"):
             self.hunter.make_offer(self.deal("/items/1-ps5"), 16000, confirm=self.confirm)
         with self.assertRaisesRegex(DealError, "csak a Vinteden"):
-            self.hunter.make_offer(self.deal("/items/1-ps5", platform="jofogas"), None, confirm=self.confirm)
+            self.hunter.make_offer(self.deal("/items/5-jofogas", platform="jofogas"), None, confirm=self.confirm)
         self.assertEqual((self.site.posts, self.prompts), ([], []))
 
 

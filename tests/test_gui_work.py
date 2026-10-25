@@ -11,6 +11,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -205,7 +206,51 @@ class WorkSecurityTests(unittest.TestCase):
                          "95 000 − (52 000 + 1 500 posta + 2 000 egyéb)")
         status, data = self.post("/api/work/update", {"id": item.id, "fields": {"sold_price": "90000"}})
         self.assertEqual((status, self.h.store.get(item.id).sold_price), (200, 90000), "az eladási ár átírható")
+        # a sikertelen mentés semmit nem módosít (a jó mező sem marad bent a memóriában, hogy később kiíródjon)
+        title = self.h.store.get(item.id).title
+        status, data = self.post("/api/work/update", {"id": item.id, "fields": {"title": "Másik cím", "price": "hát"}})
+        self.assertEqual((status, self.h.store.get(item.id).title), (400, title))
+        self.assertEqual(self.post("/api/work/update", {"id": item.id, "fields": {"size": "M"}})[0], 200)
+        self.assertEqual(json.loads((self.h.store.root / item.id / "item.json").read_text(encoding="utf-8"))["title"],
+                         title, "a lemezen sincs ott")
         self.h.store.delete(item.id)
+
+    def test_a_purchase_is_booked_once_even_if_sent_twice(self):
+        """Megvettem kétszer (dupla kattintás, két egyszerre érkező vagy egy újraküldött kérés): egy találatból egy
+        vásárlás, egy tárgy, a kiadás is egyszer számít; a csomag is egyszer bomlik darabokra. Az ismétlés a meglévő
+        tárgyat kapja vissza."""
+        deals = self.h.app.work.deals
+        url, bundle_url = "https://hardverapro.hu/apro/dupla.html", "https://www.jofogas.hu/ruha/88888.htm"
+        deals._remember({"id": "dd", "url": url, "text": "RTX 3060 Ti", "site": "Hardverapró", "price": 55000,
+                         "median": 100000, "margin": 45000, "at": time.time()})
+        lines = [{"name": "Nike pulóver", "query": "Nike pulóver", "count": 3, "unit": 4800, "source": "becslés"},
+                 {"name": "Zara póló", "query": "Zara póló", "count": 5, "unit": 1500, "source": "becslés"}]
+        deals._remember({"id": "dbd", "url": bundle_url, "site": "Jófogás", "text": "Márkás ruhacsomag", "price": 6000,
+                         "profit": 12300, "value": 21900, "at": time.time(),
+                         "bundle": {"value": 21900, "leftover": 0, "small": 0, "listings": 8, "profit": 12300,
+                                    "sure": 0.0, "top": 0.21, "lines": lines}})
+        replies: list[tuple[int, dict]] = []
+        buyers = [threading.Thread(target=lambda deal: replies.append(
+            self.post("/api/work/deals", {"action": "bought", "id": deal})), args=(deal,))
+            for deal in ("dd", "dd", "dbd", "dbd")]
+        for buyer in buyers:
+            buyer.start()
+        for buyer in buyers:
+            buyer.join(30)
+        self.assertEqual([status for status, _ in replies], [200] * 4, replies)
+        single = [i for i in self.h.store.all() if i.source == url]
+        parts = [i for i in self.h.store.all() if i.source == bundle_url]
+        self.assertEqual((len(single), len(parts)), (1, 2), "egy tárgy, és a csomag két darabja, egyszer")
+        self.assertEqual(sorted(data["item"] for _, data in replies),
+                         sorted([single[0].id] * 2 + [next(d for d in deals.state()["deals"]
+                                                          if d["id"] == "dbd")["bought"]] * 2),
+                         "mindkét kérés ugyanazt a tárgyat kapja")
+        status, data = self.post("/api/work/deals", {"action": "bought", "id": "dd", "price": "55 000"})
+        self.assertEqual((status, data["item"], data.get("again")), (200, single[0].id, True), "újraküldve is")
+        self.assertEqual(len([i for i in self.h.store.all() if i.source == url]), 1)
+        self.assertEqual(sum(i.bought_price for i in single + parts), 55000 + 6000, "a kiadás egyszer számít")
+        for item in single + parts:
+            self.h.store.delete(item.id)
 
     def test_a_cancelled_purchase_goes_away_everywhere(self):
         """Vételeim › Visszamondva: a tárgy, a találat (és az azonnali figyelő friss hirdetései közül is) eltűnik, a havi

@@ -539,7 +539,21 @@ class ItemStore:
             return self._changed(item)
 
     def _apply(self, item: Item, values: dict[str, Any]) -> list[str]:
+        """Beírja a mezőket a tárgyba; visszaadja, melyik változott. Előbb mindet ellenőrzi (_clean): ha egy is hibás
+        (pl. egy új cím mellett egy hibás ár), ItemError, és a tárgyból semmi nem változik (egy későbbi mentés se írhassa
+        ki a félig beírt adatot)."""
         changed = []
+        for key, value in self._clean(values).items():
+            if getattr(item, key) != value:
+                setattr(item, key, value)
+                changed.append(key)
+        if item.bought_price is not None and not item.bought_at:
+            item.bought_at = time.time()      # a vételár első megadásakor: ma vetted (a Vételeim fülön átírható)
+        return changed
+
+    def _clean(self, values: dict[str, Any]) -> dict[str, Any]:
+        """A mezők ellenőrizve, egységes alakban (a tárgyhoz nem nyúl); hibás adatnál ItemError."""
+        clean: dict[str, Any] = {}
         for key, value in values.items():
             if key in AMOUNT_FIELDS:
                 value = parse_price(value)
@@ -574,12 +588,8 @@ class ItemStore:
                 value = text[:TEXT_LIMITS[key]]
             else:
                 raise ItemError(f"Ezt nem lehet módosítani: {key}")
-            if getattr(item, key) != value:
-                setattr(item, key, value)
-                changed.append(key)
-        if item.bought_price is not None and not item.bought_at:
-            item.bought_at = time.time()      # a vételár első megadásakor: ma vetted (a Vételeim fülön átírható)
-        return changed
+            clean[key] = value
+        return clean
 
     def update(self, item_id: str, user: bool = False, **values: Any) -> Item:
         """Módosítás. `user=True`: a felhasználó írta át, ezért Jarvis később nem írja felül."""
@@ -591,6 +601,14 @@ class ItemStore:
             if user:
                 item.edited = sorted(set(item.edited) | {k for k in changed if k in (*LISTING_FIELDS, "price")})
             return self._changed(item)
+
+    def update_if(self, item_id: str, still: Callable[[Item], bool], **values: Any) -> Item | None:
+        """Mint az update (Jarvis írja), de csak ha a zár alatt `still(tárgy)` még igaz (pl. a modellhívás közben nem
+        változott a leírás vagy a fotók); különben semmit nem ír, és None."""
+        with self._lock:
+            if not still(self.get(item_id)):
+                return None
+            return self.update(item_id, **values)
 
     def set_busy(self, item_id: str, text: str) -> None:
         with self._lock:
@@ -1024,6 +1042,9 @@ def vision_images(store: ItemStore, item_id: str, limit: int = PRO_PHOTOS, side:
 
 # Ha az EXTRACT_SYSTEM vagy a séma érdemben változik, emeld: a régi kiolvasások egyszer újra lefutnak.
 EXTRACT_VERSION = "3"
+# Ha a modellhívás közben megváltozik a leírás (vagy a Pro fotói), a régi válasz nem kerül a tárgyba: ennyiszer olvassa
+# ki újra a frisset, utána szól (ItemError).
+STALE_RETRIES = 2
 # Ha a hirdetés már fent van valahol, ezeket Jarvis magától nem írja át (a többi oldalon is ugyanaz a
 # hirdetés legyen, és a begyakorolt lépések kulcsa se változzon); kézzel persze átírhatod.
 FROZEN_WHEN_POSTED = ("title", "description", "category", "product", "kind")
@@ -1064,11 +1085,22 @@ class ListingExtractor:
         return False
 
     def extract(self, item_id: str, only: list[str] | None = None) -> Item:
-        """Kiolvassa az adatokat. `only`: csak ezeket a mezőket (pl. a visszakérdezett állapotot és várost)."""
+        """Kiolvassa az adatokat. `only`: csak ezeket a mezőket (pl. a visszakérdezett állapotot és várost). Ha a
+        modellhívás közben megváltozott a leírás (pl. a telefonról átírtad), a régi válasz nem kerül a tárgyba (és nem is
+        számít naprakésznek): az új leírásból olvassa ki újra."""
+        for _attempt in range(STALE_RETRIES + 1):
+            item = self._extract_once(item_id, list(only) if only else None)
+            if item is not None:
+                return item
+        raise ItemError("A leírás a kiolvasás közben többször is megváltozott; próbáld újra.")
+
+    def _extract_once(self, item_id: str, only: list[str] | None) -> Item | None:
+        """Egy kiolvasás; None, ha közben megváltozott a leírás (ilyenkor semmit nem írt a tárgyba)."""
         item = self.store.get(item_id)
-        if not item.prompt.strip():
+        prompt = item.prompt                # ebből olvas ki: ha közben átírják, ez a válasz már nem az övé
+        if not prompt.strip():
             raise ItemError("Írd le röviden, mit adsz el (pl. „Zara L-es fekete póló, 500 Ft”).")
-        schema, request = EXTRACT_SCHEMA, f"Az eladó leírása:\n{item.prompt}"
+        schema, request = EXTRACT_SCHEMA, f"Az eladó leírása:\n{prompt}"
         if only:
             only = [key for key in dict.fromkeys(only) if key in EXTRACT_SCHEMA["properties"]]
             schema = {"type": "object", "required": only,
@@ -1102,17 +1134,31 @@ class ListingExtractor:
             values = {k: v for k, v in values.items() if k in only}
         if any(e.get("status") == POSTED for e in item.platforms.values()):
             values = {k: v for k, v in values.items() if k not in FROZEN_WHEN_POSTED}
-        return self.store.update(item_id, **values, extracted_sig=extract_signature(item.prompt))
+        return self.store.update_if(item_id, lambda now: now.prompt == prompt, **values,
+                                    extracted_sig=extract_signature(prompt))
 
 
     def from_photos(self, item_id: str, images: list[str]) -> tuple[Item, int | None]:
         """Pro feltöltés: a hirdetés adatai a fotókról (egy modellhívás, a képekkel); ha az eladó írt megjegyzést (a
         leírás), azt is figyelembe veszi. Amit nem lát biztosan, üresen marad: arra a feltöltés rákérdez. A kézzel
-        átírt mezőket nem írja felül. Visszaadja a tárgyat és a modell árbecslését (None, ha nem tudta)."""
+        átírt mezőket nem írja felül. Visszaadja a tárgyat és a modell árbecslését (None, ha nem tudta). Ha a
+        modellhívás közben megváltoztak a fotók vagy a megjegyzés, a régi válasz nem kerül a tárgyba: a mostani fotókkal
+        újra megnézi."""
+        for attempt in range(STALE_RETRIES + 1):
+            if attempt:
+                images = vision_images(self.store, item_id)
+            done = self._from_photos_once(item_id, images)
+            if done is not None:
+                return done
+        raise ItemError("A fotók vagy a megjegyzés az átnézés közben többször is megváltoztak; próbáld újra.")
+
+    def _from_photos_once(self, item_id: str, images: list[str]) -> tuple[Item, int | None] | None:
+        """Egy átnézés; None, ha közben megváltoztak a fotók vagy a megjegyzés (ilyenkor semmit nem írt a tárgyba)."""
         item = self.store.get(item_id)
         if not images:
             raise ItemError("Ehhez a tárgyhoz még nincs fotó.")
-        note = f"\nAz eladó megjegyzése: {item.prompt}" if item.prompt.strip() else ""
+        prompt, seen = item.prompt, photo_signature(item)   # ezekből dolgozik: ha közben változnak, ez már nem az övé
+        note = f"\nAz eladó megjegyzése: {prompt}" if prompt.strip() else ""
         messages = [{"role": "system", "content": PRO_SYSTEM},
                     {"role": "user", "content": f"Az eladásra szánt tárgy fotói ({len(images)} db).{note}",
                      "images": images}]
@@ -1135,7 +1181,9 @@ class ListingExtractor:
             estimate = parse_price(data.get("price_estimate")) or None
         except ItemError:
             estimate = None
-        return self.store.update(item_id, **values, price_estimate=estimate, pro_sig=photo_signature(item)), estimate
+        saved = self.store.update_if(item_id, lambda now: now.prompt == prompt and photo_signature(now) == seen,
+                                     **values, price_estimate=estimate, pro_sig=seen)
+        return None if saved is None else (saved, estimate)
 
 
 def compose_description(text: str, keywords: str, kind: str, seed: str = "") -> str:

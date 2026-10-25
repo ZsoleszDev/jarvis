@@ -71,6 +71,12 @@
   (_held); amíg egy tárgyon dolgozik, nem áll vissza készenlétbe. Az OLLAMA_NUM_PARALLEL-t a Jarvis maga beállítja,
   ha hiányzik (mint a setx, tartósan; ollama_log.set_user_setting); a tesztekben `parallel = 1`, hogy ne írjon a
   valódi beállításokba.
+- Tesztelés közben talált hibák javítva (regressziós tesztekkel): a Megvettem egy találatból egyszer könyvel
+  (DealHunter.buy, zár alatt; a csomag is; a gomb a válaszig letiltva); a sikertelen mentés semmit nem módosít
+  (ItemStore._clean: előbb minden mező ellenőrizve); a Leállítás a futó azonnali értékelést is megállítja (_Off: minden
+  letöltés, modellkérdés és szólás előtt, a letöltő várakozása közben is); egy tippet csak az egyik sor foglalhat le (a
+  kiválasztás és a foglalás egy zárolt lépés), és egy hirdetésből (webcím) egy találat (_remember); a modellhívás közben
+  megváltozott leírás (vagy Pro fotók) régi válasza nem kerül a tárgyba (ItemStore.update_if, STALE_RETRIES).
 
 ## Élesben kipróbálandó
 - Pro feltöltés készenlétből: a felébredés az előkészítő szálon, miközben a kereskedés szála böngészik (a modell

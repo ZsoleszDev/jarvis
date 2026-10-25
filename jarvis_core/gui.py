@@ -861,24 +861,7 @@ class _Handler(BaseHTTPRequestHandler):
             if action == "dismiss":
                 return self._json(200, {"ok": True, **deals.dismiss(str(body.get("id") or ""))})
             if action == "bought":      # Megvettem: eladási tárgy lesz belőle, a vételárral (Vételeim)
-                deal = deals.get(str(body.get("id") or ""))
-                store = self._work().store
-                if deal.get("bundle"):  # egy csomag: a darabjai külön tárgyak, a vételár szétosztva
-                    return self._bought_bundle(deal, body)
-                median = int(deal.get("median") or 0) or None
-                # a cím (a kártya szövegében a város, a dátum és az eladó is ott van), és amire az árkutatás keressen:
-                # a keresésed, vagy a cím termékkulcsa („Sony WH-1000XM4”)
-                name = str(deal.get("title") or deal["text"])
-                query = ((deal.get("query") if not deal.get("explore") else "") or deals.book.query(name)
-                         or str(deal.get("query") or ""))
-                item = store.create(prompt=f"{name}, {deal['median']} Ft", source=deal["url"], search_query=query,
-                                    bought_price=body.get("price") or deal["price"], bought_at=time.time(),
-                                    bought_shipping=body.get("shipping"), bought_from=str(deal.get("site") or ""),
-                                    in_transit=bool(body.get("in_transit", True)), market_price=median,
-                                    target_price=round_price(median * SALE_RATIO) if median else None)
-                state = deals.mark_bought(deal["id"], item.id)
-                self._money_check(self._work())
-                return self._json(200, {"ok": True, **deals.state(), "item": item.id, "profit": profit_report(store.all())})
+                return self._bought(str(body.get("id") or ""), body)
             if action == "run":
                 if app is None or app.scheduler is None or "deals" not in app.scheduler.jobs:
                     return self._json(409, {"ok": False, "error": "A kereséshez Jarvis saját böngészője kell."})
@@ -891,26 +874,62 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(400, {"ok": False, "error": str(exc)})
         return self._json(400, {"ok": False})
 
-    def _bought_bundle(self, deal: dict[str, Any], body: dict[str, Any]) -> None:
-        """Megvettél egy csomagot: a darabjai (tételenként egy, az apróságok együtt) eladási tárgyak lesznek, a
-        vételár és a posta az értékük arányában szétosztva (deals.bundle_parts), és mind a Vételeim közé kerül."""
+    def _bought(self, deal_id: str, body: dict[str, Any]) -> None:
+        """Megvettem: a találatból eladási tárgy lesz (egy csomagból a darabjai), a vételárral a Vételeim közé.
+        Egy találatból egyszer (deals.buy, zár alatt): a dupla kattintás vagy egy újraküldött kérés a meglévő
+        tárgyat kapja vissza, nem könyvel még egy vásárlást."""
         work = self._work()
+
+        def exists(item_id: str) -> bool:
+            try:
+                work.store.get(item_id)
+            except ItemError:
+                return False
+            return True
+
+        def create(deal: dict[str, Any]) -> list[str]:
+            if deal.get("bundle"):  # egy csomag: a darabjai külön tárgyak, a vételár szétosztva
+                return self._bundle_items(work, deal, body)
+            median = int(deal.get("median") or 0) or None
+            # a cím (a kártya szövegében a város, a dátum és az eladó is ott van), és amire az árkutatás keressen:
+            # a keresésed, vagy a cím termékkulcsa („Sony WH-1000XM4”)
+            name = str(deal.get("title") or deal["text"])
+            query = ((deal.get("query") if not deal.get("explore") else "") or work.deals.book.query(name)
+                     or str(deal.get("query") or ""))
+            item = work.store.create(prompt=f"{name}, {deal['median']} Ft", source=deal["url"], search_query=query,
+                                     bought_price=body.get("price") or deal["price"], bought_at=time.time(),
+                                     bought_shipping=body.get("shipping"), bought_from=str(deal.get("site") or ""),
+                                     in_transit=bool(body.get("in_transit", True)), market_price=median,
+                                     target_price=round_price(median * SALE_RATIO) if median else None)
+            return [item.id]
+
+        items, fresh = work.deals.buy(deal_id, exists, create)
+        if fresh:
+            self._money_check(work)
+        reply: dict[str, Any] = {"ok": True, **work.deals.state(), "item": items[0],
+                                 "profit": profit_report(work.store.all())}
+        if len(items) > 1:
+            reply["items"] = items
+        if not fresh:
+            reply["again"] = True    # már megvetted: ugyanaz a tárgy, nem könyvelt újra
+        return self._json(200, reply)
+
+    @staticmethod
+    def _bundle_items(work: Any, deal: dict[str, Any], body: dict[str, Any]) -> list[str]:
+        """Egy megvett csomag darabjai (tételenként egy, az apróságok együtt) eladási tárgyak lesznek, a vételár és a
+        posta az értékük arányában szétosztva (deals.bundle_parts), és mind a Vételeim közé kerül."""
         paid = parse_price(body.get("price") or deal["price"]) or int(deal["price"])
         shipping = parse_price(body.get("shipping")) or 0
         parts = bundle_parts(deal, paid, shipping)
         if not parts:
             raise DealError("Ebben a csomagban nincs külön eladható darab.")
         now = time.time()
-        items = [work.store.create(prompt=part["prompt"], source=deal["url"], search_query=part["search_query"],
-                                   bought_price=part["bought_price"], bought_at=now,
-                                   bought_shipping=part["bought_shipping"] or None,
-                                   bought_from=str(deal.get("site") or ""), in_transit=bool(body.get("in_transit", True)),
-                                   target_price=part["target_price"], trade_note=part["trade_note"])
-                 for part in parts]
-        work.deals.mark_bought(deal["id"], items[0].id, [item.id for item in items])
-        self._money_check(work)
-        return self._json(200, {"ok": True, **work.deals.state(), "item": items[0].id,
-                                "items": [item.id for item in items], "profit": profit_report(work.store.all())})
+        return [work.store.create(prompt=part["prompt"], source=deal["url"], search_query=part["search_query"],
+                                  bought_price=part["bought_price"], bought_at=now,
+                                  bought_shipping=part["bought_shipping"] or None,
+                                  bought_from=str(deal.get("site") or ""), in_transit=bool(body.get("in_transit", True)),
+                                  target_price=part["target_price"], trade_note=part["trade_note"]).id
+                for part in parts]
 
     @staticmethod
     def _ledger(work: Any) -> dict[str, Any]:

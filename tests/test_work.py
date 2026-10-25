@@ -157,6 +157,21 @@ class ItemStoreTests(unittest.TestCase):
         self.store.update(item.id, title="Zara fekete póló, L")
         self.assertEqual(self.store.get(item.id).name, "Zara fekete póló, L")
 
+    def test_a_failed_save_changes_nothing(self):
+        """Új cím és hibás ár egyszerre: hiba, és a cím sem változik meg a memóriában, így egy későbbi, másik mezőt
+        érintő mentés sem írhatja ki a lemezre."""
+        item = self.store.create(title="Zara póló", price=5000)
+        with self.assertRaises(ItemError):
+            self.store.update(item.id, user=True, title="Nike cipő", price="hát")
+        self.assertEqual((self.store.get(item.id).title, self.store.get(item.id).price), ("Zara póló", 5000))
+        self.assertEqual(self.store.get(item.id).edited, [], "a hibás mentés átírtnak sem jelöl semmit")
+        self.store.update(item.id, user=True, size="L")
+        saved = ItemStore(Path(self.tmp.name)).get(item.id)
+        self.assertEqual((saved.title, saved.price, saved.size), ("Zara póló", 5000, "L"))
+        with self.assertRaises(ItemError):
+            self.store.update(item.id, bought_price="1000", bought_at="tegnap")
+        self.assertIsNone(self.store.get(item.id).bought_price, "a vételár sem marad bent a hibás időpont mellett")
+
     def test_validation(self):
         with self.assertRaises(ItemError):
             self.store.create(price="sok")
@@ -411,6 +426,60 @@ class ExtractionTests(unittest.TestCase):
         self.assertFalse(body["stream"])
         self.assertTrue(all("images" not in m for m in body["messages"]), "a fotókat nem nézi (gyorsabb)")
         self.assertIn("Zara L-es méretű pólót", body["messages"][1]["content"])
+
+    def test_a_description_changed_during_the_call_is_read_again(self):
+        """Ha a modellhívás közben megváltozik a leírás (pl. az API-n vagy a telefonról átírod), a régi válasz nem kerül a
+        tárgyba, és nem is számít naprakésznek (eddig a „Zara póló, 5000 Ft” eredménye az új „Nike cipő, 15 000 Ft”
+        leírás azonosítójával mentődött): az új leírásból olvassa ki újra. Ha folyton változik, szól, és nem ír semmit."""
+        item = self.store.create(targets=["vinted"], prompt="Zara póló, 5000 Ft")
+
+        def changed_meanwhile(body):
+            assert "Zara póló" in body["messages"][1]["content"], body["messages"][1]["content"]
+            self.store.update(item.id, user=True, prompt="Nike cipő, 15 000 Ft")
+            return 200, extracted(product="póló", title="Zara póló", brand="Zara", price=5000)
+
+        def fresh(body):
+            assert "Nike cipő" in body["messages"][1]["content"], body["messages"][1]["content"]
+            return 200, extracted(product="cipő", title="Nike cipő", brand="Nike", price=15000)
+
+        self.fake.chat_script = [changed_meanwhile, fresh]
+        item = self.extractor.extract(item.id)
+        self.assertEqual((item.brand, item.price, item.prompt), ("Nike", 15000, "Nike cipő, 15 000 Ft"))
+        self.assertEqual(item.extracted_sig, selling.extract_signature("Nike cipő, 15 000 Ft"))
+        self.assertTrue(ListingExtractor.up_to_date(item))
+
+        other = self.store.create(targets=["vinted"], prompt="Első leírás, 1000 Ft")
+
+        def keeps_changing(n):
+            def answer(body):
+                self.store.update(other.id, user=True, prompt=f"Változat {n}, {2000 + n} Ft")
+                return 200, extracted(product="póló", title=f"Régi {n}", price=1000)
+            return answer
+
+        self.fake.chat_script = [keeps_changing(n) for n in range(selling.STALE_RETRIES + 1)]
+        with self.assertRaisesRegex(ItemError, "többször is megváltozott"):
+            self.extractor.extract(other.id)
+        other = self.store.get(other.id)
+        self.assertEqual((other.title, other.extracted_sig), ("", ""), "a régi válaszokból semmi nem került bele")
+
+    def test_photos_added_during_the_pro_check_are_looked_at_too(self):
+        """Pro: ha a fotók átnézése közben új fotót adsz hozzá, a régi válasz nem számít a mostani fotókénak (eddig a
+        pro_sig már az új fotót is tartalmazta, így többé nem nézte meg): a mostani fotókkal újra megnézi."""
+        item = self.store.add_photo(self.store.create(targets=["vinted"], pro=True).id, jpeg())
+
+        def added_meanwhile(body):
+            assert len(body["messages"][1]["images"]) == 1
+            self.store.add_photo(item.id, jpeg(color=(200, 30, 30)))
+            return 200, seen(product="póló", title="Zara póló", brand="Zara")
+
+        def again(body):
+            assert len(body["messages"][1]["images"]) == 2, "a mostani fotókkal"
+            return 200, seen(product="póló", title="Zara póló", brand="Zara", size="M")
+
+        self.fake.chat_script = [added_meanwhile, again]
+        item, _estimate = self.extractor.from_photos(item.id, selling.vision_images(self.store, item.id))
+        self.assertEqual((item.size, item.pro_sig), ("M", selling.photo_signature(item)))
+        self.assertEqual(len(item.photos), 2)
 
     def test_description_in_your_name_with_the_footer_and_keywords(self):
         item = self.store.create(targets=["vinted"], prompt="Sinsay sárga trikó M, nagyon jó állapot, 695 Ft")

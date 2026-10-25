@@ -1144,11 +1144,19 @@
     });
     for (const b of box.querySelectorAll("[data-cancel-bought]")) b.addEventListener("click", () => cancelBought(b.dataset.cancelBought, b.dataset.name));
     for (const b of box.querySelectorAll("[data-deal-paid]")) b.addEventListener("click", async () => {
-      const result = await dealAction({ action: "bought", id: b.dataset.dealPaid, price: $("d-paid").value,
-                                        shipping: $("d-ship").value, in_transit: $("d-transit").checked });
+      if (b.disabled) return;
+      b.disabled = true;      // a válaszig: egy dupla kattintás ne küldje kétszer (a gép is csak egyszer könyveli)
+      let result;
+      try {
+        result = await dealAction({ action: "bought", id: b.dataset.dealPaid, price: $("d-paid").value,
+                                    shipping: $("d-ship").value, in_transit: $("d-transit").checked });
+      } finally {
+        b.disabled = false;
+      }
       if (!result) return;
       buying = null;
-      J.toast((result.items || []).length > 1
+      J.toast(result.again ? "Ezt már felvetted a Vételeim közé (nem könyveltem még egyszer)."
+        : (result.items || []).length > 1
         ? `Felvettem: a csomag ${result.items.length} darabja külön tárgy lett az eladandók között (a vételár szétosztva). Pipáld be, hova töltsem fel.`
         : "Felvettem a Vételeim közé és az eladandók közé. Pipáld be, hova töltsem fel.");
       openId = result.item;

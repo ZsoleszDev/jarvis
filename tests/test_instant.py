@@ -238,6 +238,7 @@ class FakeNet:
         self.clock, self.pages, self.asked, self.threads, self.by_thread = clock, {}, [], set(), []
         self.posted: list[tuple] = []              # a POST-kérések (a lista beállítása): (cím, adatok, fejlécek)
         self.on_post = None
+        self.on_get = None                         # minden kéréskor (a címmel), pl. hogy a teszt közben leállítson valamit
         self.running = self.most = 0
         self.delay = 0.0
         self._lock = threading.Lock()
@@ -253,6 +254,8 @@ class FakeNet:
                 self.posted.append((url, data, headers))
                 if self.on_post is not None:
                     self.on_post()
+        if self.on_get is not None:
+            self.on_get(url)
         try:
             time.sleep(self.delay)
             for part, (status, body) in self.pages.items():
@@ -785,6 +788,38 @@ class InstantTests(InstantCase):
         self.watch.notify = lambda kind, title, text, **extra: self.notices.append((kind, title, text, extra))
         self.watch.tick()
         self.assertEqual(len(self.notices), 3, "a folytatáskor jött a többi")
+
+    def test_stopping_the_watch_stops_the_running_evaluation(self):
+        """Automata kereskedés › Leállítás az értékelés közben (az első hirdetés oldalának letöltése alatt): utána se
+        letöltés, se modellkérdés, se értesítés (eddig még egy hirdetést letöltött, és két értesítést küldött). Ez nem a
+        Szünet: a figyelő ki van kapcsolva, a hátralévő rész elmarad."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        cheap = [ha_card(70 + n, f"Palit RTX 3060 Ti Dual {n}", f"{50 + n} 000 Ft") for n in range(3)]
+        self.results(cheap + HA_CARDS[:2])
+        for n in range(3):
+            self.net.pages[f"_{70 + n}/friss"] = page_html("Hibátlan.")
+        opened: list[str] = []
+
+        def on_get(url: str) -> None:
+            if "/friss" in url:
+                opened.append(url)
+                if len(opened) == 1:
+                    self.watch.set_enabled(False)     # az első hirdetés letöltése közben: Leállítás
+
+        self.net.on_get = on_get
+        asked = len(self.hunter.llm.calls)
+        self.watch.tick()
+        self.assertEqual(len(opened), 1, "a következő hirdetést már nem töltötte le")
+        self.assertEqual(self.notices, [], "nem szólt")
+        self.assertEqual(len(self.hunter.llm.calls), asked, "a modellt sem kérdezte")
+        self.assertEqual(self.watch.state()["hits"], [])
+        self.assertEqual(self.watch.state()["waiting"], 0, "a hátralévő rész elmaradt (nem vár a folytatásra)")
 
     def test_the_whole_page_is_read(self):
         """A Hardverapró egy oldalon 100 hirdetést mutat (az elején többnyire fizetett kiemelésekkel): az egész oldalt nézi,
