@@ -36,7 +36,7 @@ from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
 from jarvis_core import autostart, instance  # noqa: E402
 from jarvis_core.api import start_api  # noqa: E402
-from jarvis_core.app import PAUSED_REPLY, STANDBY_KEEP_ALIVE, JarvisApp  # noqa: E402
+from jarvis_core.app import PAUSED_REPLY, STANDBY_KEEP_ALIVE, WAKE_FAILED_ITEM, JarvisApp  # noqa: E402
 from jarvis_core.config import PROJECT_DIR, SchedulerCfg  # noqa: E402
 from jarvis_core.gui import EventBus, GuiServer, GuiUI  # noqa: E402
 from jarvis_core.scheduler import Hooks, Job, Scheduler  # noqa: E402
@@ -195,6 +195,35 @@ class StandbyAppTests(unittest.TestCase):
         self.app.run_job_now("stale")
         self.wait_idle()
         self.assertEqual(len(self.app.notices.list()), 1)
+
+    def test_does_not_go_back_to_standby_while_an_item_is_prepared(self):
+        """Amíg az eladás-előkészítő szál egy tárgyon dolgozik (vagy vár rá egy), nem áll vissza készenlétbe: a
+        készenlét kérése a sorban a döntés pillanatában is megnézi."""
+        self.assertTrue(self.app.start())
+        self.app.start_agent()
+        self.app.prepping = "x"
+        self.app._submit(("standby", None))
+        self.wait_idle()
+        self.assertFalse(self.app.paused)
+        self.app.prepping = ""
+        self.app._submit(("standby", None))
+        self.wait_idle()
+        self.assertTrue(self.app.paused and self.app.standby)
+
+    def test_an_upload_that_cannot_wake_jarvis_says_so_on_the_card(self):
+        """Az ágens-szálra került eladási lépés (pl. az átadott feltöltés): ha készenlétből nem sikerül felébredni,
+        a kártyán nem vár tovább, és értesítésben is látszik (a Munka oldalon a Beszélgetés rejtve van)."""
+        self.standby_start()
+        store = self.app.work.store
+        item = store.create(targets=["vinted"], prompt="farmer")
+        store.set_busy(item.id, "Feltöltésre vár (a kereskedés átadja a böngészőt)…")
+        with mock.patch.object(self.app, "load_model", return_value=False):
+            self.app._submit(("work", {"action": "upload", "ids": [item.id]}))
+            self.wait_idle()
+        self.assertEqual(store.get(item.id).busy, "")
+        self.assertEqual([(n["title"], n["item"], n["text"]) for n in self.app.notices.list()],
+                         [("Munka: hiba", item.id, WAKE_FAILED_ITEM)])
+        self.assertTrue(self.app.paused and self.app.standby)
 
 
 class SchedulerStandbyTests(unittest.TestCase):

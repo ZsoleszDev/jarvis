@@ -29,7 +29,7 @@ from .creative import CreativeDesk, StoryError
 from .llm import FULL_GPU, Cancelled, OllamaClient, OllamaError, gpu_share, is_runner_crash
 from .notices import NoticeBoard
 from .ollama_log import (CACHE_SETTING, CHECKPOINT_SETTING, PARALLEL_SETTING, ServerLog, explain, find_cause,
-                         pagefile_tip, server_parallel, user_setting)
+                         pagefile_tip, server_parallel, set_user_setting, user_setting)
 from .browser import BrowserError
 from .scheduler import Hooks, Job, Scheduler, standby_ok, within_hours
 from .selling import NOT_POSTED, POSTED, ItemError, format_price, parse_price, price_verdict
@@ -57,6 +57,17 @@ PAUSE_PHRASES = {"pihenj", "szunet", "tarts szunetet", "szunetelj", "engedd el a
                  "szabaditsd fel a videokartyat", "allits le mindent"}
 PAUSED_REPLY = "Szünetelek, minden modell le van állítva. A Folytatás gombbal (vagy a telefonról) újraindulok."
 WAKE_FAILED = "Most nem tudtam felébredni, mert a nyelvi modell nem töltődött be. Próbáld újra kicsit később."
+# Egy eladási lépésnél ugyanez a Munka menü naplójába, értesítésben és a kártyán (ott a Beszélgetés nem látszik).
+WAKE_FAILED_ITEM = ("Most nem tudtam felébredni, mert a nyelvi modell nem töltődött be, ezért ezzel a tárggyal még nem "
+                    "kezdtem (az okát a napló írja). Kicsit később a hirdetésnél a „Feltöltés a hiányzó helyekre” "
+                    "gombbal próbáld újra.")
+WAKING_ITEM = "Felébredek: betöltöm a modelleket (10–20 másodperc)…"
+# A Szünet gombos szünetben jött új tárgy (vagy a Mehet): a Folytatásig vár, utána magától megy tovább.
+HELD_ITEM = "Szünetelek: a Folytatás után magamtól folytatom…"
+HELD_NOTE = ("Szünetelek (a Szünet gombbal), ezért most nem töltöm be a modelleket. A Folytatás gomb (vagy a telefon) "
+             "után ezzel magamtól folytatom.")
+# Ezek a Szünet alatt nem vesznek el (egy új tárgy útja a fotóktól a feltöltésig), hanem a Folytatás után mennek.
+HOLD_ACTIONS = PREP_ACTIONS | {"upload"}
 # A modell leállása után ennyi másodperc múlva nézzük meg az Ollama naplójában, miért (addigra beleírta).
 RESTART_LOG_DELAY = 5.0
 # A Munka menü egy körének felső határa (token): ott a válasz egy-két mondat vagy egy eszközhívás (a hosszú
@@ -267,6 +278,9 @@ class JarvisApp:
         self._prep_stop = threading.Event()              # az Állj gomb ezt is megállítja
         self.prepping = ""
         self._handoffs: dict[str, dict[str, Any]] = {}  # tárgy → amit az előkészítés után az ágens-szál folytat
+        # A felébredés és a szünet/készenlét egyszerre egy szálon: az előkészítő szál is felébreszti a Jarvist.
+        self._wake_lock = threading.RLock()
+        self._held: list[dict[str, Any]] = []            # a Szünet alatt jött eladási lépések (HOLD_ACTIONS)
         self._current_kind = ""                          # amin az ágens-szál épp dolgozik
         self._done_events: dict[str, threading.Event] = {}
         self._done_lock = threading.Lock()              # a telefonos szálak is hozzányúlnak
@@ -334,13 +348,21 @@ class JarvisApp:
 
     def _check_parallel(self) -> None:
         """Hány modellhívás mehet egyszerre: a [llm] parallel, de legfeljebb amennyit a futó Ollama bír
-        (OLLAMA_NUM_PARALLEL, alapból egy). Ha többet szeretnél, mint amennyit az Ollama enged, megmondja, hogyan."""
+        (OLLAMA_NUM_PARALLEL, alapból egy). Ha az Ollamának még nincs ilyen beállítása, a Jarvis megadja (mint a setx,
+        tartósan: a gép újraindítása után is megmarad); a futó Ollamát ehhez egyszer újra kell indítani, ezt megmondja."""
         wanted = max(1, int(self.cfg.llm.parallel or 1))
         try:
             proc = memory.ollama_process()
         except Exception:  # noqa: BLE001 - csak tanács: ha nem derül ki, az Ollama alapbeállításával számol
             proc = memory.OllamaProcess()
-        server, note = server_parallel(proc, user_setting(PARALLEL_SETTING))
+        user = user_setting(PARALLEL_SETTING)
+        if wanted > 1 and user is None and set_user_setting(PARALLEL_SETTING, str(wanted)):
+            user = str(wanted)
+            self.ui.info(f"Beállítottam: {PARALLEL_SETTING} = {wanted} (mint a setx, a gép újraindítása után is "
+                         "megmarad, nem kell újra beírni).")
+            if not (proc.found and proc.readable):    # a futó Ollama biztosan előtte indult
+                proc = memory.OllamaProcess(found=True, readable=True)
+        server, note = server_parallel(proc, user)
         slots = min(wanted, server)
         self.llm.gate.set_slots(slots)
         if slots > 1:
@@ -920,11 +942,13 @@ class JarvisApp:
         self._submit(("reset", self._mode(mode)))
 
     def submit_work(self, action: str, ids: list[str] | None = None, platform: str = "", **extra: Any) -> None:
-        """Az Adás/Vétel gombjai (eladás, válasz, árdöntés, újra, bejelentkezés): az ágens-szálon futnak."""
+        """Az Adás/Vétel gombjai (eladás, válasz, árdöntés, újra, bejelentkezés): az ágens-szálon futnak, az eladás
+        előkészítése (PREP_ACTIONS) a saját szálán."""
         ids = [str(i) for i in ids or []]
         payload = {"action": action, "ids": ids, "platform": platform, **extra}
-        if action in PREP_ACTIONS and self._prep is not None and self.work is not None and not self.paused:
-            # a saját szálán, rögtön (a kereskedés közben is); a böngészős része utána elsőbbséggel az ágens-szálon
+        if action in PREP_ACTIONS and self._prep is not None and self.work is not None:
+            # a saját szálán, rögtön (a kereskedés közben, és készenlétből is: ott ez a szál ébreszti fel a Jarvist, nem
+            # vár az ágens-szálra); a böngészős része utána elsőbbséggel az ágens-szálon
             if ids and (self.prepping or not self._prep_requests.empty()):
                 self.work.store.set_busy(ids[0], "Sorra vár…")
             self._prep_requests.put(payload)
@@ -1069,6 +1093,8 @@ class JarvisApp:
                 channel = contextlib.ExitStack()
                 if kind == "creative":
                     channel.enter_context(self._channel("creative"))
+                if kind == "work":        # a felébredés üzenetei is a Munka menü naplójába (a Beszélgetés ott rejtve)
+                    channel.enter_context(self._channel("work"))
                 if kind in INTERACTIVE:   # a kérésed modellhívásai előbb jönnek a kereskedésnél (llm.ModelGate)
                     channel.enter_context(self.llm.gate.session())
                 try:
@@ -1077,17 +1103,20 @@ class JarvisApp:
                     if self.paused and kind in INTERACTIVE and self._asks_pause(kind, payload):
                         self.ui.user(payload["text"], payload.get("via", "text"))
                         self._do_pause()           # készenlétből Szünet: felébredés nélkül
+                    elif self.paused and kind == "work" and not self.standby and payload.get("action") in HOLD_ACTIONS:
+                        self._hold(payload)   # pl. az előkészítés után átadott feltöltés: a Folytatás után megy
+                    elif self.paused and kind == "work":
+                        self._not_started(payload, WAKE_FAILED_ITEM if self.standby else PAUSED_REPLY)
                     elif self.paused and kind in INTERACTIVE:
                         self.ui.notice(WAKE_FAILED if self.standby else PAUSED_REPLY)
-                        if kind == "work":    # pl. az előkészítés után átadott feltöltés: a kártyán ne várjon tovább
-                            for item_id in payload.get("ids") or []:
-                                self._clear_busy(item_id)
                     elif self.paused and kind == "job" and not self._light_job(payload):
                         if self.scheduler is not None:
                             self.scheduler.dropped()
                     elif kind == "standby":
-                        if not self.paused and self.requests.empty():
-                            self._do_pause(standby=True)
+                        with self._wake_lock:     # közben ne ébredjen fel az előkészítő szálon, és ne is dolgozzon
+                            if (not self.paused and self.requests.empty() and not self.prepping
+                                    and self._prep_requests.empty()):
+                                self._do_pause(standby=True)
                     elif kind == "text":
                         if isinstance(payload, tuple):   # régi alak: (szöveg, menü)
                             payload = {"text": payload[0], "mode": payload[1]}
@@ -1153,11 +1182,74 @@ class JarvisApp:
         job = self.scheduler.jobs.get(str(payload.get("key") or ""))
         return job is not None and (not job.needs_models and not job.needs_browser or standby_ok(job))
 
-    def _wake_up(self, mode: str | None = None) -> None:
+    def _wake_up(self, mode: str | None = None, prep: bool = False) -> None:
         """Készenlétből: betölti a modelleket, és utána jöhet a kérés (`mode`: a kérés menüje, annak az elejét
-        melegíti elő)."""
-        self.ui.info("Felébredek: betöltöm a modelleket (10–20 másodperc)...")
-        self._do_resume(announce=False, mode=mode)
+        melegíti elő). Bármelyik szálról hívható; ha közben egy másik már felébresztette, nincs mit tenni.
+        `prep`: az eladás-előkészítő szálon (_do_resume)."""
+        with self._wake_lock:
+            if not (self.paused and self.standby):
+                return
+            self.ui.info("Felébredek: betöltöm a modelleket (10–20 másodperc)...")
+            self._do_resume(announce=False, mode=mode, prep=prep)
+
+    def _awake_for(self, item_id: str, payload: dict[str, Any]) -> bool:
+        """Az eladás-előkészítő szálon, a munka előtt: ébren van-e a Jarvis. Készenlétből itt ébred fel (a kártyán
+        látszik), nem vár az ágens-szálra (az épp kereskedhet). A Szünet gombos szünetben nem ébred fel, a kérés a
+        Folytatásig vár (_hold); ha a felébredés nem sikerült, a kártyán és értesítésben is látszik."""
+        assert self.work is not None
+        with self._wake_lock:
+            if self.paused and self.standby:
+                if item_id:
+                    self.work.store.set_busy(item_id, WAKING_ITEM)
+                with self._channel("work"):
+                    self._wake_up("work", prep=True)
+            if not self.paused:
+                return True
+            if not self.standby:
+                self._hold(payload)
+                return False
+        self._not_started(payload, WAKE_FAILED_ITEM)
+        return False
+
+    def _hold(self, payload: dict[str, Any]) -> None:
+        """A Szünet gombos szünetben jött eladási lépés (HOLD_ACTIONS): nem vész el, a Folytatás után magától megy
+        tovább (_resume_held); addig a kártyán látszik, mire vár."""
+        with self._wake_lock:
+            self._held.append(payload)
+        for item_id in payload.get("ids") or []:
+            if self.work is not None:
+                self.work.store.set_busy(item_id, HELD_ITEM)
+        with self._channel("work"):
+            self.ui.notice(HELD_NOTE)
+
+    def _resume_held(self) -> None:
+        """A Folytatás után: a Szünet alatt jött eladási lépések mennek tovább (a törölt tárgyaké nem)."""
+        with self._wake_lock:
+            held, self._held = self._held, []
+        for payload in held:
+            ids = list(payload.get("ids") or [])
+            if self.work is None or not ids:
+                continue
+            try:
+                self.work.store.get(ids[0])
+            except ItemError:
+                continue
+            self.work.store.set_busy(ids[0], "Sorra vár…")
+            if payload.get("action") in PREP_ACTIONS and self._prep is not None:
+                self._prep_requests.put(payload)
+            else:
+                self._submit(("work", payload))
+
+    def _not_started(self, payload: dict[str, Any], text: str) -> None:
+        """Egy eladási lépés nem indult el (nem tudott felébredni, vagy szünetel): a kártyán ne várjon tovább, és a
+        Munka menü naplójában, értesítésben is látszódjon, miért (a Munka oldalon a Beszélgetés el van rejtve)."""
+        ids = list(payload.get("ids") or [])
+        for item_id in ids:
+            self._clear_busy(item_id)
+        with self._channel("work"):
+            self.ui.notice(text)
+        if ids:
+            self._tell("error", "Munka: hiba", text, item=ids[0])
 
     def _request_mode(self, kind: str, payload: Any) -> str:
         """Melyik menü beszélgetése válaszol a kérésre (a Kreatív menünek nincs ilyen)."""
@@ -1185,6 +1277,10 @@ class JarvisApp:
 
         `standby`: készenlét (tétlenség után magától): ebből egy kérés felébreszti. A Szünet gombos
         szünetből nem ébred fel magától (pl. mert épp játszol a gépen)."""
+        with self._wake_lock:     # ne az előkészítő szál felébredése közben
+            self._pause(standby)
+
+    def _pause(self, standby: bool) -> None:
         if self.paused:
             if not standby and self.standby:
                 self.standby = False
@@ -1228,7 +1324,16 @@ class JarvisApp:
             self.ui.info(f"Felszabadult kb. {gpu.gb(gained)} GB videómemória. " + " | ".join(lines))
         self._hello()
 
-    def _do_resume(self, announce: bool = True, mode: str | None = None) -> None:
+    def _do_resume(self, announce: bool = True, mode: str | None = None, prep: bool = False) -> None:
+        """Folytatás (vagy felébredés készenlétből): betölti a modelleket. `prep`: az eladás-előkészítő szál ébreszt,
+        a kérés nem beszélgetés: ilyenkor a kereskedés csendes időszak nélkül megy tovább, és nincs mit előmelegíteni
+        (a fotók átnézése a saját kérését küldi). A Szünet alatt félretett eladási lépések utána mennek tovább."""
+        with self._wake_lock:
+            self._resume(announce, mode, prep)
+        if not self.paused:
+            self._resume_held()
+
+    def _resume(self, announce: bool, mode: str | None, prep: bool) -> None:
         if not self.paused:
             self.ui.info("Nem szünetelek, minden fut.")
             return
@@ -1244,9 +1349,10 @@ class JarvisApp:
         self._sync_context()
         self.paused = False
         self.standby = False
-        self.last_activity = time.time()
+        if not prep:
+            self.last_activity = time.time()
         self._set_phase("idle")
-        if mode != "creative":      # a Kreatív menü saját, eszköz nélküli kéréseket küld: ott nincs mit előre
+        if mode != "creative" and not prep:   # a Kreatív menü saját, eszköz nélküli kéréseket küld: ott nincs mit előre
             self._warm_up(mode)
         self._hello()
         if announce:
@@ -1467,12 +1573,11 @@ class JarvisApp:
                 return
             ids = list(payload.get("ids") or [])
             item_id = ids[0] if ids else ""
-            if self.paused:               # közben Szünet vagy készenlét jött: az ágens-szál intézi (felébred, ha lehet)
-                self._submit(("work", payload))
-                continue
             self.prepping = item_id or "?"
             self._prep_stop.clear()
             try:
+                if not self._awake_for(item_id, payload):     # készenlétből itt ébred fel; Szünetben vár
+                    continue
                 with self.llm.gate.session(), self.llm.stopped_by(self._prep_stop):
                     self.run_work(payload, browser=False)
             except Cancelled:

@@ -64,8 +64,17 @@
 - Legújabb elöl a címben: Jófogás `sp=3`, Vatera `ob=5&obd=2` (a felhasználó ellenőrizte, 2026. október), a Vinted
   mellett; a Vaterán a bemásolt figyelt oldal a saját rendezésével marad, a címben megadott rendezést nem írja át. Ha
   egy figyelő címe így megváltozik, egy letöltés csak megjegyzi az oldalt.
+- Pro feltöltés készenlétből: az eladás-előkészítő szál maga ébreszti fel a Jarvist (_awake_for, _wake_lock), nem vár
+  a kereskedés szálára (eddig oda került, és ha az épp dolgozott vagy a felébredés nem sikerült, a tárgy szó nélkül
+  vázlat maradt: a hiba a Munka oldalon rejtett Beszélgetésbe ment). A sikertelen felébredés a kártyán, a Munka
+  naplójában és értesítésben is látszik; a Szünet alatt jött új tárgy (és a feltöltés) a Folytatás után magától megy
+  (_held); amíg egy tárgyon dolgozik, nem áll vissza készenlétbe. Az OLLAMA_NUM_PARALLEL-t a Jarvis maga beállítja,
+  ha hiányzik (mint a setx, tartósan; ollama_log.set_user_setting); a tesztekben `parallel = 1`, hogy ne írjon a
+  valódi beállításokba.
 
 ## Élesben kipróbálandó
+- Pro feltöltés készenlétből: a felébredés az előkészítő szálon, miközben a kereskedés szála böngészik (a modell
+  betöltése a kereskedés egy modellhívása közben); ha egyszerre ébresztené a beszélgetés is, egyszer tölt be.
 - Az Android-alkalmazás új része (a megérő hirdetés értesítése: rezgés, hang, ismétlés, a találat ablaka, a vágólap) a
   GitHub Actions fordításában megy át, telefonon nincs kipróbálva; a rezgés a gyártói energiatakarékos módoktól is függ.
 - Néma módban az Android nem rezeg és nem csenget (a rendszer döntése); rezgő módban csak rezeg.

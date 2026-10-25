@@ -188,6 +188,9 @@ def make_cfg(tmp: Path, host: str | None = None) -> Config:
     # A helyi „hirdetési oldalak” a modell és a begyakorolt lépések útját tesztelik; a Vinted-kitöltőt
     # (vinted.py) a saját tesztjei (test_vinted.py) kapcsolják be, a Vinted űrlapját utánzó oldallal.
     cfg.work.autofill = False
+    # Egyesével kért modellhívás: így a Jarvis a tesztekben nem állítja be magától az OLLAMA_NUM_PARALLEL-t (Windows-on
+    # ez a valódi felhasználói beállításokba írna); a párhuzamos munka tesztjei maguk kapcsolják vissza.
+    cfg.llm.parallel = 1
     return cfg
 
 
