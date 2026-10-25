@@ -77,6 +77,9 @@
   letöltés, modellkérdés és szólás előtt, a letöltő várakozása közben is); egy tippet csak az egyik sor foglalhat le (a
   kiválasztás és a foglalás egy zárolt lépés), és egy hirdetésből (webcím) egy találat (_remember); a modellhívás közben
   megváltozott leírás (vagy Pro fotók) régi válasza nem kerül a tárgyba (ItemStore.update_if, STALE_RETRIES).
+- A hirdetés leírása alapból csak a zárószöveg és a kulcsszavak; a tárgyról csak akkor ír, ha a leírásban (Pro: a
+  megjegyzésben) kéred (selling.wants_description: „leírás”, „írd bele/oda”, „írd meg, hogy”, „említsd”…). A modell
+  szövegét kérés nélkül el is hagyja. EXTRACT_VERSION 4: a még fel nem töltött tárgyaké a következő kiolvasáskor így lesz.
 
 ## Élesben kipróbálandó
 - Pro feltöltés készenlétből: a felébredés az előkészítő szálon, miközben a kereskedés szála böngészik (a modell

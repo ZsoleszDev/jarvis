@@ -500,6 +500,44 @@ class ExtractionTests(unittest.TestCase):
         self.assertIn("első személyben", system)
         self.assertIn("csak akkor, ha a gender kiderül", system)
 
+    def test_the_description_says_only_the_closing_text_unless_you_ask(self):
+        """A leírásba alapból nem ír a tárgyról (a modell szövegét elhagyja, akkor is, ha írt): csak a zárószöveg (több
+        kép, pontos méret, csomagban olcsóbb) és a kulcsszavak. Ha a leírásodban kéred („a leírásba írd bele, hogy…”),
+        akkor azt is beleírja. A Pro feltöltésnél ugyanígy, a megjegyzés szerint."""
+        item = self.store.create(targets=["vinted"], prompt="Zara L-es fekete póló, egyszer hordtam, 500 Ft")
+        self.fake.chat_script = [extracted(product="póló", kind="ruha", title="Zara póló", brand="Zara", price=500,
+                                           description="Egyszer hordtam, nagyon jó állapotú.", keywords="zara, póló")]
+        item = self.extractor.extract(item.id)
+        footer = next(f.format(what="ruhát") for f in DESCRIPTION_FOOTERS if f.format(what="ruhát") in item.description)
+        self.assertEqual(item.description, f"{footer}\n\n#zara #póló", "csak a zárószöveg és a kulcsszavak")
+        system = self.fake.chat_bodies()[0]["messages"][0]["content"]
+        self.assertIn("description: alapból üres", system)
+
+        asked = self.store.create(targets=["vinted"],
+                                  prompt="Zara póló L, 500 Ft. A leírásba írd bele, hogy a bal ujján van egy kis folt.")
+        self.fake.chat_script = [extracted(product="póló", kind="ruha", title="Zara póló", brand="Zara", price=500,
+                                           description="A bal ujján van egy kis folt.", keywords="zara")]
+        asked = self.extractor.extract(asked.id)
+        self.assertTrue(asked.description.startswith("A bal ujján van egy kis folt.\n\n"), asked.description)
+
+        pro = self.store.add_photo(self.store.create(targets=["vinted"], pro=True).id, jpeg())
+        self.fake.chat_script = [seen(product="póló", kind="ruha", title="Zara póló", brand="Zara",
+                                      description="Kisebb folt látszik az ujján.", keywords="zara, póló")]
+        pro, _estimate = self.extractor.from_photos(pro.id, selling.vision_images(self.store, pro.id))
+        self.assertNotIn("folt", pro.description, "a Pro sem ír a tárgyról, ha nem kérted")
+        self.assertTrue(pro.description.endswith("#zara #póló"))
+        self.assertIn("description: alapból üres", self.fake.chat_bodies()[-1]["messages"][0]["content"])
+        self.store.update(pro.id, user=True, prompt="Írd oda, hogy eredeti dobozzal adom.")
+        self.store.add_photo(pro.id, jpeg(color=(10, 120, 40)))
+        self.fake.chat_script = [seen(product="póló", kind="ruha", title="Zara póló", brand="Zara",
+                                      description="Eredeti dobozzal adom.", keywords="zara")]
+        pro, _estimate = self.extractor.from_photos(pro.id, selling.vision_images(self.store, pro.id))
+        self.assertTrue(pro.description.startswith("Eredeti dobozzal adom.\n\n"), pro.description)
+        for text, wanted in (("Nike cipő 42, kicsit kopott", False), ("írd meg a hirdetést 5000-ért", False),
+                             ("írd meg, hogy a cipzár akad", True), ("Leírás: egyszer hordtam", True),
+                             ("említsd meg, hogy füstmentes háztartásból", True)):
+            self.assertEqual(selling.wants_description(text), wanted, text)
+
     def test_titles_are_short_and_natural(self):
         cases = [(("Sinsay Sárga trikó M-es", "Sinsay", "ruha", "M", "sárga"), "Sinsay trikó"),
                  (("Zara póló, L", "Zara", "ruha", "L", ""), "Zara póló"),

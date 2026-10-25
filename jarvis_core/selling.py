@@ -59,6 +59,10 @@ DESCRIPTION_FOOTERS = (
     "többet viszel egyben, csomagban olcsóbb.",
 )
 DESCRIPTION_FOOTER = DESCRIPTION_FOOTERS[0]
+# A leírásba alapból csak a zárószöveg (és a kulcsszavak) kerül: a tárgyról magáról a Jarvis csak akkor ír, ha a
+# leírásodban (Pro: a megjegyzésben) kifejezetten kéred (pl. „a leírásba írd bele, hogy…”, „írd oda, hogy…”).
+_DESCRIBE_RE = re.compile(r"leiras|\b(?:ird|irj|irjad|irjal|irjon)\s+(?:(?:bele|oda|hozza|rola|valamit|be)\b|"
+                          r"(?:meg|azt),?\s+hogy\b)|\b(?:emlitsd|emeld ki|jelezd)\b")
 TEXT_LIMITS = {"product": 80, "title": 100, "description": 3000, "category": 200, "brand": 80,
                "size": 40, "gender": 20, "condition": 40, "color": 60, "material": 120, "location": 80,
                "shipping": 300, "search_query": 100, "prompt": 3000, "kind": 20, "source": 300, "bought_from": 80,
@@ -934,11 +938,10 @@ EXTRACT_SYSTEM = (
     "- title: rövid, természetes cím, ahogy egy ember írná: a márka és hogy mi ez (pl. „Sinsay trikó”, „Zara "
     "farmerdzseki”, „Nike Air Max 90”, „RTX 3060 Ti videókártya”), legfeljebb 40 karakter. A szín, a méret és az "
     "állapot ne legyen benne (azok külön mezőben látszanak), és ne írd nagybetűvel a köznevet.\n"
-    "- description: az eladó nevében, egyes szám első személyben (pl. „Egyszer hordtam.”), soha nem harmadik "
-    "személyben („az eladó szerint”). A tárgy adatait (márka, méret, szín, állapot) ne ismételd, azok külön "
-    "látszanak; csak ha a leírás hibát vagy fontos részletet említ (folt, kopás, hiányzó tartozék), azt írd meg "
-    "egy-két rövid mondatban, különben üres. Ne ígérj olyat, amit az eladó nem mondott (szállítás, garancia, "
-    "alku, csere), és ne írj árat.\n"
+    "- description: alapból üres. Csak akkor írj bele, ha az eladó kifejezetten kéri, hogy valami a hirdetés "
+    "leírásába kerüljön (pl. „a leírásba írd bele, hogy…”, „írd oda, hogy…”): akkor pontosan azt, amit kér, egy-két "
+    "rövid mondatban, az ő nevében, egyes szám első személyben (soha nem harmadik személyben, „az eladó szerint”). "
+    "Ne ígérj olyat, amit az eladó nem mondott (szállítás, garancia, alku, csere), és ne írj árat.\n"
     "- keywords: 5–8 rövid kulcsszó vesszővel, amire a vevők a Vinteden keresnek: márka, típus, szín, anyag, "
     "stílus, alkalom vagy évszak (pl. „zara, póló, fekete, pamut, basic, nyári”). Csak a leírásból.\n"
     "- gender: ruhánál, cipőnél, kiegészítőnél: női, férfi, gyerek vagy uniszex, csak ha a leírásból kiderül "
@@ -995,9 +998,10 @@ PRO_SYSTEM = (
     "férfi, gyerek vagy uniszex, ha a fazon vagy a címke egyértelművé teszi, különben üres.\n"
     "- title: rövid, természetes cím, ahogy egy ember írná: a márka és hogy mi ez (pl. „Zara farmerdzseki”, „Nike "
     "Air Max 90”), legfeljebb 40 karakter, a szín, a méret és az állapot nélkül.\n"
-    "- description: az eladó nevében, egyes szám első személyben, egy-két rövid mondat a fotón látható fontos "
-    "részletről (pl. egy kisebb folt, a hiányzó tartozék, eredeti doboz), különben üres. Ne találj ki használatot "
-    "(„egyszer hordtam”), és ne írj árat.\n"
+    "- description: alapból üres. Csak akkor írj bele, ha az eladó megjegyzésében kifejezetten kéri, hogy valami a "
+    "hirdetés leírásába kerüljön (pl. „a leírásba írd bele, hogy…”): akkor pontosan azt, amit kér, egy-két rövid "
+    "mondatban, az ő nevében, egyes szám első személyben. Ne találj ki használatot („egyszer hordtam”), és ne írj "
+    "árat.\n"
     "- keywords: 5–8 rövid kulcsszó vesszővel (márka, típus, szín, anyag, stílus), amire a vevők keresnek.\n"
     "- category: a legvalószínűbb kategóriaút, pl. „Ruhák > Kabátok” vagy „Számítástechnika > Videókártyák”.\n"
     "- search_query: 2–4 szó a hasonló hirdetések kereséséhez (márka és típus, méret nélkül).\n"
@@ -1041,13 +1045,19 @@ def vision_images(store: ItemStore, item_id: str, limit: int = PRO_PHOTOS, side:
 
 
 # Ha az EXTRACT_SYSTEM vagy a séma érdemben változik, emeld: a régi kiolvasások egyszer újra lefutnak.
-EXTRACT_VERSION = "3"
+EXTRACT_VERSION = "4"
 # Ha a modellhívás közben megváltozik a leírás (vagy a Pro fotói), a régi válasz nem kerül a tárgyba: ennyiszer olvassa
 # ki újra a frisset, utána szól (ItemError).
 STALE_RETRIES = 2
 # Ha a hirdetés már fent van valahol, ezeket Jarvis magától nem írja át (a többi oldalon is ugyanaz a
 # hirdetés legyen, és a begyakorolt lépések kulcsa se változzon); kézzel persze átírhatod.
 FROZEN_WHEN_POSTED = ("title", "description", "category", "product", "kind")
+
+
+def wants_description(prompt: str) -> bool:
+    """Kérted-e, hogy a Jarvis a tárgyról is írjon a leírásba (pl. „a leírásba írd bele, hogy a bal ujján folt van”).
+    Ha nem, a leírás csak a zárószöveg és a kulcsszavak (compose_description)."""
+    return bool(_DESCRIBE_RE.search(fold(prompt or "")))
 
 
 def extract_signature(prompt: str) -> str:
@@ -1116,8 +1126,9 @@ class ListingExtractor:
             values["price"] = None
         kind = (values.get("kind") if not only or "kind" in only else "") or item.kind
         if not only or "description" in only:
-            values["description"] = compose_description(values["description"], str(data.get("keywords") or ""), kind,
-                                                        seed=item.id)
+            # a tárgyról csak akkor ír, ha kérted; különben a leírás a zárószöveg és a kulcsszavak
+            text = values["description"] if wants_description(prompt) else ""
+            values["description"] = compose_description(text, str(data.get("keywords") or ""), kind, seed=item.id)
         if values.get("title") and (not only or "title" in only):
             values["title"] = tidy_title(values["title"], values.get("brand") or item.brand, kind,
                                          values.get("size") or item.size, values.get("color") or item.color)
@@ -1166,8 +1177,8 @@ class ListingExtractor:
         values: dict[str, Any] = {key: str(data.get(key) or "").strip() for key in PRO_FIELDS}
         values["kind"] = str(data.get("kind") or "").strip()
         kind = values["kind"] or item.kind
-        values["description"] = compose_description(values["description"], str(data.get("keywords") or ""), kind,
-                                                    seed=item.id)
+        text = values["description"] if wants_description(prompt) else ""   # a tárgyról csak kérésre
+        values["description"] = compose_description(text, str(data.get("keywords") or ""), kind, seed=item.id)
         if values["title"]:
             values["title"] = tidy_title(values["title"], values["brand"] or item.brand, kind,
                                          values["size"] or item.size, values["color"] or item.color)
