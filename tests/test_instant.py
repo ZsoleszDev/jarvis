@@ -22,6 +22,7 @@ from test_deals import Clock, FakeBrowser, FakeLlm  # noqa: E402
 from jarvis_core import deals as deals_module  # noqa: E402
 from jarvis_core.deals import DealHunter  # noqa: E402
 from jarvis_core.feeds import FeedError, SiteFetcher, fetch_image, parse_listings, parse_page, public_host  # noqa: E402
+from jarvis_core import instant as instant_module  # noqa: E402
 from jarvis_core.instant import InstantError, InstantWatch  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
 
@@ -1375,6 +1376,42 @@ class LinkedSearchTests(InstantCase):
         self.assertEqual([a.get("search") for a in self.watch.state()["alerts"]], [None])
 
 
+    def test_a_watched_page_is_watched_every_few_minutes_too(self):
+        """A Figyelt oldalak közül a Hardveraprós és a Jófogásos az azonnali figyelőben is fut (pár percenként, nem csak a
+        kör óránkénti lépésében): a friss, megérő hirdetésről pár percen belül szól. A vateráshoz nem nyúl (azt a
+        böngésző nézi), egy saját figyelővel azonos oldalt nem kér le kétszer, és a figyelt oldal törlésével ez is
+        megszűnik."""
+        page = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        self.hunter.add_watch(page)
+        self.hunter.add_watch("lego")                          # (Vatera: keresőszóval)
+        self.hunter.set_enabled(True)
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2], "videokartya/index")
+        self.watch.tick()
+        [linked] = self.watch.state()["alerts"]
+        self.assertEqual((linked["url"], linked["sites"], linked["every"], linked["origin"]),
+                         (page, ["hardverapro"], instant_module.LINKED_EVERY, "watches"))
+        self.later(6)
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:2], "videokartya/index")
+        self.hunter.book.add([{"text": f"RTX 3060 Ti videókártya {n}", "price": p, "platform": "hardverapro",
+                               "url": f"https://hardverapro.hu/apro/rtx_{n}/friss.html"}
+                              for n, p in enumerate((95000, 100000, 105000, 98000, 102000, 99000, 101000,
+                                                     97000, 103000, 100500))])
+        self.net.pages["_7/friss"] = page_html("Hibátlan, dobozában.")
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual"])
+        with self.assertRaises(InstantError):
+            self.watch.add(page)                                # a figyelt oldal miatt már nézi
+        [ha_watch] = [w for w in self.hunter.state()["watches"] if w["platform"] == "hardverapro"]
+        self.hunter.remove_watch(ha_watch["id"])
+        self.watch.link_searches()
+        self.assertEqual(self.watch.state()["alerts"], [], "a figyelt oldal törlésével ez is megszűnt")
+        self.watch.add(page)                                    # egy saját figyelővel azonos oldalt nem kér le kétszer
+        self.hunter.add_watch(page)
+        self.watch.link_searches()
+        self.assertEqual([a.get("search") for a in self.watch.state()["alerts"]], [None])
+
+
 class ParallelRoundTests(InstantCase):
     def test_fast_sites_load_in_the_background_while_the_browser_works(self):
         """A kör elején a Hardverapró és a Jófogás találatai a háttérben töltődnek le (böngésző nélkül), a böngésző közben
@@ -1398,6 +1435,31 @@ class ParallelRoundTests(InstantCase):
         self.assertEqual(self.browser.looked, [], "a jelölt oldala is böngésző nélkül")
         self.assertIn("1 olcsó hirdetés", result)
         self.assertIn("Olcsó: Gigabyte RTX 3060 Ti Gaming OC", notices[0][1])
+
+    def test_an_exhausted_hourly_budget_is_not_made_up_with_the_browser(self):
+        """Ha a Hardverapró óránkénti kerete elfogyott (pl. az azonnali figyelő és a gyors sor elhasználta), a kör nem a
+        böngészővel tölti le helyette (a keret az oldal kímélése, a böngésző a Vintedé és a Vateráé, és ott a lista sem a
+        legújabb elöl jön): a keresés BUSY_RETRY múlva újra próbálkozik, nem a teljes gyakorisága után. Ha közben
+        felszabadul a keret, a jelölt oldala viszont már nem fér bele, a jelöltről figyelmeztetéssel szól (a friss
+        hirdetésnél az idő a fontosabb), és az oldalát sem a böngésző nyitja meg."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.fetcher.hourly = 0                # elfogyott a keret
+        notices = []
+        result = self.hunter.run(notify=lambda *a, **k: notices.append(a))
+        self.assertEqual(self.browser.urls, [], "a böngésző nem pótolja")
+        self.assertIn("Ebben az órában már sokat kérdeztem ezt az oldalt", result)
+        search = self.hunter.state()["searches"][0]
+        self.assertFalse(self.hunter._due(search, "hardverapro", self.clock.now + deals_module.BUSY_RETRY - 120))
+        self.assertTrue(self.hunter._due(search, "hardverapro", self.clock.now + deals_module.BUSY_RETRY))
+        self.results(HA_CARDS[:2])
+        self.fetcher.hourly = 1                # a találati oldal még belefér, a jelölt oldala már nem
+        self.clock.now += deals_module.BUSY_RETRY
+        self.hunter.run(notify=lambda *a, **k: notices.append(a))
+        self.assertEqual((self.browser.urls, self.browser.looked), ([], []))
+        [(_kind, title, text)] = [n[:3] for n in notices]
+        self.assertTrue(title.startswith("Olcsó: Gigabyte RTX 3060 Ti Gaming OC"), "(a kártya szövegével: az oldala nem nyílt meg)")
+        self.assertIn("a hirdetés oldalát most nem nyitottam meg (elfogyott az oldal óránkénti kerete)", text)
 
     def test_falls_back_to_the_browser_when_the_site_blocks(self):
         self.net.pages["keres.php"] = (403, "tiltva")

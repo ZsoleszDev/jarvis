@@ -637,7 +637,7 @@
           <small class="muted">${a.off ? "szünetel" : last ? `utoljára ${esc(ago(last))}` : "még nem nézte"}${a.found ? ` · eddig ${a.found} új` : ""}${a.found_at ? ` (legutóbb ${esc(ago(a.found_at))})` : ""}</small>
           ${Object.values(a.errors || {}).map((e) => `<small class="warn">${esc(e)}</small>`).join("")}
           ${a.url ? `<small><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small>` : ""}</span>
-        ${a.search ? '<small class="muted">a Keresésekből</small>' : `<span class="row"><button type="button" class="small quiet" data-ipause="${esc(a.id)}" data-off="${a.off ? "" : "1"}">${a.off ? "Folytatás" : "Szünet"}</button>
+        ${a.search ? `<small class="muted">${a.origin === "watches" ? "a Figyelt oldalakból" : "a Keresésekből"}</small>` : `<span class="row"><button type="button" class="small quiet" data-ipause="${esc(a.id)}" data-off="${a.off ? "" : "1"}">${a.off ? "Folytatás" : "Szünet"}</button>
           <button type="button" class="small quiet" data-iremove="${esc(a.id)}">Törlés</button></span>`}</li>`;
     }).join("");
     const hits = (I.hits || []).slice(0, 25).map((h) => `<li><span><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.title || h.text)}</a>

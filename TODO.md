@@ -102,6 +102,11 @@
   elsőbbségi munka (llm.ModelGate._spare). A weboldalakra nem kér többet.
 - Hiba javítva: a gyors sor (Hardverapró, Jófogás) ismeretlenjei a böngésző sorába kerültek (a _step_browse-ban a
   `lane` változó az indulóoldal lett), és ott vártak, amíg a böngésző sora meg nem nevezte őket (pihenőben sokáig).
+- A Hardverapró és a Jófogás nem kerül a böngészőbe, ha csak az óránkénti keret fogyott el vagy hálózati hiba volt
+  (deals._Later): a keresés és a figyelt oldal BUSY_RETRY (10 perc) múlva újra, a friss jelölt figyelmeztetéssel, az alku
+  és a csomag vár. A böngésző csak tiltásnál és üres oldalnál veszi át (eddig a keret fogyásakor is: ezért volt a
+  böngészőben a Hardverapró, alap sorrenddel). A hardveraprós és jófogásos Figyelt oldalak az azonnali figyelőben is
+  (link_searches, ötpercenként).
 
 ## Élesben kipróbálandó
 - Ruha felismerése (pricebook._WEAR_RE) valódi címeken: ha egy nem ruha kiesik (pl. egy márkanév más termék nevében),

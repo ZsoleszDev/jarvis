@@ -84,7 +84,6 @@ MAX_SEEN = 5000
 EVERY_CHOICES = (30, 60, 180, 360)   # percben: milyen sűrűn nézi meg egy keresés találatait
 DEFAULT_EVERY = 60
 SITE_MIN_MINUTES = {"vinted": 120}   # a Vintedet legfeljebb kétóránként (ott a robot-ellenőrzés a kockázat)
-# A legújabb hirdetések elöl: a Vinteden külön kérni kell, a Jófogáson és a Hardverapróban ez az alap.
 # A legújabb hirdetések elöl (a fizetett kiemelések után): a Vinted, a Jófogás és a Vatera találati oldalán a cím
 # paramétere (2026 októberében ellenőrizve). A Hardveraprón a rendezés nem a címben, hanem a munkamenetben van: azt a
 # böngésző nélküli letöltő állítja be magának (feeds.LIST_PREFS: új hirdetések elöl, 100 egy oldalon).
@@ -93,6 +92,12 @@ MAX_PAGES = 8              # egy körben legfeljebb ennyi jelölt hirdetés olda
 # A gyors oldalak (Hardverapró, Jófogás) találati oldalát, ha az azonnali figyelő ennyi másodpercen belül már letöltötte,
 # a kör nem kéri le újra (feeds.SiteFetcher.listings max_age): ugyanannyi kérésből több idő jut az új hirdetésekre.
 LISTING_REUSE = 300
+# Ha egy gyors oldal óránkénti kerete elfogyott (vagy átmeneti hálózati hiba volt), azt nem a böngészővel pótolja (a
+# keret az oldal kímélése, a böngésző a Vintedé és a Vateráé, és a böngészőben a Hardverapró listája sem a legújabb
+# hirdetésekkel elöl jön): a keresés vagy a figyelt oldal ennyi másodperc múlva újra próbálkozik (nem a teljes
+# gyakorisága után), a jelöltet pedig a hirdetés oldala nélkül, figyelmeztetéssel méri fel. A böngésző csak akkor veszi
+# át, ha az oldal a böngésző nélküli olvasást tiltja, vagy azon nem talál hirdetést (feeds.SiteFetcher.usable).
+BUSY_RETRY = 600
 # A szokásos ár felmérése: legfeljebb ennyi találatot kap a modell, és legalább ennyi hasonlóból mond árat. Ha kevés
 # a hasonló, egy nap múlva próbálja újra (addig kézzel megadhatod).
 CALIBRATE_ROWS = 25
@@ -794,6 +799,11 @@ class Deferred(Exception):
         self.extra: list[dict[str, Any]] = []   # az árkutatás közben talált, félbemaradt jelöltek: ezek is várnak
 
 
+class _Later(BrowserError):
+    """Egy gyors oldal most nem olvasható böngésző nélkül, mert elfogyott az óránkénti kerete (vagy átmeneti hálózati
+    hiba volt), és ezt nem a böngésző pótolja (BUSY_RETRY): ami ezen múlt, később kerül sorra."""
+
+
 class _Round:
     """Egy kör állapota: a böngésző szálán sorra kerülő lépések (work), a modell-sor, a keret (hány hirdetés oldalát
     nyithatja meg, hányszor kérdezheti a modellt), és az összefoglaló."""
@@ -1238,6 +1248,14 @@ class DealHunter:
             if not self._data["enabled"]:
                 return []
             return [json.loads(json.dumps(s)) for s in self._data["searches"] if not self._search_waits(s, now)]
+
+    def running_watches(self) -> list[dict[str, Any]]:
+        """A figyelt oldalak, amíg az automata kereskedés fut: az azonnali figyelő a Hardveraprón és a Jófogáson ezeket
+        is pár percenként megnézi (InstantWatch.link_searches), nem csak a kör (óránként)."""
+        with self._lock:
+            if not self._data["enabled"]:
+                return []
+            return [json.loads(json.dumps(w)) for w in self._data["watches"] if w.get("url")]
 
     @staticmethod
     def _search_waits(search: dict[str, Any], now: float) -> bool:
@@ -1831,6 +1849,13 @@ class DealHunter:
         last = float(self._data["last"].get(f"{search['id']}:{key}") or 0)
         return now - last >= every * 60 - 90     # másfél perc ráhagyás: az ütemező percre pontosan nem indít
 
+    def _retry_soon(self, search: dict[str, Any], key: str) -> None:
+        """Egy keresés vagy figyelt oldal ezen az oldalon BUSY_RETRY múlva esedékes újra (nem a teljes gyakorisága után):
+        most csak az oldal óránkénti kerete fogyott el, és azt nem a böngésző pótolja."""
+        every = max(int(search.get("every") or DEFAULT_EVERY), SITE_MIN_MINUTES.get(key, 0))
+        with self._lock:
+            self._data["last"][f"{search['id']}:{key}"] = self.clock() - every * 60 + BUSY_RETRY
+
     def run(self, check: Callable[[], None] = lambda: None,
             notify: Callable[..., None] = lambda *a, **k: None, force: bool = False) -> str:
         """Egy kör (a modellhívásai háttérhívások: a feltöltés és a beszélgetés előbb jön); lásd _run."""
@@ -1972,6 +1997,8 @@ class DealHunter:
                 rows = future.result() if future is not None else self.fetcher.listings(url, platform, check,
                                                                                         LISTING_REUSE)
             except FeedError as exc:
+                if exc.kind in ("busy", "network"):     # csak a keret vagy a hálózat: később, nem a böngészővel
+                    raise _Later(str(exc)) from None
                 rows, failed = None, str(exc)
             if rows:
                 if game is not None:
@@ -1996,8 +2023,9 @@ class DealHunter:
         if self.fetcher is not None and self.fetcher.usable(platform):
             try:
                 return self.fetcher.page(url, platform, check)
-            except FeedError:
-                pass
+            except FeedError as exc:
+                if exc.kind in ("busy", "network"):     # csak a keret vagy a hálózat: később, nem a böngészővel
+                    raise _Later(str(exc)) from None
         if game is not None and game.no_browser:
             raise BrowserError("böngésző nélkül most nem olvasható (a gyors sor a böngészőhöz nem nyúl)")
         return self.browser().look(url)
@@ -2074,6 +2102,8 @@ class DealHunter:
                 listings = self._listings(urls[key], key, check, game)
             except BrowserError as exc:
                 errors.append(f"{site.name}: {str(exc).splitlines()[0][:120]}")
+                if track and isinstance(exc, _Later):
+                    self._retry_soon(search, key)      # elfogyott a keret: BUSY_RETRY múlva újra (nem a böngészővel)
                 continue
             if not listings:
                 errors.append(f"{site.name}: nem találtam árat a találati oldalon (nincs találat, ellenőrzést kér, "
@@ -2417,7 +2447,7 @@ class DealHunter:
         game.check()
         with self._lock:
             self._data["last"][f"{watch['id']}:{platform}"] = self.clock()
-        rows = self._page_rows(game, watch["url"], platform, watch)
+        rows = self._page_rows(game, watch["url"], platform, watch, retry=partial(self._retry_soon, watch, platform))
         if not rows:
             return
         # a licitek elöl (azoknál sürget az idő), aztán a fix árasak, ahogy az oldalon jönnek (a legújabb elöl), a
@@ -2428,16 +2458,20 @@ class DealHunter:
             game.ask(partial(self._explore, batch), partial(self._explored, game, watch, batch))
 
     def _page_rows(self, game: _Round, url: str, platform: str, source: dict[str, Any],
-                   extra: dict[str, Any] | None = None) -> list[dict[str, Any]] | None:
+                   extra: dict[str, Any] | None = None,
+                   retry: Callable[[], None] | None = None) -> list[dict[str, Any]] | None:
         """Egy találati oldal hirdetései (modell nélkül, csak olvasva). A fix árasak árai az árbázisba kerülnek; a
         licitek közül csak a hamarosan záruló (a gép esti leállása előttiek is) marad. None, ha nem sikerült (ha
-        robot-ellenőrzést kér, game.captcha jelzi)."""
+        robot-ellenőrzést kér, game.captcha jelzi). retry: ha csak az oldal kerete fogyott el (_Later), ez jön (pl. a
+        figyelt oldal hamar újra próbálkozik)."""
         site = self.platforms[platform]
         browser = self.browser()
         try:
             listings = self._listings(url, platform, game.check, game)
         except BrowserError as exc:
             game.errors.append(f"{site.name}: {str(exc).splitlines()[0][:120]}")
+            if retry is not None and isinstance(exc, _Later):
+                retry()
             return None
         game.loaded += 1
         if not listings:
@@ -3259,7 +3293,10 @@ class DealHunter:
         deal = {k: v for k, v in deal.items() if v is not None}
         game.pages -= 1
         game.loaded += 1
-        verdict = self._inspect(deal, None, game, title=True)
+        try:
+            verdict = self._inspect(deal, None, game, title=True, later=True)
+        except _Later:
+            return                             # az oldal kerete elfogyott: a következő átnézéskor újra (nem a böngészővel)
         if verdict == "captcha":
             game.blocked = True                # később újra sorra kerül
             return
@@ -3553,7 +3590,11 @@ class DealHunter:
         deal.update(id=secrets.token_hex(5), explore=row.get("from") or "Csomagbontás")
         game.pages -= 1
         game.loaded += 1
-        verdict = self._inspect(deal, None, game, photos=BUNDLE_PHOTOS, defects=False)
+        try:
+            verdict = self._inspect(deal, None, game, photos=BUNDLE_PHOTOS, defects=False, later=True)
+        except _Later:
+            self._return_bundles([row])        # az oldal kerete elfogyott: vár (nem számít sikertelennek)
+            return
         if verdict == "captcha":
             game.blocked = True
             self._return_bundles([row])
@@ -4413,15 +4454,23 @@ class DealHunter:
             prices.pop(key, None)
 
     def _inspect(self, deal: dict[str, Any], page: dict[str, Any] | None = None, game: _Round | None = None,
-                 photos: int = CHECK_PHOTOS, defects: bool = True, title: bool = False) -> str:
+                 photos: int = CHECK_PHOTOS, defects: bool = True, title: bool = False, later: bool = False) -> str:
         """A jelölt hirdetés oldala (ha még nincs meg, megnyitja), modell nélkül, csak olvasva. Visszaadja, miért esik
         ki („” = maradhat, „captcha”: robot-ellenőrzés, ilyenkor maradhat, de nem néztük meg). A figyelmeztetéseket, a
         leírás elejét és az első fotók címét (photos) a jelölthöz teszi (a modellkérdéshez). defects=False: a hibára
         utaló szó nem ejti ki (egy csomagban lehet pár hibás darab; azt a modell méri fel). title: a hirdetés címe az
-        oldal címéből (az árbázisból jövő alkuképes hirdetésnél csak a termék neve van meg)."""
+        oldal címéből (az árbázisból jövő alkuképes hirdetésnél csak a termék neve van meg). later: ha az oldal csak az
+        óránkénti keret miatt nem nyílt meg (_Later), azt a hívó kapja (az alkunál és a csomagnál az oldal nélkül nincs
+        értelme: később újra); különben a friss jelölt figyelmeztetéssel megy tovább (az idő a fontosabb)."""
         if page is None:
             try:
                 page = self._look(deal["url"], deal.get("platform", ""), game=game)
+            except _Later:
+                if later:
+                    raise
+                deal.setdefault("warnings", []).append("a hirdetés oldalát most nem nyitottam meg (elfogyott az oldal "
+                                                       "óránkénti kerete): nézd meg, megvan-e még")
+                return ""
             except BrowserError:
                 deal.setdefault("warnings", []).append("a hirdetés oldalát nem tudtam megnyitni")
                 return ""
