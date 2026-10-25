@@ -84,7 +84,6 @@ MAX_SEEN = 5000
 EVERY_CHOICES = (30, 60, 180, 360)   # percben: milyen sűrűn nézi meg egy keresés találatait
 DEFAULT_EVERY = 60
 SITE_MIN_MINUTES = {"vinted": 120}   # a Vintedet legfeljebb kétóránként (ott a robot-ellenőrzés a kockázat)
-# A legújabb hirdetések elöl: a Vinteden külön kérni kell, a Jófogáson és a Hardverapróban ez az alap.
 # A legújabb hirdetések elöl (a fizetett kiemelések után): a Vinted, a Jófogás és a Vatera találati oldalán a cím
 # paramétere (2026 októberében ellenőrizve). A Hardveraprón a rendezés nem a címben, hanem a munkamenetben van: azt a
 # böngésző nélküli letöltő állítja be magának (feeds.LIST_PREFS: új hirdetések elöl, 100 egy oldalon).
@@ -93,6 +92,12 @@ MAX_PAGES = 8              # egy körben legfeljebb ennyi jelölt hirdetés olda
 # A gyors oldalak (Hardverapró, Jófogás) találati oldalát, ha az azonnali figyelő ennyi másodpercen belül már letöltötte,
 # a kör nem kéri le újra (feeds.SiteFetcher.listings max_age): ugyanannyi kérésből több idő jut az új hirdetésekre.
 LISTING_REUSE = 300
+# Ha egy gyors oldal óránkénti kerete elfogyott (vagy átmeneti hálózati hiba volt), azt nem a böngészővel pótolja (a
+# keret az oldal kímélése, a böngésző a Vintedé és a Vateráé, és a böngészőben a Hardverapró listája sem a legújabb
+# hirdetésekkel elöl jön): a keresés vagy a figyelt oldal ennyi másodperc múlva újra próbálkozik (nem a teljes
+# gyakorisága után), a jelöltet pedig a hirdetés oldala nélkül, figyelmeztetéssel méri fel. A böngésző csak akkor veszi
+# át, ha az oldal a böngésző nélküli olvasást tiltja, vagy azon nem talál hirdetést (feeds.SiteFetcher.usable).
+BUSY_RETRY = 600
 # A szokásos ár felmérése: legfeljebb ennyi találatot kap a modell, és legalább ennyi hasonlóból mond árat. Ha kevés
 # a hasonló, egy nap múlva próbálja újra (addig kézzel megadhatod).
 CALIBRATE_ROWS = 25
@@ -147,6 +152,15 @@ DEFAULT_HAGGLE_MESSAGE = "Szia!\nMegvan még? {ár}-ért odaadnád?\nKöszi elő
 # legalább ennyi haszonnal; egy oldalról legfeljebb EXPLORE_ROWS ismeretlen licitet kap a modell, és ezekből legfeljebb
 # EXPLORE_PICKS-nek nézi meg az árát máshol (RESALE_SITES).
 MAX_WATCHES = 10
+# Licitlista (Vatera): egy friss, 1 Ft-ról induló licitnél a mostani ár még semmit nem mond (nő), de az már most kiderül,
+# meddig érdemes licitálni (a szokásos ára szerint: max_bid), és a Vaterán ez az összeg legmagasabb ajánlatként rögtön
+# beállítható (a Vatera addig licitál helyetted). Ezért a még nem hamarosan záruló, de megérő licit nem vész el: a
+# licitlistára kerül (legfeljebb MAX_AUCTIONS, a hamarabb zárók elöl), egy csendes értesítéssel (naponta legfeljebb
+# AUCTION_TIPS_PER_DAY), és a zárás előtt (a figyelő órái szerint, a gép esti leállása előtt) a kör még egyszer megnézi:
+# ha még fent van, és nem lépte túl a javasolt összeget, szól (Licit: …). Ha közben egy oldalon látja, hogy a mostani ára
+# már a javasolt legmagasabb ajánlat fölött van, lekerül.
+MAX_AUCTIONS = 60
+AUCTION_TIPS_PER_DAY = 10
 WATCH_EVERY = 60
 WATCH_HOURS = 6
 WATCH_PROFIT = 5000
@@ -299,7 +313,10 @@ BROWSE_LANES: dict[str, list[tuple[str, str]]] = {
                     ("Alaplapok", _HA + "alaplap/index.html")],
     "jofogas": [("iPhone", "iphone"), ("PlayStation", "playstation"), ("Nintendo Switch", "nintendo switch"),
                 ("Lego", "lego"), ("AirPods", "airpods"), ("Dyson", "dyson"), ("Makita", "makita")],
-    "vatera": [("iPhone", "iphone"), ("Lego", "lego"), ("PlayStation", "playstation"), ("Nintendo", "nintendo"),
+    # a Vaterán egy egész főkategória is (a legújabb elöl, a cím a felhasználótól): a friss, 1 Ft-ról induló licitek
+    # innen kerülnek a licitlistára, nem csak a kulcsszavas oldalakról
+    "vatera": [("Műszaki cikk és mobil", "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html?ob=5&obd=2"),
+               ("iPhone", "iphone"), ("Lego", "lego"), ("PlayStation", "playstation"), ("Nintendo", "nintendo"),
                ("Fényképezőgép", "fényképezőgép")],
 }
 # Öntanulás: a gyorsan kelő (vagy már többször jó találatot hozó) termékekből saját indulóoldal lesz (legfeljebb
@@ -794,6 +811,11 @@ class Deferred(Exception):
         self.extra: list[dict[str, Any]] = []   # az árkutatás közben talált, félbemaradt jelöltek: ezek is várnak
 
 
+class _Later(BrowserError):
+    """Egy gyors oldal most nem olvasható böngésző nélkül, mert elfogyott az óránkénti kerete (vagy átmeneti hálózati
+    hiba volt), és ezt nem a böngésző pótolja (BUSY_RETRY): ami ezen múlt, később kerül sorra."""
+
+
 class _Round:
     """Egy kör állapota: a böngésző szálán sorra kerülő lépések (work), a modell-sor, a keret (hány hirdetés oldalát
     nyithatja meg, hányszor kérdezheti a modellt), és az összefoglaló."""
@@ -1148,6 +1170,11 @@ class DealHunter:
                          and isinstance(t.get("price"), int)][:MAX_TIPS],
                 "tips_told": {"day": str((data.get("tips_told") or {}).get("day") or ""),
                               "n": int((data.get("tips_told") or {}).get("n") or 0)},
+                # a licitlista (Vatera): a megérő, még nem hamarosan záruló licitek, és hányról szólt ma (_follow_auction)
+                "auctions": [a for a in data.get("auctions") or [] if isinstance(a, dict) and a.get("url")
+                             and isinstance(a.get("max_bid"), int) and isinstance(a.get("ends"), (int, float))][:MAX_AUCTIONS],
+                "auction_told": {"day": str((data.get("auction_told") or {}).get("day") or ""),
+                                 "n": int((data.get("auction_told") or {}).get("n") or 0)},
                 "funnel": {"day": str((data.get("funnel") or {}).get("day") or ""),
                            "counts": {str(k): int(v) for k, v in ((data.get("funnel") or {}).get("counts") or {}).items()
                                       if isinstance(v, int)}},
@@ -1205,6 +1232,7 @@ class DealHunter:
                     "bundles": self._bundle_state(),
                     "funnel": self.funnel(),
                     "tips": sorted((dict(t) for t in self._data["tips"]), key=lambda t: -float(t.get("at") or 0)),
+                    "auctions": sorted((dict(a) for a in self._data["auctions"]), key=lambda a: float(a["ends"])),
                     "haggle": {"on": self._data["haggle"]["on"], "message": self._data["haggle"]["message"],
                                "per_day": HAGGLE_PER_DAY, "days": HAGGLE_DAYS, "max_cut": HAGGLE_MAX}}
 
@@ -1226,7 +1254,7 @@ class DealHunter:
                 platform = watch.get("platform") or "vatera"
                 if platform in self.platforms and self._due(watch, platform, now):
                     return True
-            if self._bundles_due(now) or self._browse_due(now):
+            if self._bundles_due(now) or self._browse_due(now) or self._auctions_due(now):
                 return True
         return self._haggle_pending(now)
 
@@ -1238,6 +1266,14 @@ class DealHunter:
             if not self._data["enabled"]:
                 return []
             return [json.loads(json.dumps(s)) for s in self._data["searches"] if not self._search_waits(s, now)]
+
+    def running_watches(self) -> list[dict[str, Any]]:
+        """A figyelt oldalak, amíg az automata kereskedés fut: az azonnali figyelő a Hardveraprón és a Jófogáson ezeket
+        is pár percenként megnézi (InstantWatch.link_searches), nem csak a kör (óránként)."""
+        with self._lock:
+            if not self._data["enabled"]:
+                return []
+            return [json.loads(json.dumps(w)) for w in self._data["watches"] if w.get("url")]
 
     @staticmethod
     def _search_waits(search: dict[str, Any], now: float) -> bool:
@@ -1831,6 +1867,13 @@ class DealHunter:
         last = float(self._data["last"].get(f"{search['id']}:{key}") or 0)
         return now - last >= every * 60 - 90     # másfél perc ráhagyás: az ütemező percre pontosan nem indít
 
+    def _retry_soon(self, search: dict[str, Any], key: str) -> None:
+        """Egy keresés vagy figyelt oldal ezen az oldalon BUSY_RETRY múlva esedékes újra (nem a teljes gyakorisága után):
+        most csak az oldal óránkénti kerete fogyott el, és azt nem a böngésző pótolja."""
+        every = max(int(search.get("every") or DEFAULT_EVERY), SITE_MIN_MINUTES.get(key, 0))
+        with self._lock:
+            self._data["last"][f"{search['id']}:{key}"] = self.clock() - every * 60 + BUSY_RETRY
+
     def run(self, check: Callable[[], None] = lambda: None,
             notify: Callable[..., None] = lambda *a, **k: None, force: bool = False) -> str:
         """Egy kör (a modellhívásai háttérhívások: a feltöltés és a beszélgetés előbb jön); lásd _run."""
@@ -1899,6 +1942,10 @@ class DealHunter:
             game.work.append(partial(self._step_bundles, game))
         if self._haggle_pending(now):         # alkuképes hirdetések az árbázisból (félóránként)
             game.work.append(partial(self._step_haggle, game))
+        with self._lock:
+            auctions = self._auctions_due(now)
+        if auctions:                          # a licitlista: a zárás előtt még egyszer (elöl: ott sürget az idő)
+            game.work.appendleft(partial(self._step_auctions, game))
         with self._lock:
             tips, carry = bool(self._data["tips"]), bool(self._carry)
         if tips:                              # a bizonytalan árú tippek újra (az árbázisból, letöltés nélkül)
@@ -1972,6 +2019,8 @@ class DealHunter:
                 rows = future.result() if future is not None else self.fetcher.listings(url, platform, check,
                                                                                         LISTING_REUSE)
             except FeedError as exc:
+                if exc.kind in ("busy", "network"):     # csak a keret vagy a hálózat: később, nem a böngészővel
+                    raise _Later(str(exc)) from None
                 rows, failed = None, str(exc)
             if rows:
                 if game is not None:
@@ -1996,8 +2045,9 @@ class DealHunter:
         if self.fetcher is not None and self.fetcher.usable(platform):
             try:
                 return self.fetcher.page(url, platform, check)
-            except FeedError:
-                pass
+            except FeedError as exc:
+                if exc.kind in ("busy", "network"):     # csak a keret vagy a hálózat: később, nem a böngészővel
+                    raise _Later(str(exc)) from None
         if game is not None and game.no_browser:
             raise BrowserError("böngésző nélkül most nem olvasható (a gyors sor a böngészőhöz nem nyúl)")
         return self.browser().look(url)
@@ -2008,7 +2058,7 @@ class DealHunter:
         game.errors += problems
         if not rows:
             return
-        self._to_bundles([row for row in rows if not usable(row["text"])], f"Keresés: {search['query']}")
+        self._to_bundles([row for row in rows if not usable(row.get("title") or row["text"])], f"Keresés: {search['query']}")
         kept = self._relevant(search, rows)
         relevant = {row["url"] for row in kept}
         self.tally("other", [row for row in rows if row["url"] not in relevant])   # nem a keresett termék, nem eladó
@@ -2033,7 +2083,8 @@ class DealHunter:
         title = f"„{deal['text'][:80]}”"
         if deal.get("auction"):
             bids = f", {deal['bids']} licit" if deal.get("bids") is not None else ""
-            return (f"Vatera-licit: {title}, {left_text(deal.get('left'))} múlva zárul, most {format_price(deal['price'])}"
+            now = "legutóbb" if deal.get("followed") else "most"     # (a licitlistáról: amikor utoljára láttam)
+            return (f"Vatera-licit: {title}, {left_text(deal.get('left'))} múlva zárul, {now} {format_price(deal['price'])}"
                     f"{bids}. Máshol kb. {format_price(deal['median'])}-ért adják. Legfeljebb "
                     f"{format_price(deal['max_bid'])}-ig érdemes licitálni (akkor is kb. "
                     f"{format_price(expected_profit(deal['median'], deal['max_bid'], deal.get('low')))} a haszon). "
@@ -2074,6 +2125,8 @@ class DealHunter:
                 listings = self._listings(urls[key], key, check, game)
             except BrowserError as exc:
                 errors.append(f"{site.name}: {str(exc).splitlines()[0][:120]}")
+                if track and isinstance(exc, _Later):
+                    self._retry_soon(search, key)      # elfogyott a keret: BUSY_RETRY múlva újra (nem a böngészővel)
                 continue
             if not listings:
                 errors.append(f"{site.name}: nem találtam árat a találati oldalon (nincs találat, ellenőrzést kér, "
@@ -2334,6 +2387,9 @@ class DealHunter:
         modellkérdés a modell-sorban. Ha a kör keretébe már nem fér bele, nem jegyzi látottnak: a következő körben
         újra jelölt. done: ha az ellenőrzés lezárult (találat, vagy kiderült, hogy nem az), ez jön (a tippeknél)."""
         finish = done or (lambda: None)
+        if deal.get("auction") and deal.get("far"):
+            self._follow_auction(game, search, deal)   # még messze a zárás: a licitlistára, a zárás előtt újra
+            return finish()
         self._lane_count(deal.get("lane"), "candidates")
         self.tally("candidates", [deal])
         if why := self._suspect(deal):
@@ -2417,7 +2473,7 @@ class DealHunter:
         game.check()
         with self._lock:
             self._data["last"][f"{watch['id']}:{platform}"] = self.clock()
-        rows = self._page_rows(game, watch["url"], platform, watch)
+        rows = self._page_rows(game, watch["url"], platform, watch, retry=partial(self._retry_soon, watch, platform))
         if not rows:
             return
         # a licitek elöl (azoknál sürget az idő), aztán a fix árasak, ahogy az oldalon jönnek (a legújabb elöl), a
@@ -2428,16 +2484,20 @@ class DealHunter:
             game.ask(partial(self._explore, batch), partial(self._explored, game, watch, batch))
 
     def _page_rows(self, game: _Round, url: str, platform: str, source: dict[str, Any],
-                   extra: dict[str, Any] | None = None) -> list[dict[str, Any]] | None:
+                   extra: dict[str, Any] | None = None,
+                   retry: Callable[[], None] | None = None) -> list[dict[str, Any]] | None:
         """Egy találati oldal hirdetései (modell nélkül, csak olvasva). A fix árasak árai az árbázisba kerülnek; a
         licitek közül csak a hamarosan záruló (a gép esti leállása előttiek is) marad. None, ha nem sikerült (ha
-        robot-ellenőrzést kér, game.captcha jelzi)."""
+        robot-ellenőrzést kér, game.captcha jelzi). retry: ha csak az oldal kerete fogyott el (_Later), ez jön (pl. a
+        figyelt oldal hamar újra próbálkozik)."""
         site = self.platforms[platform]
         browser = self.browser()
         try:
             listings = self._listings(url, platform, game.check, game)
         except BrowserError as exc:
             game.errors.append(f"{site.name}: {str(exc).splitlines()[0][:120]}")
+            if retry is not None and isinstance(exc, _Later):
+                retry()
             return None
         game.loaded += 1
         if not listings:
@@ -2466,10 +2526,11 @@ class DealHunter:
                    **({"promoted": True} if entry.get("promoted") else {}), **(extra or {})}
             if entry.get("auction"):
                 info = parse_auction(row["text"])
-                if info["left"] is not None and last_chance(now + info["left"], day) - now > window:
-                    continue                   # még messze a zárás: egy későbbi körben
                 row.update(auction=True, **info)
+                if info["left"] is not None and last_chance(now + info["left"], day) - now > window:
+                    row.update(far=True, hours=window // 3600)   # még messze a zárás: ha megéri, a licitlistára kerül
             rows.append(row)
+        self._auction_seen([row for row in rows if row.get("auction")])
         self.book.add(rows)                    # a licitet kihagyja (az nem eladási ár)
         self.tally("seen", rows)
         return rows
@@ -2492,7 +2553,8 @@ class DealHunter:
             if (key in seen and not drop) or (key in deals and not drop) or key in cancelled:
                 continue
             self.tally("new", [row])
-            if not usable(row["text"]):
+            # a cím dönt, ha van (a kártya szövegében a város, az idő és az eladó neve is ott van: „eladó41”)
+            if not usable(row.get("title") or row["text"]):
                 lots.append(row)               # nem eladási ár (kereső, csere, csomag, alkatrész…); a csomag felmérhető
                 continue
             if not self._within_reach(row):
@@ -2625,11 +2687,14 @@ class DealHunter:
             return {**sample, "why": why} if why else sample
 
         want = ""
+        # egy most talált hirdetés friss állapota felülírja a korábban eltárolt árát: ha most kizárt (pl. a címébe
+        # bekerült, hogy hibás), a régi ára sem számít, és egy hirdetés nem lehet egyszerre beszámítva és kizárva
+        now_seen = {listing_key(found["url"]) for found in rows if found.get("url")}
         if product is not None:
             base, want = _split_size(product[0])
             for key, size in self.book.family(product[0]):
                 for sample in self.book.samples(key, exclude=row["url"]):
-                    if sample["url"]:
+                    if sample["url"] and listing_key(sample["url"]) not in now_seen:
                         put(size, {**basis_entry(sample), "exact": True})
             for found in rows:
                 if not found.get("url") or listing_key(found["url"]) == own:
@@ -2914,6 +2979,120 @@ class DealHunter:
         with self._lock:
             self._tip_notices.append((("deal", f"Érdemes megnézni: {tip['title'][:50]}", text),
                                       {"url": tip["url"], "actions": [DEALS_ACTION], "quiet": quiet or None}))
+
+    def _follow_auction(self, game: _Round, search: dict[str, Any], deal: dict[str, Any]) -> None:
+        """Egy megérő, de még nem hamarosan záruló licit a licitlistára: a mostani ára, a javasolt legmagasabb ajánlat
+        (max_bid), mikor zárul; a kör a zárás előtt újra megnézi (_step_auctions). Ha új, csendesen szól is (naponta
+        legfeljebb AUCTION_TIPS_PER_DAY), mert a legmagasabb ajánlat a Vaterán már most beállítható."""
+        now, key = self.clock(), listing_key(deal["url"])
+        entry = {"id": deal["id"], "url": deal["url"], "site": deal.get("site") or "", "platform": deal.get("platform"),
+                 "title": str(deal.get("title") or deal["text"])[:120], "text": deal["text"], "price": int(deal["price"]),
+                 "max_bid": int(deal["max_bid"]), "median": int(deal["median"]), "low": deal.get("low"),
+                 "ends": now + int(deal.get("left") or 0), "hours": int(deal.get("hours") or WATCH_HOURS),
+                 "search": search["id"], "query": search["query"], "explore": deal.get("explore") or "",
+                 "similar": deal.get("similar"), "sites": deal.get("sites") or [], "at": now}
+        today = day_of(now)
+        with self._lock:
+            known = next((a for a in self._data["auctions"] if listing_key(a["url"]) == key), None)
+            if known is not None:
+                entry.update(id=known["id"], at=known["at"])
+            told = self._data["auction_told"]
+            if told.get("day") != today:
+                told.update(day=today, n=0)
+            tell = known is None and told["n"] < AUCTION_TIPS_PER_DAY
+            told["n"] += tell
+            self._data["auctions"] = sorted([a for a in self._data["auctions"] if listing_key(a["url"]) != key] + [entry],
+                                            key=lambda a: float(a["ends"]))[:MAX_AUCTIONS]
+            self._save()
+        self._mark(deal)                       # a kör nem jelöltként nézi újra: a licitlista viszi tovább
+        self.tally("auction", [deal])
+        if known is None:
+            self.journal.add(f"Licitlistára tettem: „{entry['title'][:60]}” most {format_price(entry['price'])}, "
+                             f"{left_text(deal.get('left'))} múlva zárul; legfeljebb {format_price(entry['max_bid'])}-ig "
+                             f"érdemes licitálni ({entry['site']}).")
+        if tell:
+            game.notify("deal", f"Licit: {entry['title'][:50]} (legfeljebb {format_price(entry['max_bid'])})",
+                        self._auction_text(entry, deal.get("left")), url=entry["url"], actions=[DEALS_ACTION],
+                        quiet=True)
+
+    @staticmethod
+    def _auction_text(entry: dict[str, Any], left: int | None) -> str:
+        profit = expected_profit(entry["median"], entry["max_bid"], entry.get("low"))
+        return (f"Vatera-licit: „{entry['title'][:80]}” most {format_price(entry['price'])}, {left_text(left)} múlva "
+                f"zárul. Máshol kb. {format_price(entry['median'])}-ért adják; legfeljebb {format_price(entry['max_bid'])}"
+                f"-ig érdemes licitálni (akkor is kb. {format_price(profit)} a haszon). A Vaterán ezt most legmagasabb "
+                "ajánlatként beállíthatod (addig licitál helyetted a Vatera); a zárás előtt még szólok. Licitálni nem fogok "
+                "helyetted.")
+
+    def _auction_seen(self, rows: list[dict[str, Any]]) -> None:
+        """A licitlistán lévő licit egy oldalon újra: a mostani ára és a hátralévő ideje frissül; ha a mostani ára már a
+        javasolt legmagasabb ajánlat fölött van, lekerül (már nem éri meg beszállni)."""
+        if not rows:
+            return
+        now = self.clock()
+        seen = {listing_key(row["url"]): row for row in rows}
+        with self._lock:
+            kept, changed = [], False
+            for entry in self._data["auctions"]:
+                row = seen.get(listing_key(entry["url"]))
+                if row is not None:
+                    changed = True
+                    if int(row["price"]) >= int(entry["max_bid"]):
+                        self.journal.add(f"Lekerült a licitlistáról: „{entry['title'][:60]}” már "
+                                         f"{format_price(int(row['price']))}, a javasolt legfeljebb "
+                                         f"{format_price(entry['max_bid'])} fölött.")
+                        continue
+                    entry["price"] = int(row["price"])
+                    if row.get("left") is not None:
+                        entry["ends"] = now + int(row["left"])
+                kept.append(entry)
+            if changed:
+                self._data["auctions"] = kept
+                self._save()
+
+    def _auctions_due(self, now: float) -> bool:
+        """Van-e a licitlistán olyan licit, aminek a zárás előtti ellenőrzése esedékes (vagy már lejárt: lekerül)."""
+        day = tuple(self._data["day"])
+        return any(last_chance(float(a["ends"]), day) - now <= int(a.get("hours") or WATCH_HOURS) * 3600
+                   for a in self._data["auctions"])
+
+    def _step_auctions(self, game: _Round) -> None:
+        """A licitlista zárás előtti ellenőrzése: ami lejárt, lekerül; aminek a zárása közel van (a figyelő órái szerint,
+        a gép esti leállása előtt), az rendes jelölt lesz (_candidate: a licit oldala, elkelt-e, hibás-e, egy rövid
+        modellkérdés), és ha átmegy, szól a javasolt legmagasabb ajánlattal. Ha a körben elfogyott a keret, marad, és a
+        következő kör próbálja."""
+        now = self.clock()
+        with self._lock:
+            day = tuple(self._data["day"])
+            expired = [a for a in self._data["auctions"] if float(a["ends"]) <= now]
+            due = [dict(a) for a in self._data["auctions"] if float(a["ends"]) > now
+                   and last_chance(float(a["ends"]), day) - now <= int(a.get("hours") or WATCH_HOURS) * 3600]
+            if expired:
+                gone = {listing_key(a["url"]) for a in expired}
+                self._data["auctions"] = [a for a in self._data["auctions"] if listing_key(a["url"]) not in gone]
+                self._save()
+        steps = []
+        for entry in due:
+            deal = {k: v for k, v in entry.items() if k not in ("ends", "hours", "query", "search", "at") and v is not None}
+            deal.update(id=secrets.token_hex(5), auction=True, left=int(float(entry["ends"]) - now), followed=True,
+                        profit=expected_profit(entry["median"], entry["max_bid"], entry.get("low")))
+            search = {"id": entry["search"], "query": entry["query"]}
+            steps.append(partial(self._candidate, game, search, deal,
+                                 done=partial(self._drop_auction, listing_key(entry["url"]))))
+        game.next(steps)
+
+    def _drop_auction(self, key: str) -> None:
+        """Egy licit zárás előtti ellenőrzése lezárult (szólt róla, vagy elkelt, hibás…): lekerül a licitlistáról."""
+        with self._lock:
+            self._data["auctions"] = [a for a in self._data["auctions"] if listing_key(a["url"]) != key]
+            self._save()
+
+    def dismiss_auction(self, auction_id: str) -> dict[str, Any]:
+        """Egy licit levétele a licitlistáról (nem érdekel): a zárás előtt sem szól róla."""
+        with self._lock:
+            self._data["auctions"] = [a for a in self._data["auctions"] if a.get("id") != auction_id]
+            self._save()
+        return self.state()
 
     def flush_tips(self, notify: Callable[..., None]) -> None:
         """A „Érdemes megnézni” tippek értesítései (_tip gyűjti, a kör vagy az azonnali figyelő küldi ki)."""
@@ -3259,7 +3438,10 @@ class DealHunter:
         deal = {k: v for k, v in deal.items() if v is not None}
         game.pages -= 1
         game.loaded += 1
-        verdict = self._inspect(deal, None, game, title=True)
+        try:
+            verdict = self._inspect(deal, None, game, title=True, later=True)
+        except _Later:
+            return                             # az oldal kerete elfogyott: a következő átnézéskor újra (nem a böngészővel)
         if verdict == "captcha":
             game.blocked = True                # később újra sorra kerül
             return
@@ -3553,7 +3735,11 @@ class DealHunter:
         deal.update(id=secrets.token_hex(5), explore=row.get("from") or "Csomagbontás")
         game.pages -= 1
         game.loaded += 1
-        verdict = self._inspect(deal, None, game, photos=BUNDLE_PHOTOS, defects=False)
+        try:
+            verdict = self._inspect(deal, None, game, photos=BUNDLE_PHOTOS, defects=False, later=True)
+        except _Later:
+            self._return_bundles([row])        # az oldal kerete elfogyott: vár (nem számít sikertelennek)
+            return
         if verdict == "captcha":
             game.blocked = True
             self._return_bundles([row])
@@ -3715,15 +3901,21 @@ class DealHunter:
                         quiet=True)
 
     def seller_bundle(self, deal: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """Egy jó találat eladójának többi hirdetése (rows: a listája): melyik adható tovább külön is haszonnal (az
-        árbázis vagy egy kereséseid szokásos ára szerint, biztos áron, és nem lassan kelő), és ha ezeket is megveszed,
-        mennyi a haszon együtt: egy posta (SHIPPING), a Vinteden a vevővédelmi díj a végösszegre egyszer, darabonként a
-        csomagolás és a meghirdetés (PIECE_COST), és mennyi munka (darabonként LISTING_MINUTES). Összeveti azzal, ha csak
-        ezt veszed meg, és azzal, ha külön-külön vennéd. A ruha, a csomag, a nem eladási árú hirdetés kimarad; amiről nem
-        tudni, mennyit ér, azt csak megszámolja. A találatba is beírja (seller); None, ha az eladónak nincs más
-        hirdetése."""
+        """Egy jó találat eladójának többi hirdetése (rows: a listája): melyik adható tovább külön is haszonnal. Minden
+        darabra ugyanazok a vételi ellenőrzések, mint egy találatra: valódi ár-e (nem 1 Ft, nem a szokásos ár töredéke),
+        nem gyanúsan olcsó és nem hamisítványgyanús, belefér-e a vételi limitbe, biztos-e az ára (az árbázis vagy egy
+        kereséseid szokásos ára szerint), nem lassan kelő, van-e rajta haszon, és nem kockázatos (ha csak a nyugodt
+        szívvel megvehetőkről szólsz). A megmaradtakból a legjobbak kerülnek a közös vételbe, amíg a végösszeg belefér a
+        vételi limitbe; utána számolja, mennyi a haszon együtt: egy posta (SHIPPING), a Vinteden a vevővédelmi díj a
+        végösszegre egyszer, darabonként a csomagolás és a meghirdetés (PIECE_COST), és mennyi munka (darabonként
+        LISTING_MINUTES). Összeveti azzal, ha csak ezt veszed meg, és azzal, ha külön-külön vennéd. A ruha, a csomag, a
+        nem eladási árú hirdetés kimarad; amiről nem tudni, mennyit ér, azt csak megszámolja. A találatba is beírja
+        (seller); None, ha az eladónak nincs más hirdetése."""
         own, vinted = listing_key(deal["url"]), deal.get("platform") == "vinted"
         fee = (lambda amount: int(round(VINTED_FEE_FIXED + VINTED_FEE_RATE * amount))) if vinted else (lambda amount: 0)
+        with self._lock:
+            safe_only = self._data["safe_only"]
+        cap = self._cap()
         items: list[dict[str, Any]] = []
         unknown = 0
         for row in rows[:SELLER_ROWS]:
@@ -3735,21 +3927,35 @@ class DealHunter:
             if value is None:
                 unknown += 1
                 continue
-            price, resale = int(row["price"]), safe_sale(int(value["reference"]), value.get("low"))
+            price, reference = int(row["price"]), int(value["reference"])
+            resale = safe_sale(reference, value.get("low"))
             product = self.book.key(text)
             pace_now = pace(self.book.speed(product[0])) if product else ""
             margin = resale - price - PIECE_COST
-            why = ("bizonytalan ár (kevés hasonló)" if not value.get("sure") else "lassan kel" if pace_now == "lassú"
-                   else "külön nem éri meg" if margin <= 0 else "")
-            items.append({"t": text[:TITLE_KEEP], "p": price, "u": str(row["url"]), "reference": int(value["reference"]),
+            suspect = self._suspect({"price": price, "median": reference, "product_key": product[0] if product else ""})
+            why = ("nem valódi ár (pl. 1 Ft vagy „ár megegyezés szerint”)" if price < max(BUNDLE_MIN_PRICE, reference * FLOOR)
+                   else "gyanúsan olcsó (átverés, hamisítvány vagy hibás lehet)" if suspect.startswith("gyanúsan")
+                   else "gyakran hamisított márka, feltűnően olcsón" if suspect
+                   else "a vételi limit fölött" if not self._affordable(price)
+                   else "bizonytalan ár (kevés hasonló)" if not value.get("sure")
+                   else "lassan kel" if pace_now == "lassú"
+                   else "külön nem éri meg" if margin <= 0
+                   else "kockázatos: kicsi a haszon a befektetett pénzhez képest" if safe_only and margin < price * RISKY_ROI
+                   else "")
+            items.append({"t": text[:TITLE_KEEP], "p": price, "u": str(row["url"]), "reference": reference,
                           "resale": resale, "margin": margin, "n": value.get("n"), "pace": pace_now,
                           "pick": not why, **({"why": why} if why else {})})
         if not items and not unknown:
             return None
-        picked = [item for item in items if item["pick"]]
         price = int(deal.get("offer") or deal["price"])
+        total, picked = price, []
+        for item in sorted((item for item in items if item["pick"]), key=lambda i: -i["margin"]):
+            if cap is not None and total + item["p"] > cap:   # a legjobbak, amíg a végösszeg belefér a vételi limitbe
+                item.update(pick=False, why="együtt már nem fér a vételi limitbe")
+                continue
+            picked.append(item)
+            total += item["p"]
         own_resale = int(deal.get("resale") or safe_sale(int(deal["median"]), deal.get("low")))
-        total = price + sum(item["p"] for item in picked)
         single = own_resale - price - SHIPPING - fee(price) - PIECE_COST
         together = own_resale + sum(item["resale"] for item in picked) - total - SHIPPING - fee(total) \
             - (1 + len(picked)) * PIECE_COST
@@ -4413,15 +4619,23 @@ class DealHunter:
             prices.pop(key, None)
 
     def _inspect(self, deal: dict[str, Any], page: dict[str, Any] | None = None, game: _Round | None = None,
-                 photos: int = CHECK_PHOTOS, defects: bool = True, title: bool = False) -> str:
+                 photos: int = CHECK_PHOTOS, defects: bool = True, title: bool = False, later: bool = False) -> str:
         """A jelölt hirdetés oldala (ha még nincs meg, megnyitja), modell nélkül, csak olvasva. Visszaadja, miért esik
         ki („” = maradhat, „captcha”: robot-ellenőrzés, ilyenkor maradhat, de nem néztük meg). A figyelmeztetéseket, a
         leírás elejét és az első fotók címét (photos) a jelölthöz teszi (a modellkérdéshez). defects=False: a hibára
         utaló szó nem ejti ki (egy csomagban lehet pár hibás darab; azt a modell méri fel). title: a hirdetés címe az
-        oldal címéből (az árbázisból jövő alkuképes hirdetésnél csak a termék neve van meg)."""
+        oldal címéből (az árbázisból jövő alkuképes hirdetésnél csak a termék neve van meg). later: ha az oldal csak az
+        óránkénti keret miatt nem nyílt meg (_Later), azt a hívó kapja (az alkunál és a csomagnál az oldal nélkül nincs
+        értelme: később újra); különben a friss jelölt figyelmeztetéssel megy tovább (az idő a fontosabb)."""
         if page is None:
             try:
                 page = self._look(deal["url"], deal.get("platform", ""), game=game)
+            except _Later:
+                if later:
+                    raise
+                deal.setdefault("warnings", []).append("a hirdetés oldalát most nem nyitottam meg (elfogyott az oldal "
+                                                       "óránkénti kerete): nézd meg, megvan-e még")
+                return ""
             except BrowserError:
                 deal.setdefault("warnings", []).append("a hirdetés oldalát nem tudtam megnyitni")
                 return ""
@@ -4617,7 +4831,7 @@ class DealHunter:
             if listing_key(row["url"]) in known:
                 done.add(id(row))
                 continue                       # erről már szóltunk (pl. a böngészős kör)
-            if not usable(row["text"]):
+            if not usable(row.get("title") or row["text"]):     # a cím dönt, ha van (a kártyán az eladó neve is)
                 lots.append(row)               # a csomagot a csomagbontás méri fel (ha be van kapcsolva)
                 continue
             if not self._affordable(row["price"]):

@@ -199,17 +199,40 @@ def from_price(text: str) -> bool:
 
 def several_products(text: str) -> bool:
     """Több különböző termék egy hirdetésben, egy áron („RTX 3060 / 3070 / 3080”, „Ryzen 5 5600X + B550 alaplap”): az
-    ár nem egy meghatározott darabé, és a címből nem rendelhető egyértelműen egyikhez sem. Két különböző típusjel kell
-    hozzá: két videókártya-lapka, vagy két típusjel felsorolva (/, +, vessző, „és”, „vagy”)."""
+    ár nem egy meghatározott darabé, és a címből nem rendelhető egyértelműen egyikhez sem. Két valódi termék kell hozzá:
+    két videókártya-lapka egy videókártya-családdal, vagy a felsorolás (/, +, vessző, „és”, „vagy”) legalább két
+    részében más-más típusjel. Egy termék több szava egynek számít (az „Intel Core i5-10400F”: i5 és 10400F, a „16GB DDR4
+    3200 CL16”), és a felsorolás típusjel nélküli része („dobozos”, „RGB”, „AM4”, „GDDR6”) nem külön termék."""
     words = _words(text)
-    models = list(dict.fromkeys(w for w in words if re.search(r"\d", w) and not _UNIT.match(w)
-                                and not _CAPACITY.match(w) and not _KIT.match(w)
-                                and not (w.isdigit() and (len(w) <= 2 or len(w) > 5))))
-    if len(models) < 2:
-        return False
-    if sum(1 for w in models if _GPU_CHIP.match(w)) >= 2 and set(words) & GPU_FAMILIES:
+    if sum(1 for w in _model_tokens(words) if _GPU_CHIP.match(w)) >= 2 and set(words) & GPU_FAMILIES:
         return True
-    return bool(re.search(r"[/+,]|\b(?:es|vagy)\b", fold(text or "")))
+    parts = {tuple(tokens) for tokens in (_model_tokens(_words(part))
+                                          for part in re.split(r"[/+,;]|\b(?:es|vagy)\b", fold(text or ""))) if tokens}
+    return len(parts) >= 2
+
+
+# Műszaki jellemző, nem típusjel: memóriatípus (DDR4, GDDR6X), késleltetés (CL16), foglalat (AM4, LGA1700), csatoló és
+# szabvány (PCIe4, USB3, HDMI21, SATA3, WiFi6, Gen4), sávszélesség (x16).
+_SPEC = re.compile(r"^(?:(?:lp|g)?ddr\d\w*|cl\d{1,2}|am[2-5]|lga\d{3,4}|pcie\d*|usb\d\w*|hdmi\d\w*|sata\d|wifi\d\w*|"
+                   r"gen\d|x\d{1,2})$")
+# Ezek előtt a szám mennyiség, nem típusjel („3200 MHz”, „256 bit”).
+_AFTER_NUMBER = _UNIT_WORDS | {"bit", "fps", "rpm", "dpi", "mp", "mpx"}
+
+
+def _model_tokens(words: list[str]) -> list[str]:
+    """A cím típusjelnek látszó szavai (several_products): van bennük szám, és nem mértékegység, kapacitás,
+    memóriakészlet vagy műszaki jellemző; a puszta szám csak 3–5 jegyű, nem évszám, és nem egy mértékegység előtt áll."""
+    out: list[str] = []
+    for index, word in enumerate(words):
+        if not re.search(r"\d", word) or _UNIT.match(word) or _CAPACITY.match(word) or _KIT.match(word) \
+                or _SPEC.match(word):
+            continue
+        if word.isdigit() and (not 3 <= len(word) <= 5 or 1990 <= int(word) <= 2039
+                               or (index + 1 < len(words) and words[index + 1] in _AFTER_NUMBER)):
+            continue
+        if word not in out:
+            out.append(word)
+    return out
 
 
 _CAPACITY = re.compile(r"^(\d{1,4})(gb|tb)$")
@@ -467,6 +490,7 @@ class PriceBook:
         self._brand_counts: dict[str, int] = {str(k): int(v) for k, v in (data.get("brand_counts") or {}).items()
                                               if isinstance(v, int)}
         self._by_base: dict[str, list[str]] | None = None   # kapacitás nélküli kulcs → a változatai (variants)
+        self._where: dict[str, str] | None = None           # hirdetés → a terméke, ahol az ára van (_locate)
         if data.get("kv") != KEY_VERSION and self._keys:
             self._rekey()
 
@@ -487,7 +511,29 @@ class PriceBook:
             target["samples"] = sorted(by_url.values(), key=lambda s: -float(s.get("last") or 0))[:MAX_SAMPLES]
             target["seen"] = max(float(target.get("seen") or 0), float(entry.get("seen") or 0))
         self._keys = merged
+        self._where = None
         self._dirty = True
+
+    def _locate(self) -> dict[str, str]:
+        """Hirdetés (listing_key) → a termék kulcsa, ahol az ára van: egy hirdetésnek egy ára van (a legutóbbi állapota
+        szerint). Lustán épül, és a nagyobb változások után újra."""
+        if self._where is None:
+            self._where = {listing_key(str(s.get("url") or "")): key for key, entry in self._keys.items()
+                           for s in entry["samples"] if s.get("url")}
+        return self._where
+
+    def _drop(self, ident: str, keep: str = "") -> None:
+        """Egy hirdetés korábbi ára kikerül, mert a friss állapota felülírja: ha most nem használható ár (hibás lett,
+        „-tól” ár, csomag…), mindenhonnan; ha a címe szerint most másik termék, a régi helyéről (keep: az új helye)."""
+        where = self._locate()
+        key = where.get(ident)
+        if key is None or key == keep:
+            return
+        entry = self._keys.get(key)
+        if entry is not None:
+            entry["samples"] = [s for s in entry["samples"] if listing_key(str(s.get("url") or "")) != ident]
+            self._dirty = True
+        where.pop(ident, None)
     def save(self) -> None:
         with self._lock:
             if not self._dirty:
@@ -538,26 +584,34 @@ class PriceBook:
 
     def add(self, rows: list[dict[str, Any]], name: str = "") -> int:
         """A hirdetések árai a termékükhöz (a cím szerint, vagy ha megadod, a name szerint: pl. ahogy a modell nevezte
-        meg). A licit nem ár (csak a mostani ajánlat). Visszaadja, hányat tett be."""
+        meg). A licit nem ár (csak a mostani ajánlat). Egy hirdetésnek egy ára van, a friss állapota szerint: ha már
+        nem használható ár (pl. a címébe bekerült, hogy hibás), a korábbi ára sem számít tovább; ha a címe szerint most
+        másik termék, ott lesz. Visszaadja, hányat tett be."""
         now, added = self.clock(), 0
         named = self.key(name) if name else None
         with self._lock:
             for row in rows:
                 text, url, price = str(row.get("text") or ""), str(row.get("url") or ""), int(row.get("price") or 0)
-                if row.get("auction") or not url or price <= 0 or not usable(text):
+                title = str(row.get("title") or text)   # a cím dönt, ha van (a kártyán a város, az eladó neve is ott van)
+                if row.get("auction") or not url or price <= 0:
                     continue
-                found = named or self.key(str(row.get("title") or text))   # a cím: a kártyán a város, az eladó is ott van
+                ident = listing_key(url)
+                if not usable(title):
+                    self._drop(ident)          # a friss állapota szerint már nem használható ár: a régi sem számít
+                    continue
+                found = named or self.key(title)
                 if found is None:
                     continue
                 key, label = found
+                self._drop(ident, keep=key)    # a címe szerint most másik termék: a régi helyéről kikerül
                 if key not in self._keys:
                     self._by_base = None       # új termék: a változatok jegyzéke újraépül
                 entry = self._keys.setdefault(key, {"name": label, "samples": []})
-                ident = listing_key(url)
                 sample = next((s for s in entry["samples"] if listing_key(s.get("url", "")) == ident), None)
                 if sample is None:
                     sample = {"at": now, "url": url, "site": str(row.get("platform") or "")}
                     entry["samples"].append(sample)
+                    self._locate()[ident] = key
                 elif sample.get("p") and price < int(sample["p"]) * (1 - PRICE_CUT):
                     sample["cuts"] = int(sample.get("cuts") or 0) + 1     # leárazta (az alkuhoz: engedni szokott)
                     sample.setdefault("p0", int(sample["p"]))
@@ -566,12 +620,13 @@ class PriceBook:
                 if len(entry["samples"]) > MAX_SAMPLES:
                     entry["samples"].sort(key=lambda s: -float(s.get("last") or 0))
                     del entry["samples"][MAX_SAMPLES:]
+                    self._where = None
                 entry["seen"] = now
                 added += 1
             if len(self._keys) > MAX_KEYS:
                 for key in sorted(self._keys, key=lambda k: float(self._keys[k].get("seen") or 0))[:len(self._keys) - MAX_KEYS]:
                     self._keys.pop(key, None)
-                self._by_base = None
+                self._by_base = self._where = None
             self._dirty = self._dirty or bool(added)
         return added
 

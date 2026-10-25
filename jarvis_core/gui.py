@@ -814,6 +814,8 @@ class _Handler(BaseHTTPRequestHandler):
                                                                        body.get("safe_only"))})
             if action == "enable":
                 return self._json(200, {"ok": True, **deals.set_enabled(bool(body.get("on")))})
+            if action == "auction_dismiss":  # egy licit levétele a licitlistáról
+                return self._json(200, {"ok": True, **deals.dismiss_auction(str(body.get("id") or ""))})
             if action == "tip_dismiss":  # egy „Érdemes megnézni” tipp elrejtése
                 return self._json(200, {"ok": True, **deals.dismiss_tip(str(body.get("id") or ""))})
             if action == "haggle":      # alkuképes hirdetések: be/ki, az ajánlat szövege

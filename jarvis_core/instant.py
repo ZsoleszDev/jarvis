@@ -3,7 +3,8 @@ akkor szól, ha új ÉS megéri (a jó vételek többnyire a friss hirdetésekb�
 új jön” értesítés).
 
 Megadod, mit figyeljen: egy keresőszót (pl. „RTX 3080”, mindkét oldalon), vagy egy találati oldal címét (pl. Hardverapró ›
-Videókártyák). A Jarvis 2–15 percenként (alapból 3) letölti a találati oldal elejét, böngésző nélkül (feeds.SiteFetcher:
+Videókártyák); a futó Keresések és a Figyelt oldalak hardveraprós és jófogásos része magától is ide kerül
+(link_searches, ötpercenként). A Jarvis 2–15 percenként (alapból 3) letölti a találati oldal elejét, böngésző nélkül (feeds.SiteFetcher:
 oldalanként egyszerre egy kérés, szünetekkel, óránként legfeljebb INSTANT_HOURLY), egy saját szálon: nem vár a
 böngészőre, és arra sem, hogy épp beszélgetsz-e vele. Az első letöltésnél csak megjegyzi, ami már fent van; utána minden
 új (vagy leárazott) hirdetést rögtön felmér (DealHunter.appraise): modell nélkül a felmért kereséseid és az árbázis
@@ -146,17 +147,24 @@ class InstantWatch:
         os.replace(tmp, self.path)
 
     def link_searches(self) -> None:
-        """A futó Keresések (DealHunter.running_searches) Hardverapró- és Jófogás-része figyelőként: ami új, felveszi
-        (ugyanazzal a keresőszóval, ársávval és kizáró szavakkal), ami megváltozott, frissíti, a törölt keresését
-        kiveszi. Az első letöltésnél, mint minden figyelő, csak megjegyzi, ami már fent van."""
+        """A futó Keresések (DealHunter.running_searches) és a Figyelt oldalak (running_watches) Hardverapró- és
+        Jófogás-része figyelőként: ami új, felveszi (a keresésnél ugyanazzal a keresőszóval, ársávval és kizáró
+        szavakkal, a figyelt oldalnál a címével), ami megváltozott, frissíti, a törölt keresését vagy oldalát kiveszi.
+        Az első letöltésnél, mint minden figyelő, csak megjegyzi, ami már fent van."""
         self._linked_at = self.clock()
         try:
             searches = self.hunter.running_searches()
         except AttributeError:
             return
-        with self._lock:     # amit egy saját figyelőd már ugyanezzel a szóval néz, azt nem kéri le kétszer
-            covered = {(fold(a.get("query") or ""), site) for a in self._data["alerts"]
-                       if not a.get("search") and not a.get("url") for site in a.get("sites") or []}
+        try:
+            watches = self.hunter.running_watches()
+        except AttributeError:
+            watches = []
+        with self._lock:     # amit egy saját figyelőd már ugyanezzel a szóval (vagy címmel) néz, azt nem kéri le kétszer
+            own = [a for a in self._data["alerts"] if not a.get("search")]
+            covered = {(fold(a.get("query") or ""), site) for a in own if not a.get("url") for site in a.get("sites") or []}
+            pages = {self._url(a, site) for a in own if a.get("url") for site in a.get("sites") or []
+                     if site in self.platforms}
         wanted: dict[str, dict[str, Any]] = {}
         for search in searches:
             sites = [k for k in search.get("sites") or [] if k in self.platforms
@@ -167,6 +175,13 @@ class InstantWatch:
                     "max_price": search.get("max_price") or None, "min_price": search.get("min_price") or None,
                     "exclude": list(search.get("exclude") or [])[:MAX_EXCLUDE], "every": LINKED_EVERY,
                     "search": str(search["id"])}
+        for watch in watches:                # a figyelt oldal (pl. Hardverapró › Videókártyák) is pár percenként
+            site, url = str(watch.get("platform") or ""), str(watch.get("url") or "")
+            if site in self.platforms and url and newest_first(url, site) not in pages:
+                wanted["f" + str(watch["id"])] = {
+                    "query": "", "url": url, "sites": [site], "name": str(watch.get("name") or url)[:80],
+                    "max_price": None, "min_price": None, "exclude": [], "every": LINKED_EVERY,
+                    "search": "f" + str(watch["id"]), "origin": "watches"}
         with self._lock:
             alerts, changed = [], False
             for alert in self._data["alerts"]:
@@ -174,12 +189,13 @@ class InstantWatch:
                     alerts.append(alert)
                     continue
                 spec = wanted.pop(alert["id"], None)
-                if spec is None:                       # a keresést törölted (vagy újra felméri)
+                if spec is None:                       # a keresést (vagy a figyelt oldalt) törölted, vagy újra felméri
                     self._data["seen"].pop(alert["id"], None)
                     changed = True
                     continue
                 if any(alert.get(key) != value for key, value in spec.items()):
-                    if alert.get("query") != spec["query"] or set(alert.get("sites") or []) != set(spec["sites"]):
+                    if alert.get("query") != spec["query"] or alert.get("url") != spec["url"] \
+                            or set(alert.get("sites") or []) != set(spec["sites"]):
                         alert["baseline"] = []         # más keresés: előbb megint csak megjegyzi, ami fent van
                     alert.update(spec)
                     changed = True

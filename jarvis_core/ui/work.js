@@ -637,7 +637,7 @@
           <small class="muted">${a.off ? "szünetel" : last ? `utoljára ${esc(ago(last))}` : "még nem nézte"}${a.found ? ` · eddig ${a.found} új` : ""}${a.found_at ? ` (legutóbb ${esc(ago(a.found_at))})` : ""}</small>
           ${Object.values(a.errors || {}).map((e) => `<small class="warn">${esc(e)}</small>`).join("")}
           ${a.url ? `<small><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small>` : ""}</span>
-        ${a.search ? '<small class="muted">a Keresésekből</small>' : `<span class="row"><button type="button" class="small quiet" data-ipause="${esc(a.id)}" data-off="${a.off ? "" : "1"}">${a.off ? "Folytatás" : "Szünet"}</button>
+        ${a.search ? `<small class="muted">${a.origin === "watches" ? "a Figyelt oldalakból" : "a Keresésekből"}</small>` : `<span class="row"><button type="button" class="small quiet" data-ipause="${esc(a.id)}" data-off="${a.off ? "" : "1"}">${a.off ? "Folytatás" : "Szünet"}</button>
           <button type="button" class="small quiet" data-iremove="${esc(a.id)}">Törlés</button></span>`}</li>`;
     }).join("");
     const hits = (I.hits || []).slice(0, 25).map((h) => `<li><span><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.title || h.text)}</a>
@@ -667,6 +667,7 @@
       ${hits ? `<details class="setup" data-fold="fresh"${openSections.has("fresh") ? " open" : ""}><summary>Friss hirdetések (${(I.hits || []).length})</summary><ul class="dealist">${hits}</ul></details>` : ""}`;
   }
   const hhmmOf = (t) => new Date(t * 1000).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit" });
+  const whenOf = (t) => new Date(t * 1000).toLocaleString("hu-HU", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
   // --- egy megérő találat ablaka (értesítésből vagy a listából) ---------------------------------------------------
   // Mennyibe kerül, mennyiért mennek most, mennyit kereshetsz vele; a gomb kimásolja az eladónak szóló üzenetet, és
@@ -681,7 +682,8 @@
   // az elkelt hasonlók ára).
   // A mai számok (deals.funnel): mennyit látott, mennyi volt új, hány jelölt és jó találat; a Naplóban az is, mi miért
   // esett ki (ebből látszik, miért nincs találat egy napon).
-  const FUNNEL_MAIN = [["seen", "hirdetés"], ["new", "új"], ["candidates", "jelölt"], ["found", "jó találat"], ["haggles", "alku"]];
+  const FUNNEL_MAIN = [["seen", "hirdetés"], ["new", "új"], ["candidates", "jelölt"], ["found", "jó találat"], ["haggles", "alku"],
+                       ["auction", "licitlistára"]];
   const FUNNEL_OUT = [["not_cheap", "nem elég olcsó"], ["other", "nem a keresett termék vagy nem eladó"],
                       ["over_limit", "a vételi limit fölött"], ["unknown", "ismeretlen termék"], ["unsure", "bizonytalan ár (Érdemes megnézni)"],
                       ["suspicious", "gyanús"], ["risky", "kockázatos"], ["gone", "elkelt"], ["defect", "hibás"],
@@ -926,6 +928,11 @@
         <span class="row"><button type="button" class="small" data-deal-open="${esc(d.id)}">Részletek</button>${buyButton(d)}
         <button type="button" class="small quiet" data-deal-dismiss="${esc(d.id)}">Elrejtés</button></span></li>`).join("");
     // Érdemes megnézni (deals.tips): olcsónak látszott, de kevés a hasonló ára; a Jarvis a körökben újra felméri
+    // a licitlista (Vatera): megéri beszállni, a javasolt legmagasabb ajánlat most beállítható; a zárás előtt még szól
+    const auctions = (deals.auctions || []).map((a) => `<li><span><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>
+        <small class="muted">${esc(a.site)} · legutóbb <b>${esc(price(a.price))}</b> · zárás: ${esc(whenOf(a.ends))}</small>
+        <small>legfeljebb <b>${esc(price(a.max_bid))}</b>-ig érdemes licitálni <span class="muted">(máshol kb. ${esc(price(a.median))})</span></small></span>
+        <span class="row"><button type="button" class="small quiet" data-auction-dismiss="${esc(a.id)}">Elrejtés</button></span></li>`).join("");
     const tips = (deals.tips || []).map((t) => `<li><span><a href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.title)}</a>
         <small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">bizonytalan ár</b> csak ${esc(t.n)} hasonló
           (${esc((t.sites || []).join(", ") || "?")}) szerint kb. ${esc(price(t.usual))} · kb. <b>${esc(price(t.profit))}</b> haszon lehet benne</small></span>
@@ -973,6 +980,10 @@
       <p><small class="muted">Olcsónak látszik, de kevés hasonló árat találtam, ezért nem biztos, hogy megéri. Nézd meg magad;
         ha közben összegyűlik elég ár, újra felmérem, és ha megéri, szólok.</small></p>
       <ul class="dealist">${tips}</ul>` : ""}
+      ${auctions ? `<h3 class="section-title">Licitlista <small class="muted">Vatera</small></h3>
+      <p><small class="muted">Ezeknél a licit még nem zárul hamarosan, de megéri beszállni: a Vaterán a javasolt összeget most
+        legmagasabb ajánlatként beállíthatod (addig licitál helyetted). A zárás előtt még szólok.</small></p>
+      <ul class="dealist">${auctions}</ul>` : ""}
       ${section("settings", "Beállítások", `
         <div class="fields limits">
           <div class="field"><label for="d-maxbuy">Max. vételár (Ft)</label>
@@ -1174,6 +1185,7 @@
     for (const b of box.querySelectorAll("[data-offer]")) b.addEventListener("click", () => makeOffer(b.dataset.offer, $(`d-offer-${b.dataset.offer}`).value));
     for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
     for (const b of box.querySelectorAll("[data-tip-dismiss]")) b.addEventListener("click", () => dealAction({ action: "tip_dismiss", id: b.dataset.tipDismiss }));
+    for (const b of box.querySelectorAll("[data-auction-dismiss]")) b.addEventListener("click", () => dealAction({ action: "auction_dismiss", id: b.dataset.auctionDismiss }));
     for (const b of box.querySelectorAll("[data-deal-open]")) b.addEventListener("click", () => openDeal(b.dataset.dealOpen));
     $("d-haggle-save").addEventListener("click", async () => {
       const on = $("d-haggle").checked;
