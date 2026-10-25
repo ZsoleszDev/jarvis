@@ -33,8 +33,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, deal_action, excluded, matches_query, newest_first,
-                    parse_words, safety_text)
+from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, Deferred, deal_action, excluded, matches_query,
+                    newest_first, parse_words, safety_text)
 from .feeds import FAST_SITES, FeedError
 from .llm import background_calls
 from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price
@@ -56,8 +56,9 @@ MAX_ROWS = 120             # egy letöltésből ennyi hirdetést néz: az oldal 
                            # elején többnyire a fizetett kiemelések vannak); az értékelést a várólista korlátozza
 OVERFLOW_MIN = 10          # ha egy letöltésen legalább ennyi (nem kiemelt) hirdetés van, és az oldal alján lévő
 OVERFLOW_TAIL = 5          # ennyi mind új, a következő oldalt is megnézi (a kiemeltek elöl mindig a régiek)
-MAX_WAITING = 60           # ennyi hirdetés várhat a modellre
-WAIT_MAX = 1800            # ennyi ideig (másodperc); ami addig sem került sorra, az kimarad
+MAX_WAITING = 300          # ennyi hirdetés várhat (a modellre, a Szünet vagy a kéréskeret miatt; két teljes oldal is)
+WAIT_MAX = 1800            # ennyi ideig (másodperc); ami addig sem került sorra (vagy nem fér el), azt a figyelő
+                           # elfelejti: ha még fent van, a következő letöltésnél újra új hirdetésként jön (_forget)
 TICK = 2.0
 BOOK_SAVE = 600            # az árbázist legfeljebb ennyi másodpercenként írja ki (nagy fájl; a körök is mentik)
 JITTER = (0.85, 1.15)
@@ -367,11 +368,46 @@ class InstantWatch:
 
     def _park(self, alert_id: str, site: str, rows: list[dict[str, Any]]) -> None:
         """Egy szüneteltetett figyelő hirdetései a várakozók közé (a folytatásakor jönnek, legfeljebb WAIT_MAX-ig)."""
+        self._keep_waiting(alert_id, site, rows)
+
+    def _keep_waiting(self, alert_id: str, site: str, rows: list[dict[str, Any]]) -> None:
+        """Hirdetések a várakozók közé (legfeljebb MAX_WAITING; a régebbiek esnek ki, és azokat a figyelő elfelejti)."""
         now = self.clock()
         with self._lock:
             queued = {row["url"] for _a, _s, row, _t in self._waiting}
             self._waiting += [(alert_id, site, row, now) for row in rows if row["url"] not in queued]
-            del self._waiting[:-MAX_WAITING]
+            overflow = self._waiting[:max(0, len(self._waiting) - MAX_WAITING)]
+            del self._waiting[:len(overflow)]
+        self._forget(overflow)
+
+    def _forget(self, entries: list[tuple[str, str, dict[str, Any], float]]) -> None:
+        """Amire nem került sor (túl sok várt, vagy túl régóta): a figyelő nem jegyzi látottnak, így ha még fent van, a
+        következő letöltésnél újra új hirdetésként jön (nem vész el)."""
+        if not entries:
+            return
+        with self._lock:
+            for alert_id, _site, row, _at in entries:
+                (self._data["seen"].get(alert_id) or {}).pop(listing_key(row["url"]), None)
+            self._save()
+
+    def _go(self) -> None:
+        """Az értékelés közben (DealHunter.appraise: minden hirdetés letöltése, modellkérdése és a szólás előtt):
+        Szünetben, kikapcsolt háttérmunkával vagy az üzemidőn kívül megáll (Deferred: a hátralévő hirdetések
+        megmaradnak, és a folytatáskor jönnek); leállításkor kilép."""
+        self._check()
+        if not self._may_work():
+            raise Deferred("szünet")
+
+    def _reserve(self, sites: list[str]) -> bool:
+        """Egy figyelőből induló kérés (a hirdetés oldala, az árkeresés) helye a figyelő keretében (_has_budget: a
+        köröknek fenntartott rész nem fogy); ha van, lefoglalja."""
+        now = self.clock()
+        with self._lock:
+            if not all(self._has_budget(site, now) for site in sites):
+                return False
+            for site in sites:
+                self._recent.setdefault(site, deque()).append(now)
+        return True
 
     def stop(self) -> None:
         """Leállítja a szálat, és megvárja (legfeljebb pár másodpercig), hogy a mostani letöltését befejezze."""
@@ -690,25 +726,30 @@ class InstantWatch:
                 self._save()
             self._tell(alert, hit)
 
-        waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found)
+        # go: Szünetben (vagy ha a kéréskeret elfogyott: _look, _search) az értékelés megáll, a többi megmarad
+        waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found, go=self._go)
         if hasattr(self.hunter, "flush_tips"):
             self.hunter.flush_tips(self.notify)     # a bizonytalan árú tippek („Érdemes megnézni”)
         if waiting:
-            now = self.clock()
-            with self._lock:
-                queued = {row["url"] for _a, _s, row, _t in self._waiting}
-                self._waiting += [(alert["id"], site, row, now) for row in waiting if row["url"] not in queued]
-                del self._waiting[:-MAX_WAITING]
+            self._keep_waiting(alert["id"], site, waiting)
         return hits
 
     def _retry_waiting(self) -> None:
-        """A modellre váró friss hirdetések, amint lehet kérdezni (amíg nem túl régiek)."""
-        if not self._waiting or not self.model_ok():
+        """A váró friss hirdetések (a modellre, a Szünet vagy a kéréskeret miatt), amint lehet: a modell kérdezhető, és
+        mindegyik gyors oldalon van hely a figyelő keretében (az értékelés mindkettőn kereshet). Ami WAIT_MAX-nál
+        régebben vár, azt a figyelő elfelejti (_forget: ha még fent van, a következő letöltésnél újra jön)."""
+        if not self._waiting:
             return
         now = self.clock()
         with self._lock:
             alerts = {a["id"]: json.loads(json.dumps(a)) for a in self._data["alerts"]}
-            waiting = [entry for entry in self._waiting if now - entry[3] < WAIT_MAX]
+            expired = [entry for entry in self._waiting if now - entry[3] >= WAIT_MAX]
+            self._waiting = [entry for entry in self._waiting if now - entry[3] < WAIT_MAX]
+        self._forget(expired)
+        if not self.model_ok() or not all(self._has_budget(site, now) for site in self.platforms):
+            return
+        with self._lock:
+            waiting = self._waiting
             # a szüneteltetett figyelő hirdetései várnak (a folytatásáig, WAIT_MAX-ig)
             self._waiting = [entry for entry in waiting if (alerts.get(entry[0]) or {}).get("off")]
             waiting = [entry for entry in waiting if not (alerts.get(entry[0]) or {}).get("off")]
@@ -724,7 +765,11 @@ class InstantWatch:
                 self._report(alerts[alert_id], site, rows)
 
     def _look(self, row: dict[str, Any]) -> dict[str, Any] | None:
-        """Egy hirdetés oldala böngésző nélkül (None, ha most nem sikerült)."""
+        """Egy hirdetés oldala böngésző nélkül (None, ha most nem sikerült). A figyelő keretéből megy: ha nincs hely
+        (vagy Szünet van), Deferred (a hirdetés vár)."""
+        self._go()
+        if not self._reserve([row.get("platform") or ""]):
+            raise Deferred("kéréskeret")
         try:
             return self.fetcher.page(row["url"], row.get("platform", ""), self._check)
         except FeedError:
@@ -732,7 +777,12 @@ class InstantWatch:
 
     def _search(self, query: str) -> list[dict[str, Any]]:
         """Mennyiért adják máshol: a keresőszó találatai a gyors oldalakon (böngésző nélkül), az oldalak egyszerre (a
-        letöltő oldalanként egy kérést enged, a szünetekkel)."""
+        letöltő oldalanként egy kérést enged, a szünetekkel). A figyelő keretéből megy (mindkét oldalon): ha nincs hely
+        (vagy Szünet van), Deferred (a hirdetés vár)."""
+        self._go()
+        if not self._reserve(list(self.platforms)):
+            raise Deferred("kéréskeret")
+
         def one(site: str, platform: Platform) -> list[dict[str, Any]]:
             try:
                 rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site, self._check)

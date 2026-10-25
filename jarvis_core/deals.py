@@ -61,7 +61,8 @@ from .feeds import FeedError, chosen_sort, fetch_image
 from .listings import BLOCKED, GONE, SOLD, classify
 from .llm import background_calls
 from .journal import Journal, day_of
-from .pricebook import SOLD_MIN, PriceBook, fake_prone, is_capacity, pace, sizes_of, speed_text, usable
+from .pricebook import (SOLD_MIN, PriceBook, fake_prone, implied_size, is_capacity, pace, size_conflict, sized, sizes_of,
+                        speed_text, usable)
 from .replay import norm_text
 from .selling import (_PARTS_RE, _SALE_RE, _SWAP_RE, _WANTED_RE, ON_SITE, Item, ItemError, Platform, _shared, _tokens,
                       format_price, listing_key, parse_price, prefilter, price_stats, round_price, vision_jpeg)
@@ -738,6 +739,11 @@ class ModelLane:
         return self._thread.is_alive()
 
 
+class Deferred(Exception):
+    """Az értékelés most nem folytatható (Szünet, vagy elfogyott az azonnali figyelő kéréskerete): a még le nem zárt
+    hirdetések megmaradnak, és később újra sorra kerülnek (appraise)."""
+
+
 class _Round:
     """Egy kör állapota: a böngésző szálán sorra kerülő lépések (work), a modell-sor, a keret (hány hirdetés oldalát
     nyithatja meg, hányszor kérdezheti a modellt), és az összefoglaló."""
@@ -760,6 +766,7 @@ class _Round:
         self.pool: ThreadPoolExecutor | None = None
         self.prefetch: dict[str, Future] = {}
         self.fast = 0                          # ennyi oldal jött böngésző nélkül
+        self.tips: list[str] = []              # az ebben a körben ellenőrzött „Érdemes megnézni” tippek (_step_tips)
 
     def fetch_ahead(self, fetcher: Any, url: str, platform: str) -> None:
         """Egy gyors oldal letöltése a háttérben (ha még nem indult el, és az oldal most így olvasható)."""
@@ -793,6 +800,7 @@ class _Round:
 
 
 _SIZE_GAP = re.compile(r"(?<=\d)\s+(?=(?:gb|tb)\b)", re.IGNORECASE)
+_RAM_WORD = ("ram", "memori", "memory", "vram")   # egy méret fajtája („16GB RAM”): a keresésben nem kötelező szó
 
 
 def _joined_sizes(text: str) -> str:
@@ -820,19 +828,20 @@ def _split_size(key: str) -> tuple[str, str]:
 def matches_query(query: str, text: str, strict_size: bool = False) -> bool:
     """A hirdetés tényleg a keresett dolog-e: a keresés minden szava (vagy a rokon szava, SYNONYMS) benne van; négy
     szónál hosszabb keresésnél egy hiányozhat, de a kapacitás nem: ha a keresésben van (500GB, 1TB), és a hirdetésben
-    más szerepel, az más termék (más ár). strict_size (az árösszehasonlításhoz): a keresett kapacitásnak benne is kell
-    lennie a hirdetésben (a kapacitás nélküli hirdetés is lehet más változat). Így a „PS5 kontroller” keresésre a
-    PS5-játék nem jelölt, és egy 500 GB-os SSD ára nem az 1 TB-osokéból jön."""
+    más szerepel, az más termék (más ár). A RAM és a tárhely külön számít (size_conflict): az „iPhone 13 128GB”
+    keresésre a „128GB, 4GB RAM” hirdetés is jó. strict_size (az árösszehasonlításhoz): a keresett kapacitásnak benne
+    is kell lennie a hirdetésben (a kapacitás nélküli hirdetés is lehet más változat). Így a „PS5 kontroller” keresésre
+    a PS5-játék nem jelölt, és egy 500 GB-os SSD ára nem az 1 TB-osokéból jön."""
     query, text = _joined_sizes(query), _joined_sizes(text)
     wanted = _tokens(query)
     have = _tokens(text)
     if not wanted:
         return True
-    want_sizes = sizes_of(query)
+    want_sizes = sized(query)
     if want_sizes:
-        has_sizes = sizes_of(text)
-        if has_sizes - want_sizes or (strict_size and not want_sizes <= has_sizes):
-            return False
+        if size_conflict(want_sizes, sized(text), strict_size):
+            return False                       # más kapacitás (a RAM és a tárhely külön számít, lásd size_conflict)
+        wanted = {w for w in wanted if not w.startswith(_RAM_WORD)} or wanted   # a „RAM” csak a méretet írja le
     hits = sum(1 for word in wanted if _shared({word, *SYNONYMS.get(word, ())}, have))
     if hits < (len(wanted) if len(wanted) <= 4 else len(wanted) - 1):
         return False
@@ -1036,6 +1045,7 @@ class DealHunter:
         self._haggle_queue: list[dict[str, Any]] = []   # a legutóbbi átnézés legjobb alkuképes hirdetései (_step_haggle)
         self._tallied: set[tuple[str, str]] = set()      # ma már beszámolt (szám, hirdetés) párok (tally)
         self._tip_notices: list[tuple[tuple, dict]] = []   # a kiküldendő „Érdemes megnézni” értesítések (flush_tips)
+        self._tips_busy: set[str] = set()     # az épp ellenőrzött tippek (egyszerre csak az egyik sor nézi)
         self._lock = threading.RLock()
         self._data = self._load()
 
@@ -1812,6 +1822,7 @@ class DealHunter:
                 game.pool.shutdown(wait=False, cancel_futures=True)
             self.book.save()
             self.flush_tips(notify)
+            self._release_tips(game)
         if browse:
             return self._after_browse(game)
         extra = [n for n in game.notes if n] + game.errors
@@ -2007,7 +2018,7 @@ class DealHunter:
         found = self.book.key(str(extra.get("product") or "")) or self.book.key(row.get("title") or row["text"]) or \
             self.book.key(search["query"])
         if found:
-            deal["product_key"] = found[0]
+            deal["product_key"] = self.book.canon(found[0])   # az elrejtés és a vétel ehhez a termékhez számít
             speed = self.book.speed(found[0])
             deal.update(speed=speed_text(speed), pace=pace(speed))
         if "spread" not in deal and search.get("basis"):     # a felmért keresésnél a felméréskori negyedek
@@ -2202,24 +2213,25 @@ class DealHunter:
         self._set(search["id"], market=market)
 
     def _candidate(self, game: _Round, search: dict[str, Any], deal: dict[str, Any],
-                   page: dict[str, Any] | None = None) -> None:
+                   page: dict[str, Any] | None = None, done: Callable[[], None] | None = None) -> None:
         """Egy jelölt: a hirdetés oldala (modell nélkül, a böngésző szálán; ha már megnyitottuk, page), majd egy rövid
         modellkérdés a modell-sorban. Ha a kör keretébe már nem fér bele, nem jegyzi látottnak: a következő körben
-        újra jelölt."""
+        újra jelölt. done: ha az ellenőrzés lezárult (találat, vagy kiderült, hogy nem az), ez jön (a tippeknél)."""
+        finish = done or (lambda: None)
         self._lane_count(deal.get("lane"), "candidates")
         self.tally("candidates", [deal])
         if why := self._suspect(deal):
             deal["suspect"] = why
             self._suspicious(deal)             # gyanúsan olcsó: az oldalát sem nyitja meg
-            return
+            return finish()
         if self._risky(deal):
-            return
+            return finish()
         if game.blocked and page is None:
             deal.setdefault("warnings", []).append("a hirdetés oldalát nem néztem meg (robot-ellenőrzés)")
         else:
             if page is None:
                 if game.pages <= 0:
-                    return
+                    return                     # a kör keretébe már nem fér: nem zárult le
                 game.pages -= 1
                 game.loaded += 1
             verdict = self._inspect(deal, page, game)
@@ -2227,34 +2239,36 @@ class DealHunter:
                 game.blocked = True            # ebben a körben több hirdetést nem nyit meg
             elif verdict == "gyanús":
                 self._suspicious(deal)
-                return
+                return finish()
             elif verdict:
                 self._mark(deal)               # elkelt vagy hibás: nem szól róla
                 self.tally("gone" if verdict == "elkelt" else "defect", [deal])
-                return
+                return finish()
         if game.lane is None:
-            self._conclude(game, search, deal, None)
+            self._conclude(game, search, deal, None, done=done)
             return
         if game.checks <= 0:
-            return
+            return                             # a modellkérdés keretébe már nem fér: nem zárult le
         game.checks -= 1
-        game.ask(partial(self._confirm, search, deal), partial(self._conclude, game, search, deal))
+        game.ask(partial(self._confirm, search, deal), partial(self._conclude, game, search, deal, done=done))
 
-    def _conclude(self, game: _Round, search: dict[str, Any], deal: dict[str, Any], ok: bool | None) -> None:
+    def _conclude(self, game: _Round, search: dict[str, Any], deal: dict[str, Any], ok: bool | None,
+                  done: Callable[[], None] | None = None) -> None:
         """A modell válasza után (a böngésző szálán): ha nem mondott nemet, szól róla (kivéve, ha az ilyen terméket
-        többször elrejtetted: arról egy ideig nem szól). A naplóba is beírja."""
+        többször elrejtetted: arról egy ideig nem szól). A naplóba is beírja. done: lásd _candidate."""
+        finish = done or (lambda: None)
         if ok is False:
             if deal.get("suspect"):
                 self._suspicious(deal)
             else:
                 self._mark(deal)
                 self.tally("model_no", [deal])
-            return
+            return finish()
         self._mark(deal)
         if self._muted(deal.get("product_key"), self.clock()):
             game.notes.append(f"„{deal['text'][:40]}”: az ilyet elrejtetted, nem szóltam")
             self.tally("muted", [deal])
-            return
+            return finish()
         game.found += 1
         self.tally("found", [deal])
         self._lane_count(deal.get("lane"), "deals")
@@ -2272,6 +2286,7 @@ class DealHunter:
         title = f"Licit: {deal['text'][:60]}" if deal.get("auction") else f"Olcsó: {deal['text'][:60]}"
         game.notify("deal", title, self._deal_text(search, deal), url=deal["url"], actions=actions, deal=deal["id"],
                     urgent=True)
+        finish()
 
     # --- Felfedező: figyelt oldalak, keresőszó nélkül (és a Vatera-licitek) ---
 
@@ -2433,8 +2448,8 @@ class DealHunter:
         márka, a kártyagyártó típusneve, a sorozatnév nem számít: „MSI GTX 1080 OC” = „Gigabyte GTX 1080 G1”); ha a
         névből nincs kulcs, aminek a szavaira illik (matches_query). A kapacitások nem keverednek: a változatok (8/16
         GB, 500 GB/1 TB) külön számítanak; ha a névben nincs kapacitás, a legolcsóbb (legalább MARKET_GROUP_MIN árral)
-        dönt, így egy ismeretlen kapacitású hirdetés nem látszik olcsónak a drágább változathoz mérve. Ha csak egy
-        kapacitás-változat van (a GTX 1080 mind 8 GB-os), a kapacitás nélküli címek is ahhoz számítanak."""
+        dönt, így egy ismeretlen kapacitású hirdetés nem látszik olcsónak a drágább változathoz mérve. Ha a típus csak
+        egy kapacitással készült (a GTX 1080 mind 8 GB-os: implied_size), a kapacitás nélküli címek is ahhoz számítanak."""
         product = self.book.key(query)
         groups: dict[str, dict[str, tuple[Any, ...]]] = {}
 
@@ -2459,9 +2474,9 @@ class DealHunter:
                 else:
                     continue
                 put(size, found["url"], (int(found["price"]), str(found.get("platform") or "")))
-            sized = [size for size in groups if size]
-            if "" in groups and len(sized) == 1 and (not want or sized == [want]):
-                groups[sized[0]].update(groups.pop(""))      # egy változat: a kapacitás nélküliek is az
+            implied = implied_size(base)
+            if implied and "" in groups:       # a típus csak egy kapacitással készült: a kapacitás nélküliek is az
+                groups.setdefault(implied, {}).update(groups.pop(""))
             if want:
                 groups = {want: groups.get(want, {})}
         else:
@@ -2556,35 +2571,55 @@ class DealHunter:
 
     def _step_tips(self, game: _Round) -> None:
         """A tippek újra felmérése az árbázisból (letöltés nélkül): ha közben elég hasonló ár gyűlt össze (sure_price),
-        és még mindig megéri, rendes jelölt lesz belőle (_candidate); ha már nem éri meg, lekerül. A TIP_DAYS napnál
-        régebbiek és a már megtalált hirdetések lekerülnek. A gyors sor (böngésző nélkül) csak a gyors oldalakét nézi."""
+        és még mindig megéri, rendes jelölt lesz belőle (_candidate). A tipp csak akkor kerül le, ha az ellenőrzése
+        lezárult (találat, vagy kiderült, hogy elkelt, hibás, gyanús, nem éri meg): ha a körben elfogyott a keret, vagy
+        az ellenőrzés félbemaradt, a listán marad, és a következő kör újra megpróbálja. A TIP_DAYS napnál régebbiek és a
+        már megtalált hirdetések lekerülnek. A gyors sor (böngésző nélkül) csak a gyors oldalakét nézi; amit egy másik
+        sor épp ellenőriz, azt kihagyja."""
         now = self.clock()
         with self._lock:
-            tips, known = list(self._data["tips"]), self._deal_keys()
-        keep, promote, drop = [], [], set()
+            tips, known, busy = list(self._data["tips"]), self._deal_keys(), set(self._tips_busy)
+        promote, drop = [], set()
         for tip in tips:
             if now - float(tip.get("at") or 0) > TIP_DAYS * 86400 or listing_key(tip["url"]) in known:
                 drop.add(tip["id"])
                 continue
-            if game.no_browser and not (self.fetcher is not None and self.fetcher.usable(tip.get("platform") or "")):
+            if tip["id"] in busy or (game.no_browser and not (self.fetcher is not None
+                                                              and self.fetcher.usable(tip.get("platform") or ""))):
                 continue
             reference = self.book.reference(tip["key"], exclude=tip["url"]) if tip.get("key") else None
             if reference is None or not sure_price(reference):
                 continue
-            drop.add(tip["id"])                  # biztos lett az ára: vagy jelölt, vagy már nem éri meg
             row = {"site": tip["site"], "platform": tip["platform"], "text": tip["title"], "title": tip["title"],
                    "price": int(tip["price"]), "url": tip["url"]}
             watch = {"id": tip.get("watch") or "tipp", "name": "Érdemes megnézni (most már biztos az ára)",
                      "min_profit": int(tip.get("min_profit") or WATCH_PROFIT)}
             deal = self._explore_deal(watch, row, {**reference, "name": tip["query"]})
-            if deal is not None:
-                promote.append((watch, tip["query"], deal))
-        if drop:
-            with self._lock:
+            if deal is None:
+                drop.add(tip["id"])              # biztos lett az ára, és már nem éri meg: lezárva (letöltés nélkül)
+            else:
+                promote.append((tip["id"], watch, tip["query"], deal))
+        with self._lock:
+            if drop:
                 self._data["tips"] = [t for t in self._data["tips"] if t.get("id") not in drop]
                 self._save()
-        game.next([partial(self._candidate, game, {"id": watch["id"], "query": query}, deal)
-                   for watch, query, deal in promote])
+            self._tips_busy.update(tip_id for tip_id, _w, _q, _d in promote)
+        game.tips += [tip_id for tip_id, _w, _q, _d in promote]
+        game.next([partial(self._candidate, game, {"id": watch["id"], "query": query}, deal,
+                           done=partial(self._drop_tip, tip_id)) for tip_id, watch, query, deal in promote])
+
+    def _drop_tip(self, tip_id: str) -> None:
+        """A tipp ellenőrzése lezárult (_candidate): lekerül a listáról."""
+        with self._lock:
+            self._data["tips"] = [t for t in self._data["tips"] if t.get("id") != tip_id]
+            self._tips_busy.discard(tip_id)
+            self._save()
+
+    def _release_tips(self, game: _Round) -> None:
+        """A kör végén: amit ez a kör ellenőrzött, de nem zárult le (keret, félbemaradt), azt a következő kör (akár a
+        másik sor) újra megpróbálhatja."""
+        with self._lock:
+            self._tips_busy.difference_update(game.tips)
 
     def _explore(self, batch: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str, bool]] | None:
         """Egy modellhívás: a hirdetések termékének neve (keresőszó), és melyik érhet meg egy viszonteladónak (buy)."""
@@ -3648,6 +3683,7 @@ class DealHunter:
             game.loop()
         finally:
             self.flush_tips(notify)
+            self._release_tips(game)
             if game.lane is not None:
                 game.lane.close()
             if self.clock() - self._book_saved >= BOOK_SAVE:
@@ -3989,7 +4025,7 @@ class DealHunter:
 
     def appraise(self, rows: list[dict[str, Any]], source: str, look: Callable[[dict[str, Any]], dict[str, Any] | None],
                  search: Callable[[str], list[dict[str, Any]]], can_ask: Callable[[], bool],
-                 found: Callable[[dict[str, Any]], None]) -> list[dict[str, Any]]:
+                 found: Callable[[dict[str, Any]], None], go: Callable[[], None] = lambda: None) -> list[dict[str, Any]]:
         """Az azonnali figyelő friss hirdetései: minél hamarabb kideríti, megéri-e megvenni, és csak a megérőkről szól
         (found, rögtön, ahogy egy kiderül). A gyorsabbtól a lassabbig:
         1. modell nélkül: egy felmért keresésed szokásos ára, vagy az árbázis a hirdetés címéből (quick_value); ha az
@@ -4002,13 +4038,34 @@ class DealHunter:
         A vételi limit fölötti és a nem eladási árú hirdetés (kereső, csere, alkatrész…) meg sem jön. Visszaadja, ami
         még sorra kerül: a modellre várókat (ha most nem lehet kérdezni, pl. épp beszélgetsz a Jarvisszal), és amit a
         mostani keretbe (EXPLORE_PICKS ár-ellenőrzés) már nem fért bele; ezek nem vesznek el, a hívó később újra adja
-        őket (a modell által már megnevezettek a nevükkel: named, így nem kell újra megnevezni)."""
+        őket (a modell által már megnevezettek a nevükkel: named, így nem kell újra megnevezni). go: minden hirdetés
+        letöltése, modellkérdése és a szólás előtt; Deferred-del jelzi, ha most meg kell állni (Szünet; a look és a
+        search is jelezheti, ha elfogyott a kéréskeret): ilyenkor a még le nem zárt hirdetések mind visszajönnek."""
         with self._lock:
             floor = int(self._data["browse"].get("min_profit") or WATCH_PROFIT)
             known = self._deal_keys()
-        unknown, skip, recheck, lots, named_before = [], [], [], [], []
+        done: set[int] = set()                 # a lezárt hirdetések (id): ezek nem jönnek vissza
+        names: dict[int, str] = {}             # amit a modell már megnevezett
+        try:
+            return self._appraise(rows, source, look, search, can_ask, found, go, floor, known, done, names)
+        except Deferred:
+            pending = []
+            for row in rows:
+                if id(row) in done or listing_key(row["url"]) in known:
+                    continue
+                name = names.get(id(row)) or row.get("named")
+                pending.append({**row, "named": name} if name else row)
+            return pending
+
+    def _appraise(self, rows: list[dict[str, Any]], source: str, look: Callable[[dict[str, Any]], dict[str, Any] | None],
+                  search: Callable[[str], list[dict[str, Any]]], can_ask: Callable[[], bool],
+                  found: Callable[[dict[str, Any]], None], go: Callable[[], None], floor: int, known: set[str],
+                  done: set[int], names: dict[int, str]) -> list[dict[str, Any]]:
+        """Az appraise lépései; amit lezár (látottnak jegyez, felmér, a csomagbontásnak ad), azt done-ba teszi."""
+        unknown, skip, recheck, lots, named_before, settle = [], [], [], [], [], []
         for row in rows:
             if listing_key(row["url"]) in known:
+                done.add(id(row))
                 continue                       # erről már szóltunk (pl. a böngészős kör)
             if not usable(row["text"]):
                 lots.append(row)               # a csomagot a csomagbontás méri fel (ha be van kapcsolva)
@@ -4021,7 +4078,7 @@ class DealHunter:
             if value is None:
                 (named_before if row.get("named") else unknown).append(row)
             elif value["cheap"] and value["sure"]:
-                self._settle(row, value, source, look, can_ask, found)
+                settle.append((row, value))
             elif value["cheap"]:                     # olcsónak látszik, de az ára nem elég biztos
                 recheck.append((row, self.book.query(row.get("title") or row["text"]) or value["name"]))
             else:
@@ -4030,27 +4087,39 @@ class DealHunter:
         other = self._to_bundles(lots, f"Azonnali figyelő: {source}")
         self.tally("other", other)
         self._mark(*skip, *other)
+        done.update(id(row) for row in (*skip, *lots))
+        for row, value in settle:              # a biztos árúak előbb (letöltés csak a hirdetés oldalához kell)
+            go()
+            self._settle(row, value, source, look, can_ask, found, go)
+            done.add(id(row))
         for row, name in recheck[:EXPLORE_PICKS]:
-            self._recheck(row, name, search, floor, source, look, can_ask, found)
+            go()
+            self._recheck(row, name, search, floor, source, look, can_ask, found, go)
+            done.add(id(row))
         later = [row for row, _name in recheck[EXPLORE_PICKS:]]   # a keretbe nem fért: a következő körben
         named: list[tuple[dict[str, Any], str, bool]] = [(row, str(row["named"]), True) for row in named_before]
+        names.update({id(row): str(row["named"]) for row in named_before})
         rest: list[dict[str, Any]] = []
         if unknown and self.llm is None:
             self._mark(*unknown)               # modell nélkül az ismeretlenről nem derül ki, mennyit ér
             self.tally("unknown", unknown)
+            done.update(id(row) for row in unknown)
         elif unknown and not can_ask():
             rest = unknown
         elif unknown:
+            go()
             answer = self._explore(unknown[:EXPLORE_ROWS])
             if answer is None:
                 rest = unknown                 # a modell nem válaszolt: később újra
             else:
                 rest = unknown[EXPLORE_ROWS:]
-                done = {id(row) for row, _q, _b in answer}
-                unnamed = [row for row in unknown[:EXPLORE_ROWS] if id(row) not in done]
+                answered = {id(row) for row, _q, _b in answer}
+                unnamed = [row for row in unknown[:EXPLORE_ROWS] if id(row) not in answered]
                 self._mark(*unnamed)
                 self.tally("unknown", unnamed)
+                done.update(id(row) for row in unnamed)
                 named += answer
+                names.update({id(row): query for row, query, _b in answer})
         if not named:
             return rest + later
         priced: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -4071,20 +4140,24 @@ class DealHunter:
                 elsewhere.append((row, query, buy or value is not None))
         for row, value in priced:              # a biztos árúak előbb (ezekhez nem kell letöltés)
             if value["cheap"]:
-                self._settle(row, value, source, look, can_ask, found)
+                go()
+                self._settle(row, value, source, look, can_ask, found, go)
             else:
                 self._mark(row)
                 self.tally("not_cheap", [row])
+            done.add(id(row))
         # amennyiért máshol adják (a modell szerint megérők elöl, legfeljebb EXPLORE_PICKS)
         elsewhere.sort(key=lambda entry: not entry[2])
         for row, query, _buy in elsewhere[:EXPLORE_PICKS]:
-            self._recheck(row, query, search, floor, source, look, can_ask, found)
+            go()
+            self._recheck(row, query, search, floor, source, look, can_ask, found, go)
+            done.add(id(row))
         later += [{**row, "named": query} for row, query, _buy in elsewhere[EXPLORE_PICKS:]]
         return rest + later
 
     def _recheck(self, row: dict[str, Any], query: str, search: Callable[[str], list[dict[str, Any]]], floor: int,
                  source: str, look: Callable[[dict[str, Any]], dict[str, Any] | None], can_ask: Callable[[], bool],
-                 found: Callable[[dict[str, Any]], None]) -> None:
+                 found: Callable[[dict[str, Any]], None], go: Callable[[], None] = lambda: None) -> None:
         """Mennyiért adják máshol: a keresőszó találatai a többi oldalon (search; az árbázisba is bekerülnek), az
         árbázis áraival együtt (_market_of). Ha így elég biztos az ár, és jóval olcsóbb, a végső ellenőrzés jön
         (_settle); ha nem elég biztos, nem szól róla."""
@@ -4102,13 +4175,14 @@ class DealHunter:
         elif not value["sure"]:
             self._unsure(row, query, market_now)
         else:
-            self._settle(row, value, source, look, can_ask, found)
+            self._settle(row, value, source, look, can_ask, found, go)
 
     def _settle(self, row: dict[str, Any], value: dict[str, Any], source: str,
                 look: Callable[[dict[str, Any]], dict[str, Any] | None], can_ask: Callable[[], bool],
-                found: Callable[[dict[str, Any]], None]) -> None:
+                found: Callable[[dict[str, Any]], None], go: Callable[[], None] = lambda: None) -> None:
         """Egy megérő friss hirdetés végső ellenőrzése: az oldala (elkelt, hibás, gyanús?), az elrejtett termékek, és egy
-        rövid modellkérdés (ha most lehet). Ha átment, a találatok közé kerül (Megvettem gomb), és found(találat)."""
+        rövid modellkérdés (ha most lehet). Ha átment, a találatok közé kerül (Megvettem gomb), és found(találat). go:
+        a modellkérdés és a szólás előtt (Szünetben Deferred: a hirdetés megmarad, később újra sorra kerül)."""
         probe = {"id": value.get("search") or "azonnali", "query": value["name"]}
         deal = self._deal(probe, row, int(value["reference"]), explore=source, similar=value.get("n"), quick=True,
                           product=value["name"], low=value.get("low"), sites=self._site_names(value.get("sites")) or None,
@@ -4134,6 +4208,7 @@ class DealHunter:
             self._mark(deal)
             self.tally({"elkelt": "gone", "hibás": "defect"}.get(verdict, "muted"), [deal])
             return
+        go()
         if self.llm is not None and can_ask() and self._confirm(probe, deal) is False:
             if deal.get("suspect"):
                 self._suspicious(deal)
@@ -4141,6 +4216,7 @@ class DealHunter:
                 self._mark(deal)
                 self.tally("model_no", [deal])
             return
+        go()
         self._mark(deal)
         self.tally("found", [deal])
         self._remember(deal)

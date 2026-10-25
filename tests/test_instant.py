@@ -648,6 +648,103 @@ class InstantTests(InstantCase):
         self.fetcher.hourly = ROUND_RESERVE + 10
         self.assertEqual(self.watch.tick(), 1)
 
+    def test_the_evaluation_also_keeps_the_rounds_reserve(self):
+        """A figyelőből induló minden kérés (a hirdetés oldala, az árkeresés is) a figyelő keretéből megy: ha elfogyott
+        (ROUND_RESERVE mindig a köröké), az értékelés vár, a hirdetés megmarad, és a keret felszabadulása után jön (eddig
+        az értékelő a köröknek fenntartott kérésekből is elvett)."""
+        from jarvis_core.instant import ROUND_RESERVE
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:2])
+        self.net.pages["_7/friss"] = page_html("Hibátlan.")
+        used = int(self.fetcher.status()["hardverapro"]["last_hour"])
+        self.fetcher.hourly = used + 1 + ROUND_RESERVE       # a figyelőnek már csak egy kérése maradt: a letöltés
+        self.assertEqual(self.watch.tick(), 1)
+        self.assertEqual(int(self.fetcher.status()["hardverapro"]["last_hour"]), used + 1, "a köröké nem fogyott")
+        self.assertEqual((self.notices, self.watch.state()["waiting"]), ([], 1), "a hirdetés vár")
+        self.watch.tick()
+        self.assertEqual(self.notices, [], "amíg nincs hely, nem próbálja újra")
+        self.fetcher.hourly = 200
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual"], "a keret után jön")
+
+    def test_a_full_page_waiting_for_the_model_is_not_lost(self):
+        """Ha a modell épp nem kérdezhető (pl. beszélgetsz a Jarvisszal), egy teljes oldal (100) új hirdetés mind
+        megvárja (eddig a várakozók listája 60-nál levágta a többit, és azok látottként elvesztek). Ami túl sokáig vár
+        (WAIT_MAX), azt a figyelő elfelejti, így ha még fent van, a következő letöltésnél újra jön."""
+        from jarvis_core.instant import WAIT_MAX
+        self.watch.add("https://hardverapro.hu/aprok/hardver/videokartya/index.html")
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi kártya", "1 000 Ft")], "videokartya/index.html")
+        self.watch.tick()
+        self.later()
+        cards = [ha_card(300 + n, f"Videókártya {n}", f"{20 + n} 000 Ft") for n in range(100)]
+        self.results(cards, "videokartya/index.html")
+        ready, appraised = {"ok": False}, []
+
+        def appraise(rows, *args, **kwargs):
+            if not ready["ok"]:
+                return list(rows)              # mind a modellre vár
+            appraised.extend(row["url"] for row in rows)
+            return []
+
+        self.hunter.appraise = appraise
+        self.watch.model_ok = lambda: ready["ok"]
+        self.watch.tick()
+        self.assertEqual(self.watch.state()["waiting"], 100)
+        ready["ok"] = True
+        self.watch.tick()
+        self.assertEqual(len(set(appraised)), 100, "mind sorra került")
+        appraised.clear()
+        ready["ok"] = False
+        self.later()
+        more = [ha_card(500 + n, f"Új kártya {n}", "30 000 Ft") for n in range(5)]
+        self.results(more + cards, "videokartya/index.html")
+        self.watch.tick()
+        self.assertEqual(self.watch.state()["waiting"], 5)
+        self.clock.now += WAIT_MAX + 60
+        ready["ok"] = True
+        self.watch.tick()
+        self.assertEqual(sorted({u.split("/")[-2] for u in appraised}), sorted(f"új_kártya_{n}_{500 + n}" for n in range(5)),
+                         "a túl sokáig várók a következő letöltésnél újra jöttek")
+
+    def test_a_pause_stops_the_batch_too(self):
+        """A Szünet egy köteg közben is megállítja az értékelést: ami még nem került sorra, megmarad, és a folytatáskor
+        jön (eddig a köteg végéig ment: letöltött, kérdezte a modellt, szólt)."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        cheap = [ha_card(70 + n, f"Palit RTX 3060 Ti Dual {n}", f"{50 + n} 000 Ft") for n in range(3)]
+        self.results(cheap + HA_CARDS[:2])
+        for n in range(3):
+            self.net.pages[f"_{70 + n}/friss"] = page_html("Hibátlan.")
+        state = {"ok": True}
+        self.watch.allowed = lambda: state["ok"]
+
+        def notify(kind, title, text, **extra):
+            self.notices.append((kind, title, text, extra))
+            state["ok"] = False                # az első találat után Szünet
+
+        self.watch.notify = notify
+        self.watch.tick()
+        self.assertEqual(len(self.notices), 1, "a Szünet után nem folytatta")
+        self.assertEqual(self.watch.state()["waiting"], 2, "a többi megmaradt")
+        self.watch.tick()
+        self.assertEqual(len(self.notices), 1, "Szünet alatt semmi")
+        state["ok"] = True
+        self.watch.notify = lambda kind, title, text, **extra: self.notices.append((kind, title, text, extra))
+        self.watch.tick()
+        self.assertEqual(len(self.notices), 3, "a folytatáskor jött a többi")
+
     def test_the_whole_page_is_read(self):
         """A Hardverapró egy oldalon 100 hirdetést mutat (az elején többnyire fizetett kiemelésekkel): az egész oldalt nézi,
         nem csak az elejét; egy új hirdetés a 80. helyen is sorra kerül (eddig csak az első 30 számított)."""

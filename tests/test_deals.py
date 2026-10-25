@@ -12,6 +12,7 @@ import unittest
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_offline import make_cfg  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
+from jarvis_core import deals as deals_module  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
 from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, assess, careful_low,  # noqa: E402
                                expected_profit, explore_top, highest_ok, last_chance, left_text, market, matches_query,
@@ -731,6 +733,28 @@ class ExploreTests(HunterCase):
         [tip] = other.state()["tips"]
         self.assertEqual(other.dismiss_tip(tip["id"])["tips"], [])
 
+    def test_a_tip_waits_when_the_round_has_no_page_left(self):
+        """Ha egy tipp ára közben biztos lett, de a körben már nem nyitható meg több hirdetés (elfogyott a keret), a
+        tipp nem vész el: a listán marad, és a következő körben kerül sorra (eddig törlődött, és többé nem jött elő)."""
+        self.browser.results = []
+        self.browser.by_url = [("videokartya", PAGE)]
+        self.hunter = self.make("keret")
+        self.hunter.book.add([{**r, "platform": "hardverapro"} for r in NORMAL[:4]])
+        self.hunter.add_watch(CATEGORY)
+        self.hunter.set_enabled(True)
+        self.hunter.run(notify=self.notify)
+        self.notices.clear()
+        self.hunter.book.add([{**r, "platform": "jofogas"} for r in RTX_JOFOGAS])
+        self.clock.now += 3600
+        with mock.patch.object(deals_module, "MAX_PAGES", 0):
+            self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual(self.notices, [])
+        self.assertEqual(len(self.hunter.state()["tips"]), 1, "megmaradt, a következő körben jön")
+        self.clock.now += 3600
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"])
+        self.assertEqual(self.hunter.state()["tips"], [], "az ellenőrzés lezárult: lekerült")
+
     def test_profit_counts_with_a_careful_sale_price(self):
         """A haszon óvatos: a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede (ha szórnak az árak, a vevő az
         olcsóbbakat találja meg előbb). Biztos ár: legalább 5 hasonló, két oldalról (vagy egy oldalról legalább 10)."""
@@ -969,9 +993,10 @@ class PriceBookTests(unittest.TestCase):
         book.save()
         self.assertEqual(json.loads((root / "arbazis.json").read_text(encoding="utf-8"))["kv"], 2)
 
-    def test_a_single_capacity_is_implied(self):
-        """Ha egy termékből csak egy kapacitás-változatot ismerünk (a GTX 1080 mind 8 GB-os), a kapacitás nélküli címek
-        is ahhoz számítanak; ha több van (8 és 16 GB), nem keverednek."""
+    def test_a_single_capacity_only_for_known_models(self):
+        """A kapacitás nélküli címek csak az ismerten egyetlen kapacitással gyártott típusnál (a GTX 1080 mind 8 GB-os)
+        számítanak a változathoz. Az árbázis tartalma ezt nem bizonyítja: az RTX 5060 Ti 8 és 16 GB-os is, így ott hat
+        kapacitás nélküli hirdetésből nem lehet egy 8 GB-os kártya „biztos” ára (eddig 180 200 Ft lett belőle)."""
         book = PriceBook(Path(self.tmp.name), clock=self.clock)
         book.add([{"text": f"GTX 1080 {'8GB' if n < 2 else 'Gaming X'}", "price": 60000 + n * 1000,
                    "url": f"https://hardverapro.hu/apro/g{n}.html", "platform": "hardverapro"} for n in range(6)])
@@ -979,8 +1004,12 @@ class PriceBookTests(unittest.TestCase):
         self.assertEqual(book.reference("1080 gtx")["n"], 6)
         book.add([{"text": "GTX 1080 16GB", "price": 90000, "url": f"https://hardverapro.hu/apro/h{n}.html",
                    "platform": "hardverapro"} for n in range(5)])
-        self.assertEqual(book.reference("1080 8gb gtx"), None, "csak 2 biztos 8 GB-os ár van")
-        self.assertEqual(book.reference("1080 16gb gtx")["n"], 5)
+        self.assertEqual(book.reference("1080 8gb gtx")["n"], 6, "a GTX 1080 nem létezik 16 GB-tal: az zaj")
+        book.add([{"text": "RTX 5060 Ti", "price": 180000 + n * 100, "url": f"https://hardverapro.hu/apro/r{n}.html",
+                   "platform": "hardverapro"} for n in range(6)])
+        book.add([{"text": "RTX 5060 Ti 8GB", "price": 120000, "url": "https://hardverapro.hu/apro/r8.html",
+                   "platform": "hardverapro"}])
+        self.assertIsNone(book.reference("5060 8gb rtx ti"), "egyetlen 8 GB-os ár van: nincs szokásos ár")
 
     def test_product_keys_from_titles(self):
         cases = {
@@ -1528,6 +1557,15 @@ class ComparableTests(HunterCase):
         self.assertEqual(self.hunter._market_of(row, "Intel Core i5-10400F", cpus)["n"], 5)
         self.assertEqual(self.hunter._probe_text("Intel Core i5-10400F"), "i5-10400F")
 
+    def test_capacity_less_listings_are_not_an_8gb_card(self):
+        """Egy 8 GB-os RTX 5060 Ti-hoz a kapacitás nélküli hirdetések nem hasonlók (lehetnek 16 GB-osak is)."""
+        rows = [{**listing(95 + n, f"RTX 5060 Ti {name}", 180000 + n * 100), "platform": "hardverapro"}
+                for n, name in enumerate(("Dual", "Ventus", "Eagle", "Gaming", "Windforce", "Prime"))]
+        rows.append({**listing(101, "RTX 5060 Ti 8GB Twin", 120000), "platform": "hardverapro"})
+        row = {"text": "RTX 5060 Ti 8GB", "price": 110000, "url": "https://hardverapro.hu/apro/5060/1.html"}
+        found = self.hunter._market_of(row, "RTX 5060 Ti 8GB", rows)
+        self.assertTrue(found is None or found["n"] == 1, "csak az egy 8 GB-os számít")
+
 
 class NewestTests(HunterCase):
     """A legújabb hirdetések elöl: a Vinted, a Jófogás és a Vatera címében (NEWEST), ha nincs benne más rendezés."""
@@ -1554,6 +1592,27 @@ class NewestTests(HunterCase):
         watches = self.hunter.add_watch("https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html")["watches"]
         self.assertEqual(watches[-1]["url"], "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html",
                          "a Vaterán a te rendezésed (a licitekhez a „hamarosan lejár” a jó)")
+
+
+class SizeKindTests(unittest.TestCase):
+    def test_ram_and_storage_are_told_apart(self):
+        """A RAM és a tárhely nem keveredik a szűrésnél: ami a hirdetésben RAM-ként szerepel („4GB RAM”, „GDDR7”), az
+        nem egy másik tárhely-változat (eddig kizárta az „iPhone 13 128GB” keresésből), és egy címben két méretnél
+        („8GB 256GB”) a kisebb a RAM. Ami azonos fajtájú és más, az más termék."""
+        self.assertTrue(matches_query("iPhone 13 128GB", "iPhone 13 128GB, 4GB RAM, kártyafüggetlen"))
+        self.assertTrue(matches_query("MacBook Air M1 256GB", "MacBook Air M1 8GB RAM 256GB SSD"))
+        self.assertTrue(matches_query("Galaxy S21 8GB RAM 128GB", "Samsung Galaxy S21 128GB 8GB"))
+        self.assertTrue(matches_query("Kingston Fury 16GB RAM", "Kingston Fury Beast 16GB DDR4 3200"),
+                        "a „RAM” szó csak a méretet írja le: nem kell a hirdetésbe")
+        self.assertFalse(matches_query("Kingston Fury 16GB DDR5", "Kingston Fury Beast 16GB DDR4 3200"), "más típus")
+        self.assertTrue(matches_query("MacBook Air M1 8GB 256GB", "MacBook Air M1 RAM: 8GB, SSD: 256GB"))
+        self.assertFalse(matches_query("MacBook Air M1 8GB 256GB", "MacBook Air M1 16GB RAM 256GB SSD"), "más RAM")
+        self.assertFalse(matches_query("MacBook Air M1 8GB 256GB", "MacBook Air M1 8GB 512GB"), "más tárhely")
+        self.assertFalse(matches_query("RTX 5060 Ti 8GB", "RTX 5060 Ti 16GB GDDR7"), "más memória")
+        self.assertFalse(matches_query("iPhone 13 128GB", "iPhone 13 256GB, 4GB RAM"), "más tárhely")
+        self.assertFalse(matches_query("Samsung 970 EVO Plus 500GB", "Samsung 970 EVO Plus 1TB"))
+        self.assertFalse(matches_query("iPhone 13 128GB", "iPhone 13 4GB RAM"),
+                         "a tárhely nélküli hirdetés nem biztos, hogy ez a változat")
 
 
 class MatchTests(unittest.TestCase):

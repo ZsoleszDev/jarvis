@@ -180,6 +180,84 @@ def sizes_of(text: str) -> set[str]:
     return set(capacities(_words(text)))
 
 
+# A kapacitás fajtája a mellette álló szóból: memória (RAM, a videókártyáé is) vagy tárhely.
+_RAM_WORDS = ("ram", "memori", "memory", "ddr", "lpddr", "gddr", "vram")
+_STORAGE_WORDS = ("ssd", "hdd", "nvme", "tarhel", "rom", "emmc", "storage", "hattertar", "sata")
+
+
+def _kind_of(word: str) -> str:
+    return "ram" if word.startswith(_RAM_WORDS) else "storage" if word.startswith(_STORAGE_WORDS) else ""
+
+
+def _gigabytes(size: str) -> int:
+    match = _CAPACITY.match(size)
+    return int(match.group(1)) * (1000 if match.group(2) == "tb" else 1) if match else 0
+
+
+def sized(text: str) -> list[tuple[str, str]]:
+    """A kapacitások a fajtájukkal: [(„16gb”, „ram” | „storage” | „”)]. A fajta a mellette álló szóból jön („16GB RAM”,
+    „512GB SSD”, „RAM: 8GB”, „12GB GDDR6”); ha egy címben két méret van, és csak az egyiknek tudni a fajtáját, a másik
+    a másik fajta, és ha egyikét sem, de nagyon különböznek („8GB 256GB”), a kisebb a RAM."""
+    words = _words(text)
+    out: list[tuple[str, str]] = []
+    for index, word in enumerate(words):
+        match = _CAPACITY.match(word)
+        span = 1
+        if match is None and word.isdigit() and len(word) <= 4 and index + 1 < len(words) \
+                and words[index + 1] in ("gb", "tb"):
+            match, span = _CAPACITY.match(word + words[index + 1]), 2
+        if match is None or int(match.group(1)) <= 0:
+            continue
+        size = capacities([match.group(0)])[0]
+        after = words[index + span] if index + span < len(words) else ""
+        before = words[index - 1] if index else ""
+        follows = index + span + 1 < len(words) and bool(_CAPACITY.match(words[index + span + 1])
+                                                         or words[index + span + 1].isdigit())
+        # „RAM: 16GB, SSD: 512GB”: az utána álló szó a következő méreté, ha utána egy újabb méret jön
+        kind = _kind_of(before) if _kind_of(before) and (not _kind_of(after) or follows) else _kind_of(after)
+        if all(size != known for known, _k in out):
+            out.append((size, kind))
+    if len(out) == 2:
+        (first, first_kind), (second, second_kind) = out
+        if first_kind and not second_kind:
+            out[1] = (second, "storage" if first_kind == "ram" else "ram")
+        elif second_kind and not first_kind:
+            out[0] = (first, "storage" if second_kind == "ram" else "ram")
+        elif not first_kind and not second_kind:
+            small, large = sorted(out, key=lambda entry: _gigabytes(entry[0]))
+            if _gigabytes(small[0]) <= 64 and _gigabytes(large[0]) >= 4 * _gigabytes(small[0]):
+                out = [(size, "ram" if size == small[0] else "storage") for size, _k in out]
+    return out
+
+
+def size_conflict(wanted: list[tuple[str, str]], have: list[tuple[str, str]], strict: bool = False) -> bool:
+    """Más változat-e a hirdetés a kapacitása szerint (sized): ugyanannak a fajtának (RAM, tárhely) más a mérete; egy
+    ismeretlen fajtájú méret, ami a másik oldalon nincs meg (és a fajtája a nagyságából sem válik el: legfeljebb 48 GB
+    inkább RAM, fölötte tárhely). A RAM tehát nem számít egy másik tárhely-változatnak. strict (az
+    árösszehasonlításhoz): a keresett minden méretnek benne is kell lennie a hirdetésben."""
+    def group(entries: list[tuple[str, str]]) -> dict[str, set[str]]:
+        out: dict[str, set[str]] = {"ram": set(), "storage": set(), "": set()}
+        for size, kind in entries:
+            out[kind].add(size)
+        return out
+
+    def guess(size: str) -> str:
+        return "ram" if _gigabytes(size) <= 48 else "storage"
+
+    want, got = group(wanted), group(have)
+    want_all, got_all = {s for s, _k in wanted}, {s for s, _k in have}
+    for kind in ("ram", "storage"):
+        if want[kind] and got[kind] and got[kind] - want[kind]:
+            return True
+    for size in got[""] - want_all:            # a hirdetés ismeretlen fajtájú mérete, ami a keresésben nincs
+        if want[""] or want[guess(size)]:
+            return True
+    for size in want[""] - got_all:            # a keresés ismeretlen fajtájú mérete, ami a hirdetésben nincs
+        if got[""] or got[guess(size)]:
+            return True
+    return strict and not want_all <= got_all
+
+
 def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> tuple[str, str] | None:
     """A termékkulcs egy hirdetés címéből: (kulcs, név). A kulcs a rendezett szavak (így a sorrend nem számít), a név
     ahogy a címben jönnek. Benne van a termékcsalád (vagy, ha nincs, a márka), a típusjel (szám vagy számot tartalmazó
@@ -245,6 +323,31 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
     if len(sizes) > 2:
         return None
     return " ".join(sorted(picked + sizes)), " ".join(picked + sizes)
+
+
+# Videókártyák, amelyek csak egy memóriamérettel készültek (a gyártói adatlapok szerint): ezeknél a kapacitás nélküli cím
+# („GTX 1080”) is ez a változat. Más terméknél az árbázis pillanatnyi tartalmából nem következik, hogy nincs más változat
+# (az RTX 5060 Ti 8 és 16 GB-os is), ezért ott a kapacitás nélküli címek nem számítanak egy változathoz (implied_size).
+_SINGLE_CAPACITY = (
+    ("GTX 970", "4gb"), ("GTX 980", "4gb"), ("GTX 980 Ti", "6gb"), ("GTX 1050 Ti", "4gb"), ("GTX 1070", "8gb"),
+    ("GTX 1070 Ti", "8gb"), ("GTX 1080", "8gb"), ("GTX 1080 Ti", "11gb"), ("GTX 1650", "4gb"), ("GTX 1650 Super", "4gb"),
+    ("GTX 1660", "6gb"), ("GTX 1660 Super", "6gb"), ("GTX 1660 Ti", "6gb"), ("RTX 2060 Super", "8gb"),
+    ("RTX 2070", "8gb"), ("RTX 2070 Super", "8gb"), ("RTX 2080", "8gb"), ("RTX 2080 Super", "8gb"),
+    ("RTX 2080 Ti", "11gb"), ("RTX 3060 Ti", "8gb"), ("RTX 3070", "8gb"), ("RTX 3070 Ti", "8gb"),
+    ("RTX 3080 Ti", "12gb"), ("RTX 3090", "24gb"), ("RTX 3090 Ti", "24gb"), ("RTX 4060", "8gb"), ("RTX 4070", "12gb"),
+    ("RTX 4070 Super", "12gb"), ("RTX 4070 Ti", "12gb"), ("RTX 4070 Ti Super", "16gb"), ("RTX 4080", "16gb"),
+    ("RTX 4080 Super", "16gb"), ("RTX 4090", "24gb"), ("RTX 5060", "8gb"), ("RTX 5070", "12gb"), ("RTX 5070 Ti", "16gb"),
+    ("RTX 5080", "16gb"), ("RTX 5090", "32gb"), ("RX 5700", "8gb"), ("RX 5700 XT", "8gb"), ("RX 6600", "8gb"),
+    ("RX 6600 XT", "8gb"), ("RX 6650 XT", "8gb"), ("RX 6700 XT", "12gb"), ("RX 6750 XT", "12gb"), ("RX 6800", "16gb"),
+    ("RX 6800 XT", "16gb"), ("RX 6900 XT", "16gb"), ("RX 6950 XT", "16gb"), ("RX 7600", "8gb"), ("RX 7700 XT", "12gb"),
+    ("RX 7800 XT", "16gb"), ("RX 7900 XT", "20gb"), ("RX 7900 XTX", "24gb"), ("RX 9070", "16gb"), ("RX 9070 XT", "16gb"))
+_IMPLIED = {product_key(name)[0]: size for name, size in _SINGLE_CAPACITY}
+
+
+def implied_size(key: str) -> str:
+    """Egy kapacitás nélküli termékkulcs egyetlen kapacitása, ha a típus csak azzal készült (_SINGLE_CAPACITY); üres,
+    ha nem tudni (akkor a kapacitás nélküli cím bármelyik változat lehet)."""
+    return _IMPLIED.get(key, "")
 
 
 # Ezek a szavak a modell által adott név elején sem márkák (nem tanulja meg őket).
@@ -405,30 +508,37 @@ class PriceBook:
         """A szokásos ár egy termékre (_reference). Ha a kulcsban nincs kapacitás (a címből nem derült ki, pl. „RTX 5060
         Ti”), de a terméknek vannak ilyen változatai („… 8gb”, „… 16gb”), óvatosan a legolcsóbb változat szokásos árával
         számol (a name és a key azé a változaté): így egy 8 GB-os kártya nem látszik olcsó 16 GB-osnak. Ha csak egy
-        kapacitás-változatot ismerünk (a GTX 1080 mind 8 GB-os), a kapacitás nélküli címek ugyanaz a termék (implied)."""
+        típus csak egy kapacitással készült (a GTX 1080 mind 8 GB-os: implied_size), a kapacitás nélküli címek is az; az
+        árbázis tartalmából ez nem következik (attól, hogy csak 8 GB-osat láttunk, lehet 16 GB-os is)."""
         base = " ".join(word for word in key.split() if not is_capacity(word))
+        implied = implied_size(base)
+        if base != key:                        # kapacitásos kulcs: a kapacitás nélküliek csak, ha a típus ilyen
+            size = " ".join(word for word in key.split() if is_capacity(word))
+            return self._reference(key, exclude, also=[base] if implied and implied == size else [])
+        if implied:
+            return self._reference(key, exclude, also=[" ".join(sorted(key.split() + [implied]))])
         sized = self.variants(base)
-        if base != key:                        # kapacitásos kulcs: ha nincs más változata, a kapacitás nélküliek is
-            return self._reference(key, exclude, also=[] if [v for v in sized if v != key] else [base])
-        if len(sized) == 1:
-            return self._reference(sized[0], exclude, also=[key])
         found = self._reference(key, exclude)
         if not sized:
             return found
         options = [option for option in [found, *(self._reference(v, exclude) for v in sized)] if option]
         return min(options, key=lambda option: option["price"]) if options else None
 
+    @staticmethod
+    def canon(key: str) -> str:
+        """Egy termék egy kulcsa: ha a típus csak egy kapacitással készült (implied_size), a kapacitás nélküli alak
+        („1080 8gb gtx” → „1080 gtx”), így az elrejtés és a vétel ugyanarra a termékre számít, akárhogy írták."""
+        base = " ".join(word for word in key.split() if not is_capacity(word))
+        size = " ".join(word for word in key.split() if is_capacity(word))
+        return base if size and implied_size(base) == size else key
+
     def family(self, key: str) -> list[tuple[str, str]]:
         """Egy termék és a kapacitás-változatai az árbázisban: [(kulcs, kapacitás)], a kapacitás nélkülié üres
-        kapacitással; ha csak egy változatot ismerünk, a kapacitás nélküli is ahhoz számít (implied, lásd reference)."""
+        kapacitással, vagy ha a típus csak egy kapacitással készült (implied_size), azzal."""
         base = " ".join(word for word in key.split() if not is_capacity(word))
-        sized = self.variants(base)
         with self._lock:
-            out = [(base, "")] if base in self._keys else []
-        out += [(v, " ".join(w for w in v.split() if is_capacity(w))) for v in sized]
-        if len(sized) == 1:
-            out = [(k, out[-1][1]) for k, _size in out]
-        return out
+            out = [(base, implied_size(base))] if base in self._keys else []
+        return out + [(v, " ".join(w for w in v.split() if is_capacity(w))) for v in self.variants(base)]
 
     def variants(self, key: str) -> list[str]:
         """A kapacitás nélküli kulcs változatai a kapacitással (az árbázisban lévők); egy kapacitásos kulcsnak nincs."""
