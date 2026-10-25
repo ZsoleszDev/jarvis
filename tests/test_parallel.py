@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -27,7 +28,7 @@ from jarvis_core.config import LlmCfg  # noqa: E402
 from jarvis_core.gui import EventBus, GuiUI  # noqa: E402
 from jarvis_core.llm import Cancelled, ModelGate, OllamaClient, background_calls, in_background  # noqa: E402
 from jarvis_core.memory import OllamaProcess  # noqa: E402
-from jarvis_core.ollama_log import server_parallel  # noqa: E402
+from jarvis_core.ollama_log import server_parallel, set_user_setting  # noqa: E402
 
 
 def wait_until(check, timeout: float = 5.0) -> bool:
@@ -152,11 +153,33 @@ class OllamaParallelTests(unittest.TestCase):
         self.assertEqual(server_parallel(OllamaProcess(), "2"), (2, ""), "ha a futó Ollama nem olvasható: a beállítás")
         self.assertEqual(server_parallel(OllamaProcess(), "kettő"), (1, ""))
 
+    def test_the_setting_is_stored_like_setx(self):
+        """Windows-on a felhasználói környezeti változók közé kerül (mint a setx): újraindítás után is megmarad."""
+        written: dict[str, str] = {}
+
+        class Key:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        winreg = types.SimpleNamespace(
+            HKEY_CURRENT_USER="HKCU", KEY_SET_VALUE=2, REG_SZ=1,
+            OpenKey=lambda root, path, reserved, access: Key() if (root, path) == ("HKCU", "Environment") else None,
+            SetValueEx=lambda key, name, reserved, kind, value: written.update({name: value}))
+        with mock.patch.object(sys, "platform", "win32"), mock.patch.dict(sys.modules, {"winreg": winreg}):
+            self.assertTrue(set_user_setting("OLLAMA_NUM_PARALLEL", "2"))
+        self.assertEqual(written, {"OLLAMA_NUM_PARALLEL": "2"})
+        with mock.patch.object(sys, "platform", "linux"):
+            self.assertFalse(set_user_setting("OLLAMA_NUM_PARALLEL", "2"), "máshol nem nyúl hozzá")
+
 
 class AppParallelTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = make_cfg(Path(self.tmp.name))
+        self.cfg.llm.parallel = 2               # a config.toml alapértéke (a make_cfg egyre veszi)
         self.ui = RecordingUI()
         self.app = JarvisApp(self.cfg, self.ui)
 
@@ -173,7 +196,8 @@ class AppParallelTests(unittest.TestCase):
         self.assertEqual(self.app.llm.gate.slots, 2)
         self.assertIn("Egyszerre 2 modellhívás mehet", self.infos()[-1])
         with mock.patch("jarvis_core.memory.ollama_process", return_value=OllamaProcess(found=True, readable=True)), \
-                mock.patch("jarvis_core.app.user_setting", return_value=None):
+                mock.patch("jarvis_core.app.user_setting", return_value=None), \
+                mock.patch("jarvis_core.app.set_user_setting", return_value=False):
             self.app._check_parallel()
         self.assertEqual(self.app.llm.gate.slots, 1)
         self.assertIn("setx OLLAMA_NUM_PARALLEL 2", self.infos()[-1])
@@ -182,6 +206,26 @@ class AppParallelTests(unittest.TestCase):
                         return_value=OllamaProcess(found=True, readable=True, env={"OLLAMA_NUM_PARALLEL": "4"})):
             self.app._check_parallel()
         self.assertEqual(self.app.llm.gate.slots, 1, "ha egyesével kéred, egyesével megy")
+
+    def test_jarvis_sets_the_parallel_setting_itself_if_missing(self):
+        """Ha még nincs OLLAMA_NUM_PARALLEL, a Jarvis beállítja (tartósan, mint a setx), és megmondja, hogy a futó
+        Ollamát egyszer újra kell indítani; ha már be van állítva, vagy egyesével kéred, nem nyúl hozzá."""
+        with mock.patch("jarvis_core.memory.ollama_process", return_value=OllamaProcess(found=True)), \
+                mock.patch("jarvis_core.app.user_setting", return_value=None), \
+                mock.patch("jarvis_core.app.set_user_setting", return_value=True) as setter:
+            self.app._check_parallel()
+        setter.assert_called_once_with("OLLAMA_NUM_PARALLEL", "2")
+        self.assertEqual(self.app.llm.gate.slots, 1, "a futó Ollama még a beállítás előtt indult")
+        self.assertIn("Beállítottam: OLLAMA_NUM_PARALLEL = 2", self.infos()[-2])
+        self.assertIn("nem kell újra beírni", self.infos()[-2])
+        self.assertIn("lépj ki az Ollamából a tálcán", self.infos()[-1])
+        with mock.patch("jarvis_core.memory.ollama_process", return_value=OllamaProcess(found=True)), \
+                mock.patch("jarvis_core.app.user_setting", return_value="2"), \
+                mock.patch("jarvis_core.app.set_user_setting") as setter:
+            self.app._check_parallel()
+            self.cfg.llm.parallel = 1
+            self.app._check_parallel()
+        setter.assert_not_called()
 
     def test_after_an_upload_trading_goes_on_soon(self):
         """A beszélgetés után quiet_minutes, egy eladási lépés után csak AFTER_WORK másodperc a csend."""

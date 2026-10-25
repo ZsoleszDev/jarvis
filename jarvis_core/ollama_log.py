@@ -108,6 +108,27 @@ def user_setting(name: str) -> str | None:
     return os.environ.get(name)
 
 
+def set_user_setting(name: str, value: str) -> bool:
+    """Beállít egy felhasználói környezeti változót, mint a setx: a gép újraindítása után is megmarad, és az utána
+    induló programok (pl. az újraindított Ollama) már látják. Csak Windows-on (máshol False, ahogy hiba esetén is)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+    except OSError:
+        return False
+    try:   # mint a setx: a futó programok (az Intéző) is megtudják, így az onnan indítottak már ezzel indulnak
+        import ctypes
+
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, None)
+    except Exception:  # noqa: BLE001 - a beállítás megvan; legfeljebb a gép újraindítása után látszik
+        pass
+    return True
+
+
 def _count(value: str | None) -> int | None:
     try:
         number = int(str(value).strip())

@@ -9,6 +9,7 @@ Futtatás a projekt mappájából:
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import io
 import json
@@ -35,7 +36,7 @@ from test_streaming import RecordingUI  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
 from jarvis_core import config, selling  # noqa: E402
-from jarvis_core.app import JarvisApp  # noqa: E402
+from jarvis_core.app import HELD_ITEM, WAKE_FAILED_ITEM, WAKING_ITEM, JarvisApp  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError, is_risky, navigates  # noqa: E402
 from jarvis_core.config import load_config  # noqa: E402
 from jarvis_core.feeds import FeedError  # noqa: E402
@@ -1526,6 +1527,34 @@ class BrowserWorkTests(unittest.TestCase):
 
 # --- a teljes eladás: JarvisApp, hamis modell, helyi „hirdetési oldalak” --------------------
 
+class ChannelUI(RecordingUI):
+    """Mint a RecordingUI, de azt is feljegyzi, melyik menü naplójába ment az üzenet (mint a GuiUI: szálanként is)."""
+
+    def __init__(self):
+        super().__init__()
+        self.channel = "chat"
+        self.channels: list[tuple] = []
+        self._own = threading.local()
+
+    @contextlib.contextmanager
+    def own_channel(self, channel: str):
+        previous = getattr(self._own, "channel", None)
+        self._own.channel = channel
+        try:
+            yield
+        finally:
+            self._own.channel = previous
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def record(*args):
+            self.events.append((name, *args))
+            self.channels.append((name, getattr(self._own, "channel", None) or self.channel, *args))
+        return record
+
+
 @unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
 class SellFlowTests(unittest.TestCase):
     def setUp(self):
@@ -1540,7 +1569,7 @@ class SellFlowTests(unittest.TestCase):
         cfg.work.research_sites = ["vinted"]
         self.patch = mock.patch.dict(selling.PLATFORMS, local_platforms(self.pages), clear=True)
         self.patch.start()
-        self.ui = RecordingUI()
+        self.ui = ChannelUI()
         self.ui.confirm_answer = True
         self.app = JarvisApp(cfg, self.ui)
         self.fake.vram_fit = lambda ctx: 1.0
@@ -1724,6 +1753,80 @@ class SellFlowTests(unittest.TestCase):
         item = self.store.get(item.id)
         self.assertEqual(item.platforms["vinted"]["note"], "Be kell jelentkezned a Vintedre, utána az Újra gombbal folytatom.")
         self.assertEqual((len(self.fake.chat_bodies()), item.busy), (calls + 1, ""), "a fotókat nem nézte át újra")
+
+    def pro_item(self) -> Item:
+        """Egy Pro tárgy egy fotóval, és a modell válasza a fotókra (ár is: árkutatás nélkül jön a Nézd át)."""
+        self.fake.chat_script = [seen(**{**{k: v for k, v in SHIRT.items() if k in selling.PRO_FIELDS + ("kind",)},
+                                         "price_estimate": 2000})]
+        return self.store.add_photo(self.store.create(targets=["vinted"], pro=True).id, jpeg())
+
+    def loads(self) -> int:
+        return len([b for m, p, b in self.fake.requests if p == "/api/generate" and b.get("keep_alive") != 0])
+
+    def test_in_standby_a_new_item_wakes_jarvis_on_its_own_thread(self):
+        """Készenlétben, miközben az ágens-szál kereskedik (napközbeni böngészés), egy új Pro tárgy nem vár rá: az
+        eladás-előkészítő szál ébreszti fel a Jarvist (a kártyán látszik), átnézi a fotókat, és jön a Nézd át. A
+        kereskedés ettől nem kap csendes időszakot, és nem kell megszakítani."""
+        app = self.app
+        app._do_pause(standby=True)
+        self.assertTrue(app.paused and app.standby)
+        self.start_prep()
+        app._outstanding, app._current_kind = 1, "job"      # az ágens-szál épp kereskedik
+        item = self.pro_item()
+        loads, talked, shown = self.loads(), app.last_activity, []
+        set_busy = self.store.set_busy
+
+        def record(item_id: str, text: str) -> None:
+            shown.append(text)
+            set_busy(item_id, text)
+
+        with mock.patch.object(app.work, "researcher", None), mock.patch.object(self.store, "set_busy", record):
+            app.submit_work("sell", [item.id])
+            self.wait_for(lambda: self.store.get(item.id).status == "átnézésre vár")
+        self.assertFalse(app.paused or app.standby, "felébredt")
+        self.assertGreater(self.loads(), loads, "betöltötte a modellt")
+        self.assertEqual(shown[0], WAKING_ITEM, "a kártyán látszik, hogy felébred")
+        self.assertTrue(app.requests.empty(), "nem várt az ágens-szálra")
+        self.assertFalse(app.preempt.is_set(), "a kereskedést ehhez nem kellett megszakítani")
+        self.assertEqual(app.last_activity, talked, "a kereskedés csendes időszak nélkül megy tovább")
+        self.assertTrue([n for n in app.notices.list() if n["title"].startswith("Nézd át:")])
+        self.assertIn(("info", "work", "Felébredek: betöltöm a modelleket (10–20 másodperc)..."), self.ui.channels)
+
+    def test_if_waking_fails_the_card_and_a_notification_say_so(self):
+        """Ha készenlétből nem sikerül betölteni a modellt, a tárgy nem marad szó nélkül vázlatként: a kártyán nem
+        vár tovább, a Munka menü naplójában (a Beszélgetés ott rejtve van) és értesítésben is ott az ok."""
+        app = self.app
+        app._do_pause(standby=True)
+        self.start_prep()
+        item = self.pro_item()
+        with mock.patch.object(app, "load_model", return_value=False):
+            app.submit_work("sell", [item.id])
+            self.wait_for(lambda: [n for n in app.notices.list() if n["title"] == "Munka: hiba"])
+        [notice] = [n for n in app.notices.list() if n["title"] == "Munka: hiba"]
+        self.assertEqual((notice["item"], notice["text"]), (item.id, WAKE_FAILED_ITEM))
+        self.assertIn("Feltöltés a hiányzó helyekre", WAKE_FAILED_ITEM, "megmondja, hogyan próbálja újra")
+        self.assertIn(("notice", "work", WAKE_FAILED_ITEM), self.ui.channels)
+        self.assertEqual(self.store.get(item.id).busy, "")
+        self.assertTrue(app.paused and app.standby, "készenlétben maradt")
+        self.assertEqual(self.fake.chat_bodies(), [], "a fotókat még nem nézte át")
+
+    def test_a_new_item_during_a_pause_goes_on_after_resume(self):
+        """A Szünet gombos szünetben (pl. játék közben) nem tölti be a modelleket, de az új tárgy nem vész el: a
+        kártyán látszik, hogy a Folytatásra vár, és utána magától megy tovább."""
+        app = self.app
+        app._do_pause()
+        self.start_prep()
+        item = self.pro_item()
+        loads = self.loads()
+        app.submit_work("sell", [item.id])
+        self.wait_for(lambda: self.store.get(item.id).busy == HELD_ITEM)
+        self.assertEqual((self.loads(), self.fake.chat_bodies()), (loads, []), "szünetben nem tölti be a modellt")
+        self.assertTrue(app.requests.empty())
+        with mock.patch.object(app.work, "researcher", None):
+            app._do_resume()
+            self.wait_for(lambda: self.store.get(item.id).status == "átnézésre vár")
+        self.assertEqual(app._held, [])
+        self.assertTrue([n for n in app.notices.list() if n["title"].startswith("Nézd át:")])
 
     def test_a_price_check_in_the_browser_goes_on_on_the_agent_thread(self):
         """A fotók átnézése az előkészítő szálon megy; a Vinted-árkutatáshoz böngésző kell, az az ágens-szálon
