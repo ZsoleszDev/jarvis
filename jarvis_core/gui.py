@@ -812,6 +812,8 @@ class _Handler(BaseHTTPRequestHandler):
                                                                        body.get("safe_only"))})
             if action == "enable":
                 return self._json(200, {"ok": True, **deals.set_enabled(bool(body.get("on")))})
+            if action == "tip_dismiss":  # egy „Érdemes megnézni” tipp elrejtése
+                return self._json(200, {"ok": True, **deals.dismiss_tip(str(body.get("id") or ""))})
             if action == "haggle":      # alkuképes hirdetések: be/ki, az ajánlat szövege
                 return self._json(200, {"ok": True, **deals.set_haggle(body.get("on"), body.get("message"))})
             if action == "bundles":     # csomagbontás: be/ki, legalább mennyi haszonnal szóljon

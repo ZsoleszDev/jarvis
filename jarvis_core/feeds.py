@@ -23,7 +23,7 @@ import time
 import urllib.parse
 from collections import deque
 from html.parser import HTMLParser
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import requests
 
@@ -420,6 +420,8 @@ def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[d
         label = card["label"]
         summary = f"{label} | {text}" if len(label) > 15 and label not in text else text
         entry: dict[str, Any] = {"text": summary[:240], "price": price, "url": card["href"]}
+        if not (3 < len(label) <= 160 and not PRICE_RE.search(label)):
+            label = _card_title(card["node"])     # az egész kártya egy link (Jófogás): a címe a fejlécéből
         if 3 < len(label) <= 160 and not PRICE_RE.search(label):
             entry["title"] = label                # a hirdetés címe magában (az értesítésbe)
         if not FIXED_RE.search(text) and AUCTION_RE.search(text):
@@ -590,6 +592,17 @@ def fetch_image(url: str, get: Callable[..., Any] | None = None) -> bytes | None
         return None
 
 
+_TITLE_CLASS = re.compile(r"title|subject|name|cim", re.IGNORECASE)
+
+
+def _card_title(card: Node) -> str:
+    """Egy kártya címe, ha a link szövege nem az (pl. az egész kártya egy link, benne az ár, a dátum, az eladó): a
+    fejléce (h1–h4), vagy egy „title”/„subject” osztályú eleme; üres, ha nincs."""
+    found = _find(card, lambda n: n.tag in ("h1", "h2", "h3", "h4") or bool(_TITLE_CLASS.search(n.attrs.get("class", ""))
+                                                                           and len(n.text()) <= 160))
+    return clean(found.text()) if found is not None else ""
+
+
 def _find(node: Node, wanted: Callable[[Node], bool]) -> Node | None:
     stack = [node]
     while stack:
@@ -601,6 +614,15 @@ def _find(node: Node, wanted: Callable[[Node], bool]) -> Node | None:
 
 
 # --- letöltés oldalanként, tempóval ------------------------------------------------------------------------
+
+class Quota(NamedTuple):
+    """Egy hívó része a letöltő óránkénti keretéből (pl. az azonnali figyelő): a kérései ezzel a címkével számítanak
+    (tag), oldalanként legfeljebb cap kérés óránként, és a közös keretből reserve mindig a többieké (a köröké) marad.
+    Minden tényleges HTTP-kérésnél érvényes, a lista beállításának kéréseinél is (SiteFetcher._send)."""
+    tag: str
+    cap: int = 0
+    reserve: int = 0
+
 
 class SiteFetcher:
     """A gyors (böngésző nélküli) letöltések oldalanként: egyszerre egy kérés, szünetekkel és óránkénti kerettel, a
@@ -623,6 +645,7 @@ class SiteFetcher:
         self._state_lock = threading.RLock()
         self._next: dict[str, float] = {}            # oldal → mikortól jöhet a következő kérés
         self._recent: dict[str, deque] = {site: deque() for site in self.sites}
+        self._tagged: dict[tuple[str, str], deque] = {}   # (oldal, címke) → a hívó kéréseinek ideje (Quota)
         self._blocked: dict[str, dict[str, Any]] = {}   # oldal → {until, reason, strikes}
         self._empty: dict[str, int] = {}             # oldal → hányszor egymás után nem talált hirdetést
         self._empty_until: dict[str, float] = {}
@@ -670,11 +693,19 @@ class SiteFetcher:
                              "slow": round(self._slow.get(site, 1.0), 2)}
             return out
 
+    def used(self, platform: str, tag: str = "") -> int:
+        """Hány tényleges kérés ment ennek az oldalnak az utóbbi órában (tag: csak az ilyen címkéjű hívóé, Quota)."""
+        now = self.clock()
+        with self._state_lock:
+            stamps = self._tagged.get((platform, tag)) if tag else self._recent.get(platform)
+            return sum(1 for t in stamps or () if now - t <= 3600)
+
     def listings(self, url: str, platform: str, check: Callable[[], None] = lambda: None,
-                 max_age: float = 0.0) -> list[dict[str, Any]]:
+                 max_age: float = 0.0, quota: Quota | None = None) -> list[dict[str, Any]]:
         """Egy találati oldal hirdetései böngésző nélkül. FeedError, ha nem sikerült (a hívó a böngészővel próbálja).
         max_age: ha ezt az oldalt legfeljebb ennyi másodperce már letöltötte (pl. az azonnali figyelő), azt adja vissza,
-        nem kéri le újra (a kereskedés köre így nem tölti le kétszer ugyanazt)."""
+        nem kéri le újra (a kereskedés köre így nem tölti le kétszer ugyanazt). quota: a hívó része a keretből (minden
+        kérésre, a lista beállításáéra is)."""
         now = self.clock()
         if max_age > 0:
             with self._state_lock:
@@ -683,20 +714,26 @@ class SiteFetcher:
                 return [dict(row) for row in cached[1]]
         with self._state_lock:
             target = self._sorted.get(url) or url   # ha az oldal kínál „legújabb elöl” rendezést, azzal
-        final, html = self._fetch(target, platform, check)
+        final, html = self._fetch(target, platform, check, quota)
         tree = parse(html)
         setter, current, view = list_prefs(tree)
         if setter and not prefs_ok(current) and self._may_set_prefs(platform):
             # a lista nem az új hirdetésekkel elöl (vagy kevés van egy oldalon): beállítja, és újra letölti
-            if self._set_prefs(urllib.parse.urljoin(final, setter), final, platform, check):
-                final, html = self._fetch(target, platform, check)
-                tree = parse(html)
-                setter, current, view = list_prefs(tree)
-            with self._state_lock:
-                if prefs_ok(current):
-                    self._prefs_failed.pop(platform, None)
-                else:
-                    self._prefs_failed[platform] = self.clock()
+            try:
+                if self._set_prefs(urllib.parse.urljoin(final, setter), final, platform, check, quota):
+                    reloaded, html = self._fetch(target, platform, check, quota)
+                    final, tree = reloaded, parse(html)
+                    setter, current, view = list_prefs(tree)
+                with self._state_lock:
+                    if prefs_ok(current):
+                        self._prefs_failed.pop(platform, None)
+                    else:
+                        self._prefs_failed[platform] = self.clock()
+            except FeedError as exc:
+                if exc.kind != "busy":
+                    raise
+                # most nem fér a keretbe (a beállítás vagy az újratöltés): ez az oldal az alap sorrenddel jön, és a
+                # beállítást legközelebb újra próbálja (nem sikertelen)
         if setter:
             with self._state_lock:
                 self._views[platform] = view
@@ -743,18 +780,22 @@ class SiteFetcher:
             failed = self._prefs_failed.get(platform)
         return failed is None or self.clock() - failed >= PREFS_RETRY
 
-    def _set_prefs(self, setter: str, page: str, platform: str, check: Callable[[], None]) -> bool:
+    def _set_prefs(self, setter: str, page: str, platform: str, check: Callable[[], None],
+                   quota: Quota | None = None) -> bool:
         """A lista beállítása (LIST_PREFS) a saját munkamenetnek, ahogy a menü teszi: egy POST a menüpont mezőivel
         (a munkamenet sütije a requests.Session-ben marad). Igaz, ha a kérés átment (hogy hatott-e, azt az újra
-        letöltött oldal mutatja meg). Egy elutasított kérés nem tiltás: az oldal az alap sorrenddel tovább megy."""
+        letöltött oldal mutatja meg). Egy elutasított kérés nem tiltás: az oldal az alap sorrenddel tovább megy. Ha most
+        nem fér a keretbe, FeedError („busy”): a hívó legközelebb újra próbálja."""
         if not self._ours(setter, platform):
             return False
         origin = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(page))
         try:
             _final, status, _text = self._send(setter, platform, check, data={k: str(v) for k, v in LIST_PREFS.items()},
                                                extra={"X-Requested-With": "XMLHttpRequest", "Referer": page,
-                                                      "Origin": origin})
-        except FeedError:
+                                                      "Origin": origin}, quota=quota)
+        except FeedError as exc:
+            if exc.kind == "busy":
+                raise
             return False
         return status < 400
 
@@ -763,18 +804,20 @@ class SiteFetcher:
         with self._state_lock:
             return self._next_pages.get(url, "")
 
-    def page(self, url: str, platform: str, check: Callable[[], None] = lambda: None) -> dict[str, Any]:
+    def page(self, url: str, platform: str, check: Callable[[], None] = lambda: None,
+             quota: Quota | None = None) -> dict[str, Any]:
         """Egy hirdetés oldala böngésző nélkül (mint a browser.look): cím, szöveg, rövid darabok, feliratok."""
-        final, html = self._fetch(url, platform, check)
+        final, html = self._fetch(url, platform, check, quota)
         return parse_page(html, final)
 
-    def _fetch(self, url: str, platform: str, check: Callable[[], None]) -> tuple[str, str]:
+    def _fetch(self, url: str, platform: str, check: Callable[[], None],
+               quota: Quota | None = None) -> tuple[str, str]:
         if platform not in self.sites or not self._ours(url, platform):
             raise FeedError("Ezt az oldalt a böngészővel olvasom.", "off")
         if not self.usable(platform):
             raise FeedError("Ez az oldal most csak a böngészővel megy (tiltott, vagy nem találtam rajta hirdetést).",
                             "blocked")
-        final, status, html = self._send(url, platform, check)
+        final, status, html = self._send(url, platform, check, quota=quota)
         if status in BLOCKED_STATUS or (status < 400 and len(html) < 20000 and CHALLENGE_RE.search(html[:20000])
                                         and not PRICE_RE.search(html)):
             self._block(platform, f"robot-ellenőrzés vagy tiltás ({status})")
@@ -788,8 +831,9 @@ class SiteFetcher:
         return final, html
 
     def _send(self, url: str, platform: str, check: Callable[[], None], data: dict[str, str] | None = None,
-              extra: dict[str, str] | None = None) -> tuple[str, int, str]:
-        """Egy kérés a tempó szerint: oldalanként egyszerre egy, szünettel, az óránkénti kereten belül."""
+              extra: dict[str, str] | None = None, quota: Quota | None = None) -> tuple[str, int, str]:
+        """Egy kérés a tempó szerint: oldalanként egyszerre egy, szünettel, az óránkénti kereten belül (quota: a hívó
+        része: a címkéje szerinti kerete, és a többieknek meghagyott tartalék)."""
         with self._locks[platform]:              # oldalanként egyszerre egy kérés
             while True:
                 check()
@@ -798,14 +842,23 @@ class SiteFetcher:
                     recent = self._recent[platform]
                     while recent and now - recent[0] > 3600:
                         recent.popleft()
-                    if len(recent) >= self.hourly:
+                    if len(recent) >= self.hourly - (quota.reserve if quota else 0):
                         raise FeedError("Ebben az órában már sokat kérdeztem ezt az oldalt.", "busy")
+                    if quota and quota.cap:
+                        mine = self._tagged.setdefault((platform, quota.tag), deque())
+                        while mine and now - mine[0] > 3600:
+                            mine.popleft()
+                        if len(mine) >= quota.cap:
+                            raise FeedError("Ebben az órában már sokat kérdeztem ezt az oldalt.", "busy")
                     wait = self._next.get(platform, 0.0) - now
                 if wait <= 0:
                     break
                 self.sleep(min(wait, 1.0))
             with self._state_lock:
-                self._recent[platform].append(self.clock())
+                stamp = self.clock()
+                self._recent[platform].append(stamp)
+                if quota:
+                    self._tagged.setdefault((platform, quota.tag), deque()).append(stamp)
                 self.requests += 1
             started = time.monotonic()
             try:

@@ -1066,7 +1066,8 @@ class WorkBrowserTests(unittest.TestCase):
         today = page.inner_text(".funnel")
         self.assertTrue(today.startswith("Ma: 1") and "240 hirdetés · 85 új · 3 jelölt" in today, today)
         page.click('summary:has-text("Napló")')
-        self.assertIn("Kiesett: 40 nem elég olcsó, 2 bizonytalan ár.", page.inner_text('details[data-fold="journal"]'))
+        self.assertIn("Kiesett: 40 nem elég olcsó, 2 bizonytalan ár (Érdemes megnézni).",
+                      page.inner_text('details[data-fold="journal"]'))
         page.click('summary:has-text("Napló")')
         card = page.inner_text('li:has([data-deal-open="al1"])')
         for part in ("alku", "kért ár 95 000 Ft", "ajánlj 83 000 Ft-ot (13%-kal kevesebb)", "12 napja fent", "már leárazta"):
@@ -1088,6 +1089,26 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector('.toast:has-text("Kikapcsoltam az alkuképes hirdetéseket.")')
         self.assertEqual((deals.state()["haggle"]["on"], deals.state()["haggle"]["message"]),
                          (False, "Szia! {ár}-ért elvinném."))
+
+    def test_worth_a_look_tips(self):
+        """Érdemes megnézni: a bizonytalan árú tippek a találatok alatt (a hirdetés, a néhány hasonló ára, a várható
+        haszon), és elrejthetők."""
+        deals = self.h.app.work.deals
+        self.h.app.work.instant.allowed = lambda: False
+        with deals._lock:
+            deals._data["tips"] = [{"id": "tp1", "url": "https://hardverapro.hu/apro/gtx/1.html", "title": "MSI GTX 1660 Ti",
+                                    "price": 33000, "site": "Hardverapró", "platform": "hardverapro", "query": "GTX 1660 Ti",
+                                    "key": "1660 gtx ti", "usual": 52000, "n": 5, "sites": ["Hardverapró"],
+                                    "profit": 11000, "at": time.time(), "watch": "", "min_profit": 5000}]
+        page = self.page
+        page.click("#job-deals")
+        page.wait_for_selector('[data-tip-dismiss="tp1"]')
+        tip = page.inner_text('li:has([data-tip-dismiss="tp1"])')
+        for part in ("MSI GTX 1660 Ti", "33 000 Ft", "bizonytalan ár", "csak 5 hasonló", "kb. 52 000 Ft", "11 000 Ft"):
+            self.assertIn(part, tip)
+        page.click('[data-tip-dismiss="tp1"]')
+        page.wait_for_selector('[data-tip-dismiss="tp1"]', state="detached")
+        self.assertEqual(deals.state()["tips"], [])
 
     def test_flags_filter_last_check_and_a_false_flag(self):
         store = self.h.store

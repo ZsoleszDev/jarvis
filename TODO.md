@@ -46,6 +46,19 @@
   értékelő szál Szünet alatt vár (a feladat megmarad), a szüneteltetett figyelőé a folytatásakor jön.
 - Kiemelt hirdetések: a kártyák jelölése (osztály, „Kiemelt”/„Előresorolt” címke, a kiemeltek blokkja), a következő
   oldal az oldal alja szerint (a kiemeltek nem számítanak), a kiemeltek a sor végén.
+- Több jó tipp: egységes termékkulcs (i5-10400F = i5 10400F, a kártyagyártó típusneve nem számít, a „2x8 GB” készlet,
+  egy kapacitás-változatnál a kapacitás nélküliek is; a régi árbázis betöltéskor átrendeződik), a hasonlók a kulcs
+  szerint (nem a modell elnevezésének minden szava kell), egy oldalról 6 szoros ár is biztos, az „Érdemes megnézni”
+  lista (bizonytalan ár, csendes értesítés, körönként újra felméri, és ha biztos lesz, rendes jelölt), a köröknek
+  fenntartott kéréskeret és a munkamenet akadálya a naplóban, a kártya címe a fejlécéből, a csomagok a mai számokban.
+- Átnézés javításai (5b5a790 után): a kapacitás nélküli címek csak az ismerten egy memóriamérettel gyártott
+  videókártyáknál (pricebook._SINGLE_CAPACITY) számítanak a változathoz, az árbázis tartalmából nem; a tipp csak lezárt
+  ellenőrzés után kerül le; a figyelő minden kérése (oldal, árkeresés) a keretéből megy, kerethiánynál az értékelés
+  vár; a várólista 300 (két teljes oldal), és ami kiesik vagy lejár, azt a figyelő elfelejti (újra jön); a RAM és a
+  tárhely külön számít a szűrésnél (pricebook.sized, size_conflict); a Szünet egy köteg közben is megállít.
+- Második átnézés (335bed5 után): a váró hirdetés csak a szükséges oldal keretére vár (Deferred.sites, wait_for); egy
+  „RAM” szó csak egy méretet jelöl (8GB RAM 256GB); a figyelő tartaléka a közös letöltőben, minden tényleges kérésnél
+  (feeds.Quota: címke, saját keret, tartalék; a lista beállításának POST-ja és újratöltése is).
 - Hardverapró: a böngésző nélküli letöltő a munkamenetében beállítja a listát (új hirdetések elöl, 100 egy oldalon),
   az oldalon ellenőrzi, és ha a beállítás megváltozik, a figyelő egyszer csak megjegyzi az oldalt.
 - Legújabb elöl a címben: Jófogás `sp=3`, Vatera `ob=5&obd=2` (a felhasználó ellenőrizte, 2026. október), a Vinted
@@ -69,6 +82,13 @@
 - A fotóküszöbök valódi telefonos fotókon (főleg: világos tárgy fehér háttér előtt, gyenge fény).
 - Automata kereskedés a valódi oldalakon: a kategóriaoldalak (Vinted catalog, Jófogás, Hardverapró, Vatera „hamarosan lejár”) hirdetéskártyáinak kiolvasása, a Vatera-kártyák hátralévő ideje, a Vinted ajánlattétel-ablaka, az újranézett hirdetés „elkelt / eltűnt” felismerése.
 - A böngészés a valódi oldalakon: a Vinted kezdőoldalának kártyái (a kártyán sokszor csak a márka és a méret látszik), a Jófogás és a Vatera keresőjének rendezése (a legújabb elöl-e), a Hardverapró-kategóriák címe (2026 októberében ellenőrizve).
+- Az egy memóriamérettel gyártott videókártyák listája (pricebook._SINGLE_CAPACITY) az ismert asztali kártyákat
+  tartalmazza; új típusnál bővíteni kell (csak adatlap alapján, ahol tényleg egy méret van). A RAM/tárhely felismerése a
+  mellette álló szóból jön (RAM, DDR, GDDR, SSD, NVMe, tárhely); a szokatlan írásmódokat a naplóból kell pótolni.
+- Az új termékkulcs élesben: a GPU-szabály (a kártyagyártó típusneve kimarad) és a laptop/PC szavak, a „2x8” készlet;
+  ha két különböző termék egy kulcsra esik (pl. egy laptop a „laptop” szó nélkül a kártyája árán), a pricebook.py
+  GPU_FAMILIES / TYPE_WORDS / _SPLITS szabályán kell szűkíteni. A szoros ár (SURE_TIGHT 6, TIGHT_SPREAD 0.3) és a
+  tippek (TIPS_PER_DAY 10, TIP_DAYS 3) hangolása a napi számok alapján.
 - A termékkulcs valódi címeken: ha egy gyakori termék nem kap kulcsot, vagy két különböző termék egy kulcsra esik, a `pricebook.py` BRANDS / FAMILIES / MODIFIERS / TYPE_WORDS listáját kell bővíteni.
 
 - Csomagbontás a valódi oldalakon: a modell darabszám- és darabár-becslése a fotókról (ruhánál, Legónál), hogy a
