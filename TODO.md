@@ -80,6 +80,9 @@
 - A hirdetés leírása alapból csak a zárószöveg és a kulcsszavak; a tárgyról csak akkor ír, ha a leírásban (Pro: a
   megjegyzésben) kéred (selling.wants_description: „leírás”, „írd bele/oda”, „írd meg, hogy”, „említsd”…). A modell
   szövegét kérés nélkül el is hagyja. EXTRACT_VERSION 4: a még fel nem töltött tárgyaké a következő kiolvasáskor így lesz.
+- A leírás zárószövege egyetlen, helyes magyarságú szöveg (selling.DESCRIPTION_FOOTER; ruhánál „ruhát”, máshol
+  „holmit”), mindig benne van: fölötte a kért szöveg, alatta a kulcsszavak. A korábbi három változatot (az egyikben
+  „van még sok ruhát;”) a még fel nem töltött tárgyakban betöltéskor erre cseréli (ItemStore._refresh_footer).
 - Ruha kivéve az automata kereskedésből (pricebook.wearable: ruhaszavak, cipő, divatmárkák; a VW Polo nem): a
   böngészés, a figyelt oldalak, a csomagbontás (a régi „Ruhacsomag” keresés és alapgomb törölve, ruhás csomagkeresés nem
   vehető fel), az alku, a tippek és a modell megnevezése után is kiesik („ruha, cipő” a napi számokban); a Vinted
