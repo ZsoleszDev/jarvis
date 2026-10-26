@@ -146,6 +146,8 @@ class SchedulerCfg:
     message_minutes: float = 120.0  # ilyen sűrűn nézi meg a vevői üzeneteket, csak olvasva (0 = soha)
     deal_minutes: float = 60.0     # automata kereskedés: az új keresések gyakorisága (0 = a háttérben soha)
     message_reads: int = 3         # egy körben legfeljebb ennyi olvasatlan beszélgetést nyit meg
+    message_sales: int = 8         # az utolsó ennyi beszélgetésben nézi, eladtál-e valamit (címke, kód; 0 = soha)
+    todo_reminder: str = "19:00"   # ekkor emlékeztet esténként az elvégezetlen teendőkre (üres = soha)
 
 
 @dataclass

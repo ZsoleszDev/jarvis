@@ -262,7 +262,11 @@ class ApiTests(unittest.TestCase):
     def test_jobs_watches_and_notifications(self):
         h = self.h
         status, data, _ = h.request("GET", "/api/v1/jobs")
-        self.assertEqual({j["key"] for j in data["jobs"]}, {"watches", "stale", "listings", "messages", "deals"})
+        self.assertEqual({j["key"] for j in data["jobs"]},
+                         {"watches", "stale", "todos", "listings", "messages", "deals"})
+        todos = next(j for j in data["jobs"] if j["key"] == "todos")
+        self.assertEqual((todos["title"], todos["note"]),
+                         ("Teendőim emlékeztető", "Este 19:00-kor szól, ha van elvégezetlen teendő"))
         status, data, _ = h.request("POST", "/api/v1/jobs/snooze", {"minutes": 30})
         self.assertGreater(data["snoozed_until"], time.time())
         self.assertIn("felfüggesztve", h.request("GET", "/api/v1/status")[1]["scheduler"]["blocked"])

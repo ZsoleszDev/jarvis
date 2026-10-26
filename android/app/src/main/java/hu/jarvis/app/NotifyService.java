@@ -35,24 +35,30 @@ import org.json.JSONObject;
  * vagy szüneteltetheted (a gépen minden modell leáll, pl. játékhoz), és folytathatod.
  *
  * Egy megérő hirdetés (az Automata kereskedés találata) sürgős: akkor is szól, ha az alkalmazás nyitva van. A telefon
- * ALERT_MS ideig újra és újra rezeg (és ha be van kapcsolva a hang, csenget is), aztán QUIET_MS szünet, és ha addig nem
- * nyitottad meg vagy söpörted el, újra; legfeljebb ALERT_ROUNDS-szor. Rábökve az alkalmazás a találat ablakával nyílik
- * meg (MainActivity.ACTION_DEAL): ára, mennyiért mennek, mennyit kereshetsz vele, és az üzenet az eladónak.
+ * ALERT_MS ideig ötmásodpercenként halkan csenget (ha be van kapcsolva a hang) és kettőt rezeg, aztán QUIET_MS szünet,
+ * és ha addig nem nyitottad meg vagy söpörted el, újra; legfeljebb ALERT_ROUNDS-szor. Rábökve az alkalmazás a találat
+ * ablakával nyílik meg (MainActivity.ACTION_DEAL): ára, mennyiért mennek, mennyit kereshetsz vele, és az üzenet az
+ * eladónak. Egy „Érdemes megnézni” tipp (bizonytalan ár, notice.tip) egy nagyon rövid pittyenéssel szól, akkor is, ha
+ * az alkalmazás nyitva van.
  *
- * A Jarvis értesítéseinek saját hangja van, hogy hallásra is felismerd: a megérő hirdetésé egy emelkedő harangjáték
- * (res/raw/jarvis_alert), a többié (jóváhagyás, értesítés, alku) egy rövid kéthangú jelzés (jarvis_ping). Az Android egy
- * már létrehozott csatorna hangját nem cseréli le, ezért a csatornák új azonosítót kaptak (-2), a régieket törli.
+ * A Jarvis értesítéseinek saját, puha hangja van, hogy hallásra is felismerd, de ne legyen bántó (make_sounds.py): a
+ * megérő hirdetésé egy halk, háromhangú csengés, utána csenddel (res/raw/jarvis_alert; a riasztás ezt ismétli), a többié
+ * (jóváhagyás, értesítés, alku) két rövid, halk hang (jarvis_ping), a tippé egyetlen pittyenés (jarvis_tip). Az Android
+ * egy már létrehozott csatorna hangját nem cseréli le, ezért a csatornák új azonosítót kaptak (-3), a régieket törli.
  */
 public class NotifyService extends Service {
     static final String CHANNEL_LINK = "kapcsolat";
-    static final String CHANNEL_CONFIRM = "jovahagyas-2";
-    static final String CHANNEL_NEWS = "ertesitesek-2";
-    static final String CHANNEL_DEAL = "megero-hirdetes-2";
+    static final String CHANNEL_CONFIRM = "jovahagyas-3";
+    static final String CHANNEL_NEWS = "ertesitesek-3";
+    static final String CHANNEL_DEAL = "megero-hirdetes-3";
     static final String CHANNEL_DEAL_QUIET = "megero-hirdetes-csendes";
-    static final String CHANNEL_HAGGLE = "alkukepes-hirdetes-2";
-    // a régi (a rendszer alaphangjával létrehozott) csatornák: a saját hang miatt újak lettek, ezeket törli
-    static final String[] OLD_CHANNELS = {"jovahagyas", "ertesitesek", "megero-hirdetes", "alkukepes-hirdetes"};
-    static final long ALERT_MS = 2 * 60 * 1000;     // ennyi ideig rezeg / csenget egyfolytában
+    static final String CHANNEL_HAGGLE = "alkukepes-hirdetes-3";
+    static final String CHANNEL_TIP = "erdemes-megnezni";
+    // a régi csatornák (a rendszer alaphangjával, majd a korábbi, élesebb saját hangokkal): az új hangok miatt újak
+    // lettek, ezeket törli
+    static final String[] OLD_CHANNELS = {"jovahagyas", "ertesitesek", "megero-hirdetes", "alkukepes-hirdetes",
+            "jovahagyas-2", "ertesitesek-2", "megero-hirdetes-2", "alkukepes-hirdetes-2"};
+    static final long ALERT_MS = 2 * 60 * 1000;     // ennyi ideig csenget (ötmásodpercenként) és rezeg
     static final long QUIET_MS = 10 * 60 * 1000;    // utána ennyi szünet
     static final int ALERT_ROUNDS = 6;              // legfeljebb ennyiszer (kb. egy óra), ha addig nem nyitod meg
     static final int ONGOING_ID = 1;
@@ -108,10 +114,11 @@ public class NotifyService extends Service {
         news.setSound(ping, notification);
         NotificationChannel deal = new NotificationChannel(CHANNEL_DEAL, "Megérő hirdetés",
                 NotificationManager.IMPORTANCE_HIGH);
-        deal.setDescription("Új hirdetés, ami megéri: két percig rezeg (és ha be van kapcsolva a hang, a Jarvis saját "
-                + "harangjátékával csenget), aztán tíz perc múlva újra, amíg meg nem nézed.");
+        deal.setDescription("Új hirdetés, ami megéri: két percig ötmásodpercenként halkan csenget (ha be van kapcsolva "
+                + "a hang) és kettőt rezeg, aztán tíz perc múlva újra, amíg meg nem nézed.");
         deal.enableVibration(true);
-        deal.setVibrationPattern(new long[]{0, 900, 500, 900, 500});
+        // két rövid rezgés, aztán csend: a riasztás ezt ismétli, a csengéssel együtt ötmásodpercenként
+        deal.setVibrationPattern(new long[]{0, 180, 120, 180, 4520});
         deal.setSound(sound(context, R.raw.jarvis_alert), notification);
         NotificationChannel dealQuiet = new NotificationChannel(CHANNEL_DEAL_QUIET, "Megérő hirdetés (szünetben)",
                 NotificationManager.IMPORTANCE_LOW);
@@ -121,11 +128,17 @@ public class NotifyService extends Service {
         haggle.setDescription("Régóta fent lévő, kicsit drága hirdetés, amire érdemes ajánlatot tenni: egyszer szól, "
                 + "nem riaszt.");
         haggle.setSound(ping, notification);
+        NotificationChannel tip = new NotificationChannel(CHANNEL_TIP, "Érdemes megnézni",
+                NotificationManager.IMPORTANCE_DEFAULT);
+        tip.setDescription("Olcsónak látszó hirdetés bizonytalan árral: egy nagyon rövid pittyenés, nem riaszt.");
+        tip.enableVibration(true);
+        tip.setVibrationPattern(new long[]{0, 70});
+        tip.setSound(sound(context, R.raw.jarvis_tip), notification);
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         for (String old : OLD_CHANNELS) {
             manager.deleteNotificationChannel(old);
         }
-        manager.createNotificationChannels(Arrays.asList(link, confirm, news, deal, dealQuiet, haggle));
+        manager.createNotificationChannels(Arrays.asList(link, confirm, news, deal, dealQuiet, haggle, tip));
     }
 
     static PendingIntent openApp(Context context) {
@@ -450,6 +463,13 @@ public class NotifyService extends Service {
             if (!MainActivity.visible && !notice.optBoolean("quiet")) {   // alkuképes: egyszer szól, nem riaszt
                 int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
                 manager.notify(id, haggleBuilder(id, notice).build());
+            }
+        } else if ("notification".equals(type) && event.optJSONObject("notice") != null
+                && !event.optJSONObject("notice").optString("tip").isEmpty()) {
+            JSONObject notice = event.optJSONObject("notice");
+            if (!notice.optBoolean("quiet")) {        // érdemes megnézni: egy rövid pittyenés, ha nyitva is az ablak
+                int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
+                show(this, CHANNEL_TIP, id, notice.optString("title", "Érdemes megnézni"), notice.optString("text"));
             }
         } else if ("notification".equals(type) && !MainActivity.visible) {
             JSONObject notice = event.optJSONObject("notice");

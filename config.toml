@@ -185,6 +185,12 @@ message_minutes = 120
 deal_minutes = 60
 # Egy körben legfeljebb ennyi olvasatlan beszélgetést nyit meg (a többi a következő körre marad)
 message_reads = 3
+# Az utolsó ennyi beszélgetésben azt is nézi, eladtál-e valamit: ha egy beszélgetésben „Eladva” és „Szállítási címke
+# lekérése” gomb van, a tárgyat eladottnak jelöli, lekéri a címkét, és a feladási kódot a helyével a Teendőim közé
+# írja (Munka › Elemzés). Ami azóta nem változott, azt nem nyitja meg újra (0 = soha)
+message_sales = 8
+# Ha van elvégezetlen teendőd (pl. egy csomag feladása), esténként ekkor emlékeztet (üres = soha)
+todo_reminder = "19:00"
 
 [api]
 # Telefonos kapcsolat a saját appodnak (lásd docs/telefon-api.md). A host maradjon 127.0.0.1:

@@ -18,9 +18,10 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
   értesít. Firebase nem kell hozzá. Egy `sold` gombos értesítésnél (`notice.actions`) a gomb a `MainActivity`-t
   nyitja meg (`hu.jarvis.app.SOLD`, a tárggyal); a felület a `JarvisApp.pending()` `sold` részéből a tárgy Eladva
   ablakát mutatja. Az értesítésből közvetlenül semmit nem jelöl meg és nem vesz le. Egy megérő hirdetés (`notice.deal`)
-  a „Megérő hirdetés” csatornán szól, akkor is, ha az alkalmazás nyitva van: `FLAG_INSISTENT`-tel két percig rezeg (és
-  csenget, ha van hang), aztán tíz percre a csendes csatornára vált, és ha addig nem nyitottad meg, újra (legfeljebb
-  hatszor). Egy alkuképes hirdetés (`notice.haggle`) a saját „Alkuképes hirdetés” csatornáján egyszer szól (nem riaszt,
+  a „Megérő hirdetés” csatornán szól, akkor is, ha az alkalmazás nyitva van: `FLAG_INSISTENT`-tel két percig
+  ötmásodpercenként halkan csenget (ha van hang) és kettőt rezeg, aztán tíz percre a csendes csatornára vált, és ha
+  addig nem nyitottad meg, újra (legfeljebb hatszor). Egy „Érdemes megnézni” tipp (`notice.tip`) a saját csatornáján
+  egy nagyon rövid pittyenéssel szól (akkor is, ha az alkalmazás nyitva van; rábökve az alkalmazás nyílik meg). Egy alkuképes hirdetés (`notice.haggle`) a saját „Alkuképes hirdetés” csatornáján egyszer szól (nem riaszt,
   és csak ha az alkalmazás nincs előtérben). Rábökve mindkettőnél a `MainActivity` nyílik (`hu.jarvis.app.DEAL`), és a
   felület a `pending()` `deal` részéből a találat ablakát mutatja; az üzenetet a `JarvisApp.copy()` teszi a vágólapra. A Szakértői tipp gomb a kérdést
   szintén így másolja ki, és a `JarvisApp.openChatGpt()` megnyitja a ChatGPT alkalmazást (`com.openai.chatgpt`; a
@@ -33,10 +34,12 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
 - Kamera (Pro feltöltés): a felület `<input capture>` mezőjére a `MainActivity` a kamera-alkalmazást indítja
   (`ACTION_IMAGE_CAPTURE`); a fotó a `PhotoProvider`-en át az alkalmazás gyorsítótárába kerül (nem a galériába), onnan
   olvassa be a WebView. Kamera-engedély nem kell hozzá (a kamera-alkalmazás fényképez).
-- Saját hang: a megérő hirdetés csatornájáé `res/raw/jarvis_alert.wav` (emelkedő harangjáték), a jóváhagyásé, az
-  értesítéseké és az alkué `res/raw/jarvis_ping.wav` (rövid, kéthangú jelzés). A hangokat a `make_sounds.py` állítja
-  elő; ha változnak, a csatornák azonosítóját is növelni kell (`NotifyService`), mert az Android egy már létrehozott
-  csatorna hangját nem cseréli le (a régieket az `OLD_CHANNELS` szerint törli).
+- Saját, puha hang: a megérő hirdetés csatornájáé `res/raw/jarvis_alert.wav` (halk, háromhangú csengés, utána négy
+  másodperc csend: a `FLAG_INSISTENT` ezt ismétli, így ötmásodpercenként egy csengés, nem folyamatos csengetés), a
+  jóváhagyásé, az értesítéseké és az alkué `res/raw/jarvis_ping.wav` (két rövid, halk hang), az „Érdemes megnézni”
+  csatornáé `res/raw/jarvis_tip.wav` (egyetlen nagyon rövid pittyenés). A hangokat a `make_sounds.py` állítja elő;
+  ha változnak, a csatornák azonosítóját is növelni kell (`NotifyService`, most `-3`), mert az Android egy már
+  létrehozott csatorna hangját nem cseréli le (a régieket az `OLD_CHANNELS` szerint törli).
 - `ActionReceiver`: a jóváhagyás gombjai az értesítésben (`/api/v1/confirm`), és az állandó értesítés Szünet /
   Folytatás gombja (`/api/v1/pause`, `/api/v1/resume`).
 - `res/xml/shortcuts.xml`: parancsikon (Új hirdetés).

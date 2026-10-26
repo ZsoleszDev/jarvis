@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 KINDS = ("watch", "stale", "sold", "delist", "post", "question", "message", "deal", "haggle", "error", "work",
-         "info")
+         "todo", "info")
 
 
 class NoticeBoard:

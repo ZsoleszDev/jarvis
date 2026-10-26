@@ -75,7 +75,7 @@ MULTILINE = {"description", "prompt", "trade_note"}
 AMOUNT_FIELDS = ("price", "min_price", "bought_price", "sold_price", "bought_shipping", "bought_extra",
                  "market_price", "target_price", "sell_shipping", "sell_fee", "price_estimate")
 TIME_FIELDS = ("bought_at", "sold_at")
-# A Vételeim fülön (és a telefonos API-ban) átírható vételi és eladási adatok (a vételár és az eladási ár mellett).
+# Az Elemzés fülön (és a telefonos API-ban) átírható vételi és eladási adatok (a vételár és az eladási ár mellett).
 LEDGER_FIELDS = ("bought_shipping", "bought_extra", "bought_from", "bought_at", "in_transit", "market_price",
                  "target_price", "sell_shipping", "sell_fee", "trade_note", "sold_at")
 POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
@@ -238,7 +238,7 @@ class Item:
     source: str = ""                  # a hirdetés, ahol vetted (Automata kereskedés, Megvettem)
     sold_price: int | None = None
     sold_at: float = 0.0
-    # Vételi napló (Vételeim fül): a vétel többi költsége, mennyit ér, mennyiért adnád tovább, és az eladás költségei.
+    # Vételi napló (Elemzés fül): a vétel többi költsége, mennyit ér, mennyiért adnád tovább, és az eladás költségei.
     bought_shipping: int | None = None    # vételkor a posta (csomagautomata, futár)
     bought_extra: int | None = None       # egyéb költség (javítás, tisztítás, alkatrész, benzin)
     bought_from: str = ""             # honnan vetted (pl. „Hardverapró”, „bolhapiac”)
@@ -570,7 +570,7 @@ class ItemStore:
                 setattr(item, key, value)
                 changed.append(key)
         if item.bought_price is not None and not item.bought_at:
-            item.bought_at = time.time()      # a vételár első megadásakor: ma vetted (a Vételeim fülön átírható)
+            item.bought_at = time.time()      # a vételár első megadásakor: ma vetted (az Elemzés fülön átírható)
         return changed
 
     def _clean(self, values: dict[str, Any]) -> dict[str, Any]:

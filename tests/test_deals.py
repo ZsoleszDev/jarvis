@@ -964,6 +964,8 @@ class ExploreTests(HunterCase):
         self.assertNotIn("urgent", extra)
         [tip] = self.hunter.state()["tips"]
         self.assertEqual((tip["price"], tip["n"], tip["key"]), (70000, 5, "3060 rtx ti"))
+        self.assertEqual((extra["tip"], extra.get("quiet")), (tip["id"], None),
+                         "a telefonon a tipp saját, nagyon rövid pittyenésével szól (notice.tip)")
         self.notices.clear()
         self.assertTrue(any("jofogas.hu/magyarorszag?q=RTX%203060%20Ti" in u for u in self.browser.urls),
                         "a Jófogáson is megnézte, a cím szavaival (ahogy a hirdetésben írták)")
@@ -2200,7 +2202,7 @@ class MoneyTests(HunterCase):
         said = self.hunter.money_check(self.notify)
         self.assertEqual(len(said), 1)
         self.assertIn("A havi keret 82%-a elment: már csak 18 500 Ft maradt", said[0])
-        self.assertEqual(self.notices[-1][3]["actions"], [{"action": "ledger", "label": "Vételeim"}])
+        self.assertEqual(self.notices[-1][3]["actions"], [{"action": "ledger", "label": "Elemzés"}])
         self.assertEqual(self.hunter.money_check(self.notify), [], "havonta egyszer")
         self.store.create(title="Makita", bought_price=20000, bought_at=now - 30)
         self.assertIn("Elfogyott a havi keret", self.hunter.money_check(self.notify)[0])
@@ -2270,13 +2272,44 @@ class ProfitTests(unittest.TestCase):
             store.create(title="Saját póló", price=2000)          # nem vett tárgy: nem számít
             report = profit_report(store.all(), now)
         self.assertEqual(report["month"], {"profit": 40000, "count": 1, "revenue": 95000})
-        self.assertEqual(report["total"], {"profit": 43000, "count": 2, "spent": 64000, "revenue": 107000, "roi": 67})
+        self.assertEqual(report["total"], {"profit": 43000, "count": 2, "spent": 64000, "revenue": 107000, "roi": 67,
+                                           "own": 0, "own_revenue": 0})
         self.assertEqual((report["open"]["count"], report["open"]["spent"], report["open"]["unknown"]), (1, 15000, 1),
                          "a Nike-nak nincs ára: nem tudni, mennyi haszon várható belőle")
         self.assertEqual(report["days"], 20, "átlagosan (10 + 30) / 2 nap alatt kelt el")
         self.assertEqual([r["name"] for r in report["rows"]], ["Nike Air Max", "RTX 3060 Ti", "PS5 kontroller"],
                          "elöl a meg nem eladott, aztán a legutóbb eladott")
         self.assertEqual([(m["profit"], m["count"]) for m in report["months"]], [(40000, 1), (3000, 1)])
+
+    def test_own_things_sold_by_jarvis_count_in_the_profit(self):
+        """A saját holmid (nincs vételára, pl. a ruháid), amit a Jarvis töltött fel és elkelt: a bevétele a haszonba
+        számít (ebben a hónapban, összesen, havonta), az eladás költségeivel együtt; a megtérülés (%) csak a megvett
+        tárgyakból számol. Amíg nem kelt el, nem számít (nincs mit elszámolni)."""
+        from jarvis_core.deals import profit_report
+        from jarvis_core.selling import ItemStore
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ItemStore(Path(tmp))
+            now = time.time()
+            blazer = store.create(title="Zara blézer", price=4500, targets=["vinted"])
+            store.mark(blazer.id, "vinted")
+            store.mark(blazer.id, sold=True)
+            shoes = store.create(title="Nike cipő", price=8000, sell_shipping=1000)
+            store.mark(shoes.id, sold=True)
+            store.create(title="H&M póló", price=1500)          # még nem kelt el: nem számít
+            card = store.create(title="RTX 3060 Ti", bought_price=55000, sold_price=95000, bought_at=now - 10 * 86400)
+            store.mark(card.id, sold=True)
+            report = profit_report(store.all(), now)
+        rows = {r["id"]: r for r in report["rows"]}
+        self.assertEqual(set(rows), {blazer.id, shoes.id, card.id})
+        self.assertEqual((rows[blazer.id]["own"], rows[blazer.id]["stage"], rows[blazer.id]["cost"],
+                          rows[blazer.id]["profit"], rows[blazer.id]["roi"]), (True, "eladva", 0, 4500, None))
+        self.assertEqual(rows[shoes.id]["profit"], 7000, "az eladás postája levonódik")
+        self.assertFalse(rows[card.id]["own"])
+        self.assertEqual(report["total"], {"profit": 51500, "count": 3, "spent": 55000, "revenue": 107500, "roi": 73,
+                                           "own": 2, "own_revenue": 12500})
+        self.assertEqual(report["month"], {"profit": 51500, "count": 3, "revenue": 107500})
+        self.assertEqual(report["stages"], {"eladva": 3})
+        self.assertEqual(report["open"]["count"], 0, "a saját holmi nem pénz, ami bent van")
 
     def test_costs_expected_profit_stages_and_todays_price(self):
         """A bekerülés a vételár, a posta és az egyéb költség; a haszon az eladás költségeivel (posta, díj) együtt. Amíg

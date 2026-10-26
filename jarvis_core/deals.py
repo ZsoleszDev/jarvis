@@ -140,12 +140,13 @@ HAGGLE_CHECKS = 2
 HAGGLE_PER_DAY = 6
 MAX_HAGGLES = 20           # ennyi alkuképes hirdetés lehet a találatok között (a régebbiek kiesnek)
 # Érdemes megnézni (bizonytalan ár): ami olcsónak látszott, de kevés hasonló ára volt (sure_price), az nem vész el. A
-# tippek közé kerül (legfeljebb MAX_TIPS, TIP_DAYS napig), egy csendes értesítéssel (naponta legfeljebb TIPS_PER_DAY,
-# utána csak a listában), és minden körben újra felméri az árbázisból, letöltés nélkül: ha közben elég ár gyűlt össze, és
-# még mindig megéri, rendes jelölt lesz belőle (a hirdetés oldala, a modellkérdés, a megérő értesítés).
+# tippek közé kerül (legfeljebb MAX_TIPS, TIP_DAYS napig), egy értesítéssel (a telefonon egy nagyon rövid pittyenéssel,
+# notice.tip; naponta legfeljebb TIPS_PER_DAY, utána csak a listában), és minden körben újra felméri az árbázisból,
+# letöltés nélkül: ha közben elég ár gyűlt össze, és még mindig megéri, rendes jelölt lesz belőle (a hirdetés oldala, a
+# modellkérdés, a megérő értesítés).
 MAX_TIPS = 30
 TIP_DAYS = 3
-TIPS_PER_DAY = 10
+TIPS_PER_DAY = 30
 MAX_HAGGLE_DONE = 3000     # ennyi már megnézett hirdetést jegyez meg (ezekről nem szól újra)
 DEFAULT_HAGGLE_MESSAGE = "Szia!\nMegvan még? {ár}-ért odaadnád?\nKöszi előre is\nÜdv, Zsolt"
 # Vatera-licitfigyelő: alapból óránként nézi, a zárás előtt legfeljebb ennyi órával szól (hogy legyen időd licitálni),
@@ -974,7 +975,7 @@ def search_status(search: dict[str, Any]) -> str:
     return "kevés" if proposal else "felmérés"
 
 
-LEDGER_MONTHS = 6          # a Vételeim fülön ennyi hónap haszna látszik havonta
+LEDGER_MONTHS = 6          # az Elemzés fülön ennyi hónap haszna látszik havonta
 IDLE_DAYS = 3              # ennyi nap után szól, hogy a nálad lévő tárgy még nincs fent sehol
 TRANSIT_DAYS = 7           # ennyi nap után szól, hogy a csomag még mindig úton van
 PRICE_UP = 1.1             # ha most legalább ennyivel drágábban adják (a 90%-ot nézve), mint amennyiért eladnád
@@ -1024,29 +1025,33 @@ def _advice(row: dict[str, Any]) -> list[str]:
 
 
 def profit_report(items: list[Item], now: float | None = None, book: PriceBook | None = None) -> dict[str, Any]:
-    """Haszonkövetés (Vételeim) a vételárral megjelölt tárgyakból (Megvettem, vagy a tárgy lapján a Vételár). Egy tárgy
-    bekerülése a vételár, a posta és az egyéb költség; a haszna az eladási ár, mínusz az eladás költségei (posta, díj) és
-    a bekerülés. Ebben a hónapban, összesen és havonta (LEDGER_MONTHS); átlagosan hány nap alatt kelt el, mennyi pénz
-    van még bent a meg nem eladott tárgyakban, és mennyi haszon várható belőlük (sale_estimate). Ha az árbázis megvan
-    (book), a meg nem eladott tárgyaknál azt is, mennyiért adják most."""
+    """Haszonkövetés (Elemzés fül) a vételárral megjelölt tárgyakból (Megvettem, vagy a tárgy lapján a Vételár), és a
+    saját holmidból, amit a Jarvis adott el (nincs vételára, de elkelt: own). Egy tárgy bekerülése a vételár, a posta és
+    az egyéb költség (a saját holminál 0); a haszna az eladási ár, mínusz az eladás költségei (posta, díj) és a
+    bekerülés. Ebben a hónapban, összesen és havonta (LEDGER_MONTHS); átlagosan hány nap alatt kelt el (a saját holmi a
+    feltöltésétől), mennyi pénz van még bent a meg nem eladott (megvett) tárgyakban, és mennyi haszon várható belőlük
+    (sale_estimate). A megtérülés (roi) csak a megvett tárgyakból számol. Ha az árbázis megvan (book), a meg nem eladott
+    tárgyaknál azt is, mennyiért adják most."""
     now = time.time() if now is None else now
     month = time.strftime("%Y-%m", time.localtime(now))
     rows: list[dict[str, Any]] = []
-    total = {"profit": 0, "count": 0, "spent": 0, "revenue": 0, "roi": None}
+    total = {"profit": 0, "count": 0, "spent": 0, "revenue": 0, "roi": None, "own": 0, "own_revenue": 0}
     this_month = {"profit": 0, "count": 0, "revenue": 0}
     stock = {"count": 0, "spent": 0, "expected": 0, "value": 0, "unknown": 0}
     by_month: dict[str, dict[str, Any]] = {}
     stages: Counter = Counter()
     days: list[int] = []
+    bought_profit = 0
     for item in items:
-        if item.bought_price is None:
-            continue
+        own = item.bought_price is None
+        if own and not (item.sold and item.sold_price is not None):
+            continue                # a saját holmid csak akkor számít, ha elkelt (a bevétele a haszna)
         cost, sell_cost = item_cost(item), int(item.sell_shipping or 0) + int(item.sell_fee or 0)
-        bought_at = item.bought_at or item.created
+        bought_at = item.bought_at or (item.online_since() if own else None) or item.created
         where = stage(item)
         stages[where] += 1
         row: dict[str, Any] = {
-            "id": item.id, "name": item.name, "stage": where, "sold": item.sold, "status": item.status,
+            "id": item.id, "name": item.name, "stage": where, "sold": item.sold, "status": item.status, "own": own,
             "photo": item.photos[0] if item.photos else "", "source": item.source, "bought_from": item.bought_from,
             "bought_at": bought_at, "bought_price": item.bought_price, "bought_shipping": item.bought_shipping,
             "bought_extra": item.bought_extra, "cost": cost, "market_price": item.market_price,
@@ -1057,11 +1062,16 @@ def profit_report(items: list[Item], now: float | None = None, book: PriceBook |
             "days": max(0, int(((item.sold_at if item.sold and item.sold_at else now) - bought_at) // 86400))}
         if item.sold and item.sold_price is not None:
             profit = item.sold_price - sell_cost - cost
-            row.update(profit=profit, roi=_percent(profit, cost))
+            row.update(profit=profit, roi=None if own else _percent(profit, cost))
             total["profit"] += profit
             total["count"] += 1
-            total["spent"] += cost
             total["revenue"] += item.sold_price
+            if own:
+                total["own"] += 1
+                total["own_revenue"] += item.sold_price
+            else:
+                total["spent"] += cost
+                bought_profit += profit
             if item.sold_at:
                 days.append(row["days"])
                 when = time.strftime("%Y-%m", time.localtime(item.sold_at))
@@ -1092,7 +1102,7 @@ def profit_report(items: list[Item], now: float | None = None, book: PriceBook |
                                          "speed": speed_text(book.speed(found[0]))}
         row["advice"] = _advice(row)
         rows.append(row)
-    total["roi"] = _percent(total["profit"], total["spent"])
+    total["roi"] = _percent(bought_profit, total["spent"])
     order = {"úton": 0, "nálad": 1, "fent": 2, "eladva": 3}
     rows.sort(key=lambda r: (order[r["stage"]], -(r["sold_at"] or r["bought_at"] or 0)))
     months = [by_month[key] for key in sorted(by_month, reverse=True)[:LEDGER_MONTHS]]
@@ -1498,7 +1508,7 @@ class DealHunter:
             if told_now:
                 self._save()
         for title, text in told_now:
-            notify("info", title, text, actions=[{"action": "ledger", "label": "Vételeim"}])
+            notify("info", title, text, actions=[{"action": "ledger", "label": "Elemzés"}])
             self.journal.add(text)
         return [text for _title, text in told_now]
 
@@ -1818,7 +1828,7 @@ class DealHunter:
             self._remaining = (0.0, None)
         what = found["text"][:60] if found is not None else name[:60]
         self.journal.add(f"Visszamondtad a vételt: „{what}”" + (f" ({format_price(found['price'])})" if found else "")
-                         + "; töröltem a Vételeim és az eladandók közül" + (", és a találatok közül" if found else "")
+                         + "; töröltem az Elemzés fülről és az eladandók közül" + (", és a találatok közül" if found else "")
                          + ".")
         return found
 
@@ -2973,7 +2983,8 @@ class DealHunter:
 
     def _tip(self, row: dict[str, Any], query: str, found: dict[str, Any], watch: dict[str, Any] | None) -> None:
         """Egy „Érdemes megnézni” tipp (bizonytalan ár): a hirdetés, a néhány hasonló ára és a várható haszon. Egy
-        hirdetésről egyszer; értesítés naponta legfeljebb TIPS_PER_DAY (utána csak a listában)."""
+        hirdetésről egyszer; értesítés (a telefonon egy rövid pittyenés: notice.tip) naponta legfeljebb TIPS_PER_DAY
+        (utána csak a listában)."""
         usual = int(found["price"])
         profit = expected_profit(usual, int(row["price"]), careful_low(found))
         if profit <= 0 or not row.get("url") or wearable(f"{row.get('title') or row['text']} {query}"):
@@ -3007,7 +3018,8 @@ class DealHunter:
                 "lehet benne. Nézd meg magad, mielőtt megveszed; ha összegyűlik elég ár, újra felmérem.")
         with self._lock:
             self._tip_notices.append((("deal", f"Érdemes megnézni: {tip['title'][:50]}", text),
-                                      {"url": tip["url"], "actions": [DEALS_ACTION], "quiet": quiet or None}))
+                                      {"url": tip["url"], "actions": [DEALS_ACTION], "quiet": quiet or None,
+                                       "tip": tip["id"]}))
 
     def _follow_auction(self, game: _Round, search: dict[str, Any], deal: dict[str, Any]) -> None:
         """Egy megérő, de még nem hamarosan záruló licit a licitlistára, előbb ellenőrizetlenként: a szokásos ára szerint

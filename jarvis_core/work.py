@@ -42,6 +42,7 @@ from .selling import (CONDITIONS, MAX_PRICE, NEEDS, NOT_POSTED, ON_SITE, PARCEL_
                       PriceResearcher, format_price, missing_needs, photo_signature, price_verdict, question_for,
                       research_fresh, review_text, round_price, vision_images)
 from .textutil import fold, hu_amounts
+from .todos import TodoList
 from .tools import Toolbox, ToolError, params
 from .vinted import ChoiceMemory, FillOutcome, VintedDelister, VintedFiller
 
@@ -196,7 +197,8 @@ class WorkDesk:
                  confirm: Callable[[str], bool] | None = None,
                  platforms: dict[str, Platform] | None = None,
                  check_stop: Callable[[], None] | None = None,
-                 on_message: Callable[[dict[str, Any]], None] | None = None):
+                 on_message: Callable[[dict[str, Any]], None] | None = None,
+                 on_todos: Callable[[int], None] | None = None):
         self.cfg = cfg
         self.llm = llm
         self.toolbox = toolbox
@@ -223,11 +225,14 @@ class WorkDesk:
         self.autodelisted: tuple[str, str] | None = None
         self._settings_path = self.root / "beallitasok.json"
         self.settings = self._load_settings()
-        # Vevői üzenetek (messages.py): olvasás modell nélkül, válaszvázlat kérésre, küldés csak a te jóváhagyásoddal.
+        # Teendőim (todos.py): amit neked kell elvégezned (pl. egy eladott tárgy feladása a kóddal); az Elemzés fülön.
+        self.todos = TodoList(self.root, on_change=on_todos)
+        # Vevői üzenetek (messages.py): olvasás modell nélkül, válaszvázlat kérésre, küldés csak a te jóváhagyásoddal;
+        # olvasás közben azt is nézi, eladtál-e valamit (a feladási kód a Teendőim közé kerül).
         self.messages = MessageDesk(self.root, self.platforms, self.store,
                                     (lambda: toolbox.browser) if self.browser_ready else None, llm,
                                     settings=lambda: self.settings, confirm=lambda prompt: self.confirm(prompt),
-                                    check_stop=lambda: self.check_stop(), on_change=on_message)
+                                    check_stop=lambda: self.check_stop(), on_change=on_message, todos=self.todos)
         # Automata kereskedés (deals.py): alulárazott hirdetések keresése, modell nélkül (csak a jelöltekre egy kérdés).
         # A Hardverapró és a Jófogás böngésző nélkül is (feeds.py): gyorsabb, a böngészővel párhuzamosan megy, és erre
         # épül az azonnali figyelő (instant.py), ami szól, amint új hirdetés kerül fel.
@@ -292,6 +297,7 @@ class WorkDesk:
             "conditions": CONDITIONS,
             "max_photos": self.store.max_photos,
             "messages": bool(self.messages.platforms),
+            "todos_open": len(self.todos.waiting()),
         }
 
     # --- beállítások (alapadatok) ---------------------------------------------------------------
@@ -1249,7 +1255,7 @@ class WorkDesk:
                 "ott kézzel kell átírni (vagy levenni, és újra feltölteni).")
 
     def research(self, item_id: str, progress: Callable[[str], None] | None = None) -> Item:
-        """Árkutatás (csak ajánlás). Ha még nem tudni, mi ez (pl. a Megvettem gombbal vagy a Vételeim Új vételével
+        """Árkutatás (csak ajánlás). Ha még nem tudni, mi ez (pl. a Megvettem gombbal vagy az Elemzés Új vételével
         felvett tárgynál a leírásból még nem olvasta ki), előbb kiolvassa a leírásból (egy modellhívás); ha a modell
         nem válaszol, a leírás elejével keres."""
         item = self.store.get(item_id)

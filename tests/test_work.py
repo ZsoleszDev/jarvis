@@ -1132,7 +1132,7 @@ class WorkDeskTests(unittest.TestCase):
         self.assertIn("az árbázisból: a hasonlók most kb. 17 000 Ft-ért mennek (5 ár alapján)", step.text)
 
     def test_research_on_a_bought_item_reads_the_description_first(self):
-        """Egy megvett tárgy (Megvettem, vagy a Vételeim Új vétele): a leírásából még nem olvasta ki, mi ez. Az
+        """Egy megvett tárgy (Megvettem, vagy az Elemzés Új vétele): a leírásából még nem olvasta ki, mi ez. Az
         árkutatás előtt kiolvassa (egy modellhívás), és azzal keres; ha a modell nem válaszol, a leírás elejével."""
         class FakeResearcher:
             def __init__(self, store):
