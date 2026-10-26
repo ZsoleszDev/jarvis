@@ -694,6 +694,7 @@
                        ["auction", "licitlistára"]];
   const FUNNEL_OUT = [["not_cheap", "nem elég olcsó"], ["other", "nem a keresett termék vagy nem eladó"],
                       ["over_limit", "a vételi limit fölött"], ["unknown", "ismeretlen termék"], ["unsure", "bizonytalan ár (Érdemes megnézni)"],
+                      ["unverified", "ellenőrizetlen (Érdemes megnézni)"],
                       ["suspicious", "gyanús"], ["risky", "kockázatos"], ["gone", "elkelt"], ["defect", "hibás"],
                       ["model_no", "a modell szerint nem az"], ["muted", "elrejtett termék"],
                       ["bundle", "csomag (a csomagbontásnak)"], ["clothing", "ruha, cipő (azzal nem kereskedem)"]];
@@ -791,7 +792,13 @@
                   [d.auction ? "Máshol ennyiért adják" : "Most ennyiért mennek", `kb. ${esc(price(d.median))}${d.similar ? ` (${esc(d.similar)} hasonló alapján${esc(where)})` : ""}`]];
     if ((d.band || []).length === 2) rows.push(["Kínálati ársáv", `${esc(price(d.band[0]))} – ${esc(price(d.band[1]))} <small class="muted">(a hasonlók többsége)</small>`]);
     if (sale && !d.auction) rows.push(["Óvatos eladási ár", `kb. ${esc(price(sale))} <small class="muted">(a szokásos ár 90%-a, de legfeljebb a hasonlók alsó negyede)</small>`]);
-    if (d.costs && !d.auction) rows.push(["Költség", `posta kb. ${esc(price(d.costs))}`]);
+    // a költségek tételesen (deals._deal, _reprice): posta, a Vinteden a vevővédelmi díj, az állapot szerinti pótlás, javítás
+    const parts = (d.cost_parts || []).length ? d.cost_parts : (d.costs ? [{ what: "posta", amount: d.costs }] : []);
+    if (parts.length && !d.auction) rows.push(["Költség", parts.map((c) => `${esc(c.what)} kb. ${esc(price(c.amount))}`).join(" · ")
+      + (parts.length > 1 ? ` <small class="muted">(összesen kb. ${esc(price(d.costs))})</small>` : "")]);
+    if (d.condition_text) rows.push(["Állapot", `${esc(d.condition_text)}${d.verified ? "" : ' <small class="muted">(a leírás szerint)</small>'}`]);
+    if (d.cond_band) rows.push(["Hasonló hibájúak", `kb. ${esc(price(d.cond_band.price))} (${esc(d.cond_band.n)} hirdetés: ${esc(d.cond_band.issues.join(", "))}); a hibátlanok kb. ${esc(price(d.cond_band.clean))}`]);
+    rows.push(["Ellenőrizve", d.verified ? "igen: az adatlapja, az állapota és az újraszámolt haszon alapján" : '<span class="warn">nem (nézd meg magad)</span>']);
     if (d.auction) rows.push(["Meddig licitálj", `legfeljebb <b>${esc(price(d.max_bid))}</b>-ig${d.left ? ` · ${esc(leftText(d))}` : ""}`]);
     else if (d.offer) rows.push(["Ajánlattal", `ha ${esc(price(d.offer))}-ért megkapod, kb. <b>${esc(price(d.profit))}</b> a haszon`]);
     else rows.push(["Ennyit kereshetsz vele", `<b>kb. ${esc(price(d.profit))}</b>${sale ? ` (ha kb. ${esc(price(sale))}-ért eladod, a költség után)` : ""}`]);
@@ -860,11 +867,38 @@
         d.bundle.lines.map((l) => `- ${l.count > 1 ? `${l.count} db ` : ""}${l.name}: kb. ${price(l.unit)}${l.count > 1 ? "/db" : ""}`).join("\n") +
         `\nDarabonként eladva kb. ${price(d.bundle.value)}, a haszon kb. ${price(d.profit)}.\n` + d.url;
     }
+    // a kockázatok is (figyelmeztetések, a modell megjegyzése, a biztonsági értékelés, az állapot), és az összehasonlító
+    // hirdetések linkjei: ezekkel ellenőrizhető, mihez mértem
+    const lines = [`${d.title || d.text}`, `Ára: ${price(d.price)} (${d.site})`];
+    if (d.median) lines.push(`A hasonlók most kb. ${price(d.median)}-ért mennek${d.similar ? ` (${d.similar} hirdetés alapján)` : ""}.`);
+    if (d.cond_band) lines.push(`Ez a hasonló hibájúak ára (${d.cond_band.issues.join(", ")}); a hibátlanok kb. ${price(d.cond_band.clean)}.`);
+    const costs = (d.cost_parts || []).map((c) => `${c.what} kb. ${price(c.amount)}`);
+    if (d.profit !== undefined) lines.push(`Várható haszon kb. ${price(d.profit)}${costs.length ? ` (levonva: ${costs.join(", ")})` : ""}.`);
+    const cond = d.condition || {};
+    const aspects = [["display", "kijelző"], ["battery", "akkumulátor"], ["function", "működés"], ["accessories", "tartozékok"], ["warranty", "garancia"]];
+    const known = aspects.filter(([k]) => cond[k] && cond[k].state && cond[k].state !== "ismeretlen");
+    if (known.length) {
+      lines.push("Állapot a leírás szerint:");
+      for (const [k, name] of known) {
+        const state = k === "accessories" && cond[k].state === "hiányos" ? `hiányzik: ${(cond.missing || []).join(", ") || "egyéb"}` : cond[k].state;
+        lines.push(`- ${name}: ${state}${cond[k].evidence ? ` („${cond[k].evidence}”)` : ""}`);
+      }
+      const unknown = aspects.filter(([k]) => !cond[k] || !cond[k].state || cond[k].state === "ismeretlen").map(([, name]) => name);
+      if (unknown.length) lines.push(`- nem derül ki: ${unknown.join(", ")}`);
+    } else if (d.condition_text) {
+      lines.push(`Állapot: ${d.condition_text}`);
+    }
+    const risks = [...((d.safety || {}).why || []), ...(d.warnings || [])];
+    if (d.safety) lines.push(`Az én értékelésem: ${SAFETY[d.safety.level] || d.safety.level}.`);
+    if (risks.length) lines.push("Kockázatok:", ...risks.map((w) => `- ${w}`));
+    if (d.note) lines.push(`A modell megjegyzése: ${d.note}`);
+    if (!d.verified) lines.push("Az adatlapját és az állapotát nem tudtam teljesen ellenőrizni.");
+    const used = ((d.basis || {}).used || []).filter((e) => e.u).slice(0, 5);
+    if (used.length) lines.push("Ezekhez mértem:", ...used.map((e) => `- ${e.t || "hirdetés"}: ${price(e.p)}${e.s ? ` (${e.s})` : ""} ${e.u}`));
+    const out = ((d.basis || {}).out || []).filter((e) => e.u && e.why).slice(0, 3);
+    if (out.length) lines.push("Kizártam (az okkal):", ...out.map((e) => `- ${e.t || "hirdetés"}: ${price(e.p)} – ${e.why} ${e.u}`));
     return "Találtam egy jónak tűnő árut, ami jó befektetés lehetne, ha vétel után kicsit drágábban továbbárusítanám. " +
-      "Megnéznéd, hogy tényleg jó vétel lenne-e?\n\n" +
-      `${d.title || d.text}\nÁra: ${price(d.price)} (${d.site})\n` +
-      (d.median ? `A hasonlók most kb. ${price(d.median)}-ért mennek${d.similar ? ` (${d.similar} hirdetés alapján)` : ""}.\n` : "") +
-      d.url;
+      "Megnéznéd, hogy tényleg jó vétel lenne-e, és mit kockáztatok vele?\n\n" + lines.join("\n") + `\n\nA hirdetés: ${d.url}`;
   }
   $("deal-expert").addEventListener("click", (event) => {
     const d = (deals.deals || []).find((x) => x.id === dealOpen);
@@ -943,9 +977,13 @@
           : `<small class="warn">ellenőrizetlen: az adatlapját még nem néztem meg, ezért licithatárt még nem mondok</small>
              <small class="muted">máshol kb. ${esc(price(a.median))}</small>`}</span>
         <span class="row"><button type="button" class="small quiet" data-auction-dismiss="${esc(a.id)}">Elrejtés</button></span></li>`).join("");
+    // az ellenőrizetlen (deals._unverified): az ára biztos, de az adatlapja, a modell vagy az állapota miatt nem ellenőrzött
     const tips = (deals.tips || []).map((t) => `<li><span><a href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.title)}</a>
-        <small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">bizonytalan ár</b> csak ${esc(t.n)} hasonló
-          (${esc((t.sites || []).join(", ") || "?")}) szerint kb. ${esc(price(t.usual))} · kb. <b>${esc(price(t.profit))}</b> haszon lehet benne</small></span>
+        ${t.unverified ? `<small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">ellenőrizetlen</b>
+          a hasonlók kb. ${esc(price(t.usual))} · kb. <b>${esc(price(t.profit))}</b> haszon lehet benne</small>
+          <small class="warn">${esc(t.why || "")}</small>${t.condition_text ? `<small class="muted">Állapot: ${esc(t.condition_text)}</small>` : ""}`
+        : `<small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">bizonytalan ár</b> csak ${esc(t.n)} hasonló
+          (${esc((t.sites || []).join(", ") || "?")}) szerint kb. ${esc(price(t.usual))} · kb. <b>${esc(price(t.profit))}</b> haszon lehet benne</small>`}</span>
         <span class="row"><button type="button" class="small quiet" data-tip-dismiss="${esc(t.id)}">Elrejtés</button></span></li>`).join("");
     const book = deals.book || { products: 0, prices: 0, ready: 0 };
     const lookupRows = lookupResults === null ? "" : `<ul class="dealist">${lookupResults.map((r) => `<li><span><b>${esc(r.name)}</b>
@@ -986,9 +1024,9 @@
       ${funnelLine(false) ? `<p class="funnel"><small class="muted">${esc(funnelLine(false))}</small></p>` : ""}
       <h3 class="section-title">Legutóbbi találatok</h3>
       <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>
-      ${tips ? `<h3 class="section-title">Érdemes megnézni <small class="muted">bizonytalan ár</small></h3>
-      <p><small class="muted">Olcsónak látszik, de kevés hasonló árat találtam, ezért nem biztos, hogy megéri. Nézd meg magad;
-        ha közben összegyűlik elég ár, újra felmérem, és ha megéri, szólok.</small></p>
+      ${tips ? `<h3 class="section-title">Érdemes megnézni <small class="muted">bizonytalan ár vagy ellenőrizetlen</small></h3>
+      <p><small class="muted">Olcsónak látszik, de kevés hasonló árat találtam, vagy nem tudtam ellenőrizni (az adatlapját, az
+        állapotát), ezért nem biztos, hogy megéri. Nézd meg magad; ha közben kiderül, újra felmérem, és ha megéri, szólok.</small></p>
       <ul class="dealist">${tips}</ul>` : ""}
       ${auctions ? `<h3 class="section-title">Licitlista <small class="muted">Vatera</small></h3>
       <p><small class="muted">Ezeknél a licit még nem zárul hamarosan, de megérheti beszállni. Ha az adatlapját már megnéztem, a
@@ -1013,6 +1051,22 @@
         <label class="field-label" for="d-message">Üzenet az eladónak</label>
         <textarea id="d-message" rows="3">${esc(deals.message || "")}</textarea>
         <div class="row"><button type="button" class="small" id="d-message-save">Mentés</button></div>`)}
+      ${section("costs", `Pótlás és javítás (${(deals.costs || []).length})`, `
+        <p><small class="muted">Ha egy jelöltnek a leírása szerint hiányzik a töltője, vagy hibás a kijelzője, ennyit vonok le a
+          hasznából. Ha nincs megadva, és hasonló hibájú hirdetést sem találok, nem szólok róla sürgősen (ellenőrizetlen marad).
+          A termék üresen mindenre vonatkozik; megadva csak arra (és az erősebb).</small></p>
+        <ul class="dealist">${(deals.costs || []).map((c) => `<li><span><b>${esc(c.part)}</b>${c.product ? ` <small class="muted">${esc(c.product)}</small>` : ""}
+          <small>kb. ${esc(price(c.amount))}</small></span>
+          <button type="button" class="small quiet" data-cost-remove="${esc(c.id)}">Törlés</button></li>`).join("") || '<li class="muted">Még nincs megadva.</li>'}</ul>
+        <form id="d-cost" class="compose" autocomplete="off">
+          <div class="row">
+            <label>Mi <input id="d-cost-part" list="d-cost-parts" placeholder="pl. töltő, kijelző" style="width: 9em"></label>
+            <datalist id="d-cost-parts">${(deals.cost_parts || []).map((x) => `<option value="${esc(x)}">`).join("")}</datalist>
+            <label>Termék <input id="d-cost-product" placeholder="üresen: mind" style="width: 10em"></label>
+            <label><input id="d-cost-amount" type="number" inputmode="numeric" min="1" style="width: 6em"> Ft</label>
+          </div>
+          <div class="row"><button type="submit" class="small">Hozzáadás</button></div>
+        </form>`)}
       ${section("searches", `Keresések (${deals.searches.length})`, `
         <ul class="dealist">${searches || '<li class="muted">Még nincs keresés.</li>'}</ul>
         <form id="d-add" class="compose" autocomplete="off">
@@ -1196,6 +1250,13 @@
     for (const b of box.querySelectorAll("[data-offer]")) b.addEventListener("click", () => makeOffer(b.dataset.offer, $(`d-offer-${b.dataset.offer}`).value));
     for (const b of box.querySelectorAll("[data-deal-dismiss]")) b.addEventListener("click", () => dealAction({ action: "dismiss", id: b.dataset.dealDismiss }));
     for (const b of box.querySelectorAll("[data-tip-dismiss]")) b.addEventListener("click", () => dealAction({ action: "tip_dismiss", id: b.dataset.tipDismiss }));
+    for (const b of box.querySelectorAll("[data-cost-remove]")) b.addEventListener("click", () => dealAction({ action: "cost_remove", id: b.dataset.costRemove }));
+    const costForm = box.querySelector("#d-cost");
+    if (costForm) costForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      dealAction({ action: "cost_add", part: box.querySelector("#d-cost-part").value, product: box.querySelector("#d-cost-product").value,
+                   amount: box.querySelector("#d-cost-amount").value });
+    });
     for (const b of box.querySelectorAll("[data-auction-dismiss]")) b.addEventListener("click", () => dealAction({ action: "auction_dismiss", id: b.dataset.auctionDismiss }));
     for (const b of box.querySelectorAll("[data-deal-open]")) b.addEventListener("click", () => openDeal(b.dataset.dealOpen));
     $("d-haggle-save").addEventListener("click", async () => {

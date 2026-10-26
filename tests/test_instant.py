@@ -433,6 +433,14 @@ class FetcherTests(unittest.TestCase):
         self.assertIn("kártyát", rows[2]["url"], "az ékezetek is jók (a meta charset szerint)")
 
 
+class AllVetted(dict):
+    """Az összehasonlítók állapota (DealHunter._vetted): mintha mindnek elolvasta volna a leírását, és hibátlan lenne (a
+    legtöbb teszt nem erről szól; a leírások olvasásának külön tesztje van)."""
+
+    def get(self, key, default=None):
+        return super().get(key, {"at": 0.0, "issues": []})
+
+
 class InstantCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -444,13 +452,19 @@ class InstantCase(unittest.TestCase):
         self.hunter = DealHunter(Path(self.tmp.name), PLATFORMS, lambda: self.browser, FakeLlm(), clock=self.clock,
                                  fetcher=self.fetcher)
         self.hunter.set_day(0, 24)
+        self.hunter._vetted = AllVetted()
         self.watch = InstantWatch(Path(self.tmp.name), PLATFORMS, self.fetcher, self.hunter, clock=self.clock,
                                   rng=random.Random(3))
         self.notices: list[tuple] = []
-        self.watch.notify = lambda kind, title, text, **extra: self.notices.append((kind, title, text, extra))
+        self.pings: list[tuple] = []
+        self.watch.notify = self.notify
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def notify(self, kind, title, text, **extra):
+        # a gyors jelzés („Ígéretes új hirdetés, ellenőrzés folyamatban”: notice.pending) külön
+        (self.pings if extra.get("pending") else self.notices).append((kind, title, text, extra))
 
     def results(self, cards: list[str], part: str = "keres.php") -> None:
         self.net.pages[part] = (200, ha_page(cards))
@@ -486,8 +500,13 @@ class InstantTests(InstantCase):
         self.assertEqual((kind, title), ("deal", "Megéri: Palit RTX 3060 Ti Dual"),
                          "a drága Zotacról és a hibás EVGA-ról nem szól")
         self.assertIn("Hardverapró: „Palit RTX 3060 Ti Dual” 52 000 Ft, most került fel. A szokásos ára kb. 100 000 Ft", text)
-        self.assertIn("kb. 36 500 Ft haszon lehet. Biztos befektetés: 70% haszon. Ugyanaz a kártya.", text,
-                      "mennyire biztos, és a modell is megnézte")
+        self.assertIn("kb. 36 500 Ft haszon lehet. Állapot: működés: működik („Hibátlan”). Ellenőriztem: az adatlapja és "
+                      "az állapota alapján is megéri. Biztos befektetés: 70% haszon, a leírása szerint hibátlanul működik. "
+                      "Ugyanaz a kártya.", text, "az állapota bizonyítékkal, mennyire biztos, és a modell is megnézte")
+        self.assertEqual([p[1] for p in self.pings], ["Ígéretes új hirdetés: EVGA RTX 3060 Ti XC",
+                                                      "Ígéretes új hirdetés: Palit RTX 3060 Ti Dual"],
+                         "a gyors jelzés az ellenőrzés előtt ment (a hibás EVGA-ról is: az csak az adatlapon derült ki)")
+        self.assertNotIn("urgent", self.pings[0][3], "a gyors jelzés nem riaszt")
         self.assertTrue(extra["urgent"] and extra["url"].endswith("_7/friss.html"))
         [hit] = self.watch.state()["hits"]
         deals = self.hunter.state()["deals"]
@@ -497,6 +516,39 @@ class InstantTests(InstantCase):
         self.later()
         self.watch.tick()
         self.assertEqual(len(self.notices), 1, "ugyanarról kétszer nem szól")
+
+    def test_the_comparables_descriptions_are_read_before_it_tells(self):
+        """Az árbázis hat ára a címük szerint hibátlan Switch Lite (két oldalról): ez még nem biztos ár. Mielőtt szól, a
+        szokásos árhoz legközelebbi összehasonlítók leírását is elolvassa (keresés nélkül, a figyelő keretéből): a repedt
+        kijelzőjű kimarad a hibátlanok árából (az okkal), az eredmény eltárolva; utána ellenőrzötten szól."""
+        self.hunter._vetted = {}
+        comps = [(60000, "hardverapro"), (58000, "jofogas"), (59000, "hardverapro"), (61000, "jofogas"),
+                 (62000, "hardverapro"), (60500, "jofogas")]
+        self.hunter.book.add([{"text": f"Nintendo Switch Lite szürke {n}", "price": p, "platform": site,
+                               "url": f"https://{'hardverapro.hu/apro' if site == 'hardverapro' else 'www.jofogas.hu/b'}"
+                                      f"/lite_{n}/friss.html"} for n, (p, site) in enumerate(comps)])
+        for n in range(len(comps)):
+            self.net.pages[f"lite_{n}/friss"] = page_html("Nintendo Switch Lite. Hibátlan, töltővel.")
+        self.net.pages["lite_0/friss"] = page_html("Nintendo Switch Lite. A kijelzője repedt, de működik.")
+        self.watch.add("Nintendo Switch Lite", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi kontroller", "2 000 Ft")])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Nintendo Switch Lite", "30 000 Ft"), ha_card(1, "Régi kontroller", "2 000 Ft")])
+        self.net.pages["_7/friss"] = page_html("Nintendo Switch Lite, hibátlanul működik, töltővel.")
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Nintendo Switch Lite"])
+        read = [url for _at, url in self.net.asked if "/lite_" in url]
+        self.assertEqual(len(read), 3, "a legfontosabb három összehasonlító leírása")
+        self.assertIn("https://hardverapro.hu/apro/lite_0/friss.html", read, "a szokásos árhoz legközelebbi")
+        self.assertFalse(any("jofogas.hu/magyarorszag" in url for _at, url in self.net.asked),
+                         "a többi oldalon nem keresett (az árbázisban elég ár volt)")
+        [deal] = self.hunter.state()["deals"]
+        self.assertTrue(deal["verified"])
+        self.assertEqual([e["why"] for e in deal["basis"]["out"] if "lite_0" in e["u"]],
+                         ["a leírása szerint hibás a kijelzője"])
+        self.assertEqual(sorted(len(v["issues"]) for v in self.hunter._vetted.values()), [0, 0, 1])
 
     def test_the_sellers_other_listings_can_make_a_better_buy(self):
         """Egy jó találat után megnézi az eladó többi hirdetését (a hirdetés oldalán lévő „további hirdetései” linkről, a
@@ -947,6 +999,9 @@ class InstantTests(InstantCase):
         self.watch.allowed = lambda: state["ok"]
 
         def notify(kind, title, text, **extra):
+            if extra.get("pending"):           # a gyors jelzés még az ellenőrzés előtt jön
+                self.pings.append((kind, title, text, extra))
+                return
             self.notices.append((kind, title, text, extra))
             state["ok"] = False                # az első találat után Szünet
 
@@ -957,7 +1012,7 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.assertEqual(len(self.notices), 1, "Szünet alatt semmi")
         state["ok"] = True
-        self.watch.notify = lambda kind, title, text, **extra: self.notices.append((kind, title, text, extra))
+        self.watch.notify = self.notify
         self.watch.tick()
         self.assertEqual(len(self.notices), 3, "a folytatáskor jött a többi")
 
@@ -1185,8 +1240,8 @@ class InstantTests(InstantCase):
             self.watch.stop()
 
     def test_waits_for_the_model_while_you_use_jarvis(self):
-        """Amíg dolgozol a Jarvisszal, a modellt nem kérdezi: a modell nélkül is felmérhető megérőről rögtön szól (a
-        rövid modellkérdés nélkül), a többi vár, és utána jön."""
+        """Amíg dolgozol a Jarvisszal, a modellt nem kérdezi: a megérőnek látszóról rögtön jön a gyors jelzés, de a
+        sürgős „Megéri” csak a modell ellenőrzése után (addig az oldalát sem tölti le); a többi is vár, és utána jön."""
         self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
         self.hunter.set_enabled(True)
         self.watch.add("https://hardverapro.hu/aprok/hardver/videokartya/index.html")
@@ -1200,17 +1255,20 @@ class InstantTests(InstantCase):
         self.net.pages["_7/friss"] = page_html("Hibátlan.")
         self.net.pages["_31/friss"] = page_html("Hibátlan.")
         self.watch.tick()
-        self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual"])
-        self.assertNotIn("Ugyanaz a kártya", self.notices[0][2], "most nem kérdezte a modellt")
-        self.assertEqual(self.watch.state()["waiting"], 1)
+        self.assertEqual(self.notices, [], "ellenőrzés nélkül nem sürgős")
+        self.assertEqual([p[1] for p in self.pings], ["Ígéretes új hirdetés: Palit RTX 3060 Ti Dual"])
+        self.assertEqual(self.watch.state()["waiting"], 2)
         self.assertEqual(self.hunter.llm.calls, [])
+        self.assertFalse(any("_7/friss" in url for _at, url in self.net.asked), "az oldalát sem töltötte le")
         self.hunter.book.add([{"text": f"Sony WH-1000XM4 {n}", "price": 70000, "url": f"https://x.hu/s{n}",
                                "platform": ("jofogas", "hardverapro")[n % 2]} for n in range(5)])
         self.hunter.llm.explore = [{"n": 1, "query": "Sony WH-1000XM4", "buy": False}]
         self.watch.model_ok = lambda: True
         self.watch.tick()
         self.assertEqual(self.watch.state()["waiting"], 0)
-        self.assertEqual(self.notices[-1][1], "Megéri: Zajszűrős fejhallgató")
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual", "Megéri: Zajszűrős fejhallgató"])
+        self.assertIn("Ugyanaz a kártya", self.notices[0][2], "most már a modell is megnézte")
+        self.assertEqual(len(self.pings), 2, "a Palitról egyszer jött gyors jelzés")
 
     def test_suspicious_new_listings_are_never_sent(self):
         """A gyanúsan olcsóról (az oldalát sem tölti le), az átverésre utalóról és az értékelés nélküli eladóéról nem
@@ -1266,6 +1324,7 @@ class InstantTests(InstantCase):
         self.assertEqual(self.notices, [], "185 000 Ft még nem éri meg")
         self.later()
         self.results([ha_card(4, "MSI RTX 3080 Ventus", "155 000 Ft")])
+        self.net.pages["_4/friss"] = page_html("Hibátlan, dobozában.")
         self.watch.tick()
         self.assertIn("leárazta: 185 000 Ft → 155 000 Ft", self.notices[0][2])
 
@@ -1443,7 +1502,7 @@ class ParallelRoundTests(InstantCase):
         self.hunter.add_search("RTX 3060 Ti", ["vinted", "jofogas", "hardverapro"], reference=100000)
         self.hunter.set_enabled(True)
         notices = []
-        result = self.hunter.run(notify=lambda *a, **k: notices.append(a))
+        result = self.hunter.run(notify=lambda *a, **k: None if k.get("pending") else notices.append(a))
         self.assertTrue(any("vinted" in url for url in self.browser.urls))
         self.assertFalse(any("hardverapro" in url or "jofogas" in url for url in self.browser.urls),
                          "a gyors oldalakat nem a böngésző töltötte le")
@@ -1459,7 +1518,8 @@ class ParallelRoundTests(InstantCase):
         böngészővel tölti le helyette (a keret az oldal kímélése, a böngésző a Vintedé és a Vateráé, és ott a lista sem a
         legújabb elöl jön): a keresés BUSY_RETRY múlva újra próbálkozik, nem a teljes gyakorisága után. Ha közben
         felszabadul a keret, a jelölt oldala viszont már nem fér bele, a jelöltről figyelmeztetéssel szól (a friss
-        hirdetésnél az idő a fontosabb), és az oldalát sem a böngésző nyitja meg."""
+        hirdetésnél az idő a fontosabb: a gyors jelzés rögtön megy), de ellenőrizetlenként (az Érdemes megnézni listába),
+        és az oldalát sem a böngésző nyitja meg."""
         self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
         self.hunter.set_enabled(True)
         self.fetcher.hourly = 0                # elfogyott a keret
@@ -1475,8 +1535,9 @@ class ParallelRoundTests(InstantCase):
         self.clock.now += deals_module.BUSY_RETRY
         self.hunter.run(notify=lambda *a, **k: notices.append(a))
         self.assertEqual((self.browser.urls, self.browser.looked), ([], []))
-        [(_kind, title, text)] = [n[:3] for n in notices]
-        self.assertTrue(title.startswith("Olcsó: Gigabyte RTX 3060 Ti Gaming OC"), "(a kártya szövegével: az oldala nem nyílt meg)")
+        [(_kind, ping, _text), (_kind, title, text)] = [n[:3] for n in notices]
+        self.assertTrue(ping.startswith("Ígéretes új hirdetés: Gigabyte RTX 3060 Ti Gaming OC"))
+        self.assertTrue(title.startswith("Ellenőrizetlen: Gigabyte RTX 3060 Ti Gaming OC"), "az oldala nem nyílt meg")
         self.assertIn("a hirdetés oldalát most nem nyitottam meg (elfogyott az oldal óránkénti kerete)", text)
 
     def test_the_scheduler_comes_back_for_the_ten_minute_retry(self):

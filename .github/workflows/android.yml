@@ -61,8 +61,17 @@ jobs:
       - name: Kiadás (android-latest)
         env:
           GH_TOKEN: ${{ github.token }}
+        # A kiadás nem törlődik (így a letöltő link fordítás közben sem tűnik el): ha még nincs, létrehozza, ha van,
+        # csak az APK-t cseréli, és a címkét erre a változatra állítja. Rendes (nem előzetes) kiadás, hogy a
+        # repó főoldalán is látsszon.
         run: |
-          gh release delete android-latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create android-latest jarvis.apk --target "$GITHUB_SHA" --prerelease \
-            --title "Jarvis Android-alkalmazás (legfrissebb)" \
-            --notes "A legutóbb lefordított APK (${GITHUB_SHA::7}, ${GITHUB_REF_NAME}). Telepítés és párosítás: README, Telefonos és laptopos alkalmazás."
+          NOTES="A legutóbb lefordított APK (${GITHUB_SHA::7}, ${GITHUB_REF_NAME}). Telepítés és párosítás: README, Telefonos és laptopos alkalmazás."
+          if gh release view android-latest >/dev/null 2>&1; then
+            gh release upload android-latest jarvis.apk --clobber
+            git tag -f android-latest "$GITHUB_SHA"
+            git push -f origin refs/tags/android-latest
+            gh release edit android-latest --prerelease=false --latest --notes "$NOTES"
+          else
+            gh release create android-latest jarvis.apk --target "$GITHUB_SHA" --latest \
+              --title "Jarvis Android-alkalmazás (legfrissebb)" --notes "$NOTES"
+          fi
