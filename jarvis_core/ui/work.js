@@ -931,7 +931,9 @@
     // a licitlista (Vatera): megéri beszállni, a javasolt legmagasabb ajánlat most beállítható; a zárás előtt még szól
     const auctions = (deals.auctions || []).map((a) => `<li><span><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>
         <small class="muted">${esc(a.site)} · legutóbb <b>${esc(price(a.price))}</b> · zárás: ${esc(whenOf(a.ends))}</small>
-        <small>legfeljebb <b>${esc(price(a.max_bid))}</b>-ig érdemes licitálni <span class="muted">(máshol kb. ${esc(price(a.median))})</span></small></span>
+        ${a.checked ? `<small>legfeljebb <b>${esc(price(a.max_bid))}</b>-ig érdemes licitálni <span class="muted">(máshol kb. ${esc(price(a.median))})</span></small>`
+          : `<small class="warn">ellenőrizetlen: az adatlapját még nem néztem meg, ezért licithatárt még nem mondok</small>
+             <small class="muted">máshol kb. ${esc(price(a.median))}</small>`}</span>
         <span class="row"><button type="button" class="small quiet" data-auction-dismiss="${esc(a.id)}">Elrejtés</button></span></li>`).join("");
     const tips = (deals.tips || []).map((t) => `<li><span><a href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.title)}</a>
         <small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">bizonytalan ár</b> csak ${esc(t.n)} hasonló
@@ -981,8 +983,9 @@
         ha közben összegyűlik elég ár, újra felmérem, és ha megéri, szólok.</small></p>
       <ul class="dealist">${tips}</ul>` : ""}
       ${auctions ? `<h3 class="section-title">Licitlista <small class="muted">Vatera</small></h3>
-      <p><small class="muted">Ezeknél a licit még nem zárul hamarosan, de megéri beszállni: a Vaterán a javasolt összeget most
-        legmagasabb ajánlatként beállíthatod (addig licitál helyetted). A zárás előtt még szólok.</small></p>
+      <p><small class="muted">Ezeknél a licit még nem zárul hamarosan, de megérheti beszállni. Ha az adatlapját már megnéztem, a
+        javasolt összeget a Vaterán most legmagasabb ajánlatként beállíthatod (addig licitál helyetted). A zárás előtt még
+        egyszer megnézem (a mostani árát és a mostani beállításaidat), és szólok.</small></p>
       <ul class="dealist">${auctions}</ul>` : ""}
       ${section("settings", "Beállítások", `
         <div class="fields limits">

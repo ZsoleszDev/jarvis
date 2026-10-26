@@ -644,6 +644,68 @@ class DealTests(HunterCase):
         self.assertEqual(self.hunter.state()["auctions"], [], "a zárás előtti szólás után lekerül")
         self.assertEqual([d["url"] for d in self.hunter.state()["deals"]], [far["url"]])
 
+    def test_an_auction_is_only_recommended_after_its_page_is_checked(self):
+        """A még napokig futó licit gyorsan a listára kerül, de ellenőrizetlenként: licithatárt és értesítést csak az
+        adatlapja után ad. Ha az adatlap szerint hibás („hibás, nem működik, alkatrésznek”), lekerül, és nem szól; ha
+        a kör keretébe már nem fér az adatlap, ellenőrizetlen marad, és egy későbbi kör nézi meg (akkor szól)."""
+        broken = {"text": "PS5 DualSense kontroller · Hátralévő idő: 2 nap", "price": 1,
+                  "url": "https://www.vatera.hu/termek/3301", "auction": True}
+        good = {"text": "PS5 DualSense kontroller fehér · Hátralévő idő: 2 nap", "price": 1,
+                "url": "https://www.vatera.hu/termek/3302", "auction": True}
+        self.browser.by_url = [("vatera.hu", [broken, good])]
+        self.browser.pages[broken["url"]] = {"title": "PS5 DualSense kontroller",
+                                             "text": "PS5 DualSense kontroller, hibás, nem működik, alkatrésznek."}
+        self.hunter.add_search("PS5 kontroller", ["jofogas"], reference=14000)
+        self.hunter.add_watch("https://www.vatera.hu/listings/index.php?c=123&ob=ending")
+        self.hunter.set_enabled(True)
+        with mock.patch.object(deals_module, "MAX_PAGES", 1):   # csak az első adatlapja fér bele
+            self.hunter.run(notify=self.notify)
+        self.assertEqual(self.notices, [], "ellenőrzés nélkül nem javasol licithatárt")
+        [listed] = self.hunter.state()["auctions"]
+        self.assertEqual((listed["url"], listed["checked"]), (good["url"], False))
+        journal = [e["text"] for e in self.hunter.journal.entries()]
+        self.assertTrue(any("Lekerült a licitlistáról: „PS5 DualSense kontroller" in t and "hibás" in t for t in journal))
+        self.assertTrue(any(t.startswith("Licitlistára tettem, még ellenőrizetlenül") for t in journal))
+        self.assertNotIn(good["url"], self.browser.looked)
+        self.clock.now += deals_module.BUSY_RETRY
+        self.assertTrue(self.hunter.available(), "az ellenőrizetlen adatlapja esedékes")
+        self.hunter.run(notify=self.notify)
+        [(title, text, extra)] = [(t, x, e) for _k, t, x, e in self.notices]
+        self.assertTrue(title.endswith("(legfeljebb 9 800 Ft)") and extra["quiet"])
+        self.assertIn("Az adatlapját megnéztem", text)
+        self.assertTrue(self.hunter.state()["auctions"][0]["checked"])
+
+    def test_the_last_check_before_closing_uses_the_current_price_and_settings(self):
+        """A zárás előtti ellenőrzés az adatlapról olvassa a mostani árat, és a licithatárt a mostani beállításokkal
+        számolja újra: a már 12 000 Ft-nál tartó licitről (9 800 Ft-os határ) nem szól; ha közben a vételi limitet
+        3 000 Ft-ra csökkentetted, legfeljebb annyiig javasol, és ami már afölött van, arról nem szól."""
+        rows = [{"text": f"PS5 DualSense kontroller {name} · Hátralévő idő: 2 nap", "price": 1,
+                 "url": f"https://www.vatera.hu/termek/34{n}", "auction": True}
+                for n, name in enumerate(("fehér", "fekete", "kék"))]
+        self.browser.by_url = [("vatera.hu", rows)]
+        self.hunter.add_search("PS5 kontroller", ["jofogas"], reference=14000)
+        self.hunter.add_watch("https://www.vatera.hu/listings/index.php?c=123&ob=ending")
+        self.hunter.set_enabled(True)
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(len(self.notices), 3)
+        self.assertEqual({a["max_bid"] for a in self.hunter.state()["auctions"]}, {9800})
+        for row, current in zip(rows, ("12 000", "2 000", "4 000")):
+            self.browser.pages[row["url"]] = {"title": row["text"].split(" ·")[0],
+                                              "text": f"PS5 kontroller, hibátlan. Aktuális ár: {current} Ft. 3 licit."}
+        self.browser.by_url = [("vatera.hu", [])]
+        self.clock.now += 2 * 86400 - 5 * 3600
+        self.hunter.set_limits(max_buy=3000)
+        self.hunter.run(notify=self.notify)
+        urgent = [(t, x) for _k, t, x, e in self.notices[3:] if e.get("urgent")]
+        self.assertEqual([t.split(" ·")[0] for t, _x in urgent], ["Licit: PS5 DualSense kontroller fekete"])
+        text = urgent[0][1]
+        self.assertIn("most 2 000 Ft", text)
+        self.assertIn("Legfeljebb 3 000 Ft-ig érdemes licitálni", text, "a mostani vételi limittel")
+        self.assertEqual(self.hunter.state()["auctions"], [], "mindhárom lekerült")
+        journal = " ".join(e["text"] for e in self.hunter.journal.entries())
+        self.assertIn("„PS5 DualSense kontroller fehér · Hátralévő idő: 2 nap” most 12 000 Ft", journal)
+        self.assertIn("most 4 000 Ft, a mostani beállításokkal legfeljebb 3 000 Ft-ig érné meg", journal)
+
     def test_an_auction_can_be_taken_off_the_list(self):
         far = {"text": "PS5 DualSense kontroller · Hátralévő idő: 2 nap", "price": 1,
                "url": "https://www.vatera.hu/termek/3101", "auction": True}

@@ -888,21 +888,27 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector("#home-tiles", state="visible")
 
     def test_the_auction_list(self):
-        """A licitlista (Vatera) a találatok alatt: a licit, a legutóbbi ára, mikor zárul, és legfeljebb mennyiért
-        érdemes licitálni; az Elrejtés gombbal lekerül."""
+        """A licitlista (Vatera) a találatok alatt: a licit, a legutóbbi ára, mikor zárul; az ellenőrzöttnél, legfeljebb
+        mennyiért érdemes licitálni, az ellenőrizetlennél csak annyi, hogy az adatlapját még nem nézte meg (licithatár
+        nélkül). Az Elrejtés gombbal lekerül."""
         deals = self.h.app.work.deals
+        entry = {"site": "Vatera", "platform": "vatera", "text": "PS5", "price": 1, "max_bid": 9800, "median": 14000,
+                 "ends": time.time() + 2 * 86400, "hours": 6, "search": "s", "query": "PS5 kontroller", "at": time.time()}
         with deals._lock:
-            deals._data["auctions"] = [{"id": "a1", "url": "https://www.vatera.hu/termek/1", "site": "Vatera",
-                                        "platform": "vatera", "title": "PS5 DualSense kontroller", "text": "PS5",
-                                        "price": 1, "max_bid": 9800, "median": 14000, "ends": time.time() + 2 * 86400,
-                                        "hours": 6, "search": "s", "query": "PS5 kontroller", "at": time.time()}]
+            deals._data["auctions"] = [
+                {**entry, "id": "a1", "url": "https://www.vatera.hu/termek/1", "title": "PS5 DualSense kontroller",
+                 "checked": True},
+                {**entry, "id": "a2", "url": "https://www.vatera.hu/termek/2", "title": "Xbox kontroller", "checked": False}]
         page = self.page
         page.click("#job-deals")
         page.wait_for_selector("text=Licitlista")
-        box = page.inner_text("#w-deals")
-        self.assertIn("PS5 DualSense kontroller", box)
-        self.assertIn("legfeljebb 9 800 Ft-ig érdemes licitálni", box)
+        checked = page.inner_text('li:has([data-auction-dismiss="a1"])')
+        unchecked = page.inner_text('li:has([data-auction-dismiss="a2"])')
+        self.assertIn("legfeljebb 9 800 Ft-ig érdemes licitálni", checked)
+        self.assertIn("ellenőrizetlen: az adatlapját még nem néztem meg", unchecked)
+        self.assertNotIn("9 800", unchecked, "az ellenőrizetlennél nincs licithatár")
         page.click('[data-auction-dismiss="a1"]')
+        page.click('[data-auction-dismiss="a2"]')
         page.wait_for_selector("text=Licitlista", state="detached")
         self.assertEqual(deals.state()["auctions"], [])
 

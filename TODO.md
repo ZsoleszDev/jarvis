@@ -117,10 +117,17 @@
   ajánlattal), az ára frissül, ha újra látja; a zárás előtt a kör megnézi, és szól (_follow_auction, _step_auctions).
   A Vatera böngészése a Műszaki cikk és mobil főkategóriát is nézi.
 - Android: saját értesítési hangok (res/raw/jarvis_alert, jarvis_ping), új csatornaazonosítók (-2).
+- Licitlista javítva: a listára vétel ellenőrizetlen (licithatár és értesítés csak az adatlap és a modellkérdés után:
+  _verify_auction); a zárás előtti ellenőrzés az adatlapról olvassa a mostani árat (auction_price), és a licithatárt
+  a mostani beállításokkal számolja újra (_auction_top: vételi limit, havi keret, a keresés vagy a figyelt oldal
+  szabálya); ha a mostani ár eléri, nem szól; ha az adatlap nem nézhető meg, nem szól elavult adatokkal.
+- Az ütemező tud a 10 perces újrapróbálkozásról és a licitlistáról (every_minutes: addig percenként néz).
 
 ## Élesben kipróbálandó
 - Licitlista: a Vatera-kártyák hátralévő ideje (parse_auction) a valódi oldalon; ha nincs meg, a licit nem kerül a
-  listára. A „hamarosan lejár” rendezés címe (ob=…&obd=…) nem ismert: ha megvan, a böngészés licites oldalai azzal is
+  listára. A licit mostani árának leolvasása az adatlapról (deals._AUCTION_PRICE_RE: „Aktuális ár”, „Jelenlegi licit”,
+  „Legmagasabb ajánlat”): ha a valódi oldalon másképp szerepel, a zárás előtti szólás a legutóbb látott árral megy,
+  figyelmeztetéssel. A „hamarosan lejár” rendezés címe (ob=…&obd=…) nem ismert: ha megvan, a böngészés licites oldalai azzal is
   mehetnének. Hány licitértesítés jön naponta (AUCTION_TIPS_PER_DAY 10).
 - Android: a saját hang a telefonon (hangerő, hossz; a FLAG_INSISTENT ismétli), és hogy a régi csatornák törlése után a
   beállítások rendben vannak-e.
