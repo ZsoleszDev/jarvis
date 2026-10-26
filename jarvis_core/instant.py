@@ -11,8 +11,10 @@ böngészőre, és arra sem, hogy épp beszélgetsz-e vele. Az első letöltésn
 szokásos árához méri; amit így nem ismer, azt a modell nevezi meg, és ha kell, megnézi, mennyiért adják a másik oldalon;
 a megérő jelölt oldalát átnézi (elkelt, hibás, gyanús?), és egy rövid modellkérdés után szól, a telefonra is (sürgős
 értesítésként), az árral, a szokásos árral és a várható haszonnal. A vételi limit (Automata kereskedés: legfeljebb
-ennyiért) fölötti hirdetést meg sem nézi. Ha épp dolgozol a Jarvisszal, a modellt nem zavarja: ami a modellre vár, az
-utána jön (legfeljebb WAIT_MAX-ig).
+ennyiért) fölötti hirdetést meg sem nézi. Ha épp dolgozol a Jarvisszal, a modellt nem zavarja: ami csak a modellel
+ismerhető fel, az utána jön (legfeljebb WAIT_MAX-ig); a modell nélkül felmérhető megérőről rögtön szól, és a modell
+ráérő időben utólag nézi meg (_followups). A letöltések a keretből egyenletesen oszlanak el (_floor), csúcsidőben a
+leggyorsabb ütemben; az új hirdetések késését (a kártyán lévő feltöltési idő óta) feljegyzi (delay).
 
 Csak olvas: semmit nem vesz meg, nem ír senkinek. Az Automata kereskedés Indítás gombjával indul, a Leállítással és a
 Szünettel áll le. Ha egy oldal tilt vagy robot-ellenőrzést kér, azon egy ideig nem próbálkozik (a SiteFetcher), és egyszer
@@ -44,7 +46,7 @@ from .textutil import fold
 MAX_ALERTS = 12
 EVERY_CHOICES = (2, 3, 5, 10, 15)    # percben
 DEFAULT_EVERY = 3
-INSTANT_HOURLY = 80        # az azonnali figyelő oldalanként óránként legfeljebb ennyit kér (a többi a köröké)
+INSTANT_HOURLY = 90        # az azonnali figyelő oldalanként óránként legfeljebb ennyit kér (a többi a köröké)
 ROUND_RESERVE = 30         # a letöltő óránkénti keretéből ennyit mindig meghagy a köröknek (különben azok üresen futnak)
 # A figyelő része a közös letöltő keretéből: minden tényleges kérése (a lista beállításáé is) ezzel a címkével számít, és a
 # letöltő érvényesíti (feeds.Quota).
@@ -64,6 +66,7 @@ MAX_WAITING = 300          # ennyi hirdetés várhat (a modellre, a Szünet vagy
 WAIT_MAX = 1800            # ennyi ideig (másodperc); ami addig sem került sorra (vagy nem fér el), azt a figyelő
                            # elfelejti: ha még fent van, a következő letöltésnél újra új hirdetésként jön (_forget)
 TICK = 2.0
+FOLLOWUP_EVERY = 20        # ráérő időben ennyi másodpercenként nézi, van-e utólag ellenőrizendő találat
 BOOK_SAVE = 600            # az árbázist legfeljebb ennyi másodpercenként írja ki (nagy fájl; a körök is mentik)
 JITTER = (0.85, 1.15)
 # Tanult ritmus: oldalanként feljegyzi, a nap melyik órájában mennyi új (illő) hirdetés jön (a régebbiek súlya minden új
@@ -74,9 +77,39 @@ RHYTHM_MIN = 20
 RHYTHM_DECAY = 0.99
 PEAK, QUIET = 1.5, 0.5
 MAX_EVERY = 30
+# Egyenletes ütem a keretből: oldalanként a figyelők letöltései (a keret POLL_SHARE része; a többi a megérő hirdetések
+# oldalára és az árkutatásra marad) egyenletesen oszlanak el az órán belül (_floor), különben az óra elején elfogyna a
+# keret, és utána fél óráig semmit nem látna. Csúcsidőben a keret szerinti leggyorsabb ütemben néz (de legfeljebb
+# PEAK_EVERY percenként), és ha egy letöltésen új hirdetés jött, a következő hamarabb jön (BURST-szörös idő múlva):
+# az új hirdetések csoportosan jönnek.
+POLL_SHARE = 0.75
+PEAK_EVERY = 1
+BURST = 0.5
+# Késés: a Hardverapró és a Jófogás kártyáján ott a feltöltés ideje („ma 14:07”); az új hirdetésnél feljegyzi, mennyivel
+# utána vette észre (oldalanként a legutóbbi MAX_DELAYS), a felületen az elmúlt DELAY_WINDOW középértéke látszik.
+MAX_DELAYS = 300
+DELAY_WINDOW = 6 * 3600
+_POSTED_RE = re.compile(r"\b(ma|tegnap),?\s+(\d{1,2})[:.](\d{2})\b")
 
 
 RHYTHM_TEXT = {0.5: "csúcsidő: sűrűbben nézem", 2.0: "csendes óra: ritkábban nézem"}
+
+
+def posted_ago(text: str, now: float) -> float | None:
+    """Mennyi ideje került fel a hirdetés (másodperc), a kártyán lévő időből („ma 14:07”, „tegnap 23:50”, helyi idő);
+    None, ha nincs benne, vagy nem hihető (a jövőben, vagy 12 óránál régebben)."""
+    match = _POSTED_RE.search(fold(text or ""))
+    if not match:
+        return None
+    hour, minute = int(match.group(2)), int(match.group(3))
+    if hour > 23 or minute > 59:
+        return None
+    local = time.localtime(now)
+    posted = time.mktime((local.tm_year, local.tm_mon, local.tm_mday, hour, minute, 0, 0, 0, -1))
+    if match.group(1) == "tegnap":
+        posted -= 86400
+    ago = now - posted
+    return max(0.0, ago) if -120 <= ago <= 12 * 3600 else None
 
 
 class InstantError(DealError):
@@ -122,6 +155,7 @@ class InstantWatch:
         # késleltesse a következő letöltést (start; a tesztekben, ha nem indul el, a letöltés szálán megy).
         self._jobs: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
+        self._followed_at = float("-inf")     # mikor nézte meg utoljára az utólag ellenőrizendőket (_followups)
         self._data = self._load()
 
     # --- tárolás ---
@@ -137,6 +171,8 @@ class InstantWatch:
                 "alerts": [a for a in data.get("alerts") or [] if isinstance(a, dict) and a.get("id")],
                 "seen": {str(k): v for k, v in seen.items() if isinstance(v, dict)},
                 "hits": [h for h in data.get("hits") or [] if isinstance(h, dict) and h.get("url")],
+                "delays": {str(k): [list(x)[:2] for x in v if isinstance(x, (list, tuple)) and len(x) >= 2][-MAX_DELAYS:]
+                           for k, v in (data.get("delays") or {}).items() if isinstance(v, list)},
                 "rhythm": {str(k): [float(x) for x in v][:24] for k, v in (data.get("rhythm") or {}).items()
                            if isinstance(v, list) and len(v) == 24}}
 
@@ -218,7 +254,8 @@ class InstantWatch:
         load = self._load_per_hour(alerts)
         return {"enabled": enabled, "alerts": alerts, "hits": hits, "every_choices": list(EVERY_CHOICES),
                 "sites": [{"key": k, "name": p.name, **status.get(k, {}), "per_hour": load.get(k, 0),
-                           "rhythm": RHYTHM_TEXT.get(self._factor(k, self.clock()), "")}
+                           "rhythm": RHYTHM_TEXT.get(self._factor(k, self.clock()), ""), "delay": self.delay(k),
+                           "every_s": round(self._floor(k))}
                           for k, p in self.platforms.items()],
                 "hourly": INSTANT_HOURLY, "presets": self.presets(), "working": self.working(),
                 "waiting": len(self._waiting)}
@@ -359,6 +396,7 @@ class InstantWatch:
                     try:
                         job = self._jobs.get(timeout=0.5)
                     except queue.Empty:
+                        self._followups()
                         continue
                 _alert, site, rows = job
                 with self._lock:
@@ -382,6 +420,19 @@ class InstantWatch:
                     return
                 except Exception:  # noqa: BLE001 - az értékelés egy hiba miatt ne álljon le
                     pass
+
+    def _followups(self) -> None:
+        """Ráérő időben (üres sornál, legfeljebb FOLLOWUP_EVERY másodpercenként): amit a modell foglaltsága miatt
+        ellenőrzés nélkül jelzett, azt most megnézeti (DealHunter.followups), ha a modell kérdezhető."""
+        now = self.clock()
+        if now - self._followed_at < FOLLOWUP_EVERY or not hasattr(self.hunter, "followups"):
+            return
+        self._followed_at = now
+        try:
+            if self._on() and self._may_work() and self.model_ok():
+                self.hunter.followups(self.model_ok, self.notify)
+        except Exception:  # noqa: BLE001 - egy hiba miatt ne álljon le az értékelés
+            pass
 
     def _may_work(self) -> bool:
         """Most dolgozhat-e (nincs Szünet, a háttérmunka nincs kikapcsolva vagy felfüggesztve, a gép üzemideje van)."""
@@ -505,9 +556,24 @@ class InstantWatch:
         return 0.5 if ratio >= PEAK else 2.0 if ratio <= QUIET else 1.0
 
     def _interval(self, alert: dict[str, Any], site: str, now: float) -> float:
-        """A következő letöltésig (másodperc): a beállított gyakoriság a tanult ritmus szerint, egy kis véletlennel."""
-        minutes = int(alert.get("every") or DEFAULT_EVERY) * self._factor(site, now)
-        return min(max(minutes, EVERY_CHOICES[0]), MAX_EVERY) * 60 * self.rng.uniform(*JITTER)
+        """A következő letöltésig (másodperc): a beállított gyakoriság a tanult ritmus szerint, de nem sűrűbben, mint
+        ahogy a keret egyenletesen elosztva engedi (_floor); csúcsidőben a keret szerinti leggyorsabb ütem (legalább
+        PEAK_EVERY perc). Egy kis véletlennel."""
+        factor = self._factor(site, now)
+        floor = self._floor(site)
+        if factor < 1:
+            seconds = max(floor, PEAK_EVERY * 60)
+        else:
+            minutes = min(max(int(alert.get("every") or DEFAULT_EVERY) * factor, EVERY_CHOICES[0]), MAX_EVERY)
+            seconds = max(minutes * 60, floor)
+        return seconds * self.rng.uniform(*JITTER)
+
+    def _floor(self, site: str) -> float:
+        """A legrövidebb idő két letöltés között egy figyelőnél (másodperc): az oldal figyelői (a bekapcsoltak) a keret
+        POLL_SHARE részén egyenletesen osztoznak."""
+        with self._lock:
+            pairs = sum(1 for a in self._data["alerts"] if not a.get("off") and site in (a.get("sites") or []))
+        return max(1, pairs) * 3600 / max(1.0, INSTANT_HOURLY * POLL_SHARE)
 
     def _learn(self, site: str, fresh: int, now: float) -> None:
         """A ritmushoz: ebben az órában ennyi új (illő) hirdetés jött ezen az oldalon (a hívó menti)."""
@@ -601,6 +667,9 @@ class InstantWatch:
         if result is None:                    # közben törölted
             return []
         first, fresh, overflow = result
+        if fresh and not first:                # új jött: a következő letöltés hamarabb (csoportosan jönnek)
+            with self._lock:
+                self._next[key] = now + max(interval * BURST, self._floor(site), PEAK_EVERY * 60)
         if overflow:
             more = self._next_rows(url, site, now)
             extra = self._absorb(alert, site, more, now, count=False) if more else None
@@ -686,6 +755,7 @@ class InstantWatch:
                 stored["resorted"] = [s for s in stored.get("resorted") or [] if s != site]
             elif fresh:
                 self._learn(site, len(fresh), now)
+                self._note_delays(site, [row for row in fresh if not row.get("drop") and not row.get("promoted")], now)
             if count and resorted and (stored.get("sorted") or {}).get(site) != resorted:
                 stored.setdefault("sorted", {})[site] = resorted      # a következő letöltéstől más a sorrend
                 stored["baseline"] = [s for s in stored.get("baseline") or [] if s != site]
@@ -695,6 +765,27 @@ class InstantWatch:
         # valami; a kiemelt hirdetések (elöl, többnyire régiek) ebbe nem számítanak
         overflow = not first and len(fresh_rows) >= OVERFLOW_MIN and all(fresh_rows[-OVERFLOW_TAIL:])
         return first, fresh, overflow
+
+    def _note_delays(self, site: str, rows: list[dict[str, Any]], now: float) -> None:
+        """Az új hirdetések késése (a kártyán lévő feltöltési idő óta, posted_ago), oldalanként a legutóbbi MAX_DELAYS (a
+        hívó menti)."""
+        delays = self._data.setdefault("delays", {}).setdefault(site, [])
+        for row in rows:
+            ago = posted_ago(str(row.get("text") or ""), now)
+            if ago is not None:
+                delays.append([round(now), round(ago)])
+        del delays[:-MAX_DELAYS]
+
+    def delay(self, site: str, now: float | None = None) -> dict[str, Any] | None:
+        """Mennyivel a feltöltés után vette észre az új hirdetéseket ezen az oldalon az elmúlt DELAY_WINDOW-ban: {median,
+        n} másodpercben; None, ha nincs adat."""
+        now = self.clock() if now is None else now
+        with self._lock:
+            recent = sorted(ago for at, ago in (self._data.get("delays") or {}).get(site) or []
+                            if now - float(at) <= DELAY_WINDOW)
+        if not recent:
+            return None
+        return {"median": recent[len(recent) // 2], "n": len(recent)}
 
     def _next_rows(self, url: str, site: str, now: float) -> list[dict[str, Any]]:
         """A találatok következő oldala (ha az oldal linkeli, és belefér az óránkénti keretbe); üres, ha nem sikerült."""
@@ -760,6 +851,7 @@ class InstantWatch:
                    "reference": deal["median"], "profit": deal["profit"], "n": deal.get("similar"),
                    "sites": deal.get("sites") or [], "safety": deal.get("safety"),
                    "warnings": deal.get("warnings") or [], "verified": bool(deal.get("verified")),
+                   "unchecked": deal.get("unchecked") or "", "model_pending": bool(deal.get("model_pending")),
                    **{k: deal[k] for k in ("condition_text", "cost_parts", "cond_band") if deal.get(k)}}
             hit["title"] = hit["title"] or hit["text"]
             hits.append(hit)
@@ -911,6 +1003,9 @@ class InstantWatch:
             text += ". Levonva: " + ", ".join(f"{part['what']} kb. {format_price(part['amount'])}" for part in extra)
         if hit.get("verified"):
             text += ". Ellenőriztem: az adatlapja és az állapota alapján is megéri"
+        elif hit.get("unchecked"):
+            text += (f". Az adatlapja és az állapota alapján megéri, de a modell még nem nézte meg ({hit['unchecked']})"
+                     + ("; amint lehet, megnézi, és ha mégsem jó, szólok" if hit.get("model_pending") else ""))
         if hit.get("safety"):
             text += f". {safety_text(hit['safety']).rstrip('.')}"
         return text

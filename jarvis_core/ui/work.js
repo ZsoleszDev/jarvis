@@ -631,11 +631,15 @@
   const openSections = new Set((recall("jarvis-deal-open") || "").split(",").filter(Boolean));
   const section = (key, title, body) => `<details class="fold" data-fold="${key}"${openSections.has(key) ? " open" : ""}>
       <summary>${title}</summary><div class="fold-body">${body}</div></details>`;
+  // másodperc → „45 mp”, „2,5 perc” (az azonnali figyelő ütemének és késésének kiírásához)
+  const secondsText = (sec) => sec < 90 ? `${Math.round(sec)} mp` : `${(sec / 60).toFixed(1).replace(".", ",").replace(",0", "")} perc`;
   function instantBox() {
     const I = deals.instant;
     if (!I) return "";
     const siteLine = (I.sites || []).map((s) => `${esc(s.name)}: ${s.blocked_until ? `tilt (${esc(s.reason)}), ${esc(hhmmOf(s.blocked_until))}-ig szünetel`
-      : s.browser_only ? "most nem olvasható böngésző nélkül (a böngésző nézi)" : `kb. ${s.per_hour} kérés óránként (keret: ${I.hourly})${s.slow > 1.05 ? ", lassít (lassan válaszol)" : ""}${s.rhythm ? `, ${esc(s.rhythm)}` : ""}`}`).join(" · ");
+      : s.browser_only ? "most nem olvasható böngésző nélkül (a böngésző nézi)" : `kb. ${s.per_hour} kérés óránként (keret: ${I.hourly})${s.slow > 1.05 ? ", lassít (lassan válaszol)" : ""}${s.rhythm ? `, ${esc(s.rhythm)}` : ""}`
+      + (s.every_s ? `, egy figyelő két letöltése között legalább ${esc(secondsText(s.every_s))}` : "")
+      + (s.delay ? `, észlelés a feltöltés után: kb. ${esc(secondsText(s.delay.median))} (${esc(s.delay.n)} új alapján)` : "")}`).join(" · ");
     const alerts = (I.alerts || []).map((a) => {
       const sites = (a.sites || []).map((k) => (I.sites.find((s) => s.key === k) || { name: k }).name).join(", ");
       const range = a.min_price || a.max_price ? ` · ${a.min_price ? price(a.min_price) : "0"}–${a.max_price ? price(a.max_price) : "bármennyi"}` : "";
@@ -691,6 +695,7 @@
   // A mai számok (deals.funnel): mennyit látott, mennyi volt új, hány jelölt és jó találat; a Naplóban az is, mi miért
   // esett ki (ebből látszik, miért nincs találat egy napon).
   const FUNNEL_MAIN = [["seen", "hirdetés"], ["new", "új"], ["candidates", "jelölt"], ["found", "jó találat"], ["haggles", "alku"],
+                       ["haggle_tips", "alkuval megérheti"],
                        ["auction", "licitlistára"]];
   const FUNNEL_OUT = [["not_cheap", "nem elég olcsó"], ["other", "nem a keresett termék vagy nem eladó"],
                       ["over_limit", "a vételi limit fölött"], ["unknown", "ismeretlen termék"], ["unsure", "bizonytalan ár (Érdemes megnézni)"],
@@ -798,7 +803,10 @@
       + (parts.length > 1 ? ` <small class="muted">(összesen kb. ${esc(price(d.costs))})</small>` : "")]);
     if (d.condition_text) rows.push(["Állapot", `${esc(d.condition_text)}${d.verified ? "" : ' <small class="muted">(a leírás szerint)</small>'}`]);
     if (d.cond_band) rows.push(["Hasonló hibájúak", `kb. ${esc(price(d.cond_band.price))} (${esc(d.cond_band.n)} hirdetés: ${esc(d.cond_band.issues.join(", "))}); a hibátlanok kb. ${esc(price(d.cond_band.clean))}`]);
-    rows.push(["Ellenőrizve", d.verified ? "igen: az adatlapja, az állapota és az újraszámolt haszon alapján" : '<span class="warn">nem (nézd meg magad)</span>']);
+    rows.push(["Ellenőrizve", d.verified ? "igen: az adatlapja, az állapota és az újraszámolt haszon alapján"
+      : d.model_no ? `<span class="warn">utólag mégsem jó: ${esc(d.model_no)}</span>`
+      : d.unchecked ? `<span class="warn">az adatlapja és az állapota alapján igen, de a modell még nem nézte meg (${esc(d.unchecked)})${d.model_pending ? "; amint lehet, megnézi" : ""}</span>`
+      : '<span class="warn">nem (nézd meg magad)</span>']);
     if (d.auction) rows.push(["Meddig licitálj", `legfeljebb <b>${esc(price(d.max_bid))}</b>-ig${d.left ? ` · ${esc(leftText(d))}` : ""}`]);
     else if (d.offer) rows.push(["Ajánlattal", `ha ${esc(price(d.offer))}-ért megkapod, kb. <b>${esc(price(d.profit))}</b> a haszon`]);
     else rows.push(["Ennyit kereshetsz vele", `<b>kb. ${esc(price(d.profit))}</b>${sale ? ` (ha kb. ${esc(price(sale))}-ért eladod, a költség után)` : ""}`]);
@@ -965,6 +973,8 @@
         ${d.seller && d.seller.worth ? `<small><b class="tag">+${esc(d.seller.picked)} az eladótól</b> együtt kb. <b>${esc(price(d.seller.profit))}</b> haszon (Részletek)</small>` : ""}
         ${d.speed ? `<small class="muted">Eladási sebesség: ${esc(d.speed)}</small>` : ""}
         ${d.safety ? `<small class="${d.safety.level === "kockázatos" ? "warn" : "muted"}">${safetyLine(d.safety)}</small>` : ""}
+        ${d.model_no ? `<small class="warn">Utólag mégsem jó: ${esc(d.model_no)}</small>`
+          : d.unchecked && !d.verified ? `<small class="warn">A modell még nem nézte meg${d.model_pending ? " (amint lehet, megnézi)" : ""}</small>` : ""}
         ${(d.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}
         ${offerBox(d)}</span>
         <span class="row"><button type="button" class="small" data-deal-open="${esc(d.id)}">Részletek</button>${buyButton(d)}
@@ -979,7 +989,10 @@
         <span class="row"><button type="button" class="small quiet" data-auction-dismiss="${esc(a.id)}">Elrejtés</button></span></li>`).join("");
     // az ellenőrizetlen (deals._unverified): az ára biztos, de az adatlapja, a modell vagy az állapota miatt nem ellenőrzött
     const tips = (deals.tips || []).map((t) => `<li><span><a href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.title)}</a>
-        ${t.unverified ? `<small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">ellenőrizetlen</b>
+        ${t.haggle ? `<small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">alkuval</b>
+          ajánlj kb. <b>${esc(price(t.haggle.offer))}</b>-ot (${esc(Math.round(t.haggle.cut * 100))}%-kal kevesebb) · kb. <b>${esc(price(t.profit))}</b> haszon
+          · a hasonlók kb. ${esc(price(t.usual))}</small>`
+        : t.unverified ? `<small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">ellenőrizetlen</b>
           a hasonlók kb. ${esc(price(t.usual))} · kb. <b>${esc(price(t.profit))}</b> haszon lehet benne</small>
           <small class="warn">${esc(t.why || "")}</small>${t.condition_text ? `<small class="muted">Állapot: ${esc(t.condition_text)}</small>` : ""}`
         : `<small class="muted">${esc(t.site)} · <b>${esc(price(t.price))}</b> · <b class="tag">bizonytalan ár</b> csak ${esc(t.n)} hasonló
@@ -1024,9 +1037,10 @@
       ${funnelLine(false) ? `<p class="funnel"><small class="muted">${esc(funnelLine(false))}</small></p>` : ""}
       <h3 class="section-title">Legutóbbi találatok</h3>
       <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>
-      ${tips ? `<h3 class="section-title">Érdemes megnézni <small class="muted">bizonytalan ár vagy ellenőrizetlen</small></h3>
+      ${tips ? `<h3 class="section-title">Érdemes megnézni <small class="muted">bizonytalan ár, ellenőrizetlen vagy alkuval</small></h3>
       <p><small class="muted">Olcsónak látszik, de kevés hasonló árat találtam, vagy nem tudtam ellenőrizni (az adatlapját, az
-        állapotát), ezért nem biztos, hogy megéri. Nézd meg magad; ha közben kiderül, újra felmérem, és ha megéri, szólok.</small></p>
+        állapotát), ezért nem biztos, hogy megéri; vagy kicsit drága, de egy kis alkuval megérné. Nézd meg magad; ha közben
+        kiderül, újra felmérem, és ha megéri, szólok.</small></p>
       <ul class="dealist">${tips}</ul>` : ""}
       ${auctions ? `<h3 class="section-title">Licitlista <small class="muted">Vatera</small></h3>
       <p><small class="muted">Ezeknél a licit még nem zárul hamarosan, de megérheti beszállni. Ha az adatlapját már megnéztem, a
@@ -1044,7 +1058,7 @@
           Csak a nyugodt szívvel megvehetőkről szólj</label>
         <div class="row"><button type="button" class="small" id="d-limits">Mentés</button></div>
         <label class="check"><input id="d-haggle" type="checkbox" ${(deals.haggle || {}).on !== false ? "checked" : ""}>
-          Alkuképes hirdetések is (régóta fent lévő, kicsit drága)</label>
+          Alkuképes hirdetések is (régóta fent lévő vagy friss, kicsit drága)</label>
         <label class="field-label" for="d-haggle-message">Ajánlat az eladónak ({ár} = a javasolt összeg)</label>
         <textarea id="d-haggle-message" rows="3">${esc((deals.haggle || {}).message || "")}</textarea>
         <div class="row"><button type="button" class="small" id="d-haggle-save">Mentés</button></div>

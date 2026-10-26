@@ -175,6 +175,7 @@ class HunterCase(unittest.TestCase):
         self.llm = FakeLlm()
         self.notices: list[tuple] = []
         self.pings: list[tuple] = []
+        self.haggle_tips: list[tuple] = []
         self.clock = Clock()
         self.hunter = self.make()
 
@@ -188,9 +189,11 @@ class HunterCase(unittest.TestCase):
         return hunter
 
     def notify(self, kind, title, text, **extra):
-        # a gyors jelzés („Ígéretes új hirdetés, ellenőrzés folyamatban”: notice.pending) külön; a notices a végső
-        # értesítések (az ellenőrzött ajánlat, a tippek, a javaslatok)
-        (self.pings if extra.get("pending") else self.notices).append((kind, title, text, extra))
+        # a gyors jelzés („Ígéretes új hirdetés, ellenőrzés folyamatban”: notice.pending) és az alku-tipp („Alkuval
+        # megérheti”) külön; a notices a többi (a megérő ajánlat, a bizonytalan tippek, a javaslatok)
+        target = self.pings if extra.get("pending") else self.haggle_tips if title.startswith("Alkuval megérheti") \
+            else self.notices
+        target.append((kind, title, text, extra))
 
     def vetted(self, hunter: DealHunter, rows: list[dict], issues: tuple = ()) -> None:
         """Ezeknek az összehasonlítóknak a leírását már elolvasta (allapotok.json): hibátlanok, vagy issues."""
@@ -320,7 +323,7 @@ class DealTests(HunterCase):
 
     # --- a modell nélküli keresés ---
 
-    def test_the_model_can_say_no_and_without_a_model_it_stays_unverified(self):
+    def test_the_model_can_say_no_and_without_a_model_it_still_rings(self):
         self.llm.ok = False
         self.ready()
         self.hunter.run(notify=self.notify)
@@ -329,12 +332,15 @@ class DealTests(HunterCase):
         self.ready(other)
         other.run(notify=self.notify)
         [notice] = self.notices
-        self.assertEqual(notice[1], "Ellenőrizetlen: Gigabyte RTX 3060 Ti Gaming OC",
-                         "modell nélkül nem sürgős találat, hanem ellenőrizetlen tipp")
-        self.assertIn("a modell most nem tudta átnézni", notice[2])
-        self.assertEqual(other.state()["deals"], [])
-        [tip] = other.state()["tips"]
-        self.assertTrue(tip["unverified"])
+        self.assertEqual(notice[1], "Olcsó: Gigabyte RTX 3060 Ti Gaming OC",
+                         "az adatlap és az újraszámolás után modell nélkül is sürgősen szól")
+        self.assertTrue(notice[3]["urgent"])
+        self.assertIn("a modell még nem nézte meg (nincs beállítva modell)", notice[2])
+        self.assertNotIn("Amint lehet, a modell is megnézi", notice[2], "modell nélkül nincs utólagos ellenőrzés")
+        [deal] = other.state()["deals"]
+        self.assertEqual((deal["verified"], deal.get("model_pending"), deal["safety"]["level"]), (False, None, "jó"),
+                         "ellenőrizetlen: legfeljebb „jó”")
+        self.assertEqual(other.state()["tips"], [])
         self.assertEqual(len(self.pings), 2, "a gyors jelzés mindkettőnél ment (az ellenőrzés előtt)")
 
     def test_minimum_price_and_excluded_words(self):
@@ -349,6 +355,43 @@ class DealTests(HunterCase):
         self.assertEqual(len(self.notices), 3, "szűrők nélkül a doboz és a backplate is jelölt lett volna")
         with self.assertRaises(DealError):
             self.hunter.add_search("RTX 3060 Ti", min_price=90000, max_price=50000)
+
+    def test_a_slightly_expensive_fresh_listing_is_a_haggle_tip(self):
+        """Ami most kicsit drága, de legfeljebb 15% alkuval megérne, arról egy „Érdemes megnézni” tipp jön („Alkuval
+        megérheti”, a javasolt ajánlattal, rövid pittyenéssel: notice.tip); a jóval drágábbról nem. Ezt a kör nem méri fel
+        újra (neked szól), és az alkuképes hirdetések kapcsolójával ki is kapcsolható."""
+        self.browser.results = NORMAL + [listing(30, "ASUS RTX 3060 Ti Dual", 78000),
+                                         listing(31, "MSI RTX 3060 Ti Ventus", 90000)]
+        self.ready()
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(self.notices, [], "egyik sem elég olcsó")
+        [(_kind, title, text, extra)] = self.haggle_tips
+        self.assertEqual(title, "Alkuval megérheti: ASUS RTX 3060 Ti Dual")
+        self.assertIn("78 000 Ft. Most kicsit drága, de ha kb. 70 000 Ft-ért (10%-kal olcsóbban) megkapod, kb. 18 500 Ft "
+                      "haszon lehet benne", text)
+        self.assertTrue(extra["tip"])
+        self.assertNotIn("urgent", extra)
+        [tip] = self.hunter.state()["tips"]
+        self.assertEqual((tip["haggle"], tip["profit"], tip["usual"]), ({"offer": 70000, "cut": 0.1}, 18500, 100000))
+        self.assertEqual(self.hunter.state()["funnel"]["counts"]["haggle_tips"], 1)
+        game = deals_module._Round(lambda: None, self.notify, None)
+        self.hunter._step_tips(game)
+        self.assertEqual(list(game.work), [], "az alku-tippet nem méri fel újra")
+        other = self.make("alku-ki")
+        other.set_haggle(on=False)
+        self.ready(other)
+        self.haggle_tips.clear()
+        other.run(notify=self.notify)
+        self.assertEqual(self.haggle_tips, [], "kikapcsolva nincs alku-tipp")
+
+    def test_tips_go_out_after_every_step(self):
+        """A tippek értesítése nem a kör végén megy ki (egy böngészési kör sokáig tart), hanem minden lépés után."""
+        sent = []
+        game = deals_module._Round(lambda: None, self.notify, None)
+        game.flush = lambda: sent.append(len(game.work))
+        game.next([lambda: None, lambda: None])
+        game.loop()
+        self.assertEqual(sent, [1, 0])
 
     def test_percent_or_profit(self):
         self.browser.results = NORMAL + [listing(30, "ASUS RTX 3060 Ti Dual", 80000)]
