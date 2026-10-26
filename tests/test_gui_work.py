@@ -368,6 +368,14 @@ class WorkSecurityTests(unittest.TestCase):
         self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "safe_only": True})
         self.assertEqual(self.post("/api/work/deals", {"action": "limits", "max_buy": "sok"})[0], 400)
         self.post("/api/work/deals", {"action": "limits", "max_buy": ""})
+        # pótlási és javítási költség az állapot szerinti haszonhoz (Pótlás és javítás)
+        status, data = self.post("/api/work/deals", {"action": "cost_add", "part": "Töltő", "product": "",
+                                                     "amount": "4 000"})
+        self.assertEqual((status, [(c["part"], c["amount"]) for c in data["costs"]]), (200, [("töltő", 4000)]))
+        self.assertIn("kijelző", data["cost_parts"])
+        self.assertEqual(self.post("/api/work/deals", {"action": "cost_add", "part": "töltő", "amount": ""})[0], 400)
+        status, data = self.post("/api/work/deals", {"action": "cost_remove", "id": data["costs"][0]["id"]})
+        self.assertEqual((status, data["costs"]), (200, []))
         for stored in alerts:
             status, data = self.post("/api/work/deals", {"action": "instant_remove", "id": stored["id"]})
         self.assertEqual((status, data["instant"]["alerts"]), (200, []))
@@ -987,7 +995,7 @@ class WorkBrowserTests(unittest.TestCase):
 
     def test_trading_sections_are_folded_except_the_finds(self):
         """Az Automata kereskedés fülön az Indítás és a legutóbbi találatok látszanak, a többi blokk (beállítások,
-        keresések, azonnali figyelő, böngészés, figyelt oldalak, Mennyit ér?, napló) össze van csukva, magyarázó
+        pótlás és javítás, keresések, azonnali figyelő, böngészés, figyelt oldalak, Mennyit ér?, napló) össze van csukva, magyarázó
         szövegek nélkül; egy blokk kinyitva a következő megnyitáskor is nyitva marad."""
         page = self.page
         page.click("#job-deals")
@@ -995,8 +1003,8 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertTrue(page.locator("text=Legutóbbi találatok").is_visible())
         titles = [t.strip() for t in page.locator("#w-deals details.fold > summary").all_inner_texts()]
         self.assertEqual([t.split(" (")[0] for t in titles],
-                         ["Beállítások", "Keresések", "Csomagbontás", "Azonnali figyelő", "Böngészés", "Figyelt oldalak",
-                          "Mennyit ér?", "Napló"])
+                         ["Beállítások", "Pótlás és javítás", "Keresések", "Csomagbontás", "Azonnali figyelő",
+                          "Böngészés", "Figyelt oldalak", "Mennyit ér?", "Napló"])
         self.assertEqual(page.locator("#w-deals details.fold[open]").count(), 0)
         for hidden in ("#d-maxbuy", "#d-query", "#dl-query"):
             self.assertTrue(page.locator(hidden).is_hidden(), hidden)
@@ -1105,7 +1113,14 @@ class WorkBrowserTests(unittest.TestCase):
                          "low": 85000, "sites": ["Hardverapró", "Jófogás"], "sold": {"n": 4, "median": 88000},
                          "safety": {"level": "biztos", "why": [], "good": ["61% haszon", "gyorsan kel el"]},
                          "quick": True, "note": "Ugyanaz a kártya.", "explore": "azonnali figyelő: Videókártyák",
-                         "band": [92000, 106000], "resale": 85000, "costs": 1500,
+                         "band": [92000, 106000], "resale": 85000, "costs": 1500, "verified": True,
+                         "warnings": ["az eladónak kevés az értékelése"],
+                         "condition": {"display": {"state": "ismeretlen", "evidence": ""},
+                                       "battery": {"state": "ismeretlen", "evidence": ""},
+                                       "function": {"state": "működik", "evidence": "Hibátlanul működik"},
+                                       "accessories": {"state": "teljes", "evidence": "minden tartozékával"},
+                                       "warranty": {"state": "ismeretlen", "evidence": ""}, "missing": [], "issues": []},
+                         "condition_text": "működés: működik („Hibátlanul működik”); tartozékok: teljes („minden tartozékával”)",
                          "basis": {"used": [{"t": "MSI RTX 3060 Ti Ventus", "p": 98000, "s": "Jófogás",
                                              "u": "https://www.jofogas.hu/1234567.htm", "src": "most"},
                                             {"t": "RTX 3060 Ti", "p": 101000, "s": "Hardverapró", "u": "", "src": "árbázis",
@@ -1138,7 +1153,8 @@ class WorkBrowserTests(unittest.TestCase):
                      "Ennyit kereshetsz vele", "kb. 31 500 Ft (ha kb. 85 000 Ft-ért eladod", "Ugyanaz a kártya.", "3 perce",
                      "Elkelt hasonlók", "kb. 88 000 Ft (4 db alapján)", "Biztos befektetés: 61% haszon; gyorsan kel el",
                      "Kínálati ársáv", "92 000 Ft – 106 000 Ft", "Óvatos eladási ár", "Költség", "posta kb. 1 500 Ft",
-                     "Mihez mértem? 2 hirdetés · 1 kizárva"):
+                     "Mihez mértem? 2 hirdetés · 1 kizárva", "Állapot", "működés: működik („Hibátlanul működik”)",
+                     "Ellenőrizve", "igen: az adatlapja, az állapota és az újraszámolt haszon alapján"):
             self.assertIn(part, body)
         seller = page.inner_text("details.seller")   # az eladó többi hirdetése (nyitva: együtt jobban megéri)
         for part in ("Az eladó többi hirdetése: még 1 darab megérheti", "Apple AirPods Pro 2 fehér: 30 000 Ft",
@@ -1170,8 +1186,16 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertEqual(len(context.pages), pages, "nem a böngészőben")
         asked = page.evaluate("window.__copied")
         self.assertTrue(asked.startswith("Találtam egy jónak tűnő árut, ami jó befektetés lehetne, ha vétel után kicsit "
-                                         "drágábban továbbárusítanám. Megnéznéd, hogy tényleg jó vétel lenne-e?"), asked)
+                                         "drágábban továbbárusítanám. Megnéznéd, hogy tényleg jó vétel lenne-e, és mit "
+                                         "kockáztatok vele?"), asked)
         self.assertIn("Palit RTX 3060 Ti Dual\nÁra: 52 000 Ft (Hardverapró)\n", asked)
+        # a kockázatok, a modell megjegyzése, az állapot a bizonyítékkal, és az összehasonlítók linkjei is benne vannak
+        for part in ("Várható haszon kb. 31 500 Ft.", "Állapot a leírás szerint:\n- működés: működik („Hibátlanul működik”)",
+                     "- nem derül ki: kijelző, akkumulátor, garancia", "Az én értékelésem: Biztos befektetés.",
+                     "Kockázatok:\n- az eladónak kevés az értékelése", "A modell megjegyzése: Ugyanaz a kártya.",
+                     "Ezekhez mértem:\n- MSI RTX 3060 Ti Ventus: 98 000 Ft (Jófogás) https://www.jofogas.hu/1234567.htm"):
+            self.assertIn(part, asked)
+        self.assertNotIn("nem tudtam teljesen ellenőrizni", asked)
         self.assertTrue(asked.endswith(listing), "a végén a hirdetés linkje")
         self.assertFalse(page.evaluate("document.getElementById('deal-dialog').open"))
         page.click('[data-deal-open="q1"]')

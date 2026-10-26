@@ -56,6 +56,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from . import condition as conditions
 from .browser import DECLINED, LISTING_PAGE_JS, BrowserError, is_risky
 from .feeds import FeedError, chosen_sort, fetch_image
 from .listings import BLOCKED, GONE, SOLD, classify
@@ -188,6 +189,25 @@ FRESH_GAP = 0.05
 # Ha egy összehasonlító hirdetés címéből nem derül ki a változat (kapacitás), legfeljebb ennyinek a leírását olvassa el
 # egy árkutatásban (a kör vagy a figyelő kéréskeretéből), ha a biztos összehasonlításhoz kell (_clarify).
 DETAIL_READS = 2
+# Az összehasonlító hirdetések állapota (_vet): egy árkutatásban a legfontosabb (a szokásos árhoz legközelebbi)
+# legfeljebb VET_READS összehasonlító leírását is elolvassa, és az eredményt eltárolja (allapotok.json, legfeljebb
+# MAX_VETTED hirdetés, a legrégebbiek kiesnek: egy későbbi összehasonlítás ugyanazt nem olvassa el újra). A hibás vagy
+# hiányos (pl. kijelzőhibás, töltő nélküli) összehasonlító nem számít a hibátlan ár közé. Egy felfedezett (nem a
+# kereséseddel felmért) termék szokásos ára csak akkor biztos, ha legalább VET_MIN összehasonlítóról a leírása szerint
+# is kiderült, hogy hibátlan: a címekből ez nem dől el.
+VET_READS = 3
+VET_MIN = 2
+TIP_RETRY = 1800           # az ellenőrizetlen tippet (nem nyílt meg az adatlap, nem válaszolt a modell) ennyi mp múlva újra
+MAX_VETTED = 3000
+MAX_COSTS = 40
+# A felületen választható pótolni- vagy javítanivalók (más is beírható).
+COST_PARTS = ("töltő", "kábel", "kontroller", "kijelző", "akkumulátor")
+# Ellenőrzött ajánlat (a sürgős „Megéri”): az adatlapja megnyílt, van leírása (legalább MIN_DETAILS jel), a modell
+# válaszolt, és az állapota szerint újraszámolt haszon is megéri (_verdict). Előtte rögtön egy gyors jelzés megy
+# („Ígéretes …, ellenőrzés folyamatban”; egy hirdetésről PING_TTL-en belül egyszer). Ha valamelyik nem teljesül, a
+# hirdetés ellenőrizetlen marad: az Érdemes megnézni listába kerül, az okkal (_unverified).
+MIN_DETAILS = 8
+PING_TTL = 6 * 3600
 BASIS_MAX = 15             # a találat ablakában legfeljebb ennyi beszámított és ennyi kizárt összehasonlító
 # Árkutatás közben talált hirdetések: ha egy összehasonlító hirdetés a többihez mérve (saját maga nélkül) megéri, önálló
 # jelölt lesz (_peers): egy árkutatásból legfeljebb SPAWN_MAX, egy hirdetést SPAWN_TTL-en belül csak egyszer néz meg így,
@@ -367,13 +387,14 @@ _FLEX_WORDS = (("alkukepes", "alkuképes"), ("alkudhato", "alkuképes"), ("alku 
 
 CHECK_SYSTEM = (
     "Egy használtcikk-kereskedőnek segítesz. Megkapod, mit keres, és egy hirdetés címét, szövegét és árát. "
-    "Döntsd el, megéri-e megnézni: ok=true, ha ez tényleg a keresett termék (nem kiegészítő, nem alkatrész, nem "
-    "más típus), egy darab, eladó (nem keres vagy cserél), és nem hibás vagy hiányos. suspicious=true, ha átverésnek "
-    "vagy hamisítványnak látszik: túl szép, hogy igaz legyen, előre fizetést, más oldalon vagy alkalmazásban való "
-    "kapcsolatfelvételt vagy futárcéget kér, sürget, vagy a leírás nem illik a termékhez. Ha a hirdetés fotóit is "
-    "megkapod: ok=false, ha a fotón sérülés vagy hiány látszik, vagy nem a keresett termék van rajta; suspicious=true, "
-    "ha a fotó letöltött (webshop- vagy katalógus-) képnek látszik a saját fotó helyett, vagy hamisítványnak tűnik. "
-    "reason: egy rövid mondat magyarul. " + UNTRUSTED_NOTE)
+    "ok=true, ha ez tényleg a keresett termék (nem kiegészítő, nem alkatrész, nem más típus), egy darab, és eladó (nem "
+    "keres vagy cserél). Az állapota (hiba, hiányzó tartozék) ettől még nem ok=false: azt a condition részben add meg. "
+    "suspicious=true, ha átverésnek vagy hamisítványnak látszik: túl szép, hogy igaz legyen, előre fizetést, más oldalon "
+    "vagy alkalmazásban való kapcsolatfelvételt vagy futárcéget kér, sürget, vagy a leírás nem illik a termékhez. Ha a "
+    "hirdetés fotóit is megkapod: ok=false, ha nem a keresett termék van rajta; suspicious=true, ha a fotó letöltött "
+    "(webshop- vagy katalógus-) képnek látszik a saját fotó helyett, vagy hamisítványnak tűnik; a fotón látott sérülést "
+    "vagy hiányt a condition részben jelezd. " + conditions.CONDITION_RULES + " reason: egy rövid mondat magyarul. "
+    + UNTRUSTED_NOTE)
 JUDGE_SYSTEM = (
     "Egy használtcikk-kereskedőnek segítesz felmérni, mennyiért adják most a keresett terméket. Megkapod a keresett "
     "terméket és hirdetéseket (számozva, árral). Válaszd ki azokat, amelyek pontosan a keresett termék: ugyanaz a "
@@ -403,9 +424,13 @@ EXPLORE_SCHEMA: dict[str, Any] = {
 }
 CHECK_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"ok": {"type": "boolean"}, "suspicious": {"type": "boolean"}, "reason": {"type": "string"}},
-    "required": ["ok", "suspicious", "reason"],
+    "properties": {"ok": {"type": "boolean"}, "suspicious": {"type": "boolean"}, "reason": {"type": "string"},
+                   "condition": conditions.CONDITION_SCHEMA},
+    "required": ["ok", "suspicious", "reason", "condition"],
 }
+CHECK_MAX_TOKENS = 700     # az állapot szempontonként, idézettel
+# A hirdetés leírása szerint csak alkatrésznek jó (vagy csak a doboza eladó): nem egy működő darab.
+_PARTS_ONLY_RE = re.compile(r"\b(alkatresz\w*|for parts|csak (a )?doboz\w*|ures doboz\w*)\b")
 BUNDLE_PICK_SYSTEM = (
     "Egy használtcikk-kereskedőnek segítesz csomagokat (több darab egy áron) felmérni: ha darabonként eladja őket, "
     "többet kaphat érte. Megkapod a csomaghirdetéseket (számozva, árral). Válaszd ki legfeljebb kettőt, amelyik "
@@ -491,31 +516,33 @@ def left_text(seconds: int | None) -> str:
     return " ".join(parts) or "kevesebb mint egy perc"
 
 
-def pays(search: dict[str, Any], price: int, reference: int) -> bool:
+def pays(search: dict[str, Any], price: int, reference: int, fee: int = 0) -> bool:
     """Megéri-e: a szokásos árnál a megadott %-kal olcsóbb, vagy legalább a megadott haszon jön ki belőle (és
-    egyáltalán hoz hasznot); nem gyanúsan olcsó (FLOOR), és a megadott ársávban van."""
+    egyáltalán hoz hasznot); nem gyanúsan olcsó (FLOOR), és a megadott ársávban van. fee: a vevő díja (buy_fee): a
+    %-ot és a hasznot a díjjal együtt fizetett árral számolja."""
     if price < reference * FLOOR:
         return False
     if (search.get("min_price") and price < search["min_price"]) or \
             (search.get("max_price") and price > search["max_price"]):
         return False
-    profit = expected_profit(reference, price)
+    profit = expected_profit(reference, price) - fee
     if profit <= 0:
         return False
-    by_percent = price <= reference * (100 - int(search.get("discount") or DEFAULT_DISCOUNT)) / 100
+    by_percent = price + fee <= reference * (100 - int(search.get("discount") or DEFAULT_DISCOUNT)) / 100
     return by_percent or bool(search.get("min_profit") and profit >= int(search["min_profit"]))
 
 
-def highest_ok(search: dict[str, Any], reference: int) -> int | None:
-    """A legmagasabb ár, ami ennél a keresésnél még megéri (pays): ennyit érdemes ajánlani vagy licitálni. None, ha a
-    megadott ársávban nincs ilyen. Az ár csökkenésével csak jobb lesz, ezért felezéssel keresi meg a határt."""
+def highest_ok(search: dict[str, Any], reference: int, platform: str = "") -> int | None:
+    """A legmagasabb ár, ami ennél a keresésnél még megéri (pays; a platform vevői díjával együtt): ennyit érdemes
+    ajánlani vagy licitálni. None, ha a megadott ársávban nincs ilyen. Az ár csökkenésével csak jobb lesz, ezért
+    felezéssel keresi meg a határt."""
     low = max(math.ceil(reference * FLOOR), int(search.get("min_price") or 0), 1)
     high = int(search.get("max_price") or reference)
-    if high < low or not pays(search, low, reference):
+    if high < low or not pays(search, low, reference, buy_fee(platform, low)):
         return None
     while low < high:
         middle = (low + high + 1) // 2
-        if pays(search, middle, reference):
+        if pays(search, middle, reference, buy_fee(platform, middle)):
             low = middle
         else:
             high = middle - 1
@@ -586,10 +613,27 @@ def spread_of(found: dict[str, Any]) -> float | None:
     return round((p75 - p25) / median, 2) if median > 0 and p75 >= p25 else None
 
 
+def buy_fee(platform: str, price: int) -> int:
+    """A vevő díja a vételnél: a Vinteden a vevővédelmi díj (kb. VINTED_FEE_FIXED + az ár VINTED_FEE_RATE-je), máshol 0."""
+    return int(round(VINTED_FEE_FIXED + VINTED_FEE_RATE * price)) if platform == "vinted" else 0
+
+
+def before_fee(platform: str, top: int) -> int:
+    """A legmagasabb vételár, aminél a vevő díjával (buy_fee) együtt sem fizetsz többet top-nál."""
+    if platform != "vinted" or top <= 0:
+        return top
+    price = int(math.floor((top - VINTED_FEE_FIXED) / (1 + VINTED_FEE_RATE)))
+    while price > 0 and price + buy_fee(platform, price) > top:
+        price -= 1
+    return max(price, 0)
+
+
 def assess(deal: dict[str, Any]) -> dict[str, Any]:
-    """Nyugodt szívvel megvehető-e: level „biztos” (legalább SAFE_ROI haszon a befektetett pénzhez képest, nem szórnak
-    nagyon az árak, és nem lassan kelő), „jó”, vagy „kockázatos” (RISKY_ROI alatti haszon, vagy lassan kelő, kevés
-    haszonnal). why: a kockázatok és a figyelmeztetések, good: ami mellette szól (a felületre és az értesítésbe)."""
+    """Nyugodt szívvel megvehető-e: level „biztos” (ellenőrzött ajánlat: verified; legalább SAFE_ROI haszon a befektetett
+    pénzhez képest, nem szórnak nagyon az árak, nem lassan kelő, és az állapotában sincs figyelmeztetés), „jó”, vagy
+    „kockázatos” (RISKY_ROI alatti haszon, vagy lassan kelő, kevés haszonnal). A magas számított haszon magában nem
+    „biztos”: az ellenőrizetlen (az adatlapja, az állapota nincs megnézve) legfeljebb „jó”. why: a kockázatok és a
+    figyelmeztetések, good: ami mellette szól (a felületre és az értesítésbe)."""
     price = int(deal.get("offer") or deal["price"])
     roi = int(deal.get("profit") or 0) / price if price > 0 else 0.0
     risks, cautions, good = [], [], []
@@ -609,8 +653,26 @@ def assess(deal: dict[str, Any]) -> dict[str, Any]:
         good.append(f"{deal['sold']['n']} elkelt hasonló alapján is")
     if deal.get("similar") and len(deal.get("sites") or []) >= 2:
         good.append(f"{deal['similar']} hasonló, {len(deal['sites'])} oldalon")
+    cond = deal.get("condition") or {}
+    if cond:
+        state = lambda aspect: (cond.get(aspect) or {}).get("state") or conditions.UNKNOWN  # noqa: E731
+        if state("function") == "működik":
+            good.append("a leírása szerint hibátlanul működik")
+        elif deal.get("verified") and state("function") == conditions.UNKNOWN:
+            cautions.append("a leírásból nem derül ki, hogy hibátlanul működik")
+        if state("display") == "karcos":
+            cautions.append("karcos a kijelzője")
+        if "doboz" in (cond.get("missing") or []):
+            cautions.append("doboz nélkül")
+        if state("warranty") == "van":
+            good.append("garanciális")
+    if deal.get("cond_band"):
+        cautions.append(f"hasonló hibájúakhoz mértem ({', '.join(deal['cond_band']['issues'])})")
+    for part in deal.get("cost_parts") or []:
+        if part.get("repair"):
+            cautions.append(f"{part['what']} levonva (kb. {format_price(part['amount'])})")
     level = ("kockázatos" if risks else
-             "biztos" if not cautions and (deal.get("auction") or roi >= SAFE_ROI) else "jó")
+             "biztos" if not cautions and deal.get("verified") and (deal.get("auction") or roi >= SAFE_ROI) else "jó")
     return {"level": level, "why": risks + cautions, "good": good}
 
 
@@ -739,10 +801,11 @@ def last_chance(close: float, day: tuple[int, int]) -> float:
     return evening if hour >= end else evening - 86400
 
 
-def offer_price(search: dict[str, Any], price: int, reference: int) -> int | None:
-    """Vinted-ajánlat: ha a kért ár kicsit több annál, ami még megéri (highest_ok), de legfeljebb OFFER_CUT-tal, ennyit
-    ajánlj (kerek százasra lefelé). None, ha a kért ár már most is megéri, vagy túl nagy engedmény kellene."""
-    top = highest_ok(search, reference)
+def offer_price(search: dict[str, Any], price: int, reference: int, platform: str = "") -> int | None:
+    """Vinted-ajánlat: ha a kért ár kicsit több annál, ami még megéri (highest_ok, a vevővédelmi díjjal együtt), de
+    legfeljebb OFFER_CUT-tal, ennyit ajánlj (kerek százasra lefelé). None, ha a kért ár már most is megéri, vagy túl
+    nagy engedmény kellene."""
+    top = highest_ok(search, reference, platform)
     if top is None or price <= top:
         return None
     offer = top // 100 * 100
@@ -1150,6 +1213,11 @@ class DealHunter:
         self._carry_busy: set[str] = set()   # amit egy kör épp ellenőriz (egyszerre csak az egyik sor nézi)
         # keresés:oldal → mikor esedékes újra a keret fogyása miatt (_retry_soon): addig az ütemező sűrűbben néz
         self._retries: dict[str, float] = {}
+        self._pinged: dict[str, float] = {}   # a gyors jelzés („Ígéretes …”) hirdetésenként: mikor (_ping)
+        # az összehasonlító hirdetések állapota a leírásuk szerint (_vet): hirdetés → {at, issues, gone}
+        self._vetted_path = Path(root) / "allapotok.json"
+        self._vetted = self._load_vetted()
+        self._vet_dirty = False
         self._data = self._load()
 
     # --- tárolás ---
@@ -1209,7 +1277,34 @@ class DealHunter:
                 "seen": numbers("seen"),       # hirdetés → mikor néztük meg utoljára (egy keresés ehhez igazodik)
                 "cancelled": numbers("cancelled"),   # visszamondott vétel hirdetése → mikor: többé nem szól róla
                 "prices": {k: int(v) for k, v in numbers("prices").items()},   # hirdetés → az ára akkor (leárazás)
-                "last": numbers("last")}       # keresés:oldal → mikor néztük meg (gyakoriság)
+                "last": numbers("last"),       # keresés:oldal → mikor néztük meg (gyakoriság)
+                # pótlási és javítási költségek (amit te adtál meg): {id, part (pl. töltő, kijelző), product (üres: mind),
+                # amount}; ezekkel számol az állapothoz igazított haszon (_reprice), és mikor változtak utoljára
+                "costs": [c for c in data.get("costs") or [] if isinstance(c, dict) and c.get("part")
+                          and isinstance(c.get("amount"), int)][:MAX_COSTS],
+                "costs_at": float(data.get("costs_at") or 0)}
+
+    def _load_vetted(self) -> dict[str, dict[str, Any]]:
+        try:
+            data = json.loads(self._vetted_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {str(k): v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+
+    def _save_vetted(self) -> None:
+        with self._lock:
+            self._vet_dirty = False
+            if len(self._vetted) > MAX_VETTED:     # a legrégebbiek kiesnek
+                for key in sorted(self._vetted, key=lambda k: float(self._vetted[k].get("at") or 0))[
+                        :len(self._vetted) - MAX_VETTED]:
+                    self._vetted.pop(key, None)
+            try:
+                self._vetted_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self._vetted_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self._vetted, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, self._vetted_path)
+            except OSError:
+                pass
 
     @staticmethod
     def _load_haggle(saved: Any) -> dict[str, Any]:
@@ -1259,7 +1354,55 @@ class DealHunter:
                     "tips": sorted((dict(t) for t in self._data["tips"]), key=lambda t: -float(t.get("at") or 0)),
                     "auctions": sorted((dict(a) for a in self._data["auctions"]), key=lambda a: float(a["ends"])),
                     "haggle": {"on": self._data["haggle"]["on"], "message": self._data["haggle"]["message"],
-                               "per_day": HAGGLE_PER_DAY, "days": HAGGLE_DAYS, "max_cut": HAGGLE_MAX}}
+                               "per_day": HAGGLE_PER_DAY, "days": HAGGLE_DAYS, "max_cut": HAGGLE_MAX},
+                    "costs": [dict(c) for c in self._data["costs"]], "cost_parts": list(COST_PARTS)}
+
+    # --- pótlási és javítási költségek (az állapothoz igazított haszonhoz) ---
+
+    def add_cost(self, part: Any, product: Any, amount: Any) -> dict[str, Any]:
+        """Egy pótlási vagy javítási költség (pl. „töltő”, 4 000 Ft; „kijelző”, „switch lite”, 18 000 Ft): ha egy
+        jelöltnél ez hiányzik vagy hibás, ennyit von le a hasznából (_reprice). A termék üres: minden termékre; ha
+        megadod, csak arra (a szavai a hirdetésben), és az erősebb, mint az általános."""
+        name = conditions.part_name(str(part or ""))
+        if not name:
+            raise DealError("Mit kell pótolni vagy javítani (pl. töltő, kijelző)?")
+        value = self._amount(amount, "Az összeg")
+        if not value:
+            raise DealError("Mennyibe kerül (Ft)?")
+        entry = {"id": secrets.token_hex(4), "part": name, "product": " ".join(str(product or "").split())[:60],
+                 "amount": value}
+        with self._lock:
+            costs = [c for c in self._data["costs"] if not (c["part"] == name and fold(c.get("product") or "")
+                                                             == fold(entry["product"]))]
+            self._data["costs"] = (costs + [entry])[-MAX_COSTS:]
+            self._data["costs_at"] = self.clock()
+            self._save()
+        product = f" ({entry['product']})" if entry["product"] else ""
+        self.journal.add(f"Költség: {name}{product} {format_price(value)}; az ilyen hibájú vagy hiányos jelölteknél "
+                         "ennyit vonok le.")
+        return self.state()
+
+    def remove_cost(self, cost_id: str) -> dict[str, Any]:
+        with self._lock:
+            self._data["costs"] = [c for c in self._data["costs"] if c.get("id") != cost_id]
+            self._save()
+        return self.state()
+
+    def _cost(self, issue: str, deal: dict[str, Any]) -> int | None:
+        """Egy hiba vagy hiányzó tartozék pótlási/javítási költsége (amit megadtál; a termékre szabott előbb), vagy None."""
+        text = fold(" ".join(str(deal.get(k) or "") for k in ("title", "text", "query")))
+        with self._lock:
+            costs = list(self._data["costs"])
+        best: tuple[int, int] | None = None
+        for entry in costs:
+            if entry["part"] != issue:
+                continue
+            words = fold(entry.get("product") or "").split()
+            if words and not all(word in text for word in words):
+                continue
+            if best is None or len(words) > best[0]:
+                best = (len(words), int(entry["amount"]))
+        return best[1] if best else None
 
     def available(self) -> bool:
         """Van-e most dolga: egy esedékes keresés, figyelt oldal, vagy a böngészés következő lépése. Az ütemező csak
@@ -2111,6 +2254,18 @@ class DealHunter:
 
     def _deal_text(self, search: dict[str, Any], deal: dict[str, Any]) -> str:
         warn = "".join(f" Figyelj: {w}." for w in deal.get("warnings") or [])
+        extra = [part for part in deal.get("cost_parts") or [] if part.get("what") != "posta"]
+        if extra:
+            warn = (" Levonva: " + ", ".join(f"{part['what']} kb. {format_price(part['amount'])}" for part in extra)
+                    + f".{warn}")
+        if deal.get("cond_band"):
+            band = deal["cond_band"]
+            warn = (f" Hasonló hibájúakhoz mértem ({band['n']} hirdetés, {', '.join(band['issues'])}; a hibátlanok "
+                    f"kb. {format_price(band['clean'])}).{warn}")
+        if deal.get("condition_text"):
+            warn = f" Állapot: {deal['condition_text']}.{warn}"
+        if deal.get("verified"):
+            warn = f" Ellenőriztem: az adatlapja és az állapota alapján újraszámolva is megéri.{warn}"
         if deal.get("speed"):
             warn = f" Eladási sebesség: {deal['speed']}.{warn}"
         if deal.get("safety"):
@@ -2196,8 +2351,8 @@ class DealHunter:
                 and not excluded(words, row["text"]) and not (low and row["price"] < low)]
 
     @staticmethod
-    def _cheap(search: dict[str, Any], price: int, reference: int) -> bool:
-        return pays(search, price, reference)
+    def _cheap(search: dict[str, Any], price: int, reference: int, platform: str = "") -> bool:
+        return pays(search, price, reference, buy_fee(platform, price))
 
     def _deal(self, search: dict[str, Any], row: dict[str, Any], reference: int, **extra: Any) -> dict[str, Any]:
         """Egy jelölt. Az árbázisból hozzáteszi, milyen gyorsan kel el az ilyen (ha tudjuk), és a termékkulcsát (a
@@ -2216,8 +2371,15 @@ class DealHunter:
             deal["spread"] = spread_of({**search["basis"], "price": reference})
         if "band" not in deal and (search.get("basis") or {}).get("p25") and search["basis"].get("p75"):
             deal["band"] = [int(search["basis"]["p25"]), int(search["basis"]["p75"])]
-        # külön látszik: az óvatos eladási ár, és a költség (a posta), ami után a haszon marad
-        deal["resale"], deal["costs"] = safe_sale(reference, extra.get("low")), SHIPPING
+        # külön látszik: az óvatos eladási ár, és a költségek (a posta, a Vinteden a vevővédelmi díj; az állapot szerinti
+        # pótlás és javítás az ellenőrzéskor jön hozzá: _reprice), ami után a haszon marad
+        fee = buy_fee(str(row.get("platform") or ""), int(extra.get("offer") or row["price"]))
+        deal["profit"] = int(deal["profit"]) - fee
+        deal["resale"], deal["costs"] = safe_sale(reference, extra.get("low")), SHIPPING + fee
+        deal["cost_parts"] = [{"what": "posta", "amount": SHIPPING}] + (
+            [{"what": "vevővédelmi díj", "amount": fee}] if fee else [])
+        if fee:
+            deal["fee"] = fee
         deal.pop("product", None)
         return {k: v for k, v in deal.items() if v not in ("", None)}
 
@@ -2310,16 +2472,17 @@ class DealHunter:
                     prices[key] = row["price"]
                     continue
                 self.tally("new", [row])
-                offer = offer_price(search, row["price"], reference) if row.get("platform") == "vinted" else None
+                platform = str(row.get("platform") or "")
+                offer = offer_price(search, row["price"], reference, platform) if platform == "vinted" else None
                 if offer and not self._affordable(offer):
                     offer = None               # a vételi limitbe az ajánlat sem fér bele
-                if self._cheap(search, row["price"], reference) and self._affordable(row["price"]):
+                if self._cheap(search, row["price"], reference, platform) and self._affordable(row["price"]):
                     out.append(self._deal(search, row, reference, drop=old if drop else None,
                                           basis=self._search_basis(search)))
                 elif offer:            # kicsit drága: a Vinteden ajánlatot tehetsz (csak a jóváhagyásoddal)
                     out.append(self._deal(search, row, reference, offer=offer, profit=expected_profit(reference, offer),
                                           basis=self._search_basis(search)))
-                elif self._cheap(search, row["price"], reference):
+                elif self._cheap(search, row["price"], reference, platform):
                     prices[key] = row["price"]    # olcsó, de a vételi limit fölött: ha emeled, újra jelölt lehet
                     self.tally("over_limit", [row])
                 else:
@@ -2436,6 +2599,8 @@ class DealHunter:
             return finish()
         if self._risky(deal):
             return finish()
+        if not deal.get("auction"):
+            self._ping(deal, game.notify)      # gyors jelzés: ígéretes, az ellenőrzés most jön
         if game.blocked and page is None:
             deal.setdefault("warnings", []).append("a hirdetés oldalát nem néztem meg (robot-ellenőrzés)")
         else:
@@ -2466,8 +2631,10 @@ class DealHunter:
 
     def _conclude(self, game: _Round, search: dict[str, Any], deal: dict[str, Any], ok: bool | None,
                   done: Callable[[], None] | None = None) -> None:
-        """A modell válasza után (a böngésző szálán): ha nem mondott nemet, szól róla (kivéve, ha az ilyen terméket
-        többször elrejtetted: arról egy ideig nem szól). A naplóba is beírja. done: lásd _candidate."""
+        """A modell válasza után (a böngésző szálán): ha nem mondott nemet, a végső minősítés (_verdict). Sürgősen csak
+        az ellenőrzött ajánlatról szól (az adatlapja megnyílt, a modell átnézte, és az állapota szerint újraszámolt haszon
+        is megéri); az ellenőrizetlen az Érdemes megnézni listába kerül, az okkal (_unverified). Ha az ilyen terméket
+        többször elrejtetted, egy ideig nem szól. A naplóba is beírja. done: lásd _candidate."""
         finish = done or (lambda: None)
         if ok is False:
             if deal.get("suspect"):
@@ -2476,10 +2643,20 @@ class DealHunter:
                 self._mark(deal)
                 self.tally("model_no", [deal])
             return finish()
+        state, why, hold = self._verdict(deal, ok)
+        if state in ("hibás", "nem éri meg"):
+            self._drop_checked(deal, state, why)
+            return finish()
         self._mark(deal)
         if self._muted(deal.get("product_key"), self.clock()):
             game.notes.append(f"„{deal['text'][:40]}”: az ilyet elrejtetted, nem szóltam")
             self.tally("muted", [deal])
+            return finish()
+        if state == "ellenőrizetlen":
+            self._unverified(deal, why, hold)
+            return finish()
+        deal["verified"] = True
+        if self._risky(deal):                  # az újraszámolt haszonnal újra felmérve
             return finish()
         if not self._remember(deal):          # a másik sor már szólt róla (ugyanaz a hirdetés): nem még egyszer
             return finish()
@@ -2613,21 +2790,22 @@ class DealHunter:
                 basis = self._search_basis(search)
                 if row.get("auction") and top and row["price"] < top:
                     found.append((search, self._deal(search, row, reference, max_bid=top, explore=label, basis=basis)))
-                elif not row.get("auction") and pays(search, row["price"], reference) and self._affordable(row["price"]):
+                elif not row.get("auction") and self._cheap(search, row["price"], reference, row.get("platform") or "") \
+                        and self._affordable(row["price"]):
                     found.append((search, self._deal(search, row, reference, explore=label,
                                                      drop=old if drop else None, basis=basis)))
                 else:
                     skip.append(row)
                 continue
             product = self.book.key(row.get("title") or row["text"])   # a cím (a kártyán a város, az eladó is ott van)
-            reference = self.book.reference(product[0], exclude=row["url"]) if product else None
+            reference = self._screened(self.book.reference(product[0], exclude=row["url"])) if product else None
             if reference is None:
                 unknown.append(row)
                 continue
             deal = self._explore_deal(source, row, reference, drop=old if drop else None)
             if deal is None:
                 skip.append(row)
-            elif not sure_price(reference):
+            elif not reference["sure"]:        # kevés az ár, vagy az összehasonlítók leírását még nem olvastuk el
                 if game.resale > 0:            # a keretbe már nem férő a következő körben újra jön
                     game.resale -= 1
                     query = self.book.query(row.get("title") or row["text"]) or reference["name"]
@@ -2654,12 +2832,15 @@ class DealHunter:
         info = {"explore": row.get("lane_name") or watch["name"], "similar": reference.get("n"),
                 "product": reference.get("name"), "low": low, "sites": self._site_names(reference.get("sites")) or None,
                 "spread": spread_of(reference), "sold": reference.get("sold"), "band": band_of(reference),
-                "basis": self._named_basis(reference.get("basis")), **extra}
+                "basis": self._named_basis(reference.get("basis")),
+                "refs": (reference.get("vetted") or {}).get("refs") or None,
+                "floor": int(watch.get("min_profit") or WATCH_PROFIT), **extra}
         if row.get("auction"):
             top = self._capped(top)            # a vételi limitnél tovább nem érdemes licitálni
             return self._deal(probe, row, usual, max_bid=top, **info) if 0 < top and price < top else None
         if price < usual * FLOOR or top <= 0:
             return None
+        top = before_fee(str(row.get("platform") or ""), top)     # a Vinteden a vevővédelmi díjjal együtt
         if price <= top and self._affordable(price):
             return self._deal(probe, row, usual, **info)
         offer = self._capped(top) // 100 * 100
@@ -2801,6 +2982,21 @@ class DealHunter:
             out += [{**sample, "why": "régebbi ár (azóta lejjebb ment az árszint)"} for sample in group
                     if sample["src"] != "most"]
             group = now_rows
+        # az összehasonlítók állapota a leírásuk szerint (a címből nem derül ki, hogy repedt a kijelzője, vagy nincs
+        # töltője): a szokásos árhoz legközelebbiekét elolvassa (ha lehet, _vet); a hibás vagy hiányos példány ára nem
+        # számít a hibátlanok szokásos árába (a hasonló hibájú jelölthöz viszont ez a mérce: vetted.refs, _reprice)
+        if read is not None:
+            self._vet(group, read, VET_READS, int(found["price"]))
+        group, flawed, refs, clean = self._screen(group)
+        if flawed:
+            out += flawed
+            again = market([(s["p"], s["s"], bool(s.get("gone"))) for s in group]) if group else None
+            if again is None:
+                return None
+            found = {**again, **({"note": found["note"]} if found.get("note") else {})}
+        found["enough"] = bool(found["sure"])  # elég ár van (sure_price), de a leírások nélkül ez még nem biztos
+        found["sure"] = found["enough"] and clean >= VET_MIN
+        found["vetted"] = {"refs": refs, "clean": clean}
         found["basis"] = self._basis(group, out, found.get("note", ""))
         found["group"], found["peers"] = group, [sample for sample in group if sample["src"] == "most"]
         # a többi jelölthöz: a kizártak (az okkal), és maga a vizsgált hirdetés, ha a címe szerint igazoltan ugyanaz a
@@ -2840,6 +3036,10 @@ class DealHunter:
             reference = market([(s["p"], s["s"], bool(s.get("gone"))) for s in rest])
             if reference is None:
                 continue
+            clean = self._screen(rest)[3]
+            reference["enough"] = bool(reference["sure"])
+            reference["sure"] = reference["enough"] and clean >= VET_MIN
+            reference["vetted"] = {"refs": list((found.get("vetted") or {}).get("refs") or []), "clean": clean}
             reference["basis"] = self._basis(rest, list(found.get("excluded") or []), found.get("note", ""))
             verdict = judge(peer, reference)
             if verdict is not None:
@@ -2926,6 +3126,8 @@ class DealHunter:
                 continue
             folded = fold(text[:PAGE_TEXT])
             sizes = sizes_of(text[:PAGE_TEXT])
+            if sample.get("u"):
+                self._vet_note(sample["u"], text[:PAGE_TEXT])
             if _PARTS_RE.search(folded) or _DEFECT_RE.search(folded):
                 out.append({**sample, "why": "hibás vagy hiányos (a leírása szerint)"})
             elif wanted and wanted <= sizes and not size_conflict(sized(want), sized(text[:PAGE_TEXT])):
@@ -2935,6 +3137,108 @@ class DealHunter:
             else:
                 left.append({**sample, "why": "a leírásából sem derül ki, melyik változat"})
         return left
+
+    # --- az összehasonlítók állapota a leírásuk szerint (allapotok.json) ---
+
+    def _vet_note(self, url: str, text: str) -> list[str]:
+        """Egy hirdetés állapota a leírásából (kulcsszavakkal, conditions.from_text), eltárolva: az árat érintő hibái
+        (issues; üres: a leírása szerint hibátlan), és ha van, röviden, mi a baj. Visszaadja a hibákat."""
+        cond = conditions.from_text(text)
+        found = conditions.issues(cond)
+        entry: dict[str, Any] = {"at": self.clock(), "issues": found}
+        if found:
+            entry["note"] = conditions.describe(cond)[:200]
+        with self._lock:
+            self._vetted[listing_key(url)] = entry
+            self._vet_dirty = True
+        return found
+
+    def _vet(self, samples: list[dict[str, Any]], read: Callable[[dict[str, Any]], dict[str, Any] | None] | None,
+             reads: int, reference: int) -> None:
+        """Az összehasonlítók közül a szokásos árhoz (reference) legközelebbi legfeljebb reads még el nem olvasott
+        leírását elolvassa (a most találtakat előbb; az eltűntét nem), és az állapotukat eltárolja (_vet_note). Ami nem
+        nyílt meg, eltűnt vagy robot-ellenőrzést kért, nem számít ellenőrzöttnek. Ha elfogy a kéréskeret, a többit nem
+        olvassa el; legfeljebb kétszer annyit próbál, amennyit elolvasna."""
+        if read is None or reads <= 0:
+            return
+        with self._lock:
+            todo = [sample for sample in samples if sample.get("u") and not sample.get("gone")
+                    and self._vetted.get(listing_key(sample["u"])) is None]
+        todo.sort(key=lambda sample: (sample.get("src") != "most", abs(int(sample["p"]) - reference)))
+        tries = reads * 2
+        for sample in todo:
+            if reads <= 0 or tries <= 0:
+                break
+            tries -= 1
+            row = sample.get("row") or {"url": sample["u"], "platform": sample.get("s") or "", "price": int(sample["p"]),
+                                        "text": sample.get("t") or "", "title": sample.get("t") or ""}
+            try:
+                page = read(row)
+            except Deferred as exc:
+                if exc.reason != "kéréskeret":
+                    raise
+                break                          # a keret elfogyott: a többit nem olvassa el
+            if not page or page.get("captcha"):
+                continue
+            state, _detail = classify(page, sample["u"], str(row.get("text") or ""), str(row.get("platform") or ""))
+            text = " ".join(str(page.get("text") or "").split())[:PAGE_TEXT]
+            if state in (GONE, BLOCKED) or len(text) < MIN_DETAILS:
+                continue
+            reads -= 1
+            self._vet_note(sample["u"], f"{page.get('title') or sample.get('t') or ''} {text}")
+        if self._vet_dirty:
+            self._save_vetted()
+
+    def _screen(self, samples: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]],
+                                                              list[dict[str, Any]], int]:
+        """Az összehasonlítók az eltárolt állapotukkal (_vet): (a beszámíthatók: a hibátlanok és az ismeretlen
+        állapotúak; a leírásuk szerint hibásak vagy hiányosak, az okkal; ezek röviden a hasonló hibájú jelöltekhez:
+        refs {p, u, t, s, issues}; és hány a leírása szerint is hibátlan)."""
+        with self._lock:
+            entries = [self._vetted.get(listing_key(sample["u"])) if sample.get("u") else None for sample in samples]
+        kept, flawed, refs, clean = [], [], [], 0
+        for sample, entry in zip(samples, entries):
+            found = list((entry or {}).get("issues") or [])
+            if entry is not None and not found:
+                clean += 1
+            if not found:
+                kept.append(sample)
+                continue
+            flawed.append({**sample, "why": f"a leírása szerint {conditions.issue_text(found)}"})
+            refs.append({"p": int(sample["p"]), "u": str(sample["u"]), "t": str(sample.get("t") or ""),
+                         "s": str(sample.get("s") or ""), "issues": found})
+        return kept, flawed, refs, clean
+
+    def _screened(self, reference: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Az árbázis szokásos ára (book.reference) az összehasonlítók eltárolt állapotával (_screen): a leírásuk
+        szerint hibásak nélkül újraszámolva (azok a kizártak közé kerülnek, az okkal); enough: elég hasonló ár van
+        (sure_price), sure: és ezek közül legalább VET_MIN a leírása szerint is hibátlan. None, ha nem marad elég ár."""
+        if reference is None:
+            return None
+        basis = dict(reference.get("basis") or {})
+        kept, flawed, refs, clean = self._screen(list(basis.get("used") or []))
+        out = dict(reference)
+        if flawed:
+            again = market([(s["p"], s["s"], bool(s.get("gone"))) for s in kept]) if kept else None
+            if again is None:
+                return None
+            out.update({k: again[k] for k in ("price", "p25", "p75", "n", "sites")})
+            out.pop("sold", None)
+            if again.get("sold"):
+                out["sold"] = again["sold"]
+            basis.update(used=kept, out=list(basis.get("out") or []) + flawed)
+            out["basis"] = basis
+        out["enough"] = sure_price(out)
+        out["sure"] = out["enough"] and clean >= VET_MIN
+        out["vetted"] = {"refs": refs, "clean": clean}
+        return out
+
+    def _vet_reference(self, reference: dict[str, Any],
+                       read: Callable[[dict[str, Any]], dict[str, Any] | None]) -> dict[str, Any] | None:
+        """Az árbázis szokásos árának összehasonlítói közül néhánynak elolvassa a leírását (_vet), és újraszámolja
+        (_screened)."""
+        self._vet(list((reference.get("basis") or {}).get("used") or []), read, VET_READS, int(reference["price"]))
+        return self._screened(reference)
 
     def _basis(self, group: list[dict[str, Any]], out: list[dict[str, Any]], note: str = "") -> dict[str, Any]:
         """Mihez mérte (a találat ablakához): a beszámított árak (a kilógók nélkül, olcsóbbtól), és a kizártak az
@@ -3299,15 +3603,18 @@ class DealHunter:
         return self.state()
 
     def _step_tips(self, game: _Round) -> None:
-        """A tippek újra felmérése az árbázisból (letöltés nélkül): ha közben elég hasonló ár gyűlt össze (sure_price),
-        és még mindig megéri, rendes jelölt lesz belőle (_candidate). A tipp csak akkor kerül le, ha az ellenőrzése
-        lezárult (találat, vagy kiderült, hogy elkelt, hibás, gyanús, nem éri meg): ha a körben elfogyott a keret, vagy
-        az ellenőrzés félbemaradt, a listán marad, és a következő kör újra megpróbálja. A TIP_DAYS napnál régebbiek és a
-        már megtalált hirdetések lekerülnek. A gyors sor (böngésző nélkül) csak a gyors oldalakét nézi; amit egy másik
-        sor épp ellenőriz, azt kihagyja."""
+        """A tippek újra felmérése az árbázisból: ha közben elég hasonló ár gyűlt össze, és az összehasonlítók leírása is
+        rendben (_screened; ha csak ez hiányzik, néhányat elolvas a kör keretéből), és még mindig megéri, rendes jelölt
+        lesz belőle (_candidate). Az ellenőrizetlen tipp (_unverified) TIP_RETRY múlva jön újra; az állapota miatt
+        bizonytalan csak akkor, ha azóta megadtál pótlási vagy javítási költséget, az alig leírt soha (azt nézd meg te).
+        A tipp csak akkor kerül le, ha az ellenőrzése lezárult (találat, vagy kiderült, hogy elkelt, hibás, gyanús, nem
+        éri meg): ha a körben elfogyott a keret, vagy az ellenőrzés félbemaradt, a listán marad, és a következő kör újra
+        megpróbálja. A TIP_DAYS napnál régebbiek és a már megtalált hirdetések lekerülnek. A gyors sor (böngésző
+        nélkül) csak a gyors oldalakét nézi; amit egy másik sor épp ellenőriz, azt kihagyja."""
         now = self.clock()
         with self._lock:
             tips, known, busy = list(self._data["tips"]), self._deal_keys(), set(self._tips_busy)
+            costs_at = float(self._data["costs_at"])
         promote, drop = [], set()
         for tip in tips:
             if now - float(tip.get("at") or 0) > TIP_DAYS * 86400 or listing_key(tip["url"]) in known \
@@ -3317,8 +3624,17 @@ class DealHunter:
             if tip["id"] in busy or (game.no_browser and not (self.fetcher is not None
                                                               and self.fetcher.usable(tip.get("platform") or ""))):
                 continue
-            reference = self.book.reference(tip["key"], exclude=tip["url"]) if tip.get("key") else None
-            if reference is None or not sure_price(reference):
+            if tip.get("auction"):
+                continue                       # egy ellenőrizetlen licit csak a listában (a licitlista követi)
+            if tip.get("hold") and (tip["hold"] != "állapot" or float(tip.get("checked") or 0) >= costs_at):
+                continue                       # az állapota miatt bizonytalan: csak ha azóta megadtál költséget
+            if not tip.get("hold") and now - float(tip.get("checked") or 0) < TIP_RETRY:
+                continue                       # nemrég nézte meg (nem nyílt meg, a modell nem válaszolt): később
+            reference = self._screened(self.book.reference(tip["key"], exclude=tip["url"])) if tip.get("key") else None
+            if reference is not None and reference["enough"] and not reference["sure"] and game.pages > 0:
+                # elég ár van, de az összehasonlítók leírását még nem olvastuk el: néhányat most (a kör keretéből)
+                reference = self._vet_reference(reference, lambda other: self._read_page(other, game))
+            if reference is None or not reference["sure"]:
                 continue
             row = {"site": tip["site"], "platform": tip["platform"], "text": tip["title"], "title": tip["title"],
                    "price": int(tip["price"]), "url": tip["url"]}
@@ -3407,10 +3723,10 @@ class DealHunter:
                 self.tally("clothing", [row])
                 continue
             product = self.book.key(query)
-            reference = self.book.reference(product[0], exclude=row["url"]) if product else None
+            reference = self._screened(self.book.reference(product[0], exclude=row["url"])) if product else None
             if reference is not None:
                 deal = self._explore_deal(watch, row, {**reference, "name": query})
-                if deal is not None and sure_price(reference):
+                if deal is not None and reference["sure"]:
                     steps.append(partial(self._candidate, game, {"id": watch["id"], "query": query}, deal))
                     continue
                 if deal is not None:           # olcsónak látszik, de az ára nem elég biztos: a többi oldalon is
@@ -3440,9 +3756,10 @@ class DealHunter:
             sites = [k for k in sites if self.fetcher is not None and self.fetcher.usable(k)]
         own = [k for k in sites if k == row.get("platform")]
         rows: list[dict[str, Any]] = []
-        found = None
+        # ha az árbázisban már elég ár van (csak az összehasonlítók leírását nem olvastuk még el), nem keres tovább
+        found = self._market_of(row, query, []) if product else None
         for group in ([k for k in sites if k not in own], own):   # a hirdetés saját oldala csak, ha a többi kevés
-            if not group or (found is not None and found["sure"]):
+            if not group or (found is not None and found["enough"]):
                 continue
             rows += self._collect(probe, group, game.check, track=False, game=game)[0]
             found = self._market_of(row, query, rows)
@@ -3569,8 +3886,10 @@ class DealHunter:
                        and listing_key(sample["url"]) not in done]
             if not samples:
                 continue
-            reference = self.book.reference(key)
-            if reference is None or not sure_price(reference):
+            # (letöltés nélkül: az eltárolt leírások szerint hibás összehasonlítók nélkül; az adatlapot az alku előtt
+            # úgyis megnézi)
+            reference = self._screened(self.book.reference(key))
+            if reference is None or not reference["enough"]:
                 continue
             name = self.book.name(key)
             limits = self._haggle_top(name, reference, floor, running)
@@ -4044,7 +4363,7 @@ class DealHunter:
             found = None
             for text in (line["query"], line["name"]):
                 product = self.book.key(text) if text else None
-                found = self.book.reference(product[0], exclude=deal["url"]) if product else None
+                found = self._screened(self.book.reference(product[0], exclude=deal["url"])) if product else None
                 if found:
                     break
             if found is None and lookups > 0 and line["query"] and line["estimate"] >= PIECE_MIN:
@@ -4093,14 +4412,14 @@ class DealHunter:
     def seller_bundle(self, deal: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Egy jó találat eladójának többi hirdetése (rows: a listája): melyik adható tovább külön is haszonnal. Minden
         darabra ugyanazok a vételi ellenőrzések, mint egy találatra: valódi ár-e (nem 1 Ft, nem a szokásos ár töredéke),
-        nem gyanúsan olcsó és nem hamisítványgyanús, belefér-e a vételi limitbe, biztos-e az ára (az árbázis vagy egy
-        kereséseid szokásos ára szerint), nem lassan kelő, van-e rajta haszon, és nem kockázatos (ha csak a nyugodt
-        szívvel megvehetőkről szólsz). A megmaradtakból a legjobbak kerülnek a közös vételbe, amíg a végösszeg belefér a
-        vételi limitbe; utána számolja, mennyi a haszon együtt: egy posta (SHIPPING), a Vinteden a vevővédelmi díj a
-        végösszegre egyszer, darabonként a csomagolás és a meghirdetés (PIECE_COST), és mennyi munka (darabonként
-        LISTING_MINUTES). Összeveti azzal, ha csak ezt veszed meg, és azzal, ha külön-külön vennéd. A ruha, a csomag, a
-        nem eladási árú hirdetés kimarad; amiről nem tudni, mennyit ér, azt csak megszámolja. A találatba is beírja
-        (seller); None, ha az eladónak nincs más hirdetése."""
+        nem gyanúsan olcsó és nem hamisítványgyanús, belefér-e a vételi limitbe, van-e elég hasonló ára (az árbázis vagy
+        egy kereséseid szokásos ára szerint; ez csak javaslat, a darabok leírását nem olvasta el), nem lassan kelő,
+        van-e rajta haszon, és nem kockázatos (ha csak a nyugodt szívvel megvehetőkről szólsz). A megmaradtakból a
+        legjobbak kerülnek a közös vételbe, amíg a végösszeg belefér a vételi limitbe; utána számolja, mennyi a haszon
+        együtt: egy posta (SHIPPING), a Vinteden a vevővédelmi díj a végösszegre egyszer, darabonként a csomagolás és a
+        meghirdetés (PIECE_COST), és mennyi munka (darabonként LISTING_MINUTES). Összeveti azzal, ha csak ezt veszed
+        meg, és azzal, ha külön-külön vennéd. A ruha, a csomag, a nem eladási árú hirdetés kimarad; amiről nem tudni,
+        mennyit ér, azt csak megszámolja. A találatba is beírja (seller); None, ha az eladónak nincs más hirdetése."""
         own, vinted = listing_key(deal["url"]), deal.get("platform") == "vinted"
         fee = (lambda amount: int(round(VINTED_FEE_FIXED + VINTED_FEE_RATE * amount))) if vinted else (lambda amount: 0)
         with self._lock:
@@ -4127,7 +4446,7 @@ class DealHunter:
                    else "gyanúsan olcsó (átverés, hamisítvány vagy hibás lehet)" if suspect.startswith("gyanúsan")
                    else "gyakran hamisított márka, feltűnően olcsón" if suspect
                    else "a vételi limit fölött" if not self._affordable(price)
-                   else "bizonytalan ár (kevés hasonló)" if not value.get("sure")
+                   else "bizonytalan ár (kevés hasonló)" if not value.get("enough", value.get("sure"))
                    else "lassan kel" if pace_now == "lassú"
                    else "külön nem éri meg" if margin <= 0
                    else "kockázatos: kicsi a haszon a befektetett pénzhez képest" if safe_only and margin < price * RISKY_ROI
@@ -4464,7 +4783,7 @@ class DealHunter:
                 unknown.remove(row)
             return
         product = self.book.key(better["text"])
-        reference = self.book.reference(product[0], exclude=row["url"]) if product else None
+        reference = self._screened(self.book.reference(product[0], exclude=row["url"])) if product else None
         if reference is None:
             if row in unknown:
                 unknown[unknown.index(row)] = better
@@ -4474,6 +4793,11 @@ class DealHunter:
         deal = self._explore_deal(source, better, reference)
         if deal is None:
             self._mark(row)
+        elif not reference["sure"]:            # az összehasonlítók leírását még nem olvastuk el (vagy kevés az ár)
+            if game.resale > 0:                # a keretbe már nem férő egy későbbi oldalon újra jön
+                game.resale -= 1
+                game.next([partial(self._resale, game, source, better,
+                                   self.book.query(better["text"]) or reference["name"])])
         else:
             game.next([partial(self._candidate, game, {"id": source["id"], "query": reference["name"]}, deal, page)])
 
@@ -4843,20 +5167,33 @@ class DealHunter:
         deal["images"] = [str(url) for url in page.get("images") or []][:photos]
         if page.get("seller"):                 # az eladó többi hirdetése (egy jó találatnál: seller_bundle)
             deal["seller_url"] = str(page["seller"])[:300]
+        # az adatlapot megnéztük: az állapot a leírásából, kulcsszavakkal (a modell válasza ezt pontosítja: _confirm)
+        deal["page_checked"] = True
+        cond = conditions.from_text(self._condition_source(deal))
+        deal["condition"] = conditions.compact(cond)
         for pattern, why in ((_SCAM_RE, "átverésre utaló jel a hirdetésben (előre fizetés, külföldről küldi…)"),
                              (_OFFSITE_RE, "az oldalon kívüli elérhetőséget ad meg (WhatsApp, Telegram, e-mail…)"),
                              (_NO_REVIEWS_RE, "az eladónak még nincs értékelése")):
             if pattern.search(text):
                 deal["suspect"] = why
                 return "gyanús"
-        if defects and (_PARTS_RE.search(text) or _DEFECT_RE.search(text)):
+        # kiesik az alkatrésznek, üres doboznak eladott, a nem működő, és amelyiknél hibára utaló szó van, de nem tudni,
+        # mi a hiba; a felismert kijelzőhiba, hiányzó töltő tény, amihez az ár igazodik (_reprice)
+        if defects and (_PARTS_ONLY_RE.search(text) or cond["function"]["state"] == "hibás" or (
+                (_PARTS_RE.search(text) or _DEFECT_RE.search(text)) and not conditions.issues(cond))):
             return "hibás"
         return ""
 
+    @staticmethod
+    def _condition_source(deal: dict[str, Any]) -> str:
+        """A jelölt szövege az állapotfelismeréshez: cím, a kártya szövege és az adatlap leírása."""
+        return " ".join(str(deal.get(k) or "") for k in ("title", "text", "details"))
+
     def _confirm(self, search: dict[str, Any], deal: dict[str, Any]) -> bool | None:
         """Egy rövid modellkérdés egy jelöltről, a hirdetés fotóival együtt (ha le tudta tölteni őket). None: nem
-        sikerült megkérdezni (ilyenkor szól, de nem ellenőrzött); False: nem ez, hibás, vagy gyanús (akkor a
-        deal["suspect"]-ben, miért)."""
+        sikerült megkérdezni (ilyenkor ellenőrizetlen marad); False: nem ez, vagy gyanús (akkor a deal["suspect"]-ben,
+        miért). Az állapotot (kijelző, akkumulátor, működés, tartozékok, garancia) bizonyítékkal a deal["condition"]-be
+        teszi: a modell idézetei ellenőrizve, a kulcsszavakéval összevetve (a rosszabb győz)."""
         photos = self._photos(deal)
         text = (f"Keresett termék: {search['query']}\nHirdetés ({deal['site']}): {deal['text']}\nÁr: "
                 f"{format_price(deal['price'])} (a szokásos ára {format_price(deal['median'])})"
@@ -4865,19 +5202,22 @@ class DealHunter:
         messages = [{"role": "system", "content": CHECK_SYSTEM},
                     {"role": "user", "content": text, **({"images": photos} if photos else {})}]
         try:
-            data = self.llm.chat_json(messages, CHECK_SCHEMA, temperature=0.0, max_tokens=120)
+            data = self.llm.chat_json(messages, CHECK_SCHEMA, temperature=0.0, max_tokens=CHECK_MAX_TOKENS)
         except Exception:  # noqa: BLE001 - a modell hibája ne állítsa le a keresést
             if not photos:
                 return None
             try:                               # pl. a modell nem tud képet: fotók nélkül
                 messages[1] = {"role": "user", "content": text.rsplit("\nA hirdetés fotói", 1)[0]}
-                data = self.llm.chat_json(messages, CHECK_SCHEMA, temperature=0.0, max_tokens=120)
+                data = self.llm.chat_json(messages, CHECK_SCHEMA, temperature=0.0, max_tokens=CHECK_MAX_TOKENS)
                 photos = []
             except Exception:  # noqa: BLE001
                 return None
         deal["photos_checked"] = len(photos) or None
         deal["checked"] = True
         deal["note"] = str(data.get("reason") or "")[:200]
+        source = self._condition_source(deal)
+        deal["condition"] = conditions.compact(conditions.merge(conditions.from_model(data.get("condition"), source),
+                                                                conditions.from_text(source)))
         if data.get("suspicious"):
             deal["suspect"] = "a modell szerint gyanús" + (f": {deal['note']}" if deal["note"] else "")
             return False
@@ -4895,6 +5235,189 @@ class DealHunter:
             except ItemError:
                 continue
         return out
+
+    # --- gyors jelzés, állapot szerinti újraszámolás, ellenőrzött vagy ellenőrizetlen ---
+
+    def _ping(self, deal: dict[str, Any], notify: Callable[..., Any] | None) -> bool:
+        """Gyors jelzés egy ígéretes új hirdetésről, még az ellenőrzés (adatlap, állapot, újraszámolt haszon) előtt: egy
+        rövid pittyenés (notice.pending), nem a sürgős riasztás; az csak az ellenőrzött ajánlatról jön. Egy hirdetésről
+        PING_TTL-en belül egyszer."""
+        if notify is None or not deal.get("url"):
+            return False
+        key, now = listing_key(deal["url"]), self.clock()
+        with self._lock:
+            self._pinged = {k: at for k, at in self._pinged.items() if now - at < PING_TTL}
+            if key in self._pinged:
+                deal["pinged"] = True
+                return False
+            self._pinged[key] = now
+        deal["pinged"] = True
+        title = str(deal.get("title") or deal["text"])
+        text = (f"{deal['site']}: „{title[:80]}” {format_price(deal['price'])}, a hasonlók kb. "
+                f"{format_price(deal['median'])}-ért mennek. Ígéretes új hirdetés, ellenőrzés folyamatban (adatlap, "
+                "állapot, újraszámolt haszon): ha megéri, külön szólok; addig ne vedd meg látatlanban.")
+        try:
+            notify("deal", f"Ígéretes új hirdetés: {title[:50]}", text, url=deal["url"], pending=deal["id"])
+        except Exception:  # noqa: BLE001 - a jelzés hibája ne állítsa meg az ellenőrzést
+            pass
+        return True
+
+    def _top_price(self, deal: dict[str, Any], reference: int, low: int | None) -> int | None:
+        """A legmagasabb vételár (a vevő díja nélkül, de azzal együtt számolva), ami ennél a jelöltnél még megéri: a
+        keresésed szabályai szerint (highest_ok, az ársáv nélkül), vagy a felfedező küszöbével (explore_top, a jelölt
+        floor-ja)."""
+        platform = str(deal.get("platform") or "")
+        with self._lock:
+            search = next((json.loads(json.dumps(s)) for s in self._data["searches"]
+                           if s.get("id") == deal.get("search")), None)
+        if search is not None:
+            return highest_ok({**search, "min_price": None, "max_price": None}, reference, platform)
+        return before_fee(platform, explore_top(reference, int(deal.get("floor") or WATCH_PROFIT), low))
+
+    @staticmethod
+    def _unpriced_text(unpriced: list[str]) -> str:
+        repairs = [issue for issue in unpriced if issue in conditions.REPAIRS]
+        parts = [issue for issue in unpriced if issue not in conditions.REPAIRS]
+        bits = []
+        if repairs:
+            bits.append(f"{conditions.issue_text(repairs)}, és nincs hozzá hasonló hibájú összehasonlító vagy megadott "
+                        "javítási költség")
+        if parts:
+            bits.append(f"{conditions.issue_text(parts)}, és nincs hozzá hasonló hiányú összehasonlító vagy megadott "
+                        "pótlási költség")
+        return "a leírása szerint " + "; ".join(bits) + " (Pótlás és javítás)"
+
+    def _reprice(self, deal: dict[str, Any]) -> tuple[str, str]:
+        """Az adatlap (és a modell) szerinti állapothoz igazított ár és teljes költség: („ok” | „hibás” | „bizonytalan” |
+        „nem éri meg”, miért). A nem működő hibás. A többi hibához (kijelző, akkumulátor, hiányzó töltő…) alap kell: ha
+        legalább conditions.MATCH_MIN összehasonlító a leírása szerint ugyanígy hibás (best_band), az ő áruk a mérce (az
+        a hiba már benne van az árban, nem vonja le még egyszer); ami így nincs lefedve, ahhoz a megadott pótlási vagy
+        javítási költség (_cost) vonódik le. Ha egyik sincs, bizonytalan (ellenőrizetlen marad). A doboz hiánya
+        önmagában nem hiba. A haszonban a posta, a vevővédelmi díj (Vinted), a pótlás és a javítás is benne van; ha így
+        már nem éri meg (a keresésed szabályai, vagy a felfedező küszöbe szerint), „nem éri meg”."""
+        cond = deal.get("condition") or {}
+        found = list(cond.get("issues") or conditions.issues(cond)) if cond else []
+        if cond:
+            deal["condition_text"] = conditions.describe(cond)
+        if "működés" in found:
+            return "hibás", "a leírása szerint nem működik"
+        price = int(deal.get("offer") or deal["price"])
+        clean_ref, low = int(deal["median"]), deal.get("low")
+        covered, reference, band_low, n = conditions.best_band(found, deal.get("refs") or [], clean_ref, low)
+        parts, unpriced = [], []
+        for issue in found:
+            if issue in covered:
+                continue
+            amount = self._cost(issue, deal)
+            if amount is None:
+                unpriced.append(issue)
+            else:
+                repair = issue in conditions.REPAIRS
+                parts.append({"what": f"{issue} {'javítása' if repair else 'pótlása'}", "amount": amount,
+                              **({"repair": True} if repair else {})})
+        if unpriced:
+            return "bizonytalan", self._unpriced_text(unpriced)
+        extra = int(deal.get("fee") or 0) + sum(part["amount"] for part in parts)
+        if not n and not extra:
+            return "ok", ""
+        if n:                                  # a hasonló hibájúak ára a mérce
+            deal["cond_band"] = {"issues": sorted(covered), "n": n, "price": reference, "clean": clean_ref}
+            deal["median"], deal["low"] = reference, band_low
+            low = band_low
+        sale = safe_sale(reference, low)
+        deal["resale"] = sale
+        deal["cost_parts"] = list(deal.get("cost_parts") or []) + parts
+        deal["costs"] = SHIPPING + extra
+        top = self._top_price(deal, reference, low)
+        if deal.get("auction"):
+            repairs = sum(part["amount"] for part in parts)
+            bid = self._capped(top - repairs) if top else 0
+            deal["max_bid"] = bid
+            deal["profit"] = sale - price - SHIPPING - extra
+            if bid <= price:
+                return "nem éri meg", (f"az állapota és a költségek után legfeljebb {format_price(max(bid, 0))}-ig "
+                                       "érdemes licitálni, és már ennél többen tart")
+            return "ok", ""
+        deal["profit"] = sale - price - SHIPPING - extra
+        deal["margin"] = reference - price
+        if top is None or price + extra - int(deal.get("fee") or 0) > top:   # (a díj a határban már benne van)
+            return "nem éri meg", (f"az állapota és a költségek ({format_price(SHIPPING + extra)}) után kb. "
+                                   f"{format_price(deal['profit'])} haszon marad, ez már kevés")
+        return "ok", ""
+
+    def _verdict(self, deal: dict[str, Any], ok: bool | None) -> tuple[str, str, str]:
+        """A jelölt végső minősítése az adatlap és a modellkérdés után: (állapot, miért, hold). Az állapot
+        „ellenőrzött” (sürgősen szól róla), „ellenőrizetlen” (az Érdemes megnézni listába: _unverified), „hibás” vagy
+        „nem éri meg” (kiesik). Ellenőrzött csak az, amelyiknek az adatlapja megnyílt, van rajta leírás (legalább
+        MIN_DETAILS jel), a modell átnézte, és az állapota szerint újraszámolt haszon is megéri (_reprice); a magas
+        számított haszon magában kevés. hold: az ellenőrizetlenség oka magától nem múlik el („állapot”: csak ha költséget
+        adsz meg; „leírás”: alig van leírás), különben később újra megpróbálja."""
+        if not deal.get("page_checked"):
+            warnings = deal.get("warnings") or []
+            return "ellenőrizetlen", warnings[-1] if warnings else "az adatlapját nem tudtam megnézni", ""
+        state, why = self._reprice(deal)
+        if state == "bizonytalan":
+            return "ellenőrizetlen", why, "állapot"
+        if state != "ok":
+            return state, why, ""
+        if len(" ".join(str(deal.get("details") or "").split())) < MIN_DETAILS:
+            return "ellenőrizetlen", "az adatlapján alig van leírás", "leírás"
+        if ok is None:
+            return "ellenőrizetlen", "a modell most nem tudta átnézni (nincs modell, foglalt, vagy hibát adott)", ""
+        return "ellenőrzött", "", ""
+
+    def _drop_checked(self, deal: dict[str, Any], state: str, why: str) -> None:
+        """Az ellenőrzés után kiesett (az állapota szerint nem működik, vagy az újraszámolt haszon kevés): nem szól róla,
+        látottnak jegyzi, és a naplóba írja, miért."""
+        self._mark(deal)
+        self.tally("defect" if state == "hibás" else "not_cheap", [deal])
+        self.journal.add(f"Az ellenőrzés után kimaradt: „{(deal.get('title') or deal['text'])[:60]}” "
+                         f"{format_price(deal['price'])} ({deal.get('site') or deal.get('platform') or '?'}) – {why}.")
+
+    def _unverified(self, deal: dict[str, Any], why: str, hold: str) -> None:
+        """Ígéretes, de nem ellenőrzött ajánlat: nem jön róla sürgős értesítés, hanem az Érdemes megnézni listába kerül
+        az okkal (ha már volt róla tipp, az frissül, a felvétele ideje marad). hold: lásd _verdict; ha nincs, TIP_RETRY
+        múlva egy kör újra megpróbálja (_step_tips). Ha a gyors jelzés már szólt róla, nem pittyen újra."""
+        self.tally("unverified", [deal])
+        title = str(deal.get("title") or deal["text"])[:120]
+        self.journal.add(f"Ellenőrizetlen, nem szóltam sürgősen: „{title[:60]}” {format_price(deal['price'])} "
+                         f"({deal.get('site') or deal.get('platform') or '?'}) – {why}; az Érdemes megnézni listába "
+                         "tettem.")
+        if not deal.get("url") or int(deal.get("profit") or 0) <= 0:
+            return
+        now, ident = self.clock(), listing_key(deal["url"])
+        product = self.book.key(str(deal.get("query") or ""))
+        cond = deal.get("condition") or {}
+        tip = {"id": secrets.token_hex(5), "url": deal["url"], "title": title, "price": int(deal["price"]),
+               "site": deal.get("site") or "", "platform": str(deal.get("platform") or ""), "query": deal["query"],
+               "key": product[0] if product else "", "usual": int(deal["median"]),
+               "n": int(deal.get("similar") or 0), "sites": list(deal.get("sites") or []),
+               "profit": int(deal["profit"]), "at": now, "checked": now, "watch": str(deal.get("search") or ""),
+               "min_profit": int(deal.get("floor") or WATCH_PROFIT), "why": why, "unverified": True,
+               **({"hold": hold} if hold else {}), **({"auction": True} if deal.get("auction") else {}),
+               **({"condition_text": deal["condition_text"]} if deal.get("condition_text") else {}),
+               **({"issues": list(cond["issues"])} if cond.get("issues") else {})}
+        today = day_of(now)
+        with self._lock:
+            old = next((t for t in self._data["tips"] if listing_key(t["url"]) == ident), None)
+            if old is not None:
+                tip["at"] = float(old.get("at") or now)
+            self._data["tips"] = ([tip] + [t for t in self._data["tips"] if listing_key(t["url"]) != ident])[:MAX_TIPS]
+            told = self._data["tips_told"]
+            if told["day"] != today:
+                told.update(day=today, n=0)
+            quiet = old is not None or bool(deal.get("pinged"))
+            if not quiet:
+                told["n"] += 1
+                quiet = told["n"] > TIPS_PER_DAY
+            self._save()
+            if old is None or not quiet:
+                text = (f"{tip['site']}: „{title}” {format_price(tip['price'])}. Ígéretes, de nem ellenőriztem: {why}. "
+                        f"A hasonlók kb. {format_price(tip['usual'])}-ért mennek, kb. {format_price(tip['profit'])} "
+                        "haszon lehet benne. Nézd meg magad, mielőtt megveszed.")
+                self._tip_notices.append((("deal", f"Ellenőrizetlen: {title[:50]}", text),
+                                          {"url": tip["url"], "actions": [DEALS_ACTION], "quiet": quiet or None,
+                                           "tip": tip["id"]}))
 
     def _remember(self, deal: dict[str, Any]) -> bool:
         """Egy találat a találatok közé. Egy hirdetésből (webcím) egy: ha egy másik sor (vagy a figyelő) közben már
@@ -4936,7 +5459,7 @@ class DealHunter:
                     "profit": expected_profit(reference, price), "sure": True, "basis": self._search_basis(search),
                     "cheap": pays(search, price, reference) and self._affordable(price)}
         product = self.book.key(row.get("title") or row["text"])
-        found = self.book.reference(product[0], exclude=row["url"]) if product else None
+        found = self._screened(self.book.reference(product[0], exclude=row["url"])) if product else None
         if found is None:
             return None
         return self._valued(price, found, found["name"], floor)
@@ -4944,18 +5467,23 @@ class DealHunter:
     def _valued(self, price: int, found: dict[str, Any], name: str, floor: int) -> dict[str, Any]:
         """Egy friss hirdetés értéke egy szokásos árhoz (found: az árbázisból, vagy amennyiért máshol adják; price, p25,
         n, sites) mérve: megéri, ha legalább EXPLORE_CUT-tal olcsóbb, az óvatos eladási áron is legalább floor haszon
-        jön ki belőle, és belefér a vételi limitbe. sure: elég biztos-e ez a szokásos ár (sure_price)."""
+        jön ki belőle, és belefér a vételi limitbe. sure: elég biztos-e ez a szokásos ár (elég hasonló ár, és legalább
+        VET_MIN összehasonlító a leírása szerint is hibátlan: _screened, _market_of); enough: elég ár van (a leírások
+        nélkül); refs: a leírásuk szerint hibás összehasonlítók (a hasonló hibájú jelölthöz, _reprice)."""
         reference, low = int(found["price"]), careful_low(found)
+        sure = bool(found["sure"]) if "sure" in found else False
         return {"reference": reference, "n": found.get("n"), "name": name, "low": low, "sites": found.get("sites"),
                 "spread": spread_of(found), "sold": found.get("sold"), "band": band_of(found),
-                "basis": self._named_basis(found.get("basis")),
-                "profit": expected_profit(reference, price, low), "sure": sure_price(found),
+                "basis": self._named_basis(found.get("basis")), "floor": floor,
+                "refs": (found.get("vetted") or {}).get("refs") or None,
+                "enough": bool(found.get("enough", sure)), "found": found,
+                "profit": expected_profit(reference, price, low), "sure": sure,
                 "cheap": reference * FLOOR <= price <= explore_top(reference, floor, low) and self._affordable(price)}
 
     def appraise(self, rows: list[dict[str, Any]], source: str, look: Callable[[dict[str, Any]], dict[str, Any] | None],
                  search: Callable[[str], list[dict[str, Any]]], can_ask: Callable[[], bool],
                  found: Callable[[dict[str, Any]], None], go: Callable[[], None] = lambda: None,
-                 wear: bool = False) -> list[dict[str, Any]]:
+                 wear: bool = False, ping: Callable[..., Any] | None = None) -> list[dict[str, Any]]:
         """Az azonnali figyelő friss hirdetései: minél hamarabb kideríti, megéri-e megvenni, és csak a megérőkről szól
         (found, rögtön, ahogy egy kiderül). A gyorsabbtól a lassabbig:
         1. modell nélkül: egy felmért keresésed szokásos ára, vagy az árbázis a hirdetés címéből (quick_value); ha az
@@ -4972,14 +5500,16 @@ class DealHunter:
         letöltése, modellkérdése és a szólás előtt; Deferred-del jelzi, ha most meg kell állni (Szünet; a look és a
         search is jelezheti, ha elfogyott a kéréskeret): ilyenkor a még le nem zárt hirdetések mind visszajönnek. wear: a
         ruhát is felméri (a figyelő keresőszava maga ruha vagy cipő: a te kifejezett kérésed); különben ami a modell
-        szerint ruha, kimarad (ruhával nem kereskedik)."""
+        szerint ruha, kimarad (ruhával nem kereskedik). ping: a gyors jelzés a megérőnek látszó jelöltről, még az
+        ellenőrzése előtt (notify-szerű: kind, title, text, **mezők)."""
         with self._lock:
             floor = int(self._data["browse"].get("min_profit") or WATCH_PROFIT)
             known = self._deal_keys()
         done: set[int] = set()                 # a lezárt hirdetések (id): ezek nem jönnek vissza
         names: dict[int, str] = {}             # amit a modell már megnevezett
         try:
-            return self._appraise(rows, source, look, search, can_ask, found, go, floor, known, done, names, wear)
+            return self._appraise(rows, source, look, search, can_ask, found, go, floor, known, done, names, wear,
+                                  ping)
         except Deferred as exc:
             # amelyik hirdetésnél elfogyott a keret, az azokra az oldalakra vár; a többi a saját oldalára (a hirdetés
             # oldalát mindenképp meg kell nyitni), így egy másik oldal kerete nem akasztja meg (wait_for). Az árkutatás
@@ -5004,7 +5534,8 @@ class DealHunter:
     def _appraise(self, rows: list[dict[str, Any]], source: str, look: Callable[[dict[str, Any]], dict[str, Any] | None],
                   search: Callable[[str], list[dict[str, Any]]], can_ask: Callable[[], bool],
                   found: Callable[[dict[str, Any]], None], go: Callable[[], None], floor: int, known: set[str],
-                  done: set[int], names: dict[int, str], wear: bool = False) -> list[dict[str, Any]]:
+                  done: set[int], names: dict[int, str], wear: bool = False,
+                  ping: Callable[..., Any] | None = None) -> list[dict[str, Any]]:
         """Az appraise lépései; amit lezár (látottnak jegyez, felmér, a csomagbontásnak ad), azt done-ba teszi."""
         def attempt(row: dict[str, Any], call: Callable[[], None]) -> None:
             go()
@@ -5034,7 +5565,7 @@ class DealHunter:
             elif value["cheap"] and value["sure"]:
                 settle.append((row, value))
             elif value["cheap"]:                     # olcsónak látszik, de az ára nem elég biztos
-                recheck.append((row, self.book.query(row.get("title") or row["text"]) or value["name"]))
+                recheck.append((row, self.book.query(row.get("title") or row["text"]) or value["name"], value))
             else:
                 skip.append(row)
                 self.tally("not_cheap", [row])
@@ -5044,10 +5575,11 @@ class DealHunter:
         done.update(id(row) for row in (*skip, *lots))
         # a biztos árúak előbb (letöltés csak a hirdetés oldalához kell), a nagyobb haszon elöl
         for row, value in sorted(settle, key=lambda entry: -int(entry[1].get("profit") or 0)):
-            attempt(row, partial(self._settle, row, value, source, look, can_ask, found, go))
-        for row, name in recheck[:EXPLORE_PICKS]:
-            attempt(row, partial(self._recheck, row, name, search, floor, source, look, can_ask, found, go))
-        later = [row for row, _name in recheck[EXPLORE_PICKS:]]   # a keretbe nem fért: a következő körben
+            attempt(row, partial(self._settle, row, value, source, look, can_ask, found, go, ping=ping))
+        for row, name, value in recheck[:EXPLORE_PICKS]:
+            attempt(row, partial(self._recheck, row, name, search, floor, source, look, can_ask, found, go,
+                                 known=value, ping=ping))
+        later = [row for row, _name, _value in recheck[EXPLORE_PICKS:]]   # a keretbe nem fért: a következő körben
         named: list[tuple[dict[str, Any], str, bool]] = [(row, str(row["named"]), True) for row in named_before]
         names.update({id(row): str(row["named"]) for row in named_before})
         rest: list[dict[str, Any]] = []
@@ -5088,33 +5620,46 @@ class DealHunter:
                     self.journal.add(f"Tanultam egy új márkát: {brand.capitalize()} (a modell többször így nevezte meg "
                                      "a terméket); mostantól modell nélkül is felismerem.")
             product = self.book.key(query)
-            reference = self.book.reference(product[0], exclude=row["url"]) if product else None
+            reference = self._screened(self.book.reference(product[0], exclude=row["url"])) if product else None
             value = self._valued(int(row["price"]), reference, query, floor) if reference is not None else None
             if value is not None and (value["sure"] or not value["cheap"]):
                 priced.append((row, value))
             else:                              # ismeretlen, vagy olcsónak látszik, de az ára nem elég biztos
-                elsewhere.append((row, query, buy or value is not None))
+                elsewhere.append((row, query, buy or value is not None, value))
         # a biztos árúak előbb (ezekhez nem kell letöltés), a nagyobb haszon elöl
         for row, value in sorted(priced, key=lambda entry: -int(entry[1].get("profit") or 0)):
             if value["cheap"]:
-                attempt(row, partial(self._settle, row, value, source, look, can_ask, found, go))
+                attempt(row, partial(self._settle, row, value, source, look, can_ask, found, go, ping=ping))
             else:
                 self._mark(row)
                 self.tally("not_cheap", [row])
                 done.add(id(row))
         # amennyiért máshol adják (a modell szerint megérők elöl, legfeljebb EXPLORE_PICKS)
         elsewhere.sort(key=lambda entry: not entry[2])
-        for row, query, _buy in elsewhere[:EXPLORE_PICKS]:
-            attempt(row, partial(self._recheck, row, query, search, floor, source, look, can_ask, found, go))
-        later += [{**row, "named": query} for row, query, _buy in elsewhere[EXPLORE_PICKS:]]
+        for row, query, _buy, value in elsewhere[:EXPLORE_PICKS]:
+            attempt(row, partial(self._recheck, row, query, search, floor, source, look, can_ask, found, go,
+                                 known=value, ping=ping))
+        later += [{**row, "named": query} for row, query, _buy, _value in elsewhere[EXPLORE_PICKS:]]
         return rest + later
 
     def _recheck(self, row: dict[str, Any], query: str, search: Callable[[str], list[dict[str, Any]]], floor: int,
                  source: str, look: Callable[[dict[str, Any]], dict[str, Any] | None], can_ask: Callable[[], bool],
-                 found: Callable[[dict[str, Any]], None], go: Callable[[], None] = lambda: None) -> None:
+                 found: Callable[[dict[str, Any]], None], go: Callable[[], None] = lambda: None,
+                 known: dict[str, Any] | None = None, ping: Callable[..., Any] | None = None) -> None:
         """Mennyiért adják máshol: a keresőszó találatai a többi oldalon (search; az árbázisba is bekerülnek), az
         árbázis áraival együtt (_market_of). Ha így elég biztos az ár, és jóval olcsóbb, a végső ellenőrzés jön
-        (_settle); ha nem elég biztos, nem szól róla."""
+        (_settle); ha nem elég biztos, nem szól róla. known: az árbázis szerinti érték (_valued); ha abban elég ár van,
+        csak az összehasonlítók leírását nem olvastuk még el, előbb azokat olvassa el (keresés nélkül, _vet_reference)."""
+        if known is not None and known.get("enough") and not known.get("sure") and known.get("found"):
+            reference = self._vet_reference(known["found"], look)
+            if reference is not None and reference["sure"]:
+                value = self._valued(int(row["price"]), reference, query, floor)
+                if value["cheap"]:
+                    self._settle(row, value, source, look, can_ask, found, go, ping=ping)
+                else:
+                    self._mark(row)
+                    self.tally("not_cheap", [row])
+                return
         others = search(self._probe_text(query))
         self.book.add(others)
         # ha egy összehasonlító hirdetés változata a címéből nem derül ki, a leírását is elolvassa (a figyelő keretéből)
@@ -5153,9 +5698,9 @@ class DealHunter:
         for index, (_score, other, other_value) in enumerate(ordered):
             try:
                 if other is None:
-                    self._settle(row, value, source, look, can_ask, found, go)
+                    self._settle(row, value, source, look, can_ask, found, go, ping=ping)
                 else:
-                    self._settle(other, other_value, label, look, can_ask, found, go, spawned=True)
+                    self._settle(other, other_value, label, look, can_ask, found, go, spawned=True, ping=ping)
             except Exception as exc:
                 # ami innentől jönne, nem zárult le: egy későbbi összehasonlításnál újra jelölt lehet, és ha most meg
                 # kell állni, az árkutatás közben talált jelöltek a várakozók közé kerülnek (appraise: exc.extra)
@@ -5170,15 +5715,18 @@ class DealHunter:
     def _settle(self, row: dict[str, Any], value: dict[str, Any], source: str,
                 look: Callable[[dict[str, Any]], dict[str, Any] | None], can_ask: Callable[[], bool],
                 found: Callable[[dict[str, Any]], None], go: Callable[[], None] = lambda: None,
-                spawned: bool = False) -> None:
-        """Egy megérő friss hirdetés végső ellenőrzése: az oldala (elkelt, hibás, gyanús?), az elrejtett termékek, és egy
-        rövid modellkérdés (ha most lehet). Ha átment, a találatok közé kerül (Megvettem gomb), és found(találat). go:
-        a modellkérdés és a szólás előtt (Szünetben Deferred: a hirdetés megmarad, később újra sorra kerül)."""
+                spawned: bool = False, ping: Callable[..., Any] | None = None) -> None:
+        """Egy megérő friss hirdetés végső ellenőrzése: előbb egy gyors jelzés (ping: „Ígéretes …, ellenőrzés
+        folyamatban”), aztán az oldala (elkelt, hibás, gyanús?), az elrejtett termékek, egy rövid modellkérdés (ha most
+        lehet), és az állapota szerint újraszámolt haszon (_verdict). Ha ellenőrzött, a találatok közé kerül (Megvettem
+        gomb), és found(találat): ez a sürgős értesítés; ha ellenőrizetlen (nem nyílt meg az oldala, a modell nem
+        válaszolt, az állapota miatt bizonytalan), az Érdemes megnézni listába kerül, az okkal. go: a modellkérdés és a
+        szólás előtt (Szünetben Deferred: a hirdetés megmarad, később újra sorra kerül)."""
         probe = {"id": value.get("search") or "azonnali", "query": value["name"]}
         deal = self._deal(probe, row, int(value["reference"]), explore=source, similar=value.get("n"), quick=True,
                           product=value["name"], low=value.get("low"), sites=self._site_names(value.get("sites")) or None,
                           spread=value.get("spread"), sold=value.get("sold"), band=value.get("band"),
-                          basis=value.get("basis"), spawned=spawned)
+                          basis=value.get("basis"), spawned=spawned, refs=value.get("refs"), floor=value.get("floor"))
         with self._lock:
             if listing_key(row["url"]) in self._deal_keys():
                 return
@@ -5189,6 +5737,11 @@ class DealHunter:
             return
         if self._risky(deal):
             return
+        self._ping(deal, ping)
+        if self.llm is not None and not can_ask():
+            # a modell most foglalt (pl. épp dolgozol a Jarvisszal): a hirdetés vár, és amint lehet, ellenőrizve jön
+            # (a gyors jelzés már ment); modell nélkül (nincs beállítva) ellenőrizetlen marad
+            raise Deferred("modell")
         page = look(row)
         verdict = self._inspect(deal, page) if page is not None else ""
         if page is None:
@@ -5201,15 +5754,26 @@ class DealHunter:
             self.tally({"elkelt": "gone", "hibás": "defect"}.get(verdict, "muted"), [deal])
             return
         go()
-        if self.llm is not None and can_ask() and self._confirm(probe, deal) is False:
+        ok = self._confirm(probe, deal) if self.llm is not None else None
+        if ok is False:
             if deal.get("suspect"):
                 self._suspicious(deal)
             else:
                 self._mark(deal)
                 self.tally("model_no", [deal])
             return
+        state, why, hold = self._verdict(deal, ok)
+        if state in ("hibás", "nem éri meg"):
+            self._drop_checked(deal, state, why)
+            return
         go()
         self._mark(deal)
+        if state == "ellenőrizetlen":
+            self._unverified(deal, why, hold)
+            return
+        deal["verified"] = True
+        if self._risky(deal):                  # az újraszámolt haszonnal újra felmérve
+            return
         if not self._remember(deal):          # közben egy kör már megtalálta: nem szól róla még egyszer
             return
         self.tally("found", [deal])

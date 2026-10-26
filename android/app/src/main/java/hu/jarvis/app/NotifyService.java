@@ -38,8 +38,9 @@ import org.json.JSONObject;
  * ALERT_MS ideig ötmásodpercenként halkan csenget (ha be van kapcsolva a hang) és kettőt rezeg, aztán QUIET_MS szünet,
  * és ha addig nem nyitottad meg vagy söpörted el, újra; legfeljebb ALERT_ROUNDS-szor. Rábökve az alkalmazás a találat
  * ablakával nyílik meg (MainActivity.ACTION_DEAL): ára, mennyiért mennek, mennyit kereshetsz vele, és az üzenet az
- * eladónak. Egy „Érdemes megnézni” tipp (bizonytalan ár, notice.tip) egy nagyon rövid pittyenéssel szól, akkor is, ha
- * az alkalmazás nyitva van.
+ * eladónak. Csak az ellenőrzött ajánlat riaszt így (az adatlapja és az állapota alapján újraszámolva is megéri). Egy
+ * „Érdemes megnézni” tipp (bizonytalan ár vagy ellenőrizetlen, notice.tip) és az ígéretes új hirdetés gyors jelzése (még az
+ * ellenőrzés előtt, notice.pending) egy nagyon rövid pittyenéssel szól, akkor is, ha az alkalmazás nyitva van.
  *
  * A Jarvis értesítéseinek saját, puha hangja van, hogy hallásra is felismerd, de ne legyen bántó (make_sounds.py): a
  * megérő hirdetésé egy halk, háromhangú csengés, utána csenddel (res/raw/jarvis_alert; a riasztás ezt ismétli), a többié
@@ -465,9 +466,12 @@ public class NotifyService extends Service {
                 manager.notify(id, haggleBuilder(id, notice).build());
             }
         } else if ("notification".equals(type) && event.optJSONObject("notice") != null
-                && !event.optJSONObject("notice").optString("tip").isEmpty()) {
+                && (!event.optJSONObject("notice").optString("tip").isEmpty()
+                    || !event.optJSONObject("notice").optString("pending").isEmpty())) {
             JSONObject notice = event.optJSONObject("notice");
-            if (!notice.optBoolean("quiet")) {        // érdemes megnézni: egy rövid pittyenés, ha nyitva is az ablak
+            // érdemes megnézni, vagy egy ígéretes hirdetés, amit most ellenőriz: egy rövid pittyenés, ha nyitva is az
+            // ablak (a sürgős riasztás csak az ellenőrzött ajánlatról jön)
+            if (!notice.optBoolean("quiet")) {
                 int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
                 show(this, CHANNEL_TIP, id, notice.optString("title", "Érdemes megnézni"), notice.optString("text"));
             }

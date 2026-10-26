@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_offline import make_cfg  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
+from jarvis_core import condition as conditions  # noqa: E402
 from jarvis_core import deals as deals_module  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
 from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, assess, careful_low,  # noqa: E402
@@ -173,6 +174,7 @@ class HunterCase(unittest.TestCase):
         self.browser = FakeBrowser()
         self.llm = FakeLlm()
         self.notices: list[tuple] = []
+        self.pings: list[tuple] = []
         self.clock = Clock()
         self.hunter = self.make()
 
@@ -186,7 +188,19 @@ class HunterCase(unittest.TestCase):
         return hunter
 
     def notify(self, kind, title, text, **extra):
-        self.notices.append((kind, title, text, extra))
+        # a gyors jelzés („Ígéretes új hirdetés, ellenőrzés folyamatban”: notice.pending) külön; a notices a végső
+        # értesítések (az ellenőrzött ajánlat, a tippek, a javaslatok)
+        (self.pings if extra.get("pending") else self.notices).append((kind, title, text, extra))
+
+    def vetted(self, hunter: DealHunter, rows: list[dict], issues: tuple = ()) -> None:
+        """Ezeknek az összehasonlítóknak a leírását már elolvasta (allapotok.json): hibátlanok, vagy issues."""
+        for row in rows:
+            hunter._vetted[listing_key(row["url"])] = {"at": self.clock.now, "issues": list(issues)}
+
+    @staticmethod
+    def page_checked(deal: dict) -> dict:
+        """Egy jelölt, aminek az adatlapját már megnézte (a végső minősítéshez, _verdict)."""
+        return {**deal, "page_checked": True, "details": "RTX 3060 Ti. Hibátlan, dobozában. Eladó: Peti (12 értékelés)"}
 
     def ready(self, hunter: DealHunter | None = None, query: str = "RTX 3060 Ti", **values) -> dict:
         """Egy keresés kézzel megadott szokásos árral (felmérés nélkül), bekapcsolva."""
@@ -306,7 +320,7 @@ class DealTests(HunterCase):
 
     # --- a modell nélküli keresés ---
 
-    def test_the_model_can_say_no_and_without_a_model_it_still_tells(self):
+    def test_the_model_can_say_no_and_without_a_model_it_stays_unverified(self):
         self.llm.ok = False
         self.ready()
         self.hunter.run(notify=self.notify)
@@ -314,7 +328,14 @@ class DealTests(HunterCase):
         other = self.make("masik", llm=None)
         self.ready(other)
         other.run(notify=self.notify)
-        self.assertEqual(len(self.notices), 1, "modell nélkül is szól (nem ellenőrzött)")
+        [notice] = self.notices
+        self.assertEqual(notice[1], "Ellenőrizetlen: Gigabyte RTX 3060 Ti Gaming OC",
+                         "modell nélkül nem sürgős találat, hanem ellenőrizetlen tipp")
+        self.assertIn("a modell most nem tudta átnézni", notice[2])
+        self.assertEqual(other.state()["deals"], [])
+        [tip] = other.state()["tips"]
+        self.assertTrue(tip["unverified"])
+        self.assertEqual(len(self.pings), 2, "a gyors jelzés mindkettőnél ment (az ellenőrzés előtt)")
 
     def test_minimum_price_and_excluded_words(self):
         self.browser.results = RESULTS + [listing(20, "RTX 3060 Ti doboz, üres", 45000),
@@ -520,6 +541,7 @@ class DealTests(HunterCase):
         self.ready(other)
         other.run(notify=self.notify)
         [notice] = self.notices
+        self.assertEqual(notice[1], "Ellenőrizetlen: Gigabyte RTX 3060 Ti Gaming OC", "az adatlap nélkül nem sürgős")
         self.assertIn("nem néztem meg (robot-ellenőrzés)", notice[2], "captchánál szól, de jelzi, hogy nem nézte meg")
 
 
@@ -534,11 +556,13 @@ class DealTests(HunterCase):
         self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: 1 olcsó hirdetés.")
         [(_kind, title, text, extra)] = self.notices
         self.assertEqual(title, "Olcsó: MSI RTX 3060 Ti Ventus")
-        self.assertIn("Ha 70 000 Ft-ért megkapod (ajánlattétel), kb. 18 500 Ft a haszon. Ajánlatot tegyek? Csak a "
+        # a vevővédelmi díjjal (300 + 5%) együtt legfeljebb 70 000: 66 300 + 3 615; a haszon 90 000 − 66 300 − 1 500 − 3 615
+        self.assertIn("Ha 66 300 Ft-ért megkapod (ajánlattétel), kb. 18 585 Ft a haszon. Ajánlatot tegyek? Csak a "
                       "jóváhagyásod után küldöm el.", text)
+        self.assertIn("Levonva: vevővédelmi díj kb. 3 615 Ft.", text)
         [deal] = self.hunter.state()["deals"]
-        self.assertEqual((deal["offer"], deal["profit"]), (70000, 18500))
-        self.assertEqual(extra["actions"][0], {"action": "offer", "deal": deal["id"], "label": "Ajánlatot teszek (70 000 Ft)"})
+        self.assertEqual((deal["offer"], deal["profit"], deal["costs"]), (66300, 18585, 1500 + 3615))
+        self.assertEqual(extra["actions"][0], {"action": "offer", "deal": deal["id"], "label": "Ajánlatot teszek (66 300 Ft)"})
         other = self.make("jofogas")
         other.add_search("RTX 3060 Ti", ["jofogas"], reference=100000)
         other.set_enabled(True)
@@ -559,6 +583,8 @@ class DealTests(HunterCase):
                 self.assertTrue(self.hunter._cheap(search, top, reference), (search, reference))
                 self.assertFalse(self.hunter._cheap(search, top + 1, reference), (search, reference))
         self.assertEqual(offer_price(plain, 80000, 100000), 70000)
+        self.assertEqual(offer_price(plain, 80000, 100000, "vinted"), 66300, "a Vinteden a vevővédelmi díjjal együtt")
+        self.assertEqual(highest_ok(plain, 100000, "vinted"), 66381)
         self.assertIsNone(offer_price(plain, 95000, 100000), "26% engedmény: nem fogadná el")
         self.assertIsNone(offer_price(plain, 70000, 100000), "így is megéri: nem kell ajánlat")
 
@@ -824,6 +850,8 @@ class ExploreTests(HunterCase):
         self.hunter.add_watch(CATEGORY)
         self.llm.explore = [{"n": 1, "query": "Sony WH-1000XM4", "buy": True}]
         self.hunter.set_enabled(True)
+        # az összehasonlítók leírását már elolvasta (allapotok.json): nem kell rájuk oldal a kör keretéből
+        self.vetted(self.hunter, HEADPHONES + HEADPHONES_VINTED + NORMAL + RTX_JOFOGAS + PAGE + [cheap])
         with mock.patch.object(deals_module, "MAX_PAGES", 2):   # az eredeti még belefér, a talált már nem
             self.hunter.run(notify=self.notify)
         titles = lambda: [t for _k, t, _x, _e in self.notices]  # noqa: E731
@@ -1060,7 +1088,7 @@ class ExploreTests(HunterCase):
         row = {"site": tip["site"], "platform": tip["platform"], "text": tip["title"], "title": tip["title"],
                "price": int(tip["price"]), "url": tip["url"]}
         search = {"id": "tipp", "query": tip["query"]}
-        deal = hunter._deal(search, row, 98000)
+        deal = self.page_checked(hunter._deal(search, row, 98000))
         hunter._conclude(first, search, dict(deal), True)
         hunter._conclude(second, search, {**deal, "id": "masik"}, True)
         self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"], "egyszer szól")
@@ -1091,7 +1119,7 @@ class ExploreTests(HunterCase):
     def test_how_safe_an_investment_is(self):
         """Nyugodt szívvel megvehető-e: a haszon a befektetett pénzhez képest, milyen gyorsan kel az ilyen, és mennyire
         szórnak az árak."""
-        base = {"price": 50000, "profit": 15000, "similar": 12, "sites": ["Hardverapró", "Jófogás"]}
+        base = {"price": 50000, "profit": 15000, "similar": 12, "sites": ["Hardverapró", "Jófogás"], "verified": True}
         safe = assess(base)
         self.assertEqual((safe["level"], safe["good"]), ("biztos", ["30% haszon", "12 hasonló, 2 oldalon"]))
         self.assertEqual(safety_text(safe), "Biztos befektetés: 30% haszon, 12 hasonló, 2 oldalon.")
@@ -1106,8 +1134,9 @@ class ExploreTests(HunterCase):
         self.assertEqual(assess({**base, "spread": 0.6})["level"], "jó", "nagyon szórnak az árak")
         self.assertIn("gyorsan kel el", assess({**base, "pace": "gyors"})["good"])
         self.assertIn("4 elkelt hasonló alapján is", assess({**base, "sold": {"n": 4, "median": 60000}})["good"])
-        self.assertEqual(assess({"price": 9000, "profit": 40000, "auction": True, "max_bid": 30000})["level"], "biztos",
-                         "a licit mostani árán nem számol haszonrátát")
+        self.assertEqual(assess({"price": 9000, "profit": 40000, "auction": True, "max_bid": 30000, "verified": True})["level"],
+                         "biztos", "a licit mostani árán nem számol haszonrátát")
+        self.assertEqual(assess({**base, "verified": False})["level"], "jó", "ellenőrizetlen: a magas haszon magában kevés")
         self.assertEqual(assess({**base, "offer": 45000, "profit": 4000})["level"], "kockázatos", "az ajánlat árán")
 
     def test_sold_prices_and_how_fast_it_sells(self):
@@ -1168,7 +1197,7 @@ class ExploreTests(HunterCase):
     def test_known_products_need_no_model_and_the_named_ones_teach_the_book(self):
         self.browser.by_url = [("videokartya", PAGE)]
         for sub, profit, found in (("sok", 20000, []), ("eleg", 10000, ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"])):
-            hunter = self.make(sub, llm=None)
+            hunter = self.make(sub)            # a modell csak a végső ellenőrzéshez kell (az ismert terméket nem nevezi meg)
             hunter.book.add([{**r, "platform": "hardverapro"} for r in NORMAL])
             hunter.add_watch(CATEGORY, min_profit=profit)
             hunter.set_enabled(True)
@@ -1192,7 +1221,7 @@ class ExploreTests(HunterCase):
         self.hunter.set_enabled(True)
         self.hunter.run(notify=self.notify)
         deals = {d["price"]: d for d in self.hunter.state()["deals"]}
-        self.assertEqual(deals[45000]["offer"], 38500)
+        self.assertEqual(deals[45000]["offer"], 36300, "a vevővédelmi díjjal együtt legfeljebb 38 500")
         self.assertIn("Ajánlatot tegyek?", [t for _k, _t, t, _e in self.notices if "45 000" in t][0])
         self.assertNotIn(25000, deals, "a gyakran hamisított márka feltűnően olcsón gyanús: nem szól róla")
         self.assertIn("ezt a márkát gyakran hamisítják", " ".join(e["text"] for e in self.hunter.journal.entries()))
@@ -2002,6 +2031,177 @@ class CapacityTests(HunterCase):
         row = {"text": "Samsung 970 EVO Plus", "price": 15000, "url": "https://hardverapro.hu/apro/ssd/2.html"}
         found = self.hunter._market_of(row, "Samsung 970 EVO Plus", rows)
         self.assertEqual((found["price"], found["n"]), (20000, 3), "az 500 GB-osok (a 2 TB-os egyetlen ára kevés)")
+
+
+# Nintendo Switch Lite: hat összehasonlító az árbázisban, két oldalról (a címük szerint mind hibátlan); a 60 000-es
+# leírása szerint repedt a kijelzője. A jelölt (egy figyelt Hardverapró-oldalon) kijelzőhibás, és töltő nélkül adják.
+LITE = [{**listing(160 + n, f"Nintendo Switch Lite szürke {n}", p, f"www.{site}.hu"), "platform": site} for n, (p, site) in
+        enumerate(zip((60000, 58000, 59000, 61000, 62000, 60500), ("jofogas", "hardverapro") * 3))]
+LITE_PAGE = "https://hardverapro.hu/aprok/szoftver_jatek/konzol/index.html"
+LITE_CHEAP = listing(150, "Nintendo Switch Lite", 26000)
+
+
+class ConditionDealTests(HunterCase):
+    """Részletes állapot (kijelző, akkumulátor, működés, tartozékok, garancia) bizonyítékkal; az összehasonlítók
+    állapota a leírásuk szerint (eltárolva); az állapothoz igazított ár és a teljes költség; ellenőrzött vagy
+    ellenőrizetlen ajánlat."""
+
+    def setUp(self):
+        super().setUp()
+        self.browser.results = []                 # a többi oldalon nincs több találat
+        self.browser.by_url = [("konzol", [LITE_CHEAP])]
+        self.browser.pages = {
+            LITE_CHEAP["url"]: "Nintendo Switch Lite. A kijelzője repedt, töltő nélkül adom. Egyébként hibátlanul működik.",
+            LITE[0]["url"]: "Nintendo Switch Lite szürke. A kijelzője repedt, de működik. Töltővel.",
+        }
+        self.hunter.book.add(LITE)
+
+    def test_a_display_defect_and_a_missing_charger_need_a_basis(self):
+        """A címek szerint hat hibátlan Switch Lite: a szokásos ár csak azután biztos, hogy a legfontosabbak leírását is
+        elolvasta (a repedt kijelzőjű kimarad a hibátlanok árából, az eredmény eltárolva). A jelölt kijelzőhibás és töltő
+        nélküli: ezek tények, bizonyítékkal; a levonáshoz alap kell (hasonló hibájú összehasonlító, vagy megadott
+        költség). Amíg nincs, nem sürgős találat, hanem ellenőrizetlen tipp; a gyors jelzés viszont rögtön ment. Ha
+        megadod a pótlás és a javítás költségét, a következő kör újraszámolja, és ellenőrzötten szól, a levonásokkal."""
+        hunter = self.hunter
+        raw = hunter.book.reference(hunter.book.key("Nintendo Switch Lite")[0], exclude=LITE_CHEAP["url"])
+        screened = hunter._screened(raw)
+        self.assertEqual((screened["enough"], screened["sure"]), (True, False),
+                         "elég ár van, de a leírásukat még nem olvasta el: nem biztos")
+        hunter.add_watch(LITE_PAGE)
+        hunter.set_enabled(True)
+        hunter.run(notify=self.notify)
+        self.assertEqual([p[1] for p in self.pings], ["Ígéretes új hirdetés: Nintendo Switch Lite"])
+        [(_kind, title, text, extra)] = self.notices
+        self.assertEqual(title, "Ellenőrizetlen: Nintendo Switch Lite")
+        self.assertIn("hibás a kijelzője, és nincs hozzá hasonló hibájú összehasonlító vagy megadott javítási költség",
+                      text)
+        self.assertIn("nincs töltő, és nincs hozzá hasonló hiányú összehasonlító vagy megadott pótlási költség", text)
+        self.assertNotIn("urgent", extra)
+        self.assertEqual(hunter.state()["deals"], [])
+        [tip] = hunter.state()["tips"]
+        self.assertEqual((tip["hold"], tip["issues"], tip["unverified"]), ("állapot", ["kijelző", "töltő"], True))
+        self.assertIn("kijelző: hibás („kijelzője repedt”)", tip["condition_text"])
+        self.assertIn("tartozékok: hiányzik: töltő („töltő nélkül”)", tip["condition_text"])
+        # az összehasonlítók közül a szokásos árhoz legközelebbi hármat olvasta el, eltárolva (újraindítás után is)
+        vetted = DealHunter(Path(self.tmp.name), PLATFORMS, lambda: self.browser, self.llm, clock=self.clock)._vetted
+        self.assertEqual(len(vetted), 3)
+        self.assertEqual(vetted[listing_key(LITE[0]["url"])]["issues"], ["kijelző"])
+        looked = list(self.browser.looked)
+        hunter.run(notify=self.notify, force=True)
+        self.assertEqual(self.browser.looked, looked, "költség nélkül újra sem nézi meg, és az eltárolt állapotot "
+                                                      "sem olvassa el újra")
+        # költségek: a töltő pótlása (minden termékre) és a kijelző javítása (csak a Switch Lite-ra)
+        self.clock.now += 600
+        hunter.add_cost("Töltő", "", 3000)
+        state = hunter.add_cost("kijelző", "Switch Lite", "15 000")
+        self.assertEqual([(c["part"], c["product"], c["amount"]) for c in state["costs"]],
+                         [("töltő", "", 3000), ("kijelző", "Switch Lite", 15000)])
+        self.notices.clear()
+        hunter.run(notify=self.notify, force=True)
+        [(_kind, title, text, extra)] = self.notices
+        self.assertEqual(title, "Olcsó: Nintendo Switch Lite")
+        self.assertTrue(extra["urgent"])
+        self.assertIn("Ellenőriztem: az adatlapja és az állapota alapján újraszámolva is megéri.", text)
+        self.assertIn("Levonva: kijelző javítása kb. 15 000 Ft, töltő pótlása kb. 3 000 Ft.", text)
+        [deal] = hunter.state()["deals"]
+        self.assertTrue(deal["verified"])
+        self.assertEqual(deal["costs"], 1500 + 3000 + 15000)
+        self.assertEqual(deal["profit"], deal["resale"] - 26000 - 1500 - 18000, "a posta, a pótlás és a javítás is")
+        self.assertEqual(deal["safety"]["level"], "jó", "a javítás miatt nem „biztos”")
+        self.assertIn("kijelző javítása levonva (kb. 15 000 Ft)", deal["safety"]["why"])
+        excluded = [e for e in deal["basis"]["out"] if e["u"] == LITE[0]["url"]]
+        self.assertEqual([e["why"] for e in excluded], ["a leírása szerint hibás a kijelzője"],
+                         "a hibátlanok árából kimaradt, az okkal")
+        self.assertEqual(len(self.pings), 1, "a gyors jelzés egyszer ment")
+        self.assertEqual(hunter.state()["tips"], [])
+
+    def test_similar_defects_set_the_price_and_nothing_counts_twice(self):
+        """Ha legalább két összehasonlító ugyanígy hibás, az ő áruk a jelölt mércéje (a hiba már benne van): a megadott
+        javítási költséget nem vonja le még egyszer; ami nincs lefedve (a töltő), azt igen. A nem működő kiesik; ha a
+        költségek után már nem éri meg, az is."""
+        hunter = self.hunter
+        hunter.add_cost("kijelző", "", 15000)
+        hunter.add_cost("töltő", "", 3000)
+        cond = {"display": {"state": "hibás", "evidence": "repedt a kijelző"}, "missing": ["töltő"],
+                "accessories": {"state": "hiányos", "evidence": "töltő nélkül"}, "issues": ["kijelző", "töltő"]}
+        refs = [{"p": 40000, "u": "a", "issues": ["kijelző"]}, {"p": 42000, "u": "b", "issues": ["kijelző"]}]
+        row = {**LITE_CHEAP, "site": "Hardverapró", "platform": "hardverapro", "title": "Nintendo Switch Lite"}
+        deal = hunter._deal({"id": "w", "query": "Nintendo Switch Lite"}, row, 60000, low=59000, refs=refs,
+                            floor=5000, condition=cond)
+        self.assertEqual(hunter._reprice(deal), ("ok", ""))
+        self.assertEqual(deal["cond_band"], {"issues": ["kijelző"], "n": 2, "price": 41000, "clean": 60000})
+        self.assertEqual([p["what"] for p in deal["cost_parts"]], ["posta", "töltő pótlása"], "a kijelzőt nem kétszer")
+        self.assertEqual(deal["profit"], safe_sale(41000, 40000) - 26000 - 1500 - 3000)
+        broken = hunter._deal({"id": "w", "query": "x"}, row, 60000, condition={"function": {"state": "hibás"},
+                                                                              "issues": ["működés"]})
+        self.assertEqual(hunter._reprice(broken), ("hibás", "a leírása szerint nem működik"))
+        dear = hunter._deal({"id": "w", "query": "x"}, {**row, "price": 40000}, 60000, low=59000, floor=5000,
+                            condition=cond)
+        state, why = hunter._reprice(dear)
+        self.assertEqual(state, "nem éri meg")
+        self.assertIn("ez már kevés", why)
+        box = hunter._deal({"id": "w", "query": "x"}, row, 60000, condition=conditions.compact(
+            conditions.from_text("Doboz nélkül, hibátlanul működik.")))
+        self.assertEqual(hunter._reprice(box), ("ok", ""), "a doboz hiánya önmagában nem kér alapot")
+        self.assertIn("doboz nélkül", assess({**box, "verified": True})["why"])
+
+    def test_the_listing_page_keeps_known_defects_and_drops_the_rest(self):
+        """Az adatlapon a felismert hiba (repedt kijelző, hiányzó töltő) tény, a jelölt marad (az ár igazodik hozzá); a nem
+        működő, az alkatrésznek adott, és amelyiknél hibára utaló szó van, de nem tudni, mi a hiba, kiesik."""
+        base = {"url": "https://hardverapro.hu/apro/1.html", "text": "Switch Lite", "platform": "hardverapro",
+                "title": "Switch Lite"}
+        for text, verdict in (("A kijelzője repedt, töltő nélkül.", ""), ("Nem kapcsol be.", "hibás"),
+                              ("Csak alkatrésznek.", "hibás"), ("A hangszóró hibás.", "hibás"),
+                              ("Hibátlan, dobozában.", "")):
+            deal = dict(base)
+            with self.subTest(text=text):
+                self.assertEqual(self.hunter._inspect(deal, {"url": base["url"], "text": text, "title": ""}), verdict)
+                self.assertTrue(deal["page_checked"])
+
+    def test_the_model_condition_is_checked_and_merged(self):
+        """A modell szempontonkénti állapotát az idézetei alapján ellenőrzi: a kitalált idézet ismeretlen lesz, a
+        kulcsszavak szerinti rosszabb állapot nem íródik felül."""
+        deal = {"site": "Hardverapró", "text": "Switch Lite", "title": "Switch Lite", "price": 26000, "median": 60000,
+                "details": "Switch Lite. A kijelző karcos, töltő nincs hozzá. Garancia 2027-ig.", "url": "u"}
+
+        class Model:
+            def chat_json(self, messages, schema, **kwargs):
+                self.schema = schema
+                return {"ok": True, "suspicious": False, "reason": "Ugyanaz.",
+                        "condition": {"display": {"state": "ép", "evidence": "a kijelző karcmentes"},
+                                      "battery": {"state": "jó", "evidence": "az akku kiváló"},
+                                      "function": {"state": "ismeretlen", "evidence": ""},
+                                      "accessories": {"state": "hiányos", "evidence": "töltő nincs hozzá"},
+                                      "warranty": {"state": "van", "evidence": "Garancia 2027-ig"},
+                                      "missing": ["töltő"]}}
+
+        self.hunter.llm = Model()
+        self.assertTrue(self.hunter._confirm({"query": "Nintendo Switch Lite"}, deal))
+        self.assertIn("condition", self.hunter.llm.schema["required"])
+        cond = deal["condition"]
+        self.assertEqual(cond["display"]["state"], "karcos", "a kitalált „karcmentes” helyett a leírás szerinti")
+        self.assertEqual(cond["battery"]["state"], "ismeretlen", "az idézet nincs a hirdetésben")
+        self.assertEqual((cond["warranty"]["state"], cond["missing"], cond["issues"]), ("van", ["töltő"], ["töltő"]))
+
+    def test_costs_are_kept_and_the_specific_one_wins(self):
+        hunter = self.hunter
+        hunter.add_cost("akku", "", 8000)
+        hunter.add_cost("akkumulátor", "Switch Lite", 12000)
+        deal = {"title": "Nintendo Switch Lite szürke", "text": "", "query": ""}
+        self.assertEqual(hunter._cost("akkumulátor", deal), 12000, "a termékre szabott az erősebb")
+        self.assertEqual(hunter._cost("akkumulátor", {"title": "Steam Deck"}), 8000)
+        self.assertIsNone(hunter._cost("töltő", deal))
+        state = hunter.add_cost("akku", "", 9000)
+        self.assertEqual(sorted((c["product"], c["amount"]) for c in state["costs"]), [("", 9000), ("Switch Lite", 12000)],
+                         "ugyanarra a kettőre a régit lecseréli")
+        self.assertIn("kijelző", state["cost_parts"])
+        for bad in (("", "", 1000), ("töltő", "", "")):
+            with self.assertRaises(DealError):
+                hunter.add_cost(*bad)
+        again = DealHunter(Path(self.tmp.name), PLATFORMS, lambda: self.browser, self.llm, clock=self.clock)
+        self.assertEqual(len(again.state()["costs"]), 2)
+        hunter.remove_cost(state["costs"][0]["id"])
+        self.assertEqual(len(hunter.state()["costs"]), 1)
 
 
 class ComparableTests(HunterCase):

@@ -17,11 +17,12 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
 - `NotifyService`: háttérszolgáltatás, a gép eseményeit kérdezi le (`/api/v1/events`, hosszú lekérdezéssel), és
   értesít. Firebase nem kell hozzá. Egy `sold` gombos értesítésnél (`notice.actions`) a gomb a `MainActivity`-t
   nyitja meg (`hu.jarvis.app.SOLD`, a tárggyal); a felület a `JarvisApp.pending()` `sold` részéből a tárgy Eladva
-  ablakát mutatja. Az értesítésből közvetlenül semmit nem jelöl meg és nem vesz le. Egy megérő hirdetés (`notice.deal`)
+  ablakát mutatja. Az értesítésből közvetlenül semmit nem jelöl meg és nem vesz le. Egy megérő, ellenőrzött hirdetés (`notice.deal`)
   a „Megérő hirdetés” csatornán szól, akkor is, ha az alkalmazás nyitva van: `FLAG_INSISTENT`-tel két percig
   ötmásodpercenként halkan csenget (ha van hang) és kettőt rezeg, aztán tíz percre a csendes csatornára vált, és ha
-  addig nem nyitottad meg, újra (legfeljebb hatszor). Egy „Érdemes megnézni” tipp (`notice.tip`) a saját csatornáján
-  egy nagyon rövid pittyenéssel szól (akkor is, ha az alkalmazás nyitva van; rábökve az alkalmazás nyílik meg). Egy alkuképes hirdetés (`notice.haggle`) a saját „Alkuképes hirdetés” csatornáján egyszer szól (nem riaszt,
+  addig nem nyitottad meg, újra (legfeljebb hatszor). Egy „Érdemes megnézni” tipp (`notice.tip`, a bizonytalan árú és az
+  ellenőrizetlen is) és egy ígéretes új hirdetés gyors jelzése még az ellenőrzés előtt (`notice.pending`) a tipp
+  csatornáján egy nagyon rövid pittyenéssel szól (akkor is, ha az alkalmazás nyitva van; rábökve az alkalmazás nyílik meg). Egy alkuképes hirdetés (`notice.haggle`) a saját „Alkuképes hirdetés” csatornáján egyszer szól (nem riaszt,
   és csak ha az alkalmazás nincs előtérben). Rábökve mindkettőnél a `MainActivity` nyílik (`hu.jarvis.app.DEAL`), és a
   felület a `pending()` `deal` részéből a találat ablakát mutatja; az üzenetet a `JarvisApp.copy()` teszi a vágólapra. A Szakértői tipp gomb a kérdést
   szintén így másolja ki, és a `JarvisApp.openChatGpt()` megnyitja a ChatGPT alkalmazást (`com.openai.chatgpt`; a

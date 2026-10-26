@@ -833,6 +833,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **deals.dismiss_auction(str(body.get("id") or ""))})
             if action == "tip_dismiss":  # egy „Érdemes megnézni” tipp elrejtése
                 return self._json(200, {"ok": True, **deals.dismiss_tip(str(body.get("id") or ""))})
+            if action == "cost_add":    # pótlási vagy javítási költség (pl. töltő 4 000 Ft) az állapot szerinti haszonhoz
+                return self._json(200, {"ok": True, **deals.add_cost(body.get("part"), body.get("product"),
+                                                                     body.get("amount"))})
+            if action == "cost_remove":
+                return self._json(200, {"ok": True, **deals.remove_cost(str(body.get("id") or ""))})
             if action == "haggle":      # alkuképes hirdetések: be/ki, az ajánlat szövege
                 return self._json(200, {"ok": True, **deals.set_haggle(body.get("on"), body.get("message"))})
             if action == "bundles":     # csomagbontás: be/ki, legalább mennyi haszonnal szóljon

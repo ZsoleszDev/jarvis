@@ -759,7 +759,8 @@ class InstantWatch:
                    **{k: deal.get(k) for k in ("site", "platform", "text", "title", "price", "url", "drop", "note")},
                    "reference": deal["median"], "profit": deal["profit"], "n": deal.get("similar"),
                    "sites": deal.get("sites") or [], "safety": deal.get("safety"),
-                   "warnings": deal.get("warnings") or []}
+                   "warnings": deal.get("warnings") or [], "verified": bool(deal.get("verified")),
+                   **{k: deal[k] for k in ("condition_text", "cost_parts", "cond_band") if deal.get(k)}}
             hit["title"] = hit["title"] or hit["text"]
             hits.append(hit)
             with self._lock:
@@ -772,12 +773,16 @@ class InstantWatch:
             self._tell(alert, hit)
             self._seller(deal)                 # az eladó többi hirdetése: közös vétellel jobban megéri?
 
+        def ping(*args: Any, **extra: Any) -> None:
+            if self._on(alert["id"]):          # a gyors jelzés („Ígéretes …, ellenőrzés folyamatban”), ha még fut
+                self.notify(*args, **extra)
+
         # go: Szünetben (vagy ha a kéréskeret elfogyott: _look, _search) az értékelés megáll, a többi megmarad; ha
         # közben leállítottad a figyelőt, a hátralévő rész elmarad (minden letöltés, modellkérdés és szólás előtt nézi)
         try:
             waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found,
                                            go=lambda: self._go(alert["id"]),
-                                           wear=wearable(str(alert.get("query") or "")))
+                                           wear=wearable(str(alert.get("query") or "")), ping=ping)
         except _Off:
             return hits
         if hasattr(self.hunter, "flush_tips"):
@@ -899,6 +904,13 @@ class InstantWatch:
             text += f". A szokásos ára kb. {format_price(hit['reference'])}{basis}"
             if hit.get("profit", 0) > 0:
                 text += f", kb. {format_price(hit['profit'])} haszon lehet"
+        if hit.get("condition_text"):
+            text += f". Állapot: {hit['condition_text']}"
+        extra = [part for part in hit.get("cost_parts") or [] if part.get("what") != "posta"]
+        if extra:
+            text += ". Levonva: " + ", ".join(f"{part['what']} kb. {format_price(part['amount'])}" for part in extra)
+        if hit.get("verified"):
+            text += ". Ellenőriztem: az adatlapja és az állapota alapján is megéri"
         if hit.get("safety"):
             text += f". {safety_text(hit['safety']).rstrip('.')}"
         return text

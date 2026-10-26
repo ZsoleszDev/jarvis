@@ -141,6 +141,11 @@
 - Az ütemező tud a 10 perces újrapróbálkozásról és a licitlistáról (every_minutes: addig percenként néz).
 
 ## Élesben kipróbálandó
+- Állapotfelismerés (condition.py): a kulcsszavak (kijelző, akku, működés, tartozékok, garancia) a valódi leírásokon;
+  ha egy gyakori megfogalmazás kimarad, az állapot ismeretlen marad (nem hibás). A modell condition válasza (a
+  CHECK_MAX_TOKENS 700 elég-e, és hogy az idézetei tényleg szó szerintiek-e). A vett összehasonlítók leírásának
+  olvasása (VET_READS 3, VET_MIN 2) mennyit visz el a kör és az azonnali figyelő kéréskeretéből; a Pótlás és javítás
+  költségei (a felhasználó adja meg). Az ellenőrizetlen tippek száma (a „Kiesett: ellenőrizetlen” a mai számokban).
 - Licitlista: a Vatera-kártyák hátralévő ideje (parse_auction) a valódi oldalon; ha nincs meg, a licit nem kerül a
   listára. A licit mostani árának leolvasása az adatlapról (deals._AUCTION_PRICE_RE: „Aktuális ár”, „Jelenlegi licit”,
   „Legmagasabb ajánlat”): ha a valódi oldalon másképp szerepel, a zárás előtti szólás a legutóbb látott árral megy,
