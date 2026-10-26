@@ -80,6 +80,23 @@
 - A hirdetés leírása alapból csak a zárószöveg és a kulcsszavak; a tárgyról csak akkor ír, ha a leírásban (Pro: a
   megjegyzésben) kéred (selling.wants_description: „leírás”, „írd bele/oda”, „írd meg, hogy”, „említsd”…). A modell
   szövegét kérés nélkül el is hagyja. EXTRACT_VERSION 4: a még fel nem töltött tárgyaké a következő kiolvasáskor így lesz.
+- A leírás zárószövege egyetlen, helyes magyarságú szöveg (selling.DESCRIPTION_FOOTER; ruhánál „ruhát”, máshol
+  „holmit”), mindig benne van: fölötte a kért szöveg, alatta a kulcsszavak. A korábbi három változatot (az egyikben
+  „van még sok ruhát;”) a még fel nem töltött tárgyakban betöltéskor erre cseréli (ItemStore._refresh_footer).
+- Puhább értesítési hangok (android/make_sounds.py): a megérő hirdetésé egy halk, háromhangú csengés négy másodperc
+  csenddel (a FLAG_INSISTENT ismétlésével ötmásodpercenként egy csengés), két rövid rezgéssel; a többié két halk hang; a
+  csatornák -3-asok (a -2-esek az OLD_CHANNELS-ben). Az „Érdemes megnézni” tipp saját csatornán egy nagyon rövid
+  pittyenéssel szól (notice.tip; az alkalmazás nyitva létében is), naponta legfeljebb 30 (TIPS_PER_DAY). A laptopos
+  push rezgése is rövidebb.
+- Elemzés fül (a régi Vételeim): a Teendőim elöl (todos.py: feladási kód, hely, vevő, a beszélgetés, a címke képe,
+  Kész / mégsem kész / törlés; a fül neve mellett az elvégezetlenek száma), a saját holmid eladása is haszon
+  (profit_report: own, a megtérülés csak a megvettekből), a Hirdetéseim › Eladva fölött összesítő. Esti emlékeztető
+  (a „todos” háttérmunka, [scheduler] todo_reminder = "19:00"): ha van elvégezetlen, naponta egyszer szól.
+- Vinted-eladás az üzenetekből (messages.MessageDesk._sale): az utolsó message_sales (8) beszélgetés közül a
+  változottakat is megnyitja; „Eladva” + „Szállítási címke lekérése” gomb (sale_signals) → eladottnak jelöli (ahol
+  elkelt, ott „Itt kelt el.”), megnyomja a gombot (legfeljebb LABEL_TRIES = 2), a feladási kódot és a helyet a címke
+  ablakából olvassa ki (LABEL_JS, shipping_info), és teendőt ír a szövegével és a képével; ha nincs kód, a következő
+  körben a beszélgetésben keresi. A nem olvasatlan beszélgetés üzeneteiről nem szól (count_new=False).
 - Ruha kivéve az automata kereskedésből (pricebook.wearable: ruhaszavak, cipő, divatmárkák; a VW Polo nem): a
   böngészés, a figyelt oldalak, a csomagbontás (a régi „Ruhacsomag” keresés és alapgomb törölve, ruhás csomagkeresés nem
   vehető fel), az alku, a tippek és a modell megnevezése után is kiesik („ruha, cipő” a napi számokban); a Vinted
@@ -117,13 +134,25 @@
   ajánlattal), az ára frissül, ha újra látja; a zárás előtt a kör megnézi, és szól (_follow_auction, _step_auctions).
   A Vatera böngészése a Műszaki cikk és mobil főkategóriát is nézi.
 - Android: saját értesítési hangok (res/raw/jarvis_alert, jarvis_ping), új csatornaazonosítók (-2).
+- Licitlista javítva: a listára vétel ellenőrizetlen (licithatár és értesítés csak az adatlap és a modellkérdés után:
+  _verify_auction); a zárás előtti ellenőrzés az adatlapról olvassa a mostani árat (auction_price), és a licithatárt
+  a mostani beállításokkal számolja újra (_auction_top: vételi limit, havi keret, a keresés vagy a figyelt oldal
+  szabálya); ha a mostani ár eléri, nem szól; ha az adatlap nem nézhető meg, nem szól elavult adatokkal.
+- Az ütemező tud a 10 perces újrapróbálkozásról és a licitlistáról (every_minutes: addig percenként néz).
 
 ## Élesben kipróbálandó
 - Licitlista: a Vatera-kártyák hátralévő ideje (parse_auction) a valódi oldalon; ha nincs meg, a licit nem kerül a
-  listára. A „hamarosan lejár” rendezés címe (ob=…&obd=…) nem ismert: ha megvan, a böngészés licites oldalai azzal is
+  listára. A licit mostani árának leolvasása az adatlapról (deals._AUCTION_PRICE_RE: „Aktuális ár”, „Jelenlegi licit”,
+  „Legmagasabb ajánlat”): ha a valódi oldalon másképp szerepel, a zárás előtti szólás a legutóbb látott árral megy,
+  figyelmeztetéssel. A „hamarosan lejár” rendezés címe (ob=…&obd=…) nem ismert: ha megvan, a böngészés licites oldalai azzal is
   mehetnének. Hány licitértesítés jön naponta (AUCTION_TIPS_PER_DAY 10).
-- Android: a saját hang a telefonon (hangerő, hossz; a FLAG_INSISTENT ismétli), és hogy a régi csatornák törlése után a
-  beállítások rendben vannak-e.
+- Android: a saját hang a telefonon (hangerő, hossz; a FLAG_INSISTENT ismétli, a csend a fájl végén szünetet tart), az
+  „Érdemes megnézni” pittyenés, és hogy a régi csatornák törlése után a beállítások rendben vannak-e.
+- Vinted-eladás: a valódi beszélgetésoldalon az „Eladva” jelzés és a „Szállítási címke lekérése” gomb felirata
+  (messages._SOLD_RE, _LABEL_RE), a címke ablaka (LABEL_JS: role=dialog vagy a főrész), és a feladási kód és a hely
+  kiolvasása (shipping_info: a „kód” szó után vagy alatta, nagybetűk és számjegyek; a hely egy csomagautomata,
+  csomagpont vagy futárcég nevéből). Ha a Vinted csak QR-kódot ad, a teendőben a kép marad. A tárgy párosítása a
+  beszélgetés hirdetéslinkjéből (match_item); az eladási ár a hirdetési ár (alkunál átírandó).
 - Ruha felismerése (pricebook._WEAR_RE) valódi címeken: ha egy nem ruha kiesik (pl. egy márkanév más termék nevében),
   vagy egy ruha átjut, a listát kell szűkíteni vagy bővíteni (a napló „ruha, cipő” sorából látszik).
 - Az eladó többi hirdetésének linkje (feeds.SELLER_TEXT_RE, SELLER_HREF_RE, a böngészőben a LISTING_PAGE_JS) a valódi

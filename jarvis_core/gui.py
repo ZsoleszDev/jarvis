@@ -36,6 +36,7 @@ from .dossier import open_folder
 from .gpu import GpuMonitor
 from .messages import CONV_ID_RE, MAX_TEXT as MAX_MESSAGE
 from .selling import LEDGER_FIELDS, MAX_PHOTO_BYTES, ItemError, parse_price, round_price
+from .todos import TodoError
 from .tools import summarize_result
 from .watches import WatchError
 from .work import PRICE_CHOICES
@@ -45,6 +46,8 @@ PAGE = UI_DIR / "index.html"
 STATIC = {"style.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
           "work.js": "text/javascript; charset=utf-8", "creative.js": "text/javascript; charset=utf-8"}
 PHOTO_GET_RE = re.compile(r"^/api/work/photo/([0-9a-f]{8})/(\d{2}\.jpg)$")
+# Egy teendő képe (a szállítási címke oldala, todos.py).
+TODO_SHOT_RE = re.compile(r"^/api/work/todo-shot/([0-9a-f]{10})$")
 PHOTO_POST_RE = re.compile(r"^/api/work/items/([0-9a-f]{8})/photo$")
 # Az Automata kereskedés egy keresésének beállításai (deals.DealHunter.add_search, update_search).
 DEAL_FIELDS = ("query", "sites", "max_price", "min_price", "discount", "min_profit", "every", "exclude", "reference")
@@ -294,6 +297,11 @@ class GuiUI:
         """Egy vevői beszélgetés megváltozott (új üzenet, vázlat, elküldve): a felület frissíti."""
         self.bus.publish({"type": "work_message", "conversation": conversation}, record=False)
 
+    def work_todos(self, waiting: int = 0) -> None:
+        """A Teendőim változott (pl. egy eladás feladási kódja, vagy késznek jelölted): az Elemzés fül újratölti, a fül
+        felirata mellett az elvégezetlenek száma."""
+        self.bus.publish({"type": "work_todos", "open": int(waiting)}, record=False)
+
     def work_deals(self) -> None:
         """Az Automata kereskedés állapota megváltozott (pl. a telefonról elindítottad): minden ablak újratölti."""
         self.bus.publish({"type": "work_deals"}, record=False)
@@ -508,8 +516,15 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/work/deals":
             return self._json(200, {"ok": True, **work.deals.state(), "profit": profit_report(work.store.all()),
                                     "instant": work.instant.state() if work.instant is not None else None})
-        if path == "/api/work/ledger":       # Vételeim: a megvett tárgyak költségei, haszna, és mennyiért adják most
+        if path == "/api/work/ledger":       # Elemzés: a teendők, a haszon, a megvett tárgyak, és mennyiért adják most
             return self._json(200, self._ledger(work))
+        match = TODO_SHOT_RE.match(path)
+        if match:
+            try:
+                data = work.todos.shot_file(match.group(1)).read_bytes()
+            except (TodoError, OSError):
+                return self._send(404, b"", "text/plain")
+            return self._send(200, data, "image/jpeg", {"Cache-Control": "no-store"})
         if path == "/api/work/messages":
             return self._json(200, {"ok": True, "conversations": work.messages.conversations(),
                                     "unread": work.messages.unread_count(), "browser": work.messages.browser is not None})
@@ -864,7 +879,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **deals.remove_search(str(body.get("id") or ""))})
             if action == "dismiss":
                 return self._json(200, {"ok": True, **deals.dismiss(str(body.get("id") or ""))})
-            if action == "bought":      # Megvettem: eladási tárgy lesz belőle, a vételárral (Vételeim)
+            if action == "bought":      # Megvettem: eladási tárgy lesz belőle, a vételárral (Elemzés fül)
                 return self._bought(str(body.get("id") or ""), body)
             if action == "run":
                 if app is None or app.scheduler is None or "deals" not in app.scheduler.jobs:
@@ -879,7 +894,7 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json(400, {"ok": False})
 
     def _bought(self, deal_id: str, body: dict[str, Any]) -> None:
-        """Megvettem: a találatból eladási tárgy lesz (egy csomagból a darabjai), a vételárral a Vételeim közé.
+        """Megvettem: a találatból eladási tárgy lesz (egy csomagból a darabjai), a vételárral az Elemzés fülre.
         Egy találatból egyszer (deals.buy, zár alatt): a dupla kattintás vagy egy újraküldött kérés a meglévő
         tárgyat kapja vissza, nem könyvel még egy vásárlást."""
         work = self._work()
@@ -921,7 +936,7 @@ class _Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _bundle_items(work: Any, deal: dict[str, Any], body: dict[str, Any]) -> list[str]:
         """Egy megvett csomag darabjai (tételenként egy, az apróságok együtt) eladási tárgyak lesznek, a vételár és a
-        posta az értékük arányában szétosztva (deals.bundle_parts), és mind a Vételeim közé kerül."""
+        posta az értékük arányában szétosztva (deals.bundle_parts), és mind az Elemzés fülre kerül."""
         paid = parse_price(body.get("price") or deal["price"]) or int(deal["price"])
         shipping = parse_price(body.get("shipping")) or 0
         parts = bundle_parts(deal, paid, shipping)
@@ -939,7 +954,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _ledger(work: Any) -> dict[str, Any]:
         return {"ok": True, **profit_report(work.store.all(), book=work.deals.book),
                 "sites": [p.name for p in work.platforms.values()], "shipping": SHIPPING,
-                "money": work.deals.money_status()}
+                "money": work.deals.money_status(), "todos": work.todos.all()}
 
     def _money_check(self, work: Any) -> None:
         """Vétel után (és a keret átírása után): ha a havi keret fogy, vagy túl sok tárgy vár eladásra, szól."""
@@ -948,10 +963,20 @@ class _Handler(BaseHTTPRequestHandler):
             work.deals.money_check(app.notify_event)
 
     def _ledger_post(self, body: dict[str, Any]) -> None:
-        """Vételeim: egy vétel kézzel (nem az Automata kereskedésből: pl. bolhapiacon vetted), és egy tárgy vételi
-        adatainak mentése (a tárgy lapjának mentése is jó, ez a fülnek a friss összesítést is visszaadja)."""
+        """Elemzés: egy vétel kézzel (nem az Automata kereskedésből: pl. bolhapiacon vetted), egy tárgy vételi és eladási
+        adatainak mentése (a tárgy lapjának mentése is jó, ez a fülnek a friss összesítést is visszaadja), és a
+        Teendőim: kész (vagy mégsem), törlés."""
         work = self._work()
         action = str(body.get("action") or "")
+        if action in ("todo_done", "todo_remove"):
+            try:
+                if action == "todo_done":
+                    work.todos.set_done(str(body.get("id") or ""), bool(body.get("done", True)))
+                else:
+                    work.todos.remove(str(body.get("id") or ""))
+            except TodoError as exc:
+                return self._json(400, {"ok": False, "error": str(exc)})
+            return self._json(200, self._ledger(work))
         if action == "add":
             name = " ".join(str(body.get("name") or "").split())[:100]
             if not name:

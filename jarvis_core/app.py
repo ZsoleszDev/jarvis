@@ -34,6 +34,7 @@ from .browser import BrowserError
 from .scheduler import Hooks, Job, Scheduler, standby_ok, within_hours
 from .selling import NOT_POSTED, POSTED, ItemError, format_price, parse_price, price_verdict
 from .textutil import fold
+from .todos import parse_time
 from .tools import Toolbox, ToolError, params
 from .watches import WatchError, WatchList
 from .work import (DELISTED_NOTE, PRICE_CHOICES, WORK_ONLY_TOOLS, WorkDesk, interpret_price_reply, load_work_prompt,
@@ -461,6 +462,17 @@ class JarvisApp:
             self.scheduler.register(Job("stale", "Régóta fent lévő hirdetések",
                                         lambda: 24 * 60.0 if int(self.cfg.scheduler.stale_days) > 0 else 0,
                                         self._stale_job, needs_models=False))
+            todos = self.work.todos
+            # Esti emlékeztető a Teendőimre (pl. egy csomag feladása a kóddal): modell és böngésző nélkül, készenlétben
+            # is; tízpercenként nézi, hogy elérte-e a nap a todo_reminder időpontját, és ma szólt-e már.
+            self.scheduler.register(Job("todos", "Teendőim emlékeztető",
+                                        lambda: 10.0 if parse_time(self.cfg.scheduler.todo_reminder) is not None else 0,
+                                        self._todos_job,
+                                        available=lambda: todos.reminder_due(self.cfg.scheduler.todo_reminder),
+                                        needs_models=False,
+                                        note=lambda: (f"Este {self.cfg.scheduler.todo_reminder.strip()}-kor szól, ha van "
+                                                      "elvégezetlen teendő")
+                                        if parse_time(self.cfg.scheduler.todo_reminder) is not None else ""))
         checker = self.work.checker if self.work is not None else None
         if checker is not None:
             # Modell nélkül, de a böngésző kell hozzá: készenlétben (bezárt böngészővel) nem fut.
@@ -580,6 +592,17 @@ class JarvisApp:
         self.work.mark_reminded([i.id for i in stale])
         return f"{len(stale)} régóta fent lévő hirdetés."
 
+    def _todos_job(self, ctx: Any) -> str:
+        """Este (todo_reminder): ha van elvégezetlen teendő (pl. egy eladott tárgy feladása), szól."""
+        assert self.work is not None
+        todos = self.work.todos
+        waiting = todos.waiting()
+        todos.reminded()
+        if not waiting:
+            return "Nincs elvégezetlen teendő."
+        ctx.notify("todo", "Teendőim", todos.reminder_text(), actions=[{"action": "todos", "label": "Teendőim"}])
+        return f"Emlékeztettem: {len(waiting)} elvégezetlen teendő."
+
     def _listings_job(self, ctx: Any) -> str:
         """Naponta: néhány fent lévő hirdetés oldala (csak olvasva): elkelt-e vagy eltűnt-e valahol."""
         assert self.work is not None and self.work.checker is not None
@@ -591,9 +614,11 @@ class JarvisApp:
         return float(self.cfg.scheduler.message_minutes or 0)
 
     def _messages_job(self, ctx: Any) -> str:
-        """Időnként: a vevői üzenetek (csak olvasva, modell nélkül); ha új jött, szól."""
+        """Időnként: a vevői üzenetek (modell nélkül); ha új jött, szól. Az utolsó néhány beszélgetésben azt is nézi,
+        eladtál-e valamit: akkor eladottnak jelöli, lekéri a szállítási címkét, és a kódot a Teendőim közé írja."""
         assert self.work is not None
-        return self.work.messages.run(int(self.cfg.scheduler.message_reads), check=ctx.check, notify=ctx.notify)
+        return self.work.messages.run(int(self.cfg.scheduler.message_reads), check=ctx.check, notify=ctx.notify,
+                                      sales=int(self.cfg.scheduler.message_sales))
 
     def call_browser(self, fn: Callable[[Any], Any], timeout: float = 10.0) -> Any:
         """A Jarvis böngészőjén futtat egy rövid hívást az ágens szálán (bármelyik szálról hívható). Ha a Jarvis épp
@@ -706,7 +731,8 @@ class JarvisApp:
                                  on_change=getattr(self.ui, "work_item", None),
                                  on_remove=getattr(self.ui, "work_removed", None),
                                  confirm=self.confirm, check_stop=self._check_stop,
-                                 on_message=getattr(self.ui, "work_message", None))
+                                 on_message=getattr(self.ui, "work_message", None),
+                                 on_todos=getattr(self.ui, "work_todos", None))
             self.work.gap_waiter = self._respect_gap   # a közzététel előtti szünet a naplóban és az állapotsorban
         except Exception as exc:  # noqa: BLE001 - a Beszélgetés menü enélkül is működjön
             self.ui.warn(f"A Munka menü nem indult el ({exc}).")

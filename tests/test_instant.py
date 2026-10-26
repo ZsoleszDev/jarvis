@@ -1479,6 +1479,25 @@ class ParallelRoundTests(InstantCase):
         self.assertTrue(title.startswith("Olcsó: Gigabyte RTX 3060 Ti Gaming OC"), "(a kártya szövegével: az oldala nem nyílt meg)")
         self.assertIn("a hirdetés oldalát most nem nyitottam meg (elfogyott az oldal óránkénti kerete)", text)
 
+    def test_the_scheduler_comes_back_for_the_ten_minute_retry(self):
+        """Kikapcsolt böngészés és óránkénti keresés mellett, ha a kéréskeret elfogyott, a keresés 10 perc múlva esedékes
+        újra, és az ütemező is tud róla: amíg az újrapróbálkozás vár, percenként néz (nem csak egy óra múlva); utána
+        újra az óránkénti ütem."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.assertEqual(self.hunter.every_minutes(), 60.0)
+        self.fetcher.hourly = 0
+        self.hunter.run()
+        self.assertEqual(self.hunter.every_minutes(), 1.0, "az újrapróbálkozás miatt percenként néz")
+        self.clock.now += deals_module.BUSY_RETRY - 120
+        self.assertFalse(self.hunter.available())
+        self.clock.now += 120
+        self.assertTrue(self.hunter.available(), "10 perc múlva esedékes")
+        self.fetcher.hourly = 90
+        self.results(HA_CARDS[:2])
+        self.hunter.run()
+        self.assertEqual(self.hunter.every_minutes(), 60.0, "utána újra óránként")
+
     def test_falls_back_to_the_browser_when_the_site_blocks(self):
         self.net.pages["keres.php"] = (403, "tiltva")
         self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)

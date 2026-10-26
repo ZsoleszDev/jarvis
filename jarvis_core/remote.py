@@ -57,7 +57,7 @@ self.addEventListener("push", (event) => {
     if (message.urgent) {                  // egy megérő hirdetés: marad, amíg rá nem nézel, és a telefon rezeg
       options.requireInteraction = true;
       options.renotify = true;
-      options.vibrate = [800, 400, 800, 400, 800];
+      options.vibrate = [200, 150, 200];     // két rövid rezgés (nem bántó, de észreveszed)
     }
     if (message.kind === "confirm" && message.answer) {
       options.actions = [{ action: "approve", title: "Engedélyezem" }, { action: "deny", title: "Mégse" }];

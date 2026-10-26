@@ -253,7 +253,7 @@ class WorkSecurityTests(unittest.TestCase):
             self.h.store.delete(item.id)
 
     def test_a_cancelled_purchase_goes_away_everywhere(self):
-        """Vételeim › Visszamondva: a tárgy, a találat (és az azonnali figyelő friss hirdetései közül is) eltűnik, a havi
+        """Elemzés › Visszamondva: a tárgy, a találat (és az azonnali figyelő friss hirdetései közül is) eltűnik, a havi
         keretbe nem számít bele; az eladottat és a nem megvettet nem lehet visszamondani."""
         deals, instant = self.h.app.work.deals, self.h.app.work.instant
         url = "https://hardverapro.hu/apro/visszamondott/friss.html"
@@ -383,7 +383,7 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertTrue(app._instant_allowed())
 
     def test_budget_and_piling_up_from_the_window(self):
-        """Vételeim › Keret: a havi keret és a felhalmozódás határa; egy új vétel után rögtön szól, ha átlépte."""
+        """Elemzés › Keret: a havi keret és a felhalmozódás határa; egy új vétel után rögtön szól, ha átlépte."""
         status, data = self.post("/api/work/ledger", {"action": "money", "budget": "100 000", "stock_count": "1"})
         self.assertEqual((status, data["money"]["budget"], data["money"]["limits"]["stock_count"]), (200, 100000, 1))
         self.assertEqual(self.post("/api/work/ledger", {"action": "money", "budget": "sok"})[0], 400)
@@ -402,8 +402,33 @@ class WorkSecurityTests(unittest.TestCase):
             self.h.store.delete(item_id)
         self.post("/api/work/ledger", {"action": "money", "budget": "", "stock_count": ""})
 
+    def test_todos_from_the_window(self):
+        """Elemzés › Teendőim: a teendők a fül adataival jönnek; Kész (és mégsem), törlés; a címke képe csak kulccsal."""
+        todos = self.h.app.work.todos
+        todo = todos.add("ship", "Csomagfeladás: Zara blézer", item_name="Zara blézer", code="8XK2 4471",
+                         place="Foxpost automata")
+        todos.save_shot(todo["id"], jpeg())
+        status, data = request(self.port, "GET", f"/api/work/ledger?t={self.h.server.token}", self.ok)
+        self.assertEqual([(t["code"], t["done"]) for t in json.loads(data)["todos"]], [("8XK2 4471", False)])
+        status, data = request(self.port, "GET", f"/api/work/items?t={self.h.server.token}", self.ok)
+        self.assertEqual(json.loads(data)["todos_open"], 1, "a fül felirata mellé")
+        shot = f"/api/work/todo-shot/{todo['id']}"
+        self.assertEqual(request(self.port, "GET", shot, {"Host": f"127.0.0.1:{self.port}"})[0], 403)
+        status, data = request(self.port, "GET", f"{shot}?t={self.h.server.token}", self.ok)
+        self.assertEqual((status, data[:2]), (200, b"\xff\xd8"))
+        for bad in ("/api/work/todo-shot/0123456789", f"/api/work/todo-shot/{todo['id']}x",
+                    "/api/work/todo-shot/..%2Fteendok.json"):
+            self.assertEqual(request(self.port, "GET", f"{bad}?t={self.h.server.token}", self.ok)[0], 404, bad)
+        status, data = self.post("/api/work/ledger", {"action": "todo_done", "id": todo["id"], "done": True})
+        self.assertEqual((status, [t["done"] for t in data["todos"]]), (200, [True]))
+        status, data = self.post("/api/work/ledger", {"action": "todo_done", "id": todo["id"], "done": False})
+        self.assertEqual([t["done"] for t in data["todos"]], [False], "mégsem kész")
+        self.assertEqual(self.post("/api/work/ledger", {"action": "todo_done", "id": "nincs"})[0], 400)
+        status, data = self.post("/api/work/ledger", {"action": "todo_remove", "id": todo["id"]})
+        self.assertEqual((status, data["todos"]), (200, []))
+
     def test_a_purchase_can_be_added_by_hand(self):
-        """Vételeim › Új vétel: ami nem az Automata kereskedésből jött (pl. bolhapiacon vetted)."""
+        """Elemzés › Új vétel: ami nem az Automata kereskedésből jött (pl. bolhapiacon vetted)."""
         status, data = self.post("/api/work/ledger", {"action": "add", "name": "Makita DHP482", "price": "12 000",
                                                       "bought_shipping": "", "bought_from": "bolhapiac",
                                                       "target_price": "25000", "in_transit": False})
@@ -760,7 +785,7 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertEqual(found.platforms["vinted"]["note"], "Itt kelt el.")
 
     def test_ledger_tab_on_a_phone(self):
-        """Vételeim telefonméretben: az összesítő, a kártyák (úton, nálad, eladva), a Megérkezett gomb, a részletek
+        """Elemzés telefonméretben: az összesítő, a kártyák (úton, nálad, eladva), a Megérkezett gomb, a részletek
         szerkesztése és egy új vétel; vízszintes görgetés nélkül."""
         store = self.h.store
         now = time.time()
@@ -809,8 +834,56 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector("#f-title")
         self.assertTrue(page.is_hidden("#w-ledger"))
 
+    def test_the_analysis_tab_with_todos_and_own_sales_on_a_phone(self):
+        """Elemzés telefonméretben: a fül neve mellett a teendők száma; a Teendőim elöl (a feladási kód nagyban, a hely,
+        Kész gomb: utána az Elvégezve közé kerül); a saját holmid eladása a haszonba számít („saját”); a Hirdetéseim
+        Eladva szűrője fölött az eladások összesítője."""
+        store, todos = self.h.store, self.h.app.work.todos
+        blazer = store.create(title="Zara blézer", price=4500, targets=["vinted"])
+        store.mark(blazer.id, "vinted", "feltöltve", url="https://www.vinted.hu/items/1234567-zara-blezer")
+        store.mark(blazer.id, sold=True)
+        todo = todos.add("ship", "Csomagfeladás: Zara blézer", item=blazer.id, item_name="Zara blézer",
+                         code="8XK2 4471", place="Add fel bármelyik Foxpost csomagautomatánál 5 napon belül.",
+                         partner="zoli_v", url="https://www.vinted.hu/inbox/444444")
+        page = self.page
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.wait_for_selector('#job-ledger .count:has-text("1")')
+        self.assertEqual(page.inner_text("#job-ledger").replace("\n", ""), "Elemzés1")
+        page.click("#job-ledger")
+        page.wait_for_selector("#l-todos .todo")
+        card = page.inner_text("#l-todos .todo")
+        self.assertIn("Zara blézer", card)
+        self.assertIn("8XK2 4471", card)
+        self.assertIn("Add fel bármelyik Foxpost csomagautomatánál", card)
+        self.assertIn("vevő: zoli_v", card)
+        self.assertEqual(page.get_attribute("#l-todos .todo a", "href"), "https://www.vinted.hu/inbox/444444")
+        self.assertIn("+4 500 Ft", page.inner_text(".tiles"), "a saját holmi eladása is haszon")
+        self.assertIn("1 eladás (1 saját holmi)", page.inner_text(".tiles"))
+        own = page.inner_text('.lcard:has-text("Zara blézer")')
+        self.assertIn("saját", own)
+        self.assertIn("Eladva", own)
+        page.click(f'[data-todo-done="{todo["id"]}"]')
+        page.wait_for_selector('.toast:has-text("Kész")')
+        self.wait_for(lambda: todos.all()[0]["done"])
+        page.wait_for_selector('#l-todos summary:has-text("Elvégezve (1)")')
+        self.assertIn("Nincs elvégzendő", page.inner_text("#l-todos"))
+        page.wait_for_selector("#job-ledger .count", state="detached")
+        wide = page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        self.assertFalse(wide, "telefonon nincs vízszintes görgetés")
+        page.click("#job-sales")
+        page.click('[data-filter="sold"]')
+        page.wait_for_selector(".soldsum")
+        summary = page.inner_text(".soldsum")
+        self.assertIn("1 eladás", summary)
+        self.assertIn("4 500 Ft bevétel", summary)
+        self.assertIn("haszon +4 500 Ft", summary)
+        self.assertIn("eladva 4 500 Ft", page.inner_text(f'.card[data-id="{blazer.id}"]'))
+        page.click('.soldsum [data-job="ledger"]')
+        page.wait_for_selector("#l-todos")
+        self.assertEqual(page.get_attribute("#job-ledger", "aria-selected"), "true")
+
     def test_cancel_a_purchase_from_the_ledger_and_the_deals_list(self):
-        """Visszamondva: a Vételeim kártyáján és a találatok között (Megvetted ✓ mellett) is; megerősítés után
+        """Visszamondva: az Elemzés kártyáján és a találatok között (Megvetted ✓ mellett) is; megerősítés után
         mindenhonnan eltűnik. Az eladott tárgynál nincs ilyen gomb."""
         deals, store = self.h.app.work.deals, self.h.store
         for n, name in enumerate(("Makita DHP482", "Bosch GSR 18V")):
@@ -888,21 +961,27 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector("#home-tiles", state="visible")
 
     def test_the_auction_list(self):
-        """A licitlista (Vatera) a találatok alatt: a licit, a legutóbbi ára, mikor zárul, és legfeljebb mennyiért
-        érdemes licitálni; az Elrejtés gombbal lekerül."""
+        """A licitlista (Vatera) a találatok alatt: a licit, a legutóbbi ára, mikor zárul; az ellenőrzöttnél, legfeljebb
+        mennyiért érdemes licitálni, az ellenőrizetlennél csak annyi, hogy az adatlapját még nem nézte meg (licithatár
+        nélkül). Az Elrejtés gombbal lekerül."""
         deals = self.h.app.work.deals
+        entry = {"site": "Vatera", "platform": "vatera", "text": "PS5", "price": 1, "max_bid": 9800, "median": 14000,
+                 "ends": time.time() + 2 * 86400, "hours": 6, "search": "s", "query": "PS5 kontroller", "at": time.time()}
         with deals._lock:
-            deals._data["auctions"] = [{"id": "a1", "url": "https://www.vatera.hu/termek/1", "site": "Vatera",
-                                        "platform": "vatera", "title": "PS5 DualSense kontroller", "text": "PS5",
-                                        "price": 1, "max_bid": 9800, "median": 14000, "ends": time.time() + 2 * 86400,
-                                        "hours": 6, "search": "s", "query": "PS5 kontroller", "at": time.time()}]
+            deals._data["auctions"] = [
+                {**entry, "id": "a1", "url": "https://www.vatera.hu/termek/1", "title": "PS5 DualSense kontroller",
+                 "checked": True},
+                {**entry, "id": "a2", "url": "https://www.vatera.hu/termek/2", "title": "Xbox kontroller", "checked": False}]
         page = self.page
         page.click("#job-deals")
         page.wait_for_selector("text=Licitlista")
-        box = page.inner_text("#w-deals")
-        self.assertIn("PS5 DualSense kontroller", box)
-        self.assertIn("legfeljebb 9 800 Ft-ig érdemes licitálni", box)
+        checked = page.inner_text('li:has([data-auction-dismiss="a1"])')
+        unchecked = page.inner_text('li:has([data-auction-dismiss="a2"])')
+        self.assertIn("legfeljebb 9 800 Ft-ig érdemes licitálni", checked)
+        self.assertIn("ellenőrizetlen: az adatlapját még nem néztem meg", unchecked)
+        self.assertNotIn("9 800", unchecked, "az ellenőrizetlennél nincs licithatár")
         page.click('[data-auction-dismiss="a1"]')
+        page.click('[data-auction-dismiss="a2"]')
         page.wait_for_selector("text=Licitlista", state="detached")
         self.assertEqual(deals.state()["auctions"], [])
 

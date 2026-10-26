@@ -41,7 +41,7 @@ from jarvis_core.browser import BrowserController, BrowserError, is_risky, navig
 from jarvis_core.config import load_config  # noqa: E402
 from jarvis_core.feeds import FeedError  # noqa: E402
 from jarvis_core.llm import OllamaClient, OllamaError, parse_json_object  # noqa: E402
-from jarvis_core.selling import (DESCRIPTION_FOOTERS, FAILED, NOT_POSTED, POSTED, Item, ItemError,  # noqa: E402
+from jarvis_core.selling import (FAILED, NOT_POSTED, POSTED, Item, ItemError,  # noqa: E402
                                  ItemStore, ListingExtractor, NeedsBrowser,
                                  Platform, PriceResearcher, compose_description, missing_needs, needs_for,
                                  parse_price, price_verdict, question_for, round_price, tidy_title)
@@ -146,6 +146,28 @@ class ItemStoreTests(unittest.TestCase):
         self.store.mark(item.id, sold=True)
         self.assertEqual(self.store.get(item.id).status, "eladva")
         self.assertEqual(self.changes[-1]["status"], "eladva")     # a felület mindig értesül
+
+    def test_the_old_closing_texts_are_replaced_in_unposted_items(self):
+        """A korábbi, váltakozó zárószövegek (az egyikben „van még sok ruhát;”) helyén betöltéskor a mostani, ugyanazzal a
+        szóval; a leírás többi része (amit kértél, a kulcsszavak, a kézzel átírt rész) marad. A fent lévő hirdetésé nem
+        változik (a többi oldalon is ugyanaz legyen)."""
+        bad = selling.OLD_FOOTERS[1].format(what="ruhát")
+        self.assertIn("van még sok ruhát;", bad)
+        waiting = self.store.create(targets=["vinted"], prompt="Zara póló")
+        self.store.update(waiting.id, user=True, description=f"A bal ujján van egy kis folt.\n\n{bad}\n\n#zara #póló")
+        other = self.store.create(targets=["vinted"], prompt="Pendrive")
+        self.store.update(other.id, description=selling.OLD_FOOTERS[0].format(what="holmit") + "\n\n#pendrive")
+        posted = self.store.create(targets=["vinted"], prompt="Zara ing")
+        self.store.update(posted.id, description=f"{bad}\n\n#zara")
+        self.store.mark(posted.id, "vinted", POSTED, "https://www.vinted.hu/items/2")
+        for _ in range(2):                  # elmenti: a második betöltéskor is ez van (és nem cseréli tovább)
+            store = ItemStore(Path(self.tmp.name), max_photos=3)
+            self.assertEqual(store.get(waiting.id).description,
+                             f"A bal ujján van egy kis folt.\n\n{selling.description_footer('ruha')}\n\n#zara #póló")
+            self.assertEqual(store.get(other.id).description,
+                             f"{selling.description_footer('elektronika')}\n\n#pendrive")
+            self.assertEqual(store.get(posted.id).description, f"{bad}\n\n#zara", "a fent lévő hirdetésé marad")
+        self.assertEqual(store.get(waiting.id).edited, ["description"])
 
     def test_name_prefers_title_then_product_then_description(self):
         item = self.store.create()
@@ -488,12 +510,14 @@ class ExtractionTests(unittest.TestCase):
                                            price=695)]
         item = self.extractor.extract(item.id)
         self.assertNotIn("eladó", item.description)
-        # a zárómondat a tárgy szerint az egyik változat (nem minden hirdetésé szóról szóra ugyanaz)
-        footer = next(f.format(what="ruhát") for f in DESCRIPTION_FOOTERS if f.format(what="ruhát") in item.description)
-        self.assertIn("a profilomon", footer.lower())   # mindegyik változat a profilodra hív (egyikben kisbetűvel)
-        self.assertEqual(compose_description("", "x", "ruha", seed=item.id).split("\n\n")[0], footer, "mindig ugyanaz")
-        self.assertGreater(len({compose_description("", "", "ruha", seed=str(n)) for n in range(12)}), 1)
-        self.assertTrue(item.description.endswith("#sinsay #trikó #sárga #nyári"))
+        # mindig ugyanaz a zárószöveg (helyes magyarsággal), alatta a kulcsszavak
+        footer = selling.description_footer("ruha")
+        self.assertEqual(item.description, f"{footer}\n\n#sinsay #trikó #sárga #nyári")
+        self.assertEqual(footer, "Ha kérdésed van, vagy több képet szeretnél, írj bátran! Nézz körül a profilomon is, "
+                                 "ott még sok más ruhát találsz. Ha egyszerre több darabot veszel, csomagban olcsóbban "
+                                 "kapod meg.")
+        self.assertEqual(selling.description_footer("cipő"), footer, "ruhánál, cipőnél, kiegészítőnél ugyanaz")
+        self.assertIn("ott még sok más holmit találsz.", selling.description_footer("elektronika"))
         self.assertEqual(item.title, "Sinsay trikó", "a cím márka és termék, szín és méret nélkül")
         self.assertEqual((item.gender, item.category), ("", "Nők > Ruhák > Trikók"))
         system = self.fake.chat_bodies()[0]["messages"][0]["content"]
@@ -508,7 +532,7 @@ class ExtractionTests(unittest.TestCase):
         self.fake.chat_script = [extracted(product="póló", kind="ruha", title="Zara póló", brand="Zara", price=500,
                                            description="Egyszer hordtam, nagyon jó állapotú.", keywords="zara, póló")]
         item = self.extractor.extract(item.id)
-        footer = next(f.format(what="ruhát") for f in DESCRIPTION_FOOTERS if f.format(what="ruhát") in item.description)
+        footer = selling.description_footer("ruha")
         self.assertEqual(item.description, f"{footer}\n\n#zara #póló", "csak a zárószöveg és a kulcsszavak")
         system = self.fake.chat_bodies()[0]["messages"][0]["content"]
         self.assertIn("description: alapból üres", system)
@@ -518,7 +542,12 @@ class ExtractionTests(unittest.TestCase):
         self.fake.chat_script = [extracted(product="póló", kind="ruha", title="Zara póló", brand="Zara", price=500,
                                            description="A bal ujján van egy kis folt.", keywords="zara")]
         asked = self.extractor.extract(asked.id)
-        self.assertTrue(asked.description.startswith("A bal ujján van egy kis folt.\n\n"), asked.description)
+        # felül, amit kértél, alatta a zárószöveg, legalul a kulcsszavak
+        self.assertEqual(asked.description, f"A bal ujján van egy kis folt.\n\n{footer}\n\n#zara")
+        self.assertEqual(compose_description("A profilomon van még sok hasonló.", "zara", "ruha"),
+                         f"A profilomon van még sok hasonló.\n\n{footer}\n\n#zara", "a zárószöveg mindig benne van")
+        self.assertEqual(compose_description(f"Füstmentes háztartásból.\n\n{footer}", "", "ruha"),
+                         f"Füstmentes háztartásból.\n\n{footer}", "ami szó szerint benne van, nem kétszer")
 
         pro = self.store.add_photo(self.store.create(targets=["vinted"], pro=True).id, jpeg())
         self.fake.chat_script = [seen(product="póló", kind="ruha", title="Zara póló", brand="Zara",
@@ -532,7 +561,7 @@ class ExtractionTests(unittest.TestCase):
         self.fake.chat_script = [seen(product="póló", kind="ruha", title="Zara póló", brand="Zara",
                                       description="Eredeti dobozzal adom.", keywords="zara")]
         pro, _estimate = self.extractor.from_photos(pro.id, selling.vision_images(self.store, pro.id))
-        self.assertTrue(pro.description.startswith("Eredeti dobozzal adom.\n\n"), pro.description)
+        self.assertEqual(pro.description, f"Eredeti dobozzal adom.\n\n{footer}\n\n#zara")
         for text, wanted in (("Nike cipő 42, kicsit kopott", False), ("írd meg a hirdetést 5000-ért", False),
                              ("írd meg, hogy a cipzár akad", True), ("Leírás: egyszer hordtam", True),
                              ("említsd meg, hogy füstmentes háztartásból", True)):
@@ -1103,7 +1132,7 @@ class WorkDeskTests(unittest.TestCase):
         self.assertIn("az árbázisból: a hasonlók most kb. 17 000 Ft-ért mennek (5 ár alapján)", step.text)
 
     def test_research_on_a_bought_item_reads_the_description_first(self):
-        """Egy megvett tárgy (Megvettem, vagy a Vételeim Új vétele): a leírásából még nem olvasta ki, mi ez. Az
+        """Egy megvett tárgy (Megvettem, vagy az Elemzés Új vétele): a leírásából még nem olvasta ki, mi ez. Az
         árkutatás előtt kiolvassa (egy modellhívás), és azzal keres; ha a modell nem válaszol, a leírás elejével."""
         class FakeResearcher:
             def __init__(self, store):

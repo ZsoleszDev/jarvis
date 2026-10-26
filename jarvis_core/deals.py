@@ -140,12 +140,13 @@ HAGGLE_CHECKS = 2
 HAGGLE_PER_DAY = 6
 MAX_HAGGLES = 20           # ennyi alkuképes hirdetés lehet a találatok között (a régebbiek kiesnek)
 # Érdemes megnézni (bizonytalan ár): ami olcsónak látszott, de kevés hasonló ára volt (sure_price), az nem vész el. A
-# tippek közé kerül (legfeljebb MAX_TIPS, TIP_DAYS napig), egy csendes értesítéssel (naponta legfeljebb TIPS_PER_DAY,
-# utána csak a listában), és minden körben újra felméri az árbázisból, letöltés nélkül: ha közben elég ár gyűlt össze, és
-# még mindig megéri, rendes jelölt lesz belőle (a hirdetés oldala, a modellkérdés, a megérő értesítés).
+# tippek közé kerül (legfeljebb MAX_TIPS, TIP_DAYS napig), egy értesítéssel (a telefonon egy nagyon rövid pittyenéssel,
+# notice.tip; naponta legfeljebb TIPS_PER_DAY, utána csak a listában), és minden körben újra felméri az árbázisból,
+# letöltés nélkül: ha közben elég ár gyűlt össze, és még mindig megéri, rendes jelölt lesz belőle (a hirdetés oldala, a
+# modellkérdés, a megérő értesítés).
 MAX_TIPS = 30
 TIP_DAYS = 3
-TIPS_PER_DAY = 10
+TIPS_PER_DAY = 30
 MAX_HAGGLE_DONE = 3000     # ennyi már megnézett hirdetést jegyez meg (ezekről nem szól újra)
 DEFAULT_HAGGLE_MESSAGE = "Szia!\nMegvan még? {ár}-ért odaadnád?\nKöszi előre is\nÜdv, Zsolt"
 # Vatera-licitfigyelő: alapból óránként nézi, a zárás előtt legfeljebb ennyi órával szól (hogy legyen időd licitálni),
@@ -460,6 +461,19 @@ def parse_auction(text: str) -> dict[str, int | None]:
     bids = re.search(r"(\d+)\s*licit|licit(?:ek)?(?: szama)?:?\s*(\d+)", folded)
     return {"left": sum(int(n) * _LEFT_UNITS[unit] for n, unit in parts) if parts else None,
             "bids": int(bids.group(1) or bids.group(2)) if bids else None}
+
+
+# A licit mostani ára az adatlapján („Aktuális ár: 12 000 Ft”, „Jelenlegi licit: 12.000 Ft”, „Legmagasabb ajánlat …”);
+# a kikiáltási (kezdő) ár nem ez.
+_AUCTION_PRICE_RE = re.compile(r"\b(?:aktualis|jelenlegi|legmagasabb)\s+(?:ar|licit|ajanlat)\w*\W{0,5}"
+                               r"(\d{1,3}(?:[\s.]\d{3})+|\d+)\s*(?:ft|huf)\b")
+
+
+def auction_price(page: dict[str, Any]) -> int | None:
+    """A licit mostani ára a licit oldaláról (a szövegéből vagy a rövid feliratokból); None, ha nem olvasható le."""
+    text = fold(" ".join([str(page.get("text") or ""), *[str(item) for item in page.get("short") or []]]))
+    match = _AUCTION_PRICE_RE.search(text)
+    return int(re.sub(r"\D", "", match.group(1))) if match else None
 
 
 def left_text(seconds: int | None) -> str:
@@ -961,7 +975,7 @@ def search_status(search: dict[str, Any]) -> str:
     return "kevés" if proposal else "felmérés"
 
 
-LEDGER_MONTHS = 6          # a Vételeim fülön ennyi hónap haszna látszik havonta
+LEDGER_MONTHS = 6          # az Elemzés fülön ennyi hónap haszna látszik havonta
 IDLE_DAYS = 3              # ennyi nap után szól, hogy a nálad lévő tárgy még nincs fent sehol
 TRANSIT_DAYS = 7           # ennyi nap után szól, hogy a csomag még mindig úton van
 PRICE_UP = 1.1             # ha most legalább ennyivel drágábban adják (a 90%-ot nézve), mint amennyiért eladnád
@@ -1011,29 +1025,33 @@ def _advice(row: dict[str, Any]) -> list[str]:
 
 
 def profit_report(items: list[Item], now: float | None = None, book: PriceBook | None = None) -> dict[str, Any]:
-    """Haszonkövetés (Vételeim) a vételárral megjelölt tárgyakból (Megvettem, vagy a tárgy lapján a Vételár). Egy tárgy
-    bekerülése a vételár, a posta és az egyéb költség; a haszna az eladási ár, mínusz az eladás költségei (posta, díj) és
-    a bekerülés. Ebben a hónapban, összesen és havonta (LEDGER_MONTHS); átlagosan hány nap alatt kelt el, mennyi pénz
-    van még bent a meg nem eladott tárgyakban, és mennyi haszon várható belőlük (sale_estimate). Ha az árbázis megvan
-    (book), a meg nem eladott tárgyaknál azt is, mennyiért adják most."""
+    """Haszonkövetés (Elemzés fül) a vételárral megjelölt tárgyakból (Megvettem, vagy a tárgy lapján a Vételár), és a
+    saját holmidból, amit a Jarvis adott el (nincs vételára, de elkelt: own). Egy tárgy bekerülése a vételár, a posta és
+    az egyéb költség (a saját holminál 0); a haszna az eladási ár, mínusz az eladás költségei (posta, díj) és a
+    bekerülés. Ebben a hónapban, összesen és havonta (LEDGER_MONTHS); átlagosan hány nap alatt kelt el (a saját holmi a
+    feltöltésétől), mennyi pénz van még bent a meg nem eladott (megvett) tárgyakban, és mennyi haszon várható belőlük
+    (sale_estimate). A megtérülés (roi) csak a megvett tárgyakból számol. Ha az árbázis megvan (book), a meg nem eladott
+    tárgyaknál azt is, mennyiért adják most."""
     now = time.time() if now is None else now
     month = time.strftime("%Y-%m", time.localtime(now))
     rows: list[dict[str, Any]] = []
-    total = {"profit": 0, "count": 0, "spent": 0, "revenue": 0, "roi": None}
+    total = {"profit": 0, "count": 0, "spent": 0, "revenue": 0, "roi": None, "own": 0, "own_revenue": 0}
     this_month = {"profit": 0, "count": 0, "revenue": 0}
     stock = {"count": 0, "spent": 0, "expected": 0, "value": 0, "unknown": 0}
     by_month: dict[str, dict[str, Any]] = {}
     stages: Counter = Counter()
     days: list[int] = []
+    bought_profit = 0
     for item in items:
-        if item.bought_price is None:
-            continue
+        own = item.bought_price is None
+        if own and not (item.sold and item.sold_price is not None):
+            continue                # a saját holmid csak akkor számít, ha elkelt (a bevétele a haszna)
         cost, sell_cost = item_cost(item), int(item.sell_shipping or 0) + int(item.sell_fee or 0)
-        bought_at = item.bought_at or item.created
+        bought_at = item.bought_at or (item.online_since() if own else None) or item.created
         where = stage(item)
         stages[where] += 1
         row: dict[str, Any] = {
-            "id": item.id, "name": item.name, "stage": where, "sold": item.sold, "status": item.status,
+            "id": item.id, "name": item.name, "stage": where, "sold": item.sold, "status": item.status, "own": own,
             "photo": item.photos[0] if item.photos else "", "source": item.source, "bought_from": item.bought_from,
             "bought_at": bought_at, "bought_price": item.bought_price, "bought_shipping": item.bought_shipping,
             "bought_extra": item.bought_extra, "cost": cost, "market_price": item.market_price,
@@ -1044,11 +1062,16 @@ def profit_report(items: list[Item], now: float | None = None, book: PriceBook |
             "days": max(0, int(((item.sold_at if item.sold and item.sold_at else now) - bought_at) // 86400))}
         if item.sold and item.sold_price is not None:
             profit = item.sold_price - sell_cost - cost
-            row.update(profit=profit, roi=_percent(profit, cost))
+            row.update(profit=profit, roi=None if own else _percent(profit, cost))
             total["profit"] += profit
             total["count"] += 1
-            total["spent"] += cost
             total["revenue"] += item.sold_price
+            if own:
+                total["own"] += 1
+                total["own_revenue"] += item.sold_price
+            else:
+                total["spent"] += cost
+                bought_profit += profit
             if item.sold_at:
                 days.append(row["days"])
                 when = time.strftime("%Y-%m", time.localtime(item.sold_at))
@@ -1079,7 +1102,7 @@ def profit_report(items: list[Item], now: float | None = None, book: PriceBook |
                                          "speed": speed_text(book.speed(found[0]))}
         row["advice"] = _advice(row)
         rows.append(row)
-    total["roi"] = _percent(total["profit"], total["spent"])
+    total["roi"] = _percent(bought_profit, total["spent"])
     order = {"úton": 0, "nálad": 1, "fent": 2, "eladva": 3}
     rows.sort(key=lambda r: (order[r["stage"]], -(r["sold_at"] or r["bought_at"] or 0)))
     months = [by_month[key] for key in sorted(by_month, reverse=True)[:LEDGER_MONTHS]]
@@ -1125,6 +1148,8 @@ class DealHunter:
         # az árkutatásból jött jelöltek, amelyek a kör keretébe már nem fértek: hirdetés → (mióta vár, keresés, jelölt)
         self._carry: dict[str, tuple[float, dict[str, Any], dict[str, Any]]] = {}
         self._carry_busy: set[str] = set()   # amit egy kör épp ellenőriz (egyszerre csak az egyik sor nézi)
+        # keresés:oldal → mikor esedékes újra a keret fogyása miatt (_retry_soon): addig az ütemező sűrűbben néz
+        self._retries: dict[str, float] = {}
         self._data = self._load()
 
     # --- tárolás ---
@@ -1483,7 +1508,7 @@ class DealHunter:
             if told_now:
                 self._save()
         for title, text in told_now:
-            notify("info", title, text, actions=[{"action": "ledger", "label": "Vételeim"}])
+            notify("info", title, text, actions=[{"action": "ledger", "label": "Elemzés"}])
             self.journal.add(text)
         return [text for _title, text in told_now]
 
@@ -1803,7 +1828,7 @@ class DealHunter:
             self._remaining = (0.0, None)
         what = found["text"][:60] if found is not None else name[:60]
         self.journal.add(f"Visszamondtad a vételt: „{what}”" + (f" ({format_price(found['price'])})" if found else "")
-                         + "; töröltem a Vételeim és az eladandók közül" + (", és a találatok közül" if found else "")
+                         + "; töröltem az Elemzés fülről és az eladandók közül" + (", és a találatok közül" if found else "")
                          + ".")
         return found
 
@@ -1848,7 +1873,11 @@ class DealHunter:
     # --- a keresés (háttérmunka) ---
 
     def every_minutes(self) -> float:
-        """A háttérmunka gyakorisága: a leggyakoribb keresésé (a többi csak akkor fut, ha esedékes, lásd _due)."""
+        """A háttérmunka gyakorisága: a leggyakoribb keresésé (a többi csak akkor fut, ha esedékes, lásd _due). Ha egy
+        keresés vagy figyelt oldal a keret fogyása miatt hamarabb esedékes újra (_retry_soon), vagy a licitlistán van
+        valami (az ellenőrizetlenek adatlapja, a zárás előtti ellenőrzés), az ütemező percenként megnézi, van-e dolga
+        (available dönt), különben a 10 perces újrapróbálkozás is a teljes gyakoriságra várna."""
+        now = self.clock()
         with self._lock:
             jobs = [int(s.get("every") or DEFAULT_EVERY) for s in self._data["searches"]]
             jobs += [int(w.get("every") or WATCH_EVERY) for w in self._data["watches"]]
@@ -1857,10 +1886,15 @@ class DealHunter:
                 jobs += [int(s.get("every") or DEFAULT_EVERY) for s in bundles["searches"]]
                 if bundles["inbox"]:
                     jobs.append(5)             # a felmérésre váró csomagok (a többi oldalról) hamar sorra kerülnek
-            if not self._data["enabled"] or not (jobs or self._data["browse"]["on"]):
+            ids = {str(item.get("id")) for item in self._data["searches"] + self._data["watches"]}
+            self._retries = {key: at for key, at in self._retries.items()   # a törölt és a régen lejárt kimarad
+                             if key.split(":")[0] in ids and now - at < 3600}
+            soon = bool(self._retries or self._data["auctions"])
+            if not self._data["enabled"] or not (jobs or self._data["browse"]["on"] or soon):
                 return 0.0
-            # böngészés közben percenként megnézi, van-e dolga (csak akkor fut, ha van: lásd available)
-            return 1.0 if self._data["browse"]["on"] else float(min(jobs))
+            # böngészés közben (és az újrapróbálkozásnál, a licitlistánál) percenként megnézi, van-e dolga (csak akkor
+            # fut, ha van: lásd available)
+            return 1.0 if self._data["browse"]["on"] or soon or not jobs else float(min(jobs))
 
     def _due(self, search: dict[str, Any], key: str, now: float) -> bool:
         every = max(int(search.get("every") or DEFAULT_EVERY), SITE_MIN_MINUTES.get(key, 0))
@@ -1869,10 +1903,13 @@ class DealHunter:
 
     def _retry_soon(self, search: dict[str, Any], key: str) -> None:
         """Egy keresés vagy figyelt oldal ezen az oldalon BUSY_RETRY múlva esedékes újra (nem a teljes gyakorisága után):
-        most csak az oldal óránkénti kerete fogyott el, és azt nem a böngésző pótolja."""
+        most csak az oldal óránkénti kerete fogyott el, és azt nem a böngésző pótolja. Az ütemező is tud róla
+        (every_minutes), így tényleg BUSY_RETRY múlva jön, nem a következő óránkénti körben."""
         every = max(int(search.get("every") or DEFAULT_EVERY), SITE_MIN_MINUTES.get(key, 0))
+        now = self.clock()
         with self._lock:
-            self._data["last"][f"{search['id']}:{key}"] = self.clock() - every * 60 + BUSY_RETRY
+            self._data["last"][f"{search['id']}:{key}"] = now - every * 60 + BUSY_RETRY
+            self._retries[f"{search['id']}:{key}"] = now + BUSY_RETRY
 
     def run(self, check: Callable[[], None] = lambda: None,
             notify: Callable[..., None] = lambda *a, **k: None, force: bool = False) -> str:
@@ -2121,6 +2158,7 @@ class DealHunter:
             if track:
                 with self._lock:
                     self._data["last"][f"{search['id']}:{key}"] = self.clock()
+                    self._retries.pop(f"{search['id']}:{key}", None)
             try:
                 listings = self._listings(urls[key], key, check, game)
             except BrowserError as exc:
@@ -2473,6 +2511,7 @@ class DealHunter:
         game.check()
         with self._lock:
             self._data["last"][f"{watch['id']}:{platform}"] = self.clock()
+            self._retries.pop(f"{watch['id']}:{platform}", None)
         rows = self._page_rows(game, watch["url"], platform, watch, retry=partial(self._retry_soon, watch, platform))
         if not rows:
             return
@@ -2944,7 +2983,8 @@ class DealHunter:
 
     def _tip(self, row: dict[str, Any], query: str, found: dict[str, Any], watch: dict[str, Any] | None) -> None:
         """Egy „Érdemes megnézni” tipp (bizonytalan ár): a hirdetés, a néhány hasonló ára és a várható haszon. Egy
-        hirdetésről egyszer; értesítés naponta legfeljebb TIPS_PER_DAY (utána csak a listában)."""
+        hirdetésről egyszer; értesítés (a telefonon egy rövid pittyenés: notice.tip) naponta legfeljebb TIPS_PER_DAY
+        (utána csak a listában)."""
         usual = int(found["price"])
         profit = expected_profit(usual, int(row["price"]), careful_low(found))
         if profit <= 0 or not row.get("url") or wearable(f"{row.get('title') or row['text']} {query}"):
@@ -2978,55 +3018,192 @@ class DealHunter:
                 "lehet benne. Nézd meg magad, mielőtt megveszed; ha összegyűlik elég ár, újra felmérem.")
         with self._lock:
             self._tip_notices.append((("deal", f"Érdemes megnézni: {tip['title'][:50]}", text),
-                                      {"url": tip["url"], "actions": [DEALS_ACTION], "quiet": quiet or None}))
+                                      {"url": tip["url"], "actions": [DEALS_ACTION], "quiet": quiet or None,
+                                       "tip": tip["id"]}))
 
     def _follow_auction(self, game: _Round, search: dict[str, Any], deal: dict[str, Any]) -> None:
-        """Egy megérő, de még nem hamarosan záruló licit a licitlistára: a mostani ára, a javasolt legmagasabb ajánlat
-        (max_bid), mikor zárul; a kör a zárás előtt újra megnézi (_step_auctions). Ha új, csendesen szól is (naponta
-        legfeljebb AUCTION_TIPS_PER_DAY), mert a legmagasabb ajánlat a Vaterán már most beállítható."""
+        """Egy megérő, de még nem hamarosan záruló licit a licitlistára, előbb ellenőrizetlenként: a szokásos ára szerint
+        megérheti, de az adatlapját még nem nézte meg, ezért konkrét licithatárt még nem javasol, és nem is szól róla.
+        Rögtön megnyitja az adatlapját (_verify_auction; ha a kör keretébe már nem fér, egy későbbi kör): ha rendben van,
+        ellenőrzött lesz, és akkor csendesen szól a javasolt legmagasabb ajánlattal. A zárás előtt a kör még egyszer
+        megnézi (_final_auction)."""
         now, key = self.clock(), listing_key(deal["url"])
         entry = {"id": deal["id"], "url": deal["url"], "site": deal.get("site") or "", "platform": deal.get("platform"),
                  "title": str(deal.get("title") or deal["text"])[:120], "text": deal["text"], "price": int(deal["price"]),
                  "max_bid": int(deal["max_bid"]), "median": int(deal["median"]), "low": deal.get("low"),
                  "ends": now + int(deal.get("left") or 0), "hours": int(deal.get("hours") or WATCH_HOURS),
                  "search": search["id"], "query": search["query"], "explore": deal.get("explore") or "",
-                 "similar": deal.get("similar"), "sites": deal.get("sites") or [], "at": now}
-        today = day_of(now)
+                 "similar": deal.get("similar"), "sites": deal.get("sites") or [], "at": now, "checked": False,
+                 "tried": 0.0}
         with self._lock:
             known = next((a for a in self._data["auctions"] if listing_key(a["url"]) == key), None)
             if known is not None:
-                entry.update(id=known["id"], at=known["at"])
-            told = self._data["auction_told"]
-            if told.get("day") != today:
-                told.update(day=today, n=0)
-            tell = known is None and told["n"] < AUCTION_TIPS_PER_DAY
-            told["n"] += tell
+                entry.update(id=known["id"], at=known["at"], checked=bool(known.get("checked")),
+                             tried=float(known.get("tried") or 0))
             self._data["auctions"] = sorted([a for a in self._data["auctions"] if listing_key(a["url"]) != key] + [entry],
                                             key=lambda a: float(a["ends"]))[:MAX_AUCTIONS]
             self._save()
         self._mark(deal)                       # a kör nem jelöltként nézi újra: a licitlista viszi tovább
         self.tally("auction", [deal])
         if known is None:
-            self.journal.add(f"Licitlistára tettem: „{entry['title'][:60]}” most {format_price(entry['price'])}, "
-                             f"{left_text(deal.get('left'))} múlva zárul; legfeljebb {format_price(entry['max_bid'])}-ig "
-                             f"érdemes licitálni ({entry['site']}).")
-        if tell:
-            game.notify("deal", f"Licit: {entry['title'][:50]} (legfeljebb {format_price(entry['max_bid'])})",
-                        self._auction_text(entry, deal.get("left")), url=entry["url"], actions=[DEALS_ACTION],
-                        quiet=True)
+            self.journal.add(f"Licitlistára tettem, még ellenőrizetlenül: „{entry['title'][:60]}” most "
+                             f"{format_price(entry['price'])}, {left_text(deal.get('left'))} múlva zárul ({entry['site']}); "
+                             "az adatlapja után mondok licithatárt.")
+        if not entry["checked"]:
+            game.next([partial(self._verify_auction, game, key)])
 
     @staticmethod
     def _auction_text(entry: dict[str, Any], left: int | None) -> str:
         profit = expected_profit(entry["median"], entry["max_bid"], entry.get("low"))
         return (f"Vatera-licit: „{entry['title'][:80]}” most {format_price(entry['price'])}, {left_text(left)} múlva "
-                f"zárul. Máshol kb. {format_price(entry['median'])}-ért adják; legfeljebb {format_price(entry['max_bid'])}"
-                f"-ig érdemes licitálni (akkor is kb. {format_price(profit)} a haszon). A Vaterán ezt most legmagasabb "
-                "ajánlatként beállíthatod (addig licitál helyetted a Vatera); a zárás előtt még szólok. Licitálni nem fogok "
-                "helyetted.")
+                f"zárul. Az adatlapját megnéztem, rendben van. Máshol kb. {format_price(entry['median'])}-ért adják; "
+                f"legfeljebb {format_price(entry['max_bid'])}-ig érdemes licitálni (akkor is kb. {format_price(profit)} a "
+                "haszon). A Vaterán ezt most legmagasabb ajánlatként beállíthatod (addig licitál helyetted a Vatera); a "
+                "zárás előtt még szólok. Licitálni nem fogok helyetted.")
+
+    def _auction(self, key: str) -> dict[str, Any] | None:
+        with self._lock:
+            entry = next((a for a in self._data["auctions"] if listing_key(a["url"]) == key), None)
+            return dict(entry) if entry is not None else None
+
+    def _auction_update(self, key: str, **fields: Any) -> dict[str, Any] | None:
+        with self._lock:
+            entry = next((a for a in self._data["auctions"] if listing_key(a["url"]) == key), None)
+            if entry is None:
+                return None
+            entry.update(fields)
+            self._save()
+            return dict(entry)
+
+    def _auction_top(self, entry: dict[str, Any]) -> int:
+        """A licithatár most, a mostani beállításokkal: ha egy keresésedből jött (és az még megvan), annak a szabálya
+        (szokásos ár, %, haszon, ársáv), különben a figyelt oldal (vagy a böngészés) legkisebb haszna szerint; és
+        legfeljebb a mostani vételi limit (a havi keret maradéka). 0: már nem éri meg."""
+        with self._lock:
+            search = next((s for s in self._data["searches"] if s.get("id") == entry.get("search")), None)
+            watch = next((w for w in self._data["watches"] if w.get("id") == entry.get("search")), None)
+            browse = int(self._data["browse"].get("min_profit") or WATCH_PROFIT)
+        if search is not None and search.get("reference"):
+            top = highest_ok(search, int(search["reference"])) or 0
+        else:
+            top = explore_top(int(entry["median"]), int((watch or {}).get("min_profit") or browse), entry.get("low"))
+        return max(0, self._capped(top)) if top > 0 else 0
+
+    def _auction_deal(self, entry: dict[str, Any], now: float) -> dict[str, Any]:
+        """A licitlista egy eleméből jelölt (az ellenőrzéshez és a szóláshoz)."""
+        deal = {k: v for k, v in entry.items()
+                if k not in ("ends", "hours", "query", "search", "at", "checked", "tried") and v is not None}
+        deal.update(id=secrets.token_hex(5), auction=True, left=int(float(entry["ends"]) - now))
+        return deal
+
+    def _look_auction(self, game: _Round, entry: dict[str, Any],
+                      deal: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+        """A licit adatlapja a kör oldalkeretéből (_inspect: elkelt, hibás, gyanús?). (verdict, oldal); verdict None, ha
+        most nem nézhető meg (elfogyott a keret, robot-ellenőrzés, nem nyílt meg): a licit a listán marad, és egy
+        későbbi kör próbálja (elavult adatokkal nem szól)."""
+        if game.blocked or game.pages <= 0:
+            return None, None
+        game.pages -= 1
+        game.loaded += 1
+        try:
+            page = self._look(entry["url"], str(entry.get("platform") or ""), game.check, game)
+        except BrowserError:
+            return None, None
+        verdict = self._inspect(deal, page, game)
+        if verdict == "captcha":
+            game.blocked = True
+            return None, None
+        return verdict, page
+
+    def _auction_rejected(self, entry: dict[str, Any], deal: dict[str, Any], verdict: str,
+                          page: dict[str, Any] | None) -> bool:
+        """Az adatlap után: kiesik-e a licit (elkelt, hibás, gyanús, vagy a mostani ára már eléri a mostani beállításokkal
+        újraszámolt licithatárt); ha igen, lekerül a listáról, és a naplóba írja, miért. Ha nem, a jelöltbe a mostani ár
+        (az oldalról, ha leolvasható; különben a legutóbb látott, figyelmeztetéssel) és az új licithatár kerül."""
+        key, title = listing_key(entry["url"]), entry["title"][:60]
+        if verdict == "gyanús":
+            self._drop_auction(key)
+            self._suspicious(deal)
+            return True
+        if verdict:                            # elkelt, eltűnt, hibás
+            self._drop_auction(key)
+            self._mark(deal)
+            self.journal.add(f"Lekerült a licitlistáról: „{title}” "
+                             + ("(elkelt vagy eltűnt)." if verdict == "elkelt" else "(az adatlapja szerint hibás)."))
+            return True
+        now_price = auction_price(page or {})
+        price, top = now_price or int(entry["price"]), self._auction_top(entry)
+        if top <= 0 or price >= top:
+            self._drop_auction(key)
+            self.journal.add(f"Lekerült a licitlistáról: „{title}” most {format_price(price)}, a mostani beállításokkal "
+                             + (f"legfeljebb {format_price(top)}-ig érné meg." if top > 0 else "már nem éri meg."))
+            return True
+        deal.update(price=price, max_bid=top,
+                    profit=expected_profit(int(entry["median"]), top, entry.get("low")))
+        if now_price is None:
+            deal["followed"] = True            # a szövegben: „legutóbb” (az oldalról nem tudtam leolvasni)
+            deal.setdefault("warnings", []).append("a mostani licitet nem tudtam leolvasni az oldalról: nézd meg")
+        return False
+
+    def _verify_auction(self, game: _Round, key: str) -> None:
+        """Egy ellenőrizetlen licit adatlapja (_look_auction), és ha van modell, egy rövid modellkérdés (tényleg ez,
+        működik?). Ha rendben van, ellenőrzött lesz, a mostani árával és a mostani beállításokkal számolt licithatárral,
+        és csendesen szól a javasolt legmagasabb ajánlattal (naponta legfeljebb AUCTION_TIPS_PER_DAY); ha elkelt,
+        hibás, gyanús, vagy a mostani ára már eléri a licithatárt, lekerül. Ha most nem nézhető meg, ellenőrizetlenként a
+        listán marad (BUSY_RETRY múlva újra próbálja)."""
+        now = self.clock()
+        entry = self._auction_update(key, tried=now)
+        if entry is None or entry.get("checked"):
+            return
+        deal = self._auction_deal(entry, now)
+        verdict, page = self._look_auction(game, entry, deal)
+        if verdict is None or self._auction_rejected(entry, deal, verdict, page):
+            return
+        if game.lane is None:                  # modell nélkül az adatlap dönt
+            self._auction_checked(game, key, deal, None)
+            return
+        if game.checks <= 0:
+            return                             # a modellkérdés keretébe már nem fér: később (ellenőrizetlen marad)
+        game.checks -= 1
+        game.ask(partial(self._confirm, {"id": entry["search"], "query": entry["query"]}, deal),
+                 partial(self._auction_checked, game, key, deal))
+
+    def _auction_checked(self, game: _Round, key: str, deal: dict[str, Any], ok: bool | None) -> None:
+        """A modell válasza után: ha nemet mondott, a licit lekerül; különben ellenőrzött lesz (a mostani ár, a
+        licithatár), és ha még nem szólt róla, csendesen szól (naponta legfeljebb AUCTION_TIPS_PER_DAY)."""
+        if ok is False:
+            self._drop_auction(key)
+            if deal.get("suspect"):
+                self._suspicious(deal)
+            else:
+                self._mark(deal)
+                self.journal.add(f"Lekerült a licitlistáról: „{str(deal.get('title') or deal['text'])[:60]}” (a modell "
+                                 "szerint nem az, vagy nem működik).")
+            return
+        today = day_of(self.clock())
+        with self._lock:
+            entry = next((a for a in self._data["auctions"] if listing_key(a["url"]) == key), None)
+            if entry is None:
+                return
+            entry.update(checked=True, price=int(deal["price"]), max_bid=int(deal["max_bid"]))
+            told = self._data["auction_told"]
+            if told.get("day") != today:
+                told.update(day=today, n=0)
+            tell = not entry.get("told") and told["n"] < AUCTION_TIPS_PER_DAY
+            told["n"] += tell
+            entry["told"] = entry.get("told") or tell
+            entry = dict(entry)
+            self._save()
+        self.journal.add(f"Ellenőriztem a licitlistán: „{entry['title'][:60]}” rendben van; legfeljebb "
+                         f"{format_price(entry['max_bid'])}-ig érdemes licitálni.")
+        if tell:
+            game.notify("deal", f"Licit: {entry['title'][:50]} (legfeljebb {format_price(entry['max_bid'])})",
+                        self._auction_text(entry, deal.get("left")), url=entry["url"], actions=[DEALS_ACTION],
+                        quiet=True)
 
     def _auction_seen(self, rows: list[dict[str, Any]]) -> None:
         """A licitlistán lévő licit egy oldalon újra: a mostani ára és a hátralévő ideje frissül; ha a mostani ára már a
-        javasolt legmagasabb ajánlat fölött van, lekerül (már nem éri meg beszállni)."""
+        licithatár fölött van (a mostani beállításokkal számolva), lekerül (már nem éri meg beszállni)."""
         if not rows:
             return
         now = self.clock()
@@ -3037,10 +3214,11 @@ class DealHunter:
                 row = seen.get(listing_key(entry["url"]))
                 if row is not None:
                     changed = True
-                    if int(row["price"]) >= int(entry["max_bid"]):
+                    top = self._auction_top(entry)
+                    if int(row["price"]) >= top:
                         self.journal.add(f"Lekerült a licitlistáról: „{entry['title'][:60]}” már "
-                                         f"{format_price(int(row['price']))}, a javasolt legfeljebb "
-                                         f"{format_price(entry['max_bid'])} fölött.")
+                                         f"{format_price(int(row['price']))}, a licithatár ("
+                                         f"{format_price(top)}) fölött.")
                         continue
                     entry["price"] = int(row["price"])
                     if row.get("left") is not None:
@@ -3051,38 +3229,50 @@ class DealHunter:
                 self._save()
 
     def _auctions_due(self, now: float) -> bool:
-        """Van-e a licitlistán olyan licit, aminek a zárás előtti ellenőrzése esedékes (vagy már lejárt: lekerül)."""
+        """Van-e dolga a licitlistának: egy licit zárás előtti ellenőrzése esedékes (vagy már lejárt: lekerül), vagy egy
+        ellenőrizetlen licit adatlapját kell megnézni (legfeljebb BUSY_RETRY-onként próbálja)."""
         day = tuple(self._data["day"])
         return any(last_chance(float(a["ends"]), day) - now <= int(a.get("hours") or WATCH_HOURS) * 3600
+                   or (not a.get("checked") and now - float(a.get("tried") or 0) >= BUSY_RETRY)
                    for a in self._data["auctions"])
 
     def _step_auctions(self, game: _Round) -> None:
-        """A licitlista zárás előtti ellenőrzése: ami lejárt, lekerül; aminek a zárása közel van (a figyelő órái szerint,
-        a gép esti leállása előtt), az rendes jelölt lesz (_candidate: a licit oldala, elkelt-e, hibás-e, egy rövid
-        modellkérdés), és ha átmegy, szól a javasolt legmagasabb ajánlattal. Ha a körben elfogyott a keret, marad, és a
-        következő kör próbálja."""
+        """A licitlista: ami lejárt, lekerül; aminek a zárása közel van (a figyelő órái szerint, a gép esti leállása
+        előtt), azt még egyszer megnézi (_final_auction), és a még ellenőrizetlenek adatlapját is (_verify_auction). Ami
+        a kör keretébe már nem fér bele, marad, és a következő kör próbálja."""
         now = self.clock()
         with self._lock:
             day = tuple(self._data["day"])
-            expired = [a for a in self._data["auctions"] if float(a["ends"]) <= now]
-            due = [dict(a) for a in self._data["auctions"] if float(a["ends"]) > now
-                   and last_chance(float(a["ends"]), day) - now <= int(a.get("hours") or WATCH_HOURS) * 3600]
+            expired = {listing_key(a["url"]) for a in self._data["auctions"] if float(a["ends"]) <= now}
             if expired:
-                gone = {listing_key(a["url"]) for a in expired}
-                self._data["auctions"] = [a for a in self._data["auctions"] if listing_key(a["url"]) not in gone]
+                self._data["auctions"] = [a for a in self._data["auctions"] if listing_key(a["url"]) not in expired]
                 self._save()
-        steps = []
-        for entry in due:
-            deal = {k: v for k, v in entry.items() if k not in ("ends", "hours", "query", "search", "at") and v is not None}
-            deal.update(id=secrets.token_hex(5), auction=True, left=int(float(entry["ends"]) - now), followed=True,
-                        profit=expected_profit(entry["median"], entry["max_bid"], entry.get("low")))
-            search = {"id": entry["search"], "query": entry["query"]}
-            steps.append(partial(self._candidate, game, search, deal,
-                                 done=partial(self._drop_auction, listing_key(entry["url"]))))
-        game.next(steps)
+            due = [listing_key(a["url"]) for a in self._data["auctions"]
+                   if last_chance(float(a["ends"]), day) - now <= int(a.get("hours") or WATCH_HOURS) * 3600]
+            unchecked = [listing_key(a["url"]) for a in self._data["auctions"] if listing_key(a["url"]) not in due
+                         and not a.get("checked") and now - float(a.get("tried") or 0) >= BUSY_RETRY]
+        game.next([partial(self._final_auction, game, key) for key in due] +
+                  [partial(self._verify_auction, game, key) for key in unchecked])
+
+    def _final_auction(self, game: _Round, key: str) -> None:
+        """A licit zárás előtti ellenőrzése: az adatlapja újra (elkelt, hibás, gyanús?), a mostani ára (az oldalról, ha
+        leolvasható), és a licithatár újraszámolva a mostani beállításokkal (vételi limit, havi keret, a keresés vagy a
+        figyelt oldal szabálya). Ha a mostani ár eléri a határt, vagy már nem éri meg, nem szól, és lekerül; különben egy
+        rövid modellkérdés után sürgősen szól (_candidate), és lekerül. Ha most nem nézhető meg, a listán marad, és a
+        következő kör próbálja: elavult adatokkal nem szól."""
+        now = self.clock()
+        entry = self._auction(key)
+        if entry is None:
+            return
+        deal = self._auction_deal(entry, now)
+        verdict, page = self._look_auction(game, entry, deal)
+        if verdict is None or self._auction_rejected(entry, deal, verdict, page):
+            return
+        self._candidate(game, {"id": entry["search"], "query": entry["query"]}, deal, page,
+                        done=partial(self._drop_auction, key))
 
     def _drop_auction(self, key: str) -> None:
-        """Egy licit zárás előtti ellenőrzése lezárult (szólt róla, vagy elkelt, hibás…): lekerül a licitlistáról."""
+        """Egy licit lekerül a licitlistáról (szólt róla a zárás előtt, vagy elkelt, hibás, már nem éri meg…)."""
         with self._lock:
             self._data["auctions"] = [a for a in self._data["auctions"] if listing_key(a["url"]) != key]
             self._save()

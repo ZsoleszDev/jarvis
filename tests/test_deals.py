@@ -644,6 +644,68 @@ class DealTests(HunterCase):
         self.assertEqual(self.hunter.state()["auctions"], [], "a zárás előtti szólás után lekerül")
         self.assertEqual([d["url"] for d in self.hunter.state()["deals"]], [far["url"]])
 
+    def test_an_auction_is_only_recommended_after_its_page_is_checked(self):
+        """A még napokig futó licit gyorsan a listára kerül, de ellenőrizetlenként: licithatárt és értesítést csak az
+        adatlapja után ad. Ha az adatlap szerint hibás („hibás, nem működik, alkatrésznek”), lekerül, és nem szól; ha
+        a kör keretébe már nem fér az adatlap, ellenőrizetlen marad, és egy későbbi kör nézi meg (akkor szól)."""
+        broken = {"text": "PS5 DualSense kontroller · Hátralévő idő: 2 nap", "price": 1,
+                  "url": "https://www.vatera.hu/termek/3301", "auction": True}
+        good = {"text": "PS5 DualSense kontroller fehér · Hátralévő idő: 2 nap", "price": 1,
+                "url": "https://www.vatera.hu/termek/3302", "auction": True}
+        self.browser.by_url = [("vatera.hu", [broken, good])]
+        self.browser.pages[broken["url"]] = {"title": "PS5 DualSense kontroller",
+                                             "text": "PS5 DualSense kontroller, hibás, nem működik, alkatrésznek."}
+        self.hunter.add_search("PS5 kontroller", ["jofogas"], reference=14000)
+        self.hunter.add_watch("https://www.vatera.hu/listings/index.php?c=123&ob=ending")
+        self.hunter.set_enabled(True)
+        with mock.patch.object(deals_module, "MAX_PAGES", 1):   # csak az első adatlapja fér bele
+            self.hunter.run(notify=self.notify)
+        self.assertEqual(self.notices, [], "ellenőrzés nélkül nem javasol licithatárt")
+        [listed] = self.hunter.state()["auctions"]
+        self.assertEqual((listed["url"], listed["checked"]), (good["url"], False))
+        journal = [e["text"] for e in self.hunter.journal.entries()]
+        self.assertTrue(any("Lekerült a licitlistáról: „PS5 DualSense kontroller" in t and "hibás" in t for t in journal))
+        self.assertTrue(any(t.startswith("Licitlistára tettem, még ellenőrizetlenül") for t in journal))
+        self.assertNotIn(good["url"], self.browser.looked)
+        self.clock.now += deals_module.BUSY_RETRY
+        self.assertTrue(self.hunter.available(), "az ellenőrizetlen adatlapja esedékes")
+        self.hunter.run(notify=self.notify)
+        [(title, text, extra)] = [(t, x, e) for _k, t, x, e in self.notices]
+        self.assertTrue(title.endswith("(legfeljebb 9 800 Ft)") and extra["quiet"])
+        self.assertIn("Az adatlapját megnéztem", text)
+        self.assertTrue(self.hunter.state()["auctions"][0]["checked"])
+
+    def test_the_last_check_before_closing_uses_the_current_price_and_settings(self):
+        """A zárás előtti ellenőrzés az adatlapról olvassa a mostani árat, és a licithatárt a mostani beállításokkal
+        számolja újra: a már 12 000 Ft-nál tartó licitről (9 800 Ft-os határ) nem szól; ha közben a vételi limitet
+        3 000 Ft-ra csökkentetted, legfeljebb annyiig javasol, és ami már afölött van, arról nem szól."""
+        rows = [{"text": f"PS5 DualSense kontroller {name} · Hátralévő idő: 2 nap", "price": 1,
+                 "url": f"https://www.vatera.hu/termek/34{n}", "auction": True}
+                for n, name in enumerate(("fehér", "fekete", "kék"))]
+        self.browser.by_url = [("vatera.hu", rows)]
+        self.hunter.add_search("PS5 kontroller", ["jofogas"], reference=14000)
+        self.hunter.add_watch("https://www.vatera.hu/listings/index.php?c=123&ob=ending")
+        self.hunter.set_enabled(True)
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(len(self.notices), 3)
+        self.assertEqual({a["max_bid"] for a in self.hunter.state()["auctions"]}, {9800})
+        for row, current in zip(rows, ("12 000", "2 000", "4 000")):
+            self.browser.pages[row["url"]] = {"title": row["text"].split(" ·")[0],
+                                              "text": f"PS5 kontroller, hibátlan. Aktuális ár: {current} Ft. 3 licit."}
+        self.browser.by_url = [("vatera.hu", [])]
+        self.clock.now += 2 * 86400 - 5 * 3600
+        self.hunter.set_limits(max_buy=3000)
+        self.hunter.run(notify=self.notify)
+        urgent = [(t, x) for _k, t, x, e in self.notices[3:] if e.get("urgent")]
+        self.assertEqual([t.split(" ·")[0] for t, _x in urgent], ["Licit: PS5 DualSense kontroller fekete"])
+        text = urgent[0][1]
+        self.assertIn("most 2 000 Ft", text)
+        self.assertIn("Legfeljebb 3 000 Ft-ig érdemes licitálni", text, "a mostani vételi limittel")
+        self.assertEqual(self.hunter.state()["auctions"], [], "mindhárom lekerült")
+        journal = " ".join(e["text"] for e in self.hunter.journal.entries())
+        self.assertIn("„PS5 DualSense kontroller fehér · Hátralévő idő: 2 nap” most 12 000 Ft", journal)
+        self.assertIn("most 4 000 Ft, a mostani beállításokkal legfeljebb 3 000 Ft-ig érné meg", journal)
+
     def test_an_auction_can_be_taken_off_the_list(self):
         far = {"text": "PS5 DualSense kontroller · Hátralévő idő: 2 nap", "price": 1,
                "url": "https://www.vatera.hu/termek/3101", "auction": True}
@@ -902,6 +964,8 @@ class ExploreTests(HunterCase):
         self.assertNotIn("urgent", extra)
         [tip] = self.hunter.state()["tips"]
         self.assertEqual((tip["price"], tip["n"], tip["key"]), (70000, 5, "3060 rtx ti"))
+        self.assertEqual((extra["tip"], extra.get("quiet")), (tip["id"], None),
+                         "a telefonon a tipp saját, nagyon rövid pittyenésével szól (notice.tip)")
         self.notices.clear()
         self.assertTrue(any("jofogas.hu/magyarorszag?q=RTX%203060%20Ti" in u for u in self.browser.urls),
                         "a Jófogáson is megnézte, a cím szavaival (ahogy a hirdetésben írták)")
@@ -2138,7 +2202,7 @@ class MoneyTests(HunterCase):
         said = self.hunter.money_check(self.notify)
         self.assertEqual(len(said), 1)
         self.assertIn("A havi keret 82%-a elment: már csak 18 500 Ft maradt", said[0])
-        self.assertEqual(self.notices[-1][3]["actions"], [{"action": "ledger", "label": "Vételeim"}])
+        self.assertEqual(self.notices[-1][3]["actions"], [{"action": "ledger", "label": "Elemzés"}])
         self.assertEqual(self.hunter.money_check(self.notify), [], "havonta egyszer")
         self.store.create(title="Makita", bought_price=20000, bought_at=now - 30)
         self.assertIn("Elfogyott a havi keret", self.hunter.money_check(self.notify)[0])
@@ -2208,13 +2272,44 @@ class ProfitTests(unittest.TestCase):
             store.create(title="Saját póló", price=2000)          # nem vett tárgy: nem számít
             report = profit_report(store.all(), now)
         self.assertEqual(report["month"], {"profit": 40000, "count": 1, "revenue": 95000})
-        self.assertEqual(report["total"], {"profit": 43000, "count": 2, "spent": 64000, "revenue": 107000, "roi": 67})
+        self.assertEqual(report["total"], {"profit": 43000, "count": 2, "spent": 64000, "revenue": 107000, "roi": 67,
+                                           "own": 0, "own_revenue": 0})
         self.assertEqual((report["open"]["count"], report["open"]["spent"], report["open"]["unknown"]), (1, 15000, 1),
                          "a Nike-nak nincs ára: nem tudni, mennyi haszon várható belőle")
         self.assertEqual(report["days"], 20, "átlagosan (10 + 30) / 2 nap alatt kelt el")
         self.assertEqual([r["name"] for r in report["rows"]], ["Nike Air Max", "RTX 3060 Ti", "PS5 kontroller"],
                          "elöl a meg nem eladott, aztán a legutóbb eladott")
         self.assertEqual([(m["profit"], m["count"]) for m in report["months"]], [(40000, 1), (3000, 1)])
+
+    def test_own_things_sold_by_jarvis_count_in_the_profit(self):
+        """A saját holmid (nincs vételára, pl. a ruháid), amit a Jarvis töltött fel és elkelt: a bevétele a haszonba
+        számít (ebben a hónapban, összesen, havonta), az eladás költségeivel együtt; a megtérülés (%) csak a megvett
+        tárgyakból számol. Amíg nem kelt el, nem számít (nincs mit elszámolni)."""
+        from jarvis_core.deals import profit_report
+        from jarvis_core.selling import ItemStore
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ItemStore(Path(tmp))
+            now = time.time()
+            blazer = store.create(title="Zara blézer", price=4500, targets=["vinted"])
+            store.mark(blazer.id, "vinted")
+            store.mark(blazer.id, sold=True)
+            shoes = store.create(title="Nike cipő", price=8000, sell_shipping=1000)
+            store.mark(shoes.id, sold=True)
+            store.create(title="H&M póló", price=1500)          # még nem kelt el: nem számít
+            card = store.create(title="RTX 3060 Ti", bought_price=55000, sold_price=95000, bought_at=now - 10 * 86400)
+            store.mark(card.id, sold=True)
+            report = profit_report(store.all(), now)
+        rows = {r["id"]: r for r in report["rows"]}
+        self.assertEqual(set(rows), {blazer.id, shoes.id, card.id})
+        self.assertEqual((rows[blazer.id]["own"], rows[blazer.id]["stage"], rows[blazer.id]["cost"],
+                          rows[blazer.id]["profit"], rows[blazer.id]["roi"]), (True, "eladva", 0, 4500, None))
+        self.assertEqual(rows[shoes.id]["profit"], 7000, "az eladás postája levonódik")
+        self.assertFalse(rows[card.id]["own"])
+        self.assertEqual(report["total"], {"profit": 51500, "count": 3, "spent": 55000, "revenue": 107500, "roi": 73,
+                                           "own": 2, "own_revenue": 12500})
+        self.assertEqual(report["month"], {"profit": 51500, "count": 3, "revenue": 107500})
+        self.assertEqual(report["stages"], {"eladva": 3})
+        self.assertEqual(report["open"]["count"], 0, "a saját holmi nem pénz, ami bent van")
 
     def test_costs_expected_profit_stages_and_todays_price(self):
         """A bekerülés a vételár, a posta és az egyéb költség; a haszon az eladás költségeivel (posta, díj) együtt. Amíg

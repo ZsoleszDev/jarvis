@@ -48,9 +48,13 @@ LISTING_FIELDS = ("product", "title", "description", "category", "gender", "bran
 # Kinek szól a ruha (a Vinted kategóriafájának első szintje): a kategóriaút első szava ehhez igazodik.
 GENDERS = {"női": "Nők", "férfi": "Férfiak", "gyerek": "Gyerekek"}
 GENDER_LEVELS = {"no", "nok", "noi", "ferfi", "ferfiak", "gyerek", "gyerekek", "gyermek", "women", "men", "kids"}
-# A leírás vége (a te nevedben): ezt a Jarvis teszi hozzá, nem a modell írja. Több változat, hogy ne minden hirdetésed
-# vége legyen szóról szóra ugyanaz (a tárgy szerint mindig ugyanazt kapja).
-DESCRIPTION_FOOTERS = (
+# A leírás vége (a te nevedben): ezt a Jarvis teszi hozzá, nem a modell írja, és mindig ugyanez (ruhánál, cipőnél,
+# kiegészítőnél „ruhát”, máshol „holmit”). Fölötte az, amit kifejezetten kértél, alatta a kulcsszavak.
+DESCRIPTION_FOOTER = ("Ha kérdésed van, vagy több képet szeretnél, írj bátran! Nézz körül a profilomon is, ott még "
+                      "sok más {what} találsz. Ha egyszerre több darabot veszel, csomagban olcsóbban kapod meg.")
+# A korábbi, váltakozó zárószövegek (az egyikből „van még sok ruhát;” lett): a még fel nem töltött tárgyak leírásában
+# betöltéskor a mostanira cseréli (refresh_footer).
+OLD_FOOTERS = (
     "Ha kell pontos méret vagy több kép, írj nyugodtan! A profilomon még sok {what} találsz: ha többet rendelsz "
     "egyben, a csomag-összeállítással olcsóbban kapod meg.",
     "Kérdés esetén vagy ha több képet szeretnél, írj bátran! Nézz körül a profilomon is, van még sok {what}; több "
@@ -58,7 +62,6 @@ DESCRIPTION_FOOTERS = (
     "Pontos méretet vagy további fotót szívesen küldök, csak írj! A profilomon találsz még sok {what}, és ha "
     "többet viszel egyben, csomagban olcsóbb.",
 )
-DESCRIPTION_FOOTER = DESCRIPTION_FOOTERS[0]
 # A leírásba alapból csak a zárószöveg (és a kulcsszavak) kerül: a tárgyról magáról a Jarvis csak akkor ír, ha a
 # leírásodban (Pro: a megjegyzésben) kifejezetten kéred (pl. „a leírásba írd bele, hogy…”, „írd oda, hogy…”).
 _DESCRIBE_RE = re.compile(r"leiras|\b(?:ird|irj|irjad|irjal|irjon)\s+(?:(?:bele|oda|hozza|rola|valamit|be)\b|"
@@ -72,7 +75,7 @@ MULTILINE = {"description", "prompt", "trade_note"}
 AMOUNT_FIELDS = ("price", "min_price", "bought_price", "sold_price", "bought_shipping", "bought_extra",
                  "market_price", "target_price", "sell_shipping", "sell_fee", "price_estimate")
 TIME_FIELDS = ("bought_at", "sold_at")
-# A Vételeim fülön (és a telefonos API-ban) átírható vételi és eladási adatok (a vételár és az eladási ár mellett).
+# Az Elemzés fülön (és a telefonos API-ban) átírható vételi és eladási adatok (a vételár és az eladási ár mellett).
 LEDGER_FIELDS = ("bought_shipping", "bought_extra", "bought_from", "bought_at", "in_transit", "market_price",
                  "target_price", "sell_shipping", "sell_fee", "trade_note", "sold_at")
 POSTED, NOT_POSTED, FAILED = "feltöltve", "nincs fent", "hiba"
@@ -235,7 +238,7 @@ class Item:
     source: str = ""                  # a hirdetés, ahol vetted (Automata kereskedés, Megvettem)
     sold_price: int | None = None
     sold_at: float = 0.0
-    # Vételi napló (Vételeim fül): a vétel többi költsége, mennyit ér, mennyiért adnád tovább, és az eladás költségei.
+    # Vételi napló (Elemzés fül): a vétel többi költsége, mennyit ér, mennyiért adnád tovább, és az eladás költségei.
     bought_shipping: int | None = None    # vételkor a posta (csomagautomata, futár)
     bought_extra: int | None = None       # egyéb költség (javítás, tisztítás, alkatrész, benzin)
     bought_from: str = ""             # honnan vetted (pl. „Hardverapró”, „bolhapiac”)
@@ -472,6 +475,21 @@ class ItemStore:
             item.photos = [p for p in item.photos if (folder / p).is_file()]
             item.photo_checks = {k: v for k, v in item.photo_checks.items() if k in item.photos}
             self._items[item.id] = item
+            self._refresh_footer(item)
+
+    def _refresh_footer(self, item: Item) -> None:
+        """Betöltéskor: a még fel nem töltött tárgy leírásában a korábbi zárószöveg helyén a mostani (refresh_footer;
+        a kézzel átírt leírásban is csak a zárószöveget cseréli). A fent lévő hirdetésé marad, mint a többi oldalon
+        (FROZEN_WHEN_POSTED)."""
+        if any(e.get("status") == POSTED for e in item.platforms.values()):
+            return
+        fresh = refresh_footer(item.description)
+        if fresh != item.description:
+            item.description = fresh
+            try:
+                self._save(item)
+            except OSError:
+                pass                       # a memóriában már a mostani; a következő mentéssel kiíródik
 
     # --- belső -------------------------------------------------------------------------
 
@@ -552,7 +570,7 @@ class ItemStore:
                 setattr(item, key, value)
                 changed.append(key)
         if item.bought_price is not None and not item.bought_at:
-            item.bought_at = time.time()      # a vételár első megadásakor: ma vetted (a Vételeim fülön átírható)
+            item.bought_at = time.time()      # a vételár első megadásakor: ma vetted (az Elemzés fülön átírható)
         return changed
 
     def _clean(self, values: dict[str, Any]) -> dict[str, Any]:
@@ -1128,7 +1146,7 @@ class ListingExtractor:
         if not only or "description" in only:
             # a tárgyról csak akkor ír, ha kérted; különben a leírás a zárószöveg és a kulcsszavak
             text = values["description"] if wants_description(prompt) else ""
-            values["description"] = compose_description(text, str(data.get("keywords") or ""), kind, seed=item.id)
+            values["description"] = compose_description(text, str(data.get("keywords") or ""), kind)
         if values.get("title") and (not only or "title" in only):
             values["title"] = tidy_title(values["title"], values.get("brand") or item.brand, kind,
                                          values.get("size") or item.size, values.get("color") or item.color)
@@ -1178,7 +1196,7 @@ class ListingExtractor:
         values["kind"] = str(data.get("kind") or "").strip()
         kind = values["kind"] or item.kind
         text = values["description"] if wants_description(prompt) else ""   # a tárgyról csak kérésre
-        values["description"] = compose_description(text, str(data.get("keywords") or ""), kind, seed=item.id)
+        values["description"] = compose_description(text, str(data.get("keywords") or ""), kind)
         if values["title"]:
             values["title"] = tidy_title(values["title"], values["brand"] or item.brand, kind,
                                          values["size"] or item.size, values["color"] or item.color)
@@ -1197,13 +1215,25 @@ class ListingExtractor:
         return None if saved is None else (saved, estimate)
 
 
-def compose_description(text: str, keywords: str, kind: str, seed: str = "") -> str:
-    """A hirdetés leírása: a modell rövid (első személyű) megjegyzése, ha van, a zárószöveg (a tárgy szerint az egyik
-    változat, seed), és a kulcsszavak a Vinted keresőjének (#zara #póló …, legfeljebb hat)."""
-    parts = [text.strip()] if text.strip() else []
-    if "profilomon" not in fold(text):   # ha a modell mégis beleírta, nem kétszer
-        footer = DESCRIPTION_FOOTERS[int(hashlib.sha1(seed.encode("utf-8")).hexdigest(), 16) % len(DESCRIPTION_FOOTERS)]
-        parts.append(footer.format(what="ruhát" if kind in CLOTHING else "holmit"))
+def description_footer(kind: str) -> str:
+    """A leírás zárószövege: mindig ugyanaz (ruhánál, cipőnél, kiegészítőnél „ruhát”, máshol „holmit”)."""
+    return DESCRIPTION_FOOTER.format(what="ruhát" if kind in CLOTHING else "holmit")
+
+
+def refresh_footer(description: str) -> str:
+    """A leírás, a korábbi zárószövegek (OLD_FOOTERS) helyén a mostanival, ugyanazzal a szóval („ruhát” vagy
+    „holmit”); a többi részéhez nem nyúl."""
+    for old in OLD_FOOTERS:
+        for what in ("ruhát", "holmit"):
+            description = description.replace(old.format(what=what), DESCRIPTION_FOOTER.format(what=what))
+    return description
+
+
+def compose_description(text: str, keywords: str, kind: str) -> str:
+    """A hirdetés leírása: felül, amit kifejezetten kértél (a modell rövid, első személyű szövege), alatta mindig a
+    zárószöveg, legalul a kulcsszavak a Vinted keresőjének (#zara #póló …, legfeljebb hat)."""
+    text, footer = text.strip(), description_footer(kind)
+    parts = [text] if fold(footer) in fold(text) else [text, footer]   # ha szó szerint benne van, nem kétszer
     tags = []
     for word in re.split(r"[,;\n]+", keywords):
         tag = re.sub(r"[^\w-]", "", word.strip().lower().replace(" ", ""))
