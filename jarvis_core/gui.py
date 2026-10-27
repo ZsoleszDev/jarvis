@@ -826,7 +826,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **deals.set_message(body.get("text"))})
             if action == "limits":      # legfeljebb ennyiért vegyen, legalább ennyi haszonnal (minden keresésre)
                 return self._json(200, {"ok": True, **deals.set_limits(body.get("max_buy"), body.get("min_profit"),
-                                                                       body.get("safe_only"))})
+                                                                       body.get("safe_only"), body.get("fast_alert"))})
             if action == "enable":
                 return self._json(200, {"ok": True, **deals.set_enabled(bool(body.get("on")))})
             if action == "auction_dismiss":  # egy licit levétele a licitlistáról

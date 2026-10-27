@@ -139,6 +139,11 @@
   a mostani beállításokkal számolja újra (_auction_top: vételi limit, havi keret, a keresés vagy a figyelt oldal
   szabálya); ha a mostani ár eléri, nem szól; ha az adatlap nem nézhető meg, nem szól elavult adatokkal.
 - Az ütemező tud a 10 perces újrapróbálkozásról és a licitlistáról (every_minutes: addig percenként néz).
+- Gyors riasztás (alapból be, Beállítások): az adatlap és az állapot szerinti újraszámolás után rögtön csenget, a modell
+  utána nézi meg (a körben a következő modellkérdésként, az azonnali figyelőben a köteg végén); ha gyanús, „Mégsem”, és
+  leveszi a találatok közül. A jelölt adatlapja a letöltő sorában elsőbbséget kap (SiteFetcher urgent; a szünet marad).
+  Előmelegítés ráérő időben (DealHunter.warm, InstantWatch._warm): a gyakori termékek összehasonlítóinak leírása,
+  csendes órában a kevés árúak árkeresése; a mai számokban „Ráérő időben”.
 
 ## Élesben kipróbálandó
 - Azonnali figyelő: a feltöltési idő a valódi kártyákon (instant._POSTED_RE: „ma 14:07”, „tegnap 23:50”; a Jófogáson
@@ -146,6 +151,10 @@
   keret mennyire terheli az oldalakat. A Hardverapró kiemeltjeinek átugrása (LEAD_SITES, offset=): hogy a valódi oldalon
   az offset= tetszőleges értékkel is jól lapoz-e a 100-as listanézetben, és hogy az „Előresorolt” blokkot a kártyák
   felismerik-e (feeds._promoted). A közös friss lista (Hardverapró › Hardver) lefedettsége (COVER_MIN 5, COVER_MISS 0,1).
+- Gyors riasztás: hány „Mégsem” jön utána naponta (ha sok, érdemes kikapcsolni, vagy a csengetés szövegén jelezni). Az
+  előmelegítés (WARM_EVERY 60 mp, WARM_BELOW 0,5, WARM_SCORE 1,5) mennyit visz el a figyelő keretéből (a mai számokban
+  „Ráérő időben”), és hogy a gyakori termékek friss hirdetéseinél tényleg elmarad-e a leírások olvasása a csengetés
+  előtt. A csendes órák felismerése (tanult ritmus) a valódi forgalommal.
 - Alkuval megérheti (FRESH_HAGGLE_CUT 15%): hány ilyen tipp jön naponta (a mai számokban „alkuval megérheti”), és
   hogy a javasolt ajánlatot elfogadják-e. Utólagos modellellenőrzés (FOLLOWUP_TTL 6 óra): mennyi idő alatt kerül sorra
   egy feltöltés után.

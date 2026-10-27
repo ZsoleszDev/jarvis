@@ -67,6 +67,11 @@ WAIT_MAX = 1800            # ennyi ideig (másodperc); ami addig sem került sor
                            # elfelejti: ha még fent van, a következő letöltésnél újra új hirdetésként jön (_forget)
 TICK = 2.0
 FOLLOWUP_EVERY = 20        # ráérő időben ennyi másodpercenként nézi, van-e utólag ellenőrizendő találat
+# Előmelegítés (DealHunter.warm): ráérő időben, legfeljebb WARM_EVERY másodpercenként egy lépés (egy leírás, vagy csendes
+# órában egy árkeresés), csak csúcsidőn kívül, ha a figyelő keretének kevesebb mint WARM_BELOW része ment el ebben az
+# órában, és az oldal most rögtön kérhető (nem vár a szünetre: egy közben jövő új hirdetés értékelését nem késlelteti).
+WARM_EVERY = 60
+WARM_BELOW = 0.5
 BOOK_SAVE = 600            # az árbázist legfeljebb ennyi másodpercenként írja ki (nagy fájl; a körök is mentik)
 JITTER = (0.85, 1.15)
 # Tanult ritmus: oldalanként feljegyzi, a nap melyik órájában mennyi új (illő) hirdetés jön (a régebbiek súlya minden új
@@ -198,6 +203,7 @@ class InstantWatch:
         self._jobs: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
         self._followed_at = float("-inf")     # mikor nézte meg utoljára az utólag ellenőrizendőket (_followups)
+        self._warmed_at = float("-inf")       # mikor melegített elő utoljára (_warm)
         self._data = self._load()
 
     # --- tárolás ---
@@ -442,6 +448,7 @@ class InstantWatch:
                         job = self._jobs.get(timeout=0.5)
                     except queue.Empty:
                         self._followups()
+                        self._warm()
                         continue
                 _alert, site, rows = job
                 with self._lock:
@@ -466,11 +473,12 @@ class InstantWatch:
                 except Exception:  # noqa: BLE001 - az értékelés egy hiba miatt ne álljon le
                     pass
 
-    def _followups(self) -> None:
-        """Ráérő időben (üres sornál, legfeljebb FOLLOWUP_EVERY másodpercenként): amit a modell foglaltsága miatt
-        ellenőrzés nélkül jelzett, azt most megnézeti (DealHunter.followups), ha a modell kérdezhető."""
+    def _followups(self, force: bool = False) -> None:
+        """Ráérő időben (üres sornál, legfeljebb FOLLOWUP_EVERY másodpercenként; force: rögtön, egy köteg után): amit
+        ellenőrzés nélkül jelzett (gyors riasztás, vagy a modell foglalt volt), azt most megnézeti
+        (DealHunter.followups), ha a modell kérdezhető."""
         now = self.clock()
-        if now - self._followed_at < FOLLOWUP_EVERY or not hasattr(self.hunter, "followups"):
+        if (not force and now - self._followed_at < FOLLOWUP_EVERY) or not hasattr(self.hunter, "followups"):
             return
         self._followed_at = now
         try:
@@ -478,6 +486,43 @@ class InstantWatch:
                 self.hunter.followups(self.model_ok, self.notify)
         except Exception:  # noqa: BLE001 - egy hiba miatt ne álljon le az értékelés
             pass
+
+    def _spare(self, site: str, now: float) -> bool:
+        """Van-e most kimaradó keret ezen az oldalon az előmelegítéshez: nincs csúcsidő, a figyelő keretének kevesebb mint
+        WARM_BELOW része ment el ebben az órában, és az oldal most rögtön kérhető."""
+        if self._factor(site, now) < 1 or not self._has_budget(site, now):
+            return False
+        used = getattr(self.fetcher, "used", None)
+        if used is not None and used(site, QUOTA.tag) >= INSTANT_HOURLY * WARM_BELOW:
+            return False
+        ready = getattr(self.fetcher, "ready", None)
+        return ready is None or bool(ready(site))
+
+    def _warm(self, force: bool = False) -> str:
+        """Ráérő időben (üres sornál, legfeljebb WARM_EVERY másodpercenként) egy előmelegítő lépés (DealHunter.warm): a
+        gyakran felbukkanó termékek összehasonlítóinak egy leírása, vagy csendes órában (mindkét oldal ráér) egy
+        árkeresés a kevés árú termékre. Visszaadja, mit csinált."""
+        now = self.clock()
+        if (not force and now - self._warmed_at < WARM_EVERY) or not hasattr(self.hunter, "warm"):
+            return ""
+        self._warmed_at = now
+        try:
+            if not (self._on() and self._may_work()):
+                return ""
+            spare = [site for site in self.platforms if self._spare(site, now)]
+            if not spare:
+                return ""
+            quiet = len(spare) == len(self.platforms) and all(self._factor(site, now) > 1 for site in self.platforms)
+
+            def read(row: dict[str, Any]) -> dict[str, Any] | None:
+                site = str(row.get("platform") or "")
+                if site not in spare or not self._spare(site, self.clock()):
+                    raise Deferred("kéréskeret", sites=[site])     # most nem: a következő alkalommal
+                return self._look(row)
+
+            return self.hunter.warm(read, self._search if quiet else None, readable=lambda site: site in spare)
+        except Exception:  # noqa: BLE001 - (Szünet, keret, letöltési hiba, kilépés: a szál ciklusa nézi) ráér
+            return ""
 
     def _may_work(self) -> bool:
         """Most dolgozhat-e (nincs Szünet, a háttérmunka nincs kikapcsolva vagy felfüggesztve, a gép üzemideje van)."""
@@ -997,6 +1042,7 @@ class InstantWatch:
             return hits
         if hasattr(self.hunter, "flush_tips"):
             self.hunter.flush_tips(self.notify)     # a bizonytalan árú tippek („Érdemes megnézni”)
+        self._followups(force=True)                 # a gyors riasztással jelzetteket a modell most nézi meg
         if waiting:
             self._keep_waiting(alert["id"], site, waiting)
         return hits
@@ -1035,13 +1081,13 @@ class InstantWatch:
 
     def _look(self, row: dict[str, Any]) -> dict[str, Any] | None:
         """Egy hirdetés oldala böngésző nélkül (None, ha most nem sikerült). A figyelő keretéből megy: ha nincs hely
-        (vagy Szünet van), Deferred (a hirdetés vár)."""
+        (vagy Szünet van), Deferred (a hirdetés vár). A jelölt adatlapja (row urgent) a letöltő sorában elsőbbséggel."""
         self._go()
         site = str(row.get("platform") or "")
         if not self._room([site]):
             raise Deferred("kéréskeret", sites=[site])
         try:
-            return self.fetcher.page(row["url"], site, self._check_on, quota=QUOTA)
+            return self.fetcher.page(row["url"], site, self._check_on, quota=QUOTA, urgent=bool(row.get("urgent")))
         except FeedError as exc:
             if exc.kind == "busy":                 # a letöltő szerint sincs hely: a hirdetés vár
                 raise Deferred("kéréskeret", sites=[site]) from None
