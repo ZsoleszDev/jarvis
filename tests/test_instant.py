@@ -23,7 +23,7 @@ from jarvis_core import deals as deals_module  # noqa: E402
 from jarvis_core.deals import DealHunter  # noqa: E402
 from jarvis_core.feeds import FeedError, SiteFetcher, fetch_image, parse_listings, parse_page, public_host  # noqa: E402
 from jarvis_core import instant as instant_module  # noqa: E402
-from jarvis_core.instant import InstantError, InstantWatch  # noqa: E402
+from jarvis_core.instant import InstantError, InstantWatch, posted_ago  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
 
 
@@ -37,6 +37,11 @@ def ha_card(n: int, title: str, price: str, city: str = "Budapest") -> str:
         <div class="uad-col uad-col-info"><div class="uad-price">{price}</div><div class="uad-ultralight">ma 14:0{n % 10}</div></div>
         <div class="uad-col uad-col-seller"><a href="/tag/eladó{n}.html">eladó{n}</a> (12 értékelés)</div>
       </div></li>"""
+
+
+def promo_card(n: int, title: str, price: str) -> str:
+    """Egy fizetett kiemelés („Előresorolt”) a Hardverapró listájának elején."""
+    return ha_card(n, title, price).replace('<li class="media"', '<li class="media kiemelt"', 1)
 
 
 def ha_page(cards: list[str]) -> str:
@@ -550,6 +555,125 @@ class InstantTests(InstantCase):
                          ["a leírása szerint hibás a kijelzője"])
         self.assertEqual(sorted(len(v["issues"]) for v in self.hunter._vetted.values()), [0, 0, 1])
 
+    def test_how_soon_it_notices_and_the_pace(self):
+        """A kártyán lévő feltöltési időből („ma 14:07”) méri, mennyivel a feltöltés után vette észre az új hirdetést (a
+        felületen oldalanként látszik). A figyelők a keretből egyenletesen kapnak időt (nem fogy el az óra elején);
+        csúcsidőben a keret szerinti leggyorsabb ütemben néz (legalább percenként), és ha új hirdetés jött, a következő
+        letöltés hamarabb jön."""
+        now = time.mktime((2027, 1, 15, 14, 10, 0, 0, 0, -1))
+        self.clock.now = now
+        self.assertEqual(posted_ago("Palit RTX 3060 Ti Budapest 52 000 Ft ma 14:07 eladó7", now), 180)
+        self.assertEqual(posted_ago("Ma, 14.05", now), 300)
+        self.assertEqual(posted_ago("tegnap 23:50", time.mktime((2027, 1, 16, 0, 10, 0, 0, 0, -1))), 1200)
+        self.assertIsNone(posted_ago("ma 18:00", now), "a jövőben")
+        self.assertIsNone(posted_ago("Budapest 52 000 Ft", now))
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        [alert] = self.watch.add("RTX 3060 Ti", ["hardverapro"])["alerts"]
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()                                                  # 14:14
+        self.results([ha_card(7, "Zotac RTX 3060 Ti Twin Edge", "99 000 Ft")] + HA_CARDS[:2])   # „ma 14:07”
+        self.watch.tick()
+        [site] = [s for s in self.watch.state()["sites"] if s["key"] == "hardverapro"]
+        self.assertEqual(site["delay"], {"median": 420, "n": 1}, "7 perccel a feltöltés után")
+        self.assertLessEqual(self.watch._next[f"{alert['id']}:hardverapro"] - self.clock.now, 180 * 1.15 * 0.5 + 1,
+                             "új jött: a következő letöltés hamarabb")
+        floor = 3600 / (instant_module.INSTANT_HOURLY * instant_module.POLL_SHARE)
+        self.assertEqual(site["every_s"], round(floor))
+        self.watch._factor = lambda site, now: 0.5                    # csúcsidő
+        for _ in range(20):
+            self.assertTrue(60 * 0.85 <= self.watch._interval(alert, "hardverapro", now) <= 60 * 1.15)
+        for n in range(5):                                            # hat figyelő: a keret egyenletesen oszlik
+            self.watch.add(f"GTX 10{n}0", ["hardverapro"])
+        self.watch._factor = lambda site, now: 1.0
+        self.assertGreaterEqual(self.watch._interval(alert, "hardverapro", now), 6 * floor * 0.85,
+                                "3 percenként nem férne bele a keretbe")
+
+    def test_the_promoted_ads_at_the_top_are_not_downloaded(self):
+        """A Hardverapró egy kategóriájának elején álló kiemelt („Előresorolt”) hirdetéseket megjegyzi, és a következő
+        letöltésnél az offset= paraméterrel átugorja őket (öt kiemeltet meghagy jelzőnek). A bemásolt cím offset= értéke a
+        kezdő becslés. Ha a letöltött oldal már nem kiemelttel kezdődik (elfogytak a kiemeltek), rögtön újra letölti az
+        elejétől, így az átugrott részbe eső új hirdetés sem vész el."""
+        promos = [promo_card(200 + n, f"Kiemelt monitor {n}", "50 000 Ft") for n in range(20)]
+        normal = [ha_card(1, "ASUS RTX 3060 Ti Dual", "95 000 Ft"), ha_card(4, "MSI RTX 3080 Ventus", "185 000 Ft")]
+        self.net.pages["offset=15"] = (200, ha_page(promos[15:] + normal))
+        self.net.pages["hardver/index.html"] = (200, ha_page(promos + normal))
+        [alert] = self.watch.add("https://hardverapro.hu/aprok/hardver/index.html?offset=20")["alerts"]
+        self.watch.set_enabled(True)
+        self.watch.poll(alert, "hardverapro")
+        self.assertTrue(self.net.asked[-1][1].endswith("hardver/index.html?offset=15"), "a bemásolt offset=20 a becslés")
+        self.assertEqual(self.watch.state()["alerts"][0]["lead"], {"hardverapro": 20})
+        self.later()
+        # a kiemeltek közül háromra fogyott, és jött egy új hirdetés: az offset=15 oldal már nem kiemelttel kezdődik
+        fresh = ha_card(9, "Zotac RTX 3060 Ti Twin Edge", "99 000 Ft")
+        self.net.pages["offset=15"] = (200, ha_page(normal))
+        self.net.pages["hardver/index.html"] = (200, ha_page(promos[:3] + [fresh] + normal))
+        asked = len(self.net.asked)
+        self.watch.poll(alert, "hardverapro")
+        urls = [url for _at, url in self.net.asked[asked:] if "friss.html" not in url]
+        self.assertEqual([u.rsplit("/", 1)[1] for u in urls], ["index.html?offset=15", "index.html"],
+                         "rögtön újra az elejétől")
+        self.assertEqual(self.watch.state()["alerts"][0]["lead"], {"hardverapro": 3})
+        self.assertEqual(self.hunter.state()["funnel"]["counts"]["new"], 1, "az új hirdetés nem veszett el")
+        self.later()
+        self.watch.poll(alert, "hardverapro")
+        self.assertTrue(self.net.asked[-1][1].endswith("hardver/index.html"), "háromnál kevesebb jelzőnél az elejétől")
+
+    def test_a_shared_list_covers_the_keyword_alerts(self):
+        """Egy keresőszó nélküli figyelő (pl. Hardverapró › Hardver) egy letöltéssel a keresőszavas figyelőknek is hoz
+        friss hirdetést: amelyikre illik, annak a látottjai közé kerül (nem méri fel kétszer). Ha egy keresőszavas
+        figyelő találatai rendre a közös listából jönnek, azt külön csak negyedóránként tölti le, és a keretből is
+        kevesebbet visz (így a közös lista sűrűbben jöhet)."""
+        self.net.pages["hardver/index.html"] = (200, ha_page(HA_CARDS[:2]))
+        self.results(HA_CARDS[:2])
+        feed = self.watch.add("https://hardverapro.hu/aprok/hardver/index.html")["alerts"][0]
+        keyword = self.watch.add("RTX 3060 Ti", ["hardverapro"])["alerts"][1]
+        self.watch.set_enabled(True)
+        self.watch.poll(feed, "hardverapro")
+        self.watch.poll(keyword, "hardverapro")
+        floor_before = self.watch._floor("hardverapro")
+        for n in range(6):
+            self.later()
+            card = ha_card(100 + n, f"Palit RTX 3060 Ti Dual {n}", "99 000 Ft")
+            self.net.pages["hardver/index.html"] = (200, ha_page([card] + HA_CARDS[:2]))
+            self.results([card] + HA_CARDS[:2])
+            new_before = self.hunter.state()["funnel"]["counts"].get("new", 0)
+            self.watch.poll(feed, "hardverapro")
+            self.watch.poll(keyword, "hardverapro")
+            self.assertEqual(self.hunter.state()["funnel"]["counts"]["new"], new_before + 1, "egyszer méri fel")
+        [_feed, stored] = self.watch.state()["alerts"]
+        self.assertEqual(stored["covered"], ["hardverapro"])
+        self.assertGreaterEqual(self.watch._interval(stored, "hardverapro", self.clock.now),
+                                instant_module.COVERED_EVERY * 60 * 0.85)
+        self.assertLess(self.watch._floor("hardverapro"), floor_before, "a közös lista sűrűbben jöhet")
+        # ha a keresés rendre olyat is talál, ami a közös listában nincs, újra a saját ütemében nézi
+        for n in range(6):
+            self.later()
+            self.results([ha_card(300 + n, f"Gigabyte RTX 3060 Ti {n}", "99 000 Ft")] + HA_CARDS[:2])
+            self.watch.poll(keyword, "hardverapro")
+        self.assertEqual(self.watch.state()["alerts"][1]["covered"], [])
+
+    def test_a_slightly_expensive_new_listing_is_a_haggle_tip(self):
+        """Ami most kicsit drága, de egy kis alkuval (legfeljebb 15%) megérne, arról egy rövid pittyenés jön („Alkuval
+        megérheti”), a javasolt ajánlattal; az oldalát nem tölti le (ez neked szóló tipp)."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "76 000 Ft")] + HA_CARDS[:2])
+        self.watch.tick()
+        [(_kind, title, text, extra)] = self.notices
+        self.assertEqual(title, "Alkuval megérheti: Palit RTX 3060 Ti Dual")
+        self.assertIn("ha kb. 70 000 Ft-ért (8%-kal olcsóbban) megkapod, kb. 18 500 Ft haszon", text)
+        self.assertTrue(extra["tip"])
+        self.assertFalse(any("_7/friss" in url for _at, url in self.net.asked), "az oldalát nem töltötte le")
+        self.assertEqual(self.pings, [])
+
     def test_the_sellers_other_listings_can_make_a_better_buy(self):
         """Egy jó találat után megnézi az eladó többi hirdetését (a hirdetés oldalán lévő „további hirdetései” linkről, a
         figyelő keretéből): amit külön is haszonnal lehetne továbbadni (itt egy AirPods az árbázis biztos ára alatt), azzal
@@ -837,7 +961,8 @@ class InstantTests(InstantCase):
     def test_promoted_listings_do_not_hide_a_full_page_of_new_ones(self):
         """A kiemelt hirdetések (elöl, mindig ugyanazok, tehát ismertek) nem akadályozzák, hogy észrevegye: az oldal alja
         is csupa új, lehet, hogy lemaradt valami (eddig csak a teljesen új oldal számított, ilyen pedig a kiemeltek miatt
-        nem volt). Az új kiemelt hirdetés a többi új után kerül sorra."""
+        nem volt). A Hardveraprón a kiemeltek blokkja nem új hirdetés (azt átugorja), egy újonnan feltűnő kiemeltet sem
+        mér fel."""
         url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
         self.watch.add(url)
         self.watch.set_enabled(True)
@@ -855,7 +980,8 @@ class InstantTests(InstantCase):
         self.hunter.appraise = lambda rows, *args, **kwargs: fresh.extend(rows) or []
         self.watch.tick()
         self.assertEqual(len([u for _t, u in self.net.asked if u.endswith("?offset=16")]), 1, "a következő oldal is")
-        self.assertEqual(fresh[-1]["title"], "Új kiemelt kártya", "a kiemelt a többi új után")
+        self.assertNotIn("Új kiemelt kártya", [row["title"] for row in fresh], "a kiemeltek blokkja nem új")
+        self.assertEqual(len(fresh), 15, "a két oldal nem kiemelt új hirdetései")
 
     def test_the_rounds_keep_part_of_the_hourly_budget(self):
         """Az azonnali figyelő nem eszi el a letöltő egész óránkénti keretét: ROUND_RESERVE kérés mindig a köröké marad
@@ -1239,9 +1365,11 @@ class InstantTests(InstantCase):
         finally:
             self.watch.stop()
 
-    def test_waits_for_the_model_while_you_use_jarvis(self):
-        """Amíg dolgozol a Jarvisszal, a modellt nem kérdezi: a megérőnek látszóról rögtön jön a gyors jelzés, de a
-        sürgős „Megéri” csak a modell ellenőrzése után (addig az oldalát sem tölti le); a többi is vár, és utána jön."""
+    def test_rings_while_you_use_jarvis_and_the_model_checks_later(self):
+        """Amíg dolgozol a Jarvisszal (pl. egy feltöltés használja a modellt), a modellt nem kérdezi, de nem is vár rá:
+        a megérőről az adatlap és az újraszámolás után rögtön sürgősen szól („a modell még nem nézte meg”); ami csak a
+        modellel ismerhető fel (a megnevezés), az vár. Amint a modell szabad, utólag megnézi a jelzett találatot: ha
+        rendben, ellenőrzött lesz (nem szól újra); ha a modell szerint nem ez, szól („Mégsem: …”, nem riaszt)."""
         self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
         self.hunter.set_enabled(True)
         self.watch.add("https://hardverapro.hu/aprok/hardver/videokartya/index.html")
@@ -1250,25 +1378,55 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.later()
         self.watch.model_ok = lambda: False
-        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft"), ha_card(31, "Zajszűrős fejhallgató", "30 000 Ft")]
-                     + HA_CARDS[:1], "videokartya")
-        self.net.pages["_7/friss"] = page_html("Hibátlan.")
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft"), ha_card(8, "PNY RTX 3060 Ti", "50 000 Ft"),
+                      ha_card(31, "Zajszűrős fejhallgató", "30 000 Ft")] + HA_CARDS[:1], "videokartya")
+        self.net.pages["_7/friss"] = page_html("Hibátlan, dobozában.")
+        self.net.pages["_8/friss"] = page_html("Hibátlan, dobozában.")
         self.net.pages["_31/friss"] = page_html("Hibátlan.")
         self.watch.tick()
-        self.assertEqual(self.notices, [], "ellenőrzés nélkül nem sürgős")
-        self.assertEqual([p[1] for p in self.pings], ["Ígéretes új hirdetés: Palit RTX 3060 Ti Dual"])
-        self.assertEqual(self.watch.state()["waiting"], 2)
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: PNY RTX 3060 Ti", "Megéri: Palit RTX 3060 Ti Dual"],
+                         "a modell nélkül is rögtön szól")
+        self.assertTrue(self.notices[0][3]["urgent"])
+        self.assertIn("de a modell még nem nézte meg (a modell most foglalt volt vagy nem válaszolt); amint lehet, "
+                      "megnézi, és ha mégsem jó, szólok", self.notices[0][2])
+        self.assertEqual(self.watch.state()["waiting"], 1, "a fejhallgató a megnevezésre vár")
         self.assertEqual(self.hunter.llm.calls, [])
-        self.assertFalse(any("_7/friss" in url for _at, url in self.net.asked), "az oldalát sem töltötte le")
+        deals = {d["title"]: d for d in self.hunter.state()["deals"]}
+        self.assertEqual((deals["PNY RTX 3060 Ti"]["verified"], deals["PNY RTX 3060 Ti"]["model_pending"]), (False, True))
+        self.assertEqual(deals["PNY RTX 3060 Ti"]["safety"]["level"], "jó", "ellenőrizetlen: legfeljebb „jó”")
+        self.watch._followups()
+        self.assertEqual(self.hunter.llm.calls, [], "a modell még foglalt: az utólagos ellenőrzés is vár")
+        # a modell szabad: az egyiket rendben találja, a másikat nem
+        self.watch.model_ok = lambda: True
+        original = self.hunter.llm._answer
+
+        def answer(messages, schema):
+            if "PNY" in messages[1]["content"]:
+                return {"ok": False, "suspicious": False, "reason": "Csak a doboza."}
+            return original(messages, schema)
+
+        self.hunter.llm._answer = answer
+        self.watch._followed_at = float("-inf")
+        self.watch._followups()
+        deals = {d["title"]: d for d in self.hunter.state()["deals"]}
+        self.assertEqual((deals["Palit RTX 3060 Ti Dual"]["verified"], deals["Palit RTX 3060 Ti Dual"].get("model_pending"),
+                          deals["Palit RTX 3060 Ti Dual"].get("unchecked")), (True, None, None), "utólag ellenőrzött")
+        self.assertNotIn("check", deals["Palit RTX 3060 Ti Dual"])
+        self.assertIn("Csak a doboza", deals["PNY RTX 3060 Ti"]["model_no"])
+        [(kind, title, text, extra)] = self.notices[2:]
+        self.assertEqual(title, "Mégsem: PNY RTX 3060 Ti")
+        self.assertIn("Utólag a modell is megnézte: a modell szerint nem ez: Csak a doboza.", text)
+        self.assertNotIn("urgent", extra)
+        self.assertNotIn("deal", extra, "a telefon nem riaszt rá")
+        self.watch._followed_at = float("-inf")
+        self.assertEqual(self.hunter.followups(lambda: True, self.notify), 0, "egyszer nézi meg")
+        # a megnevezésre váró fejhallgató is sorra kerül
         self.hunter.book.add([{"text": f"Sony WH-1000XM4 {n}", "price": 70000, "url": f"https://x.hu/s{n}",
                                "platform": ("jofogas", "hardverapro")[n % 2]} for n in range(5)])
         self.hunter.llm.explore = [{"n": 1, "query": "Sony WH-1000XM4", "buy": False}]
-        self.watch.model_ok = lambda: True
         self.watch.tick()
         self.assertEqual(self.watch.state()["waiting"], 0)
-        self.assertEqual([n[1] for n in self.notices], ["Megéri: Palit RTX 3060 Ti Dual", "Megéri: Zajszűrős fejhallgató"])
-        self.assertIn("Ugyanaz a kártya", self.notices[0][2], "most már a modell is megnézte")
-        self.assertEqual(len(self.pings), 2, "a Palitról egyszer jött gyors jelzés")
+        self.assertEqual(self.notices[-1][1], "Megéri: Zajszűrős fejhallgató")
 
     def test_suspicious_new_listings_are_never_sent(self):
         """A gyanúsan olcsóról (az oldalát sem tölti le), az átverésre utalóról és az értékelés nélküli eladóéról nem

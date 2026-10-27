@@ -141,6 +141,14 @@
 - Az ütemező tud a 10 perces újrapróbálkozásról és a licitlistáról (every_minutes: addig percenként néz).
 
 ## Élesben kipróbálandó
+- Azonnali figyelő: a feltöltési idő a valódi kártyákon (instant._POSTED_RE: „ma 14:07”, „tegnap 23:50”; a Jófogáson
+  más lehet, akkor nincs késés-adat); a keretarányos ütem (POLL_SHARE 0,75, PEAK_EVERY 1 perc, BURST 0,5) és a 90-es
+  keret mennyire terheli az oldalakat. A Hardverapró kiemeltjeinek átugrása (LEAD_SITES, offset=): hogy a valódi oldalon
+  az offset= tetszőleges értékkel is jól lapoz-e a 100-as listanézetben, és hogy az „Előresorolt” blokkot a kártyák
+  felismerik-e (feeds._promoted). A közös friss lista (Hardverapró › Hardver) lefedettsége (COVER_MIN 5, COVER_MISS 0,1).
+- Alkuval megérheti (FRESH_HAGGLE_CUT 15%): hány ilyen tipp jön naponta (a mai számokban „alkuval megérheti”), és
+  hogy a javasolt ajánlatot elfogadják-e. Utólagos modellellenőrzés (FOLLOWUP_TTL 6 óra): mennyi idő alatt kerül sorra
+  egy feltöltés után.
 - Állapotfelismerés (condition.py): a kulcsszavak (kijelző, akku, működés, tartozékok, garancia) a valódi leírásokon;
   ha egy gyakori megfogalmazás kimarad, az állapot ismeretlen marad (nem hibás). A modell condition válasza (a
   CHECK_MAX_TOKENS 700 elég-e, és hogy az idézetei tényleg szó szerintiek-e). A vett összehasonlítók leírásának
