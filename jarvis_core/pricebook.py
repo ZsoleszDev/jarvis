@@ -29,7 +29,7 @@ from .textutil import fold
 
 MAX_KEYS = 1500            # ennyi terméket őriz (a legrégebben látottak esnek ki)
 MAX_SAMPLES = 30           # termékenként ennyi árat (a legújabbakat)
-TITLE_KEEP = 70            # egy ár mellé a hirdetés címének eleje (a találatnál látszik, mihez mérte)
+TITLE_KEEP = 100           # egy ár mellé a hirdetés címének eleje (a találatnál látszik, mihez mérte; a termékadatai)
 MAX_AGE = 45 * 86400       # ennél régebben látott ár már nem számít a szokásos árba
 MIN_SAMPLES = 5            # legalább ennyi ár kell egy szokásos árhoz
 REVISIT_AFTER = 2 * 86400  # egy hirdetést legkorábban ennyi idő múlva néz meg újra (elkelt-e)
@@ -41,7 +41,7 @@ PRICE_CUT = 0.03           # ennyivel olcsóbb lett egy már látott hirdetés: 
 SLOW_RATE = 0.25           # ha az újranézett hirdetéseknek legfeljebb ennyi része tűnt el: lassan kel
 # A termékkulcs képzésének változata: ha a mentett árbázis régebbi, betöltéskor a kulcsokat újraképzi a nevükből, és az
 # így egybeeső termékek árait összevonja (rekey).
-KEY_VERSION = 2
+KEY_VERSION = 3
 
 # Márkák (ékezet nélkül, kisbetűvel; a több szavasak egybeírva, lásd _ALIASES).
 BRANDS = {
@@ -96,7 +96,12 @@ _ALIASES = ((r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbala
             (r"\btp ?-?link\b", "tplink"), (r"\bsteam deck\b", "steamdeck"), (r"\bjoy ?-?con\w*\b", "joycon"),
             (r"\bde ?'?longhi\b", "delonghi"), (r"\bx ?box\b", "xbox"), (r"\bapple watch\b", "watch"),
             (r"\blevi'?s\b", "levis"), (r"\bmeta quest\b", "quest"), (r"\boculus quest\b", "quest"),
-            (r"\bseries ([xs])\b", r"series\1"), (r"\bxiaomi redmi\b", "redmi"), (r"\bgamer ?pc\b", "gamerpc"))
+            (r"\bseries ([xs])\b", r"series\1"), (r"\bxiaomi redmi\b", "redmi"), (r"\bgamer ?pc\b", "gamerpc"),
+            # memória: a „SO DIMM” egy szó, a „DDR 4” is „ddr4”; a modul szabványneve („PC4-21300”) a generációja
+            (r"\bso ?-?dimm\b", "sodimm"), (r"\b(lp)?ddr ([2-5])\b", r"\1ddr\2"), (r"\bpc([2-5])l?-?\d{4,5}[a-z]?\b", r"ddr\1"),
+            # a laptop-memória SO-DIMM (de egy laptop a benne lévő memóriával nem az: ehhez a memória szava kell mellé)
+            (r"\b(?:laptop|notebook)(?:ba|hoz|os)? (ram|memoria\w*|memory)\b", r"sodimm \1"),
+            (r"\b(ram|memoria\w*|memory) (?:laptop|notebook)\w*", r"\1 sodimm"))
 # Ugyanannak a típusjelnek egy alakja (a kötőjel már ki van véve): az „i5-10400F”, „i5 10400F”, „i510400f” egyaránt
 # „i5 10400f”, az „RTX3060” „rtx 3060”, a memóriakészlet „2x8 GB”, „2 x 8GB”, „2x8” egyaránt „2x8gb”.
 _SPLITS = ((re.compile(r"\bi([3579]) ?(\d{4,5}[a-z]{0,3})\b"), r"i\1 \2"),
@@ -104,6 +109,15 @@ _SPLITS = ((re.compile(r"\bi([3579]) ?(\d{4,5}[a-z]{0,3})\b"), r"i\1 \2"),
            (re.compile(r"\b([1-8]) ?x ?(2|4|8|16|32|64) ?gb\b"), r"\1x\2gb"),
            (re.compile(r"\b([1-8])x(4|8|16|32|64)\b(?! ?(?:cm|mm|m|db)\b)"), r"\1x\2gb"))
 _KIT = re.compile(r"^([1-8])x(\d{1,2})gb$")
+# Videókártyán a „4G”, „6G”, „12G” a memória (VRAM): ugyanaz, mint a „4GB” (a GTX 1060 3 és 6 GB-os is, más áron).
+# Telefonnál (és máshol) a „4G”, „5G” a mobilhálózat, nem méret: ott nem így olvassa.
+_GPU_CONTEXT = {"rtx", "gtx", "rx", "arc", "geforce", "radeon", "quadro", "videokartya", "vga", "vram"}
+_GPU_VRAM = re.compile(r"^(1|2|3|4|6|8|10|11|12|16|20|24|32|48)g$")
+# Memóriamodul: a kiszerelés és a fajta is a termék része (más áron kel): SO-DIMM (laptop), szerver (ECC, regisztrált),
+# és a „kit” (több modul, a felosztása nélkül), csak memóriánál (egy DDR-generáció vagy a „RAM” szó mellett).
+_RAM_FORMS = {"sodimm": "sodimm", "ecc": "ecc", "reg": "reg", "registered": "reg", "rdimm": "reg", "lrdimm": "reg",
+              "kit": "kit", "keszlet": "kit"}
+_RAM_CONTEXT = re.compile(r"^(?:lp)?ddr[2-5]\w*$|^(?:ram|memoria\w*|memory|dimm|sodimm|rdimm)$")
 # Ár a címben („95 000 Ft”, „25e”, „25.000,-”): nem a termék része.
 _PRICE_IN_TITLE = re.compile(r"\b\d+(?:[ .]\d{3})*\s*(?:,-|(?:ft|huf|forint|e ?ft|ezer)\b)")
 # Mértékegység vagy méret egy szám után (8gb, 4k, 42es, 38-as, 120hz): nem a típusjel.
@@ -156,7 +170,15 @@ def _words(text: str) -> list[str]:
     folded = re.sub(r"(?<=[a-z0-9])-(?=[a-z0-9])", "", folded)      # WH-1000XM4 → wh1000xm4, i5-12400 → i512400
     for pattern, replacement in _SPLITS:                               # i512400 → i5 12400 (mint az „i5 12400”)
         folded = pattern.sub(replacement, folded)
-    return re.findall(r"[a-z0-9]+", folded)
+    words = [re.sub(r"^1x(\d{1,2}gb)$", r"\1", word) for word in re.findall(r"[a-z0-9]+", folded)]   # 1x8GB = 8GB
+    if any(word in _GPU_CONTEXT or word.startswith("gddr") for word in words):
+        words = [f"{m.group(1)}gb" if (m := _GPU_VRAM.match(word)) else word for word in words]
+    return words
+
+
+def ram_context(words: list[str]) -> bool:
+    """Memóriamodulról szól-e (egy DDR-generáció, vagy a RAM, memória, DIMM szó; _RAM_FORMS)."""
+    return any(_RAM_CONTEXT.match(word) for word in words)
 
 
 def usable(text: str) -> bool:
@@ -164,13 +186,47 @@ def usable(text: str) -> bool:
     return not unusable(text)
 
 
+# Nem a termék vételára: részletfizetés, bérlet („havi 5 000 Ft”, „25 000 Ft/hó”, „részletre”); darabár („/db”,
+# „darabár”); a termék doboza („iPhone 13 doboza”, „üres doboz”); zárolt telefon (iCloud, aktiválási vagy Google-fiók
+# zár, lopott: a tagadott, pl. „iCloud mentes”, „nincs iCloud”, nem); és egy árlista (három vagy több méret egy címben).
+_INSTALLMENT = re.compile(r"\b(?:havi|havonta)\s+\d|\d\s*(?:ft|huf|e|ezer)?\s*/\s*(?:ho|honap)\b|"
+                          r"\b(?:reszletre|reszletfizet\w*|thm|lizing\w*|berelhet\w*|berbe|kolcsonz\w*)\b")
+_PER_PIECE = re.compile(r"\b(?:darabar\w*|db ?ar\w*|ar ?/ ?db|darabonkent|darabja|egyenkent)\b|\d\s*(?:ft)?\s*/\s*db\b|"
+                        r"(?:^|\s)/\s*db\b")
+_BOX_ONLY = re.compile(r"\b(?:ures|csak a|csak)\s+doboz\w*|\bdoboza\s*$|\bdoboz(?:a)?\s*(?:elado|kiado)\b|"
+                       r"\b(?:box only|empty box)\b|^\W*(?:eredeti\s+|gyari\s+)?doboz\b")
+_LOCKED = re.compile(r"\b(?:icloud\w*|aktivalasi zar\w*|fiok ?zar\w*|google ?fiok\w* zar\w*|frp ?zar\w*|zarolt\w*|"
+                     r"lopott\w*|feketelist\w*|blacklist\w*)\b")
+_LOCK_DENIED = re.compile(r"\b(?:nincs|nem|mentes\w*|nelkul|free|kijelentkez\w*|torolve|torolt|lekotve|off)\b")
+
+
+def locked(text: str) -> bool:
+    """Zárolt telefon (iCloud, aktiválási vagy Google-fiók zár, lopott), és nincs tagadva („iCloud mentes”)."""
+    folded = fold(text or "")
+    for match in _LOCKED.finditer(folded):
+        if not _LOCK_DENIED.search(folded[max(0, match.start() - 12):match.end() + 14]):
+            return True
+    return False
+
+
 def unusable(text: str) -> str:
     """Miért nem egy működő, egy darab, meghatározott termék ára (az összehasonlításnál ez a kizárás oka): kereső- vagy
-    cserehirdetés, csomag vagy több darab, alkatrész vagy hibás, kiegészítő, „-tól” ár, vagy több termék egy hirdetésben.
-    Üres, ha az ára használható."""
+    cserehirdetés, csomag vagy több darab, alkatrész vagy hibás, a termék doboza, zárolt telefon, részletfizetési vagy
+    bérleti összeg, darabár, árlista (több méret), kiegészítő, „-tól” ár, vagy több termék egy hirdetésben. Üres, ha
+    az ára használható."""
     folded = fold(text or "")
     if _WANTED_RE.search(folded) or (_SWAP_RE.search(folded) and not _SALE_RE.search(folded)):
         return "kereső- vagy cserehirdetés"
+    if _INSTALLMENT.search(folded):
+        return "részletfizetési vagy bérleti összeg, nem a vételár"
+    if _PER_PIECE.search(folded):
+        return "darabár, nem az egész ára"
+    if _BOX_ONLY.search(folded):
+        return "a termék doboza, nem a termék"
+    if locked(text):
+        return "zárolt (iCloud, aktiválási vagy fiókzár), nem eladható működő termék"
+    if len(capacities(_words(text))) >= 3:
+        return "több méret egy hirdetésben (az ár valamelyiké, vagy a legolcsóbbé)"
     if _LOT_RE.search(folded) or _PIECES.search(folded) or _HEAP.search(folded):
         return "csomag vagy több darab egy áron"
     if _PARTS_RE.search(folded):
@@ -364,6 +420,7 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
     words = _words(text)
     picked: list[str] = []
     known = BRANDS | brands if brands else BRANDS
+    memory = ram_context(words)
     if any(_CPU_TIER.match(w) for w in words):
         known = known - CPU_BRANDS             # „Intel Core i5-10400F” = „i5 10400F”
     families = [w for w in words if w in FAMILIES]
@@ -374,12 +431,17 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         after = words[index + 1] if index + 1 < len(words) else ""
         if word in _NOISE:
             continue
-        if word in FAMILIES or word == brand:
+        if memory and word in _RAM_FORMS:
+            term = _RAM_FORMS[word]            # SO-DIMM, ECC, regisztrált, kit: más termék (más ár)
+        elif word in FAMILIES or word == brand:
             term = word
         elif word in MODIFIERS:
             term, qualified = word, True
         elif word in TYPE_WORDS:
             term = TYPE_WORDS[word]
+            if term in ("kontroller", "jatek") and families and (before.isdigit() or before in ("es", "plusz")) and \
+                    index > 1:
+                continue                       # „PS5 + 2 kontroller”: a konzol plusz tartozéka, nem kontroller-hirdetés
             qualified = qualified or term == "kontroller"
         elif word in SERIES:
             if not re.search(r"\d", after):
@@ -388,6 +450,8 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         elif re.search(r"\d", word):
             if _UNIT.match(word) or (word.isdigit() and (len(word) > 5 or set(word) == {"0"} or after in _UNIT_WORDS)):
                 continue
+            if word.isdigit() and families and TYPE_WORDS.get(after) in ("kontroller", "jatek") and index > 1:
+                continue                       # „Switch OLED + 3 játék”: a darabszám nem típusjel
             # rövid szám csak a család, a márka, egy jelző vagy egy sorozatnév után típusjel („iPhone 13”, „Air Max 90”,
             # „Note 10”), különben inkább méret vagy darabszám; a márka utáni 30–56 is inkább méret („Nike 42”)
             if word.isdigit() and len(word) <= 2:
@@ -456,12 +520,48 @@ LEARN_AFTER = 3            # ennyiszer kell egy ismeretlen márkának előfordul
 
 def basis_entry(sample: dict[str, Any], source: str = "árbázis") -> dict[str, Any]:
     """Egy összehasonlító ár a találat „mihez mérte” listájához: cím, ár, oldal (kulcs), webcím, és honnan (az árbázisból,
-    vagy most találta: „most”); ha azóta eltűnt (elkelt), azt is."""
+    vagy most találta: „most”); ha azóta eltűnt (lehet, hogy elkelt, de nem tudni, mennyiért), azt is; az eladó (v), ha
+    tudjuk."""
     entry = {"t": str(sample.get("t") or ""), "p": int(sample["p"]), "s": str(sample.get("site") or ""),
              "u": str(sample.get("url") or ""), "src": source}
     if sample.get("gone"):
         entry["gone"] = True
+    if sample.get("seller"):
+        entry["v"] = str(sample["seller"])
     return entry
+
+
+SELLER_CAP = 2             # egy eladótól legfeljebb ennyi ár számít egy termék szokásos árába
+
+
+def _same_title(text: str) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", fold(text or "")).split())
+
+
+def independent(samples: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """A független árak egy termékhez: ugyanaz a hirdetés több helyen (ugyanaz a cím és az ár, pl. a Hardveraprón és a
+    Jófogáson is fent van) egyszer számít; egy eladótól legfeljebb SELLER_CAP (sok hasonló hirdetése nem sok független
+    ár: egy kereskedő a saját árszintjét mutatja). Az első marad (a hívó sorrendje: a frissebb elöl). (megtartottak,
+    kizártak: a mintájuk a why okkal). A minta book.samples- vagy basis_entry-alakú (t, p, site/s, seller/v)."""
+    kept, out = [], []
+    titles: dict[tuple[str, int], dict[str, Any]] = {}
+    sellers: dict[str, int] = {}
+    for sample in samples:
+        title = _same_title(str(sample.get("t") or ""))
+        twin = titles.get((title, int(sample["p"]))) if len(title) >= 8 else None
+        if twin is not None:
+            out.append({**sample, "why": "valószínűleg ugyanaz a hirdetés, máshol is fent van (egyszer számít)"})
+            continue
+        seller = fold(str(sample.get("seller") or sample.get("v") or "")).strip()
+        if seller and sellers.get(seller, 0) >= SELLER_CAP:
+            out.append({**sample, "why": f"ugyanattól az eladótól ({sample.get('seller') or sample.get('v')}): "
+                                         f"legfeljebb {SELLER_CAP} hirdetése számít"})
+            continue
+        if seller:
+            sellers[seller] = sellers.get(seller, 0) + 1
+        titles[(title, int(sample["p"]))] = sample
+        kept.append(sample)
+    return kept, out
 
 
 def fake_prone(key: str) -> bool:
@@ -496,22 +596,32 @@ class PriceBook:
 
     def _rekey(self) -> None:
         """A régi kulcsok újraképzése a nevükből (a mostani product_key szerint), és az így egybeeső termékek árainak
-        összevonása (egy hirdetés egyszer, a legutóbb látott alakjában; termékenként legfeljebb MAX_SAMPLES)."""
+        összevonása (egy hirdetés egyszer, a legutóbb látott alakjában; termékenként legfeljebb MAX_SAMPLES). Egy ár a
+        saját címe szerinti változatához kerül, ha az a termék pontosabb alakja (a kulcs minden szava benne van, és még
+        egy változat is: pl. a régi „580 rx” alatt a „Sapphire RX580 4G” a „4gb 580 rx”-hez; a „4G” régen nem
+        számított méretnek); más esetben (pl. amit a modell nevezett meg) marad, ahol volt."""
         merged: dict[str, dict[str, Any]] = {}
         for old, entry in self._keys.items():
             found = self.key(str(entry.get("name") or old))
             key, label = found if found is not None else (old, str(entry.get("name") or old))
-            target = merged.setdefault(key, {**entry, "name": label, "samples": []})
-            by_url = {listing_key(str(s.get("url") or "")): s for s in target["samples"]}
             for sample in entry["samples"]:
+                title = str(sample.get("t") or "")
+                own = self.key(title) if title and usable(title) else None
+                place, name = (own if own is not None and own[0] != key and set(key.split()) < set(own[0].split())
+                               else (key, label))
+                target = merged.setdefault(place, {**entry, "name": name, "samples": []})
                 ident = listing_key(str(sample.get("url") or ""))
-                known = by_url.get(ident)
-                if known is None or float(sample.get("last") or 0) > float(known.get("last") or 0):
-                    by_url[ident] = sample
-            target["samples"] = sorted(by_url.values(), key=lambda s: -float(s.get("last") or 0))[:MAX_SAMPLES]
-            target["seen"] = max(float(target.get("seen") or 0), float(entry.get("seen") or 0))
-        self._keys = merged
+                known = next((s for s in target["samples"] if listing_key(str(s.get("url") or "")) == ident), None)
+                if known is None:
+                    target["samples"].append(sample)
+                elif float(sample.get("last") or 0) > float(known.get("last") or 0):
+                    target["samples"][target["samples"].index(known)] = sample
+                target["seen"] = max(float(target.get("seen") or 0), float(entry.get("seen") or 0))
+        for target in merged.values():
+            target["samples"] = sorted(target["samples"], key=lambda s: -float(s.get("last") or 0))[:MAX_SAMPLES]
+        self._keys = {key: entry for key, entry in merged.items() if entry["samples"]}
         self._where = None
+        self._by_base = None
         self._dirty = True
 
     def _locate(self) -> dict[str, str]:
@@ -612,6 +722,8 @@ class PriceBook:
                     sample = {"at": now, "url": url, "site": str(row.get("platform") or "")}
                     entry["samples"].append(sample)
                     self._locate()[ident] = key
+                if row.get("seller"):
+                    sample["v"] = str(row["seller"])[:40]
                 elif sample.get("p") and price < int(sample["p"]) * (1 - PRICE_CUT):
                     sample["cuts"] = int(sample.get("cuts") or 0) + 1     # leárazta (az alkuhoz: engedni szokott)
                     sample.setdefault("p0", int(sample["p"]))
@@ -639,7 +751,8 @@ class PriceBook:
         with self._lock:
             return [{"p": int(s["p"]), "site": str(s.get("site") or ""), "url": str(s.get("url") or ""),
                      "gone": bool(s.get("gone")), "at": float(s.get("at") or 0), "last": float(s.get("last") or 0),
-                     "cuts": int(s.get("cuts") or 0), "p0": int(s.get("p0") or s["p"]), "t": str(s.get("t") or "")}
+                     "cuts": int(s.get("cuts") or 0), "p0": int(s.get("p0") or s["p"]), "t": str(s.get("t") or ""),
+                     **({"seller": str(s["v"])} if s.get("v") else {})}
                     for s in (self._keys.get(key) or {}).get("samples") or []
                     if now - float(s.get("last") or 0) <= MAX_AGE and not (skip and listing_key(s.get("url", "")) == skip)]
 
@@ -711,6 +824,8 @@ class PriceBook:
                         samples.append(sample)
         with self._lock:
             name = (self._keys.get(key) or {}).get("name") or key
+        samples.sort(key=lambda s: -float(s.get("last") or 0))
+        samples, twins = independent(samples)   # egy hirdetés egyszer, egy eladótól legfeljebb SELLER_CAP
         stats = price_stats([s["p"] for s in samples])
         if not stats or stats["n"] < MIN_SAMPLES or stats["confidence"] != "megbízható":
             return None
@@ -720,7 +835,8 @@ class PriceBook:
                  # mihez mérte: a beszámított árak, és a kilógók (nagyon olcsó vagy drága: kimaradt a szokásos árból)
                  "basis": {"used": [basis_entry(s) for s in sorted(kept, key=lambda s: s["p"])],
                            "out": [{**basis_entry(s), "why": "kilógó ár (kimaradt a szokásos árból)"}
-                                   for s in sorted(samples, key=lambda s: s["p"]) if s not in kept]}}
+                                   for s in sorted(samples, key=lambda s: s["p"]) if s not in kept]
+                           + [{**basis_entry(s), "why": s["why"]} for s in twins]}}
         sold = [s["p"] for s in kept if s["gone"]]
         if len(sold) >= SOLD_MIN:
             found["sold"] = {"n": len(sold), "median": round_price(statistics.median(sold))}

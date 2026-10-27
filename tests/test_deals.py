@@ -28,6 +28,7 @@ from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, 
                                newest_first, offer_price, parse_auction, profit_floor, safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
 from jarvis_core.pricebook import PriceBook, pace, product_key, sized, unusable, usable, wearable  # noqa: E402
+from jarvis_core import pricebook as pricebook_module  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
 from jarvis_core.selling import PLATFORMS, listing_key  # noqa: E402
 
@@ -198,7 +199,8 @@ class HunterCase(unittest.TestCase):
     def vetted(self, hunter: DealHunter, rows: list[dict], issues: tuple = ()) -> None:
         """Ezeknek az összehasonlítóknak a leírását már elolvasta (allapotok.json): hibátlanok, vagy issues."""
         for row in rows:
-            hunter._vetted[listing_key(row["url"])] = {"at": self.clock.now, "issues": list(issues)}
+            hunter._vetted[listing_key(row["url"])] = {"at": self.clock.now, "issues": list(issues),
+                                                       "state": "hibás" if issues else "hibátlan"}
 
     @staticmethod
     def page_checked(deal: dict) -> dict:
@@ -1536,11 +1538,20 @@ class PriceBookTests(unittest.TestCase):
                     {"p": 30000, "url": "https://hardverapro.hu/apro/a0.html", "site": "hardverapro", "at": now,
                      "last": now - 10}]}}
         (root / "arbazis.json").write_text(json.dumps({"keys": keys}), encoding="utf-8")
+        # egy régi árbázisban a „4G” még nem számított méretnek: a 4 GB-os RX 580 a kapacitás nélküliek közé került
+        keys["580 rx"] = {"name": "rx 580", "samples": [
+            {"p": 30000 + n * 500, "url": f"https://hardverapro.hu/apro/c{n}.html", "site": "hardverapro", "at": now,
+             "last": now, "t": "Sapphire RX 580 Nitro+"} for n in range(3)] + [
+            {"p": 21000, "url": "https://hardverapro.hu/apro/c9.html", "site": "hardverapro", "at": now, "last": now,
+             "t": "Sapphire RX580 4G Nitro"}]}
+        (root / "arbazis.json").write_text(json.dumps({"keys": keys}), encoding="utf-8")
         book = PriceBook(root, clock=self.clock)
         self.assertEqual(len(book.samples("10400f i5")), 6)
         self.assertEqual(book.reference("10400f i5")["n"], 6)
+        self.assertEqual([s["p"] for s in book.samples("4gb 580 rx")], [21000], "a saját címe szerinti változatához")
+        self.assertEqual(sorted(s["p"] for s in book.samples("580 rx")), [30000, 30500, 31000])
         book.save()
-        self.assertEqual(json.loads((root / "arbazis.json").read_text(encoding="utf-8"))["kv"], 2)
+        self.assertEqual(json.loads((root / "arbazis.json").read_text(encoding="utf-8"))["kv"], pricebook_module.KEY_VERSION)
 
     def test_a_single_capacity_only_for_known_models(self):
         """A kapacitás nélküli címek csak az ismerten egyetlen kapacitással gyártott típusnál (a GTX 1080 mind 8 GB-os)

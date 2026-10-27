@@ -110,6 +110,15 @@ COVER_MISS = 0.1
 COVER_DECAY = 0.98
 COVERED_EVERY = 15
 COVERED_WEIGHT = 0.25
+# A közös lista csak akkor fed le egy keresőszavas figyelőt, ha tényleg fut: be van kapcsolva, nem szünetel, nem tilt az
+# oldal, és COVER_STALE másodpercen belül letöltött (különben a keresőszavas figyelő a saját ütemében néz).
+COVER_STALE = 20 * 60
+# Egy hirdetés a figyelő látottjai közt (seen): [mikor láttuk utoljára, ár, állapot, ki értékeli, mióta vár]. Az állapot
+# SEEN_LISTED (letöltve: az első letöltésnél fent volt, vagy nem illik a figyelőhöz, nincs mit felmérni), SEEN_QUEUED
+# (felmérésre vár: ez a figyelő, vagy a közös lista értékeli, owner), SEEN_DONE (felmérve). A régi, kételemű bejegyzés
+# felmértnek számít. Ami PENDING_STALE-nél régebben vár (pl. a közös lista értékelése elmaradt), az újra új.
+SEEN_LISTED, SEEN_QUEUED, SEEN_DONE = "l", "v", "e"
+PENDING_STALE = WAIT_MAX + 600
 _POSTED_RE = re.compile(r"\b(ma|tegnap),?\s+(\d{1,2})[:.](\d{2})\b")
 
 
@@ -205,6 +214,8 @@ class InstantWatch:
         self._followed_at = float("-inf")     # mikor nézte meg utoljára az utólag ellenőrizendőket (_followups)
         self._warmed_at = float("-inf")       # mikor melegített elő utoljára (_warm)
         self._data = self._load()
+        if hasattr(hunter, "listen"):
+            hunter.listen(self._deal_changed)   # egy találat utólagos változása a friss hirdetések közt is látszik
 
     # --- tárolás ---
 
@@ -402,6 +413,34 @@ class InstantWatch:
             self._save()
         return self.state()
 
+    def _deal_changed(self, deal_id: str, deal: dict[str, Any] | None) -> None:
+        """Egy találat utólag megváltozott (DealHunter.listen: az utólagos modellellenőrzés után ellenőrzött lett, mégsem
+        jó, vagy levette, mert gyanús): a friss hirdetések közt is ez látszik, és amit elutasított vagy veszteségesnek
+        bizonyult, az nem marad „Megéri”."""
+        with self._lock:
+            changed = False
+            for hit in self._data["hits"]:
+                if hit.get("deal") != deal_id:
+                    continue
+                changed = True
+                if deal is None:
+                    hit.update(cheap=False, withdrawn="utólag levettem: a modell szerint gyanús", model_pending=False,
+                               verified=False)
+                    continue
+                hit.update(verified=bool(deal.get("verified")), unchecked=deal.get("unchecked") or "",
+                           model_pending=bool(deal.get("model_pending")), profit=deal.get("profit", hit.get("profit")),
+                           reference=deal.get("median", hit.get("reference")), safety=deal.get("safety"),
+                           warnings=deal.get("warnings") or [])
+                for key in ("condition_text", "cost_parts", "cond_band", "model_no"):
+                    if deal.get(key):
+                        hit[key] = deal[key]
+                    else:
+                        hit.pop(key, None)
+                if deal.get("model_no") or int(deal.get("profit") or 0) <= 0:
+                    hit["cheap"] = False       # mégsem jó, vagy a teljes költséggel nem hoz hasznot: nem „Megéri”
+            if changed:
+                self._save()
+
     def forget_deal(self, deal_id: str) -> None:
         """Visszamondtad a vételt: a friss hirdetések közül is kikerül (a hirdetést látottnak tudja, nem szól újra)."""
         with self._lock:
@@ -557,7 +596,12 @@ class InstantWatch:
             return
         with self._lock:
             for entry in entries:
-                (self._data["seen"].get(entry[0]) or {}).pop(listing_key(entry[2]["url"]), None)
+                ident = listing_key(entry[2]["url"])
+                (self._data["seen"].get(entry[0]) or {}).pop(ident, None)
+                for seen in self._data["seen"].values():      # akiknek a közös lista mérte volna fel
+                    old = seen.get(ident)
+                    if isinstance(old, list) and len(old) > 3 and old[2] == SEEN_QUEUED and old[3] == entry[0]:
+                        seen.pop(ident, None)
             self._save()
 
     def _go(self, alert_id: str | None = None) -> None:
@@ -818,7 +862,8 @@ class InstantWatch:
         name = self.platforms[site].name
         rows = [{"site": name, "platform": site, "text": str(r.get("text") or "")[:180], "price": int(r["price"]),
                  "url": str(r["url"]), "title": str(r.get("title") or r.get("text") or "")[:120],
-                 **({"promoted": True} if r.get("promoted") else {})}
+                 **({"promoted": True} if r.get("promoted") else {}),
+                 **({"seller": str(r["seller"])[:40]} if r.get("seller") else {})}
                 for r in rows[:MAX_ROWS] if r.get("url") and not r.get("auction")]
         self.hunter.book.add(rows)            # az árbázis is tanul belőle
         self.hunter.tally("seen", rows)
@@ -860,16 +905,24 @@ class InstantWatch:
                 old = seen.get(ident)
                 if not row.get("promoted"):
                     fresh_rows.append(old is None)
-                seen[ident] = [now, row["price"]]
                 if first:
+                    seen[ident] = [now, row["price"], SEEN_LISTED]
                     continue
                 drop = isinstance(old, list) and len(old) > 1 and row["price"] <= int(old[1]) * (1 - DROP)
                 if row.get("promoted") and skips:
+                    seen[ident] = self._seen_again(old, now, row["price"])
                     continue                          # a kiemeltek blokkját átugorja: ezek nem új hirdetések
-                if (old is None or drop) and self._fits(stored, row):
+                # új, ami még nem jött; és ami felmérésre várt, de az elmaradt (a közös lista leállt, szünetel, elfelejtette)
+                unseen = old is None or self._stale_pending(old, now)
+                if (unseen or drop) and self._fits(stored, row):
                     fresh.append({**row, "drop": int(old[1]) if drop else None})
+                    seen[ident] = [now, row["price"], SEEN_QUEUED, stored["id"], now]
+                elif unseen:
+                    seen[ident] = [now, row["price"], SEEN_LISTED]   # nem illik ehhez a figyelőhöz: csak letöltve
+                else:
+                    seen[ident] = self._seen_again(old, now, row["price"])
             if not first and not stored.get("query"):
-                self._share(stored, site, rows, now)
+                self._share(stored, site, fresh, now)
             elif not first and stored.get("query") and count:
                 self._covered_note(stored, site, misses=len(fresh))
             if len(seen) > MAX_SEEN:
@@ -895,23 +948,58 @@ class InstantWatch:
         overflow = not first and len(fresh_rows) >= OVERFLOW_MIN and all(fresh_rows[-OVERFLOW_TAIL:])
         return first, fresh, overflow
 
-    def _share(self, feed: dict[str, Any], site: str, rows: list[dict[str, Any]], now: float) -> None:
-        """Egy közös lista (keresőszó nélküli figyelő) friss hirdetései a keresőszavas figyelőknek is: amelyikre illik,
-        annak a látottjai közé kerül (így a saját letöltése nem méri fel újra), és a lefedettségébe beszámít (_covered).
-        A hívó tartja a zárat, és ment."""
+    def _share(self, feed: dict[str, Any], site: str, fresh: list[dict[str, Any]], now: float) -> None:
+        """Egy közös lista (keresőszó nélküli figyelő) friss hirdetései a keresőszavas figyelőknek is: csak az, amit a
+        közös lista tényleg felmér (fresh: illik a saját szűrőjéhez, pl. az ársávjához); amelyik keresőszavas figyelőhöz
+        is illik, annál „felmérésre vár, a közös lista értékeli” lesz (SEEN_QUEUED, owner), így a saját letöltése nem
+        méri fel még egyszer, és a lefedettségébe beszámít (_covered). Amit a közös lista nem mér fel (pl. drágább a
+        szűrőjénél), azt a keresőszavas figyelő maga méri fel. A ruhára szóló keresőszavast kihagyja (azt a közös lista
+        nem méri fel). A hívó tartja a zárat, és ment."""
         for alert in self._data["alerts"]:
             if alert is feed or not alert.get("query") or alert.get("off") or site not in (alert.get("sites") or []) \
-                    or site not in (alert.get("baseline") or []):
+                    or site not in (alert.get("baseline") or []) or wearable(str(alert["query"])):
                 continue
             seen = self._data["seen"].setdefault(alert["id"], {})
             hits = 0
-            for row in rows:
+            for row in fresh:
                 ident = listing_key(row["url"])
-                if ident not in seen and not row.get("promoted") and self._fits(alert, row):
-                    seen[ident] = [now, row["price"]]
+                old = seen.get(ident)
+                if (old is None or self._stale_pending(old, now) or row.get("drop")) and not row.get("promoted") \
+                        and self._fits(alert, row):
+                    seen[ident] = [now, row["price"], SEEN_QUEUED, feed["id"], now]
                     hits += 1
             if hits:
                 self._covered_note(alert, site, hits=hits)
+
+    @staticmethod
+    def _seen_again(old: Any, now: float, price: int) -> list[Any]:
+        """Egy már ismert hirdetés újra a letöltésben: az ideje és az ára friss, az állapota marad."""
+        state = list(old[2:]) if isinstance(old, list) and len(old) > 2 else [SEEN_DONE]
+        return [now, price, *state]
+
+    def _stale_pending(self, old: Any, now: float) -> bool:
+        """Felmérésre várt, de az elmaradt: PENDING_STALE óta vár, vagy aki felméri, már nincs meg, szünetel, vagy a
+        figyelő le van állítva (a hívó tartja a zárat)."""
+        if not (isinstance(old, list) and len(old) > 3 and old[2] == SEEN_QUEUED):
+            return False
+        since = float(old[4]) if len(old) > 4 else float(old[0])
+        owner = next((a for a in self._data["alerts"] if a.get("id") == old[3]), None)
+        return now - since >= PENDING_STALE or owner is None or bool(owner.get("off"))
+
+    def _mark_done(self, alert_id: str, rows: list[dict[str, Any]]) -> None:
+        """Ezeket a hirdetéseket felmérte (ez a figyelő, vagy a közös lista a keresőszavasoknak is): SEEN_DONE."""
+        idents = {listing_key(row["url"]) for row in rows}
+        with self._lock:
+            changed = False
+            for owner_id, seen in self._data["seen"].items():
+                for ident in idents:
+                    entry = seen.get(ident)
+                    if isinstance(entry, list) and len(entry) > 3 and entry[2] == SEEN_QUEUED and \
+                            (entry[3] == alert_id or owner_id == alert_id):
+                        seen[ident] = [entry[0], entry[1], SEEN_DONE]
+                        changed = True
+            if changed:
+                self._save()
 
     @staticmethod
     def _covered_note(alert: dict[str, Any], site: str, hits: int = 0, misses: int = 0) -> None:
@@ -923,11 +1011,20 @@ class InstantWatch:
         cover[0] = round(cover[0] * COVER_DECAY + hits, 3)
         cover[1] = round(cover[1] * COVER_DECAY + misses, 3)
 
-    @staticmethod
-    def _covered(alert: dict[str, Any], site: str) -> bool:
-        """Egy keresőszavas figyelő friss találatai rendre a közös listából jönnek-e (lásd COVER_MIN)."""
+    def _covered(self, alert: dict[str, Any], site: str) -> bool:
+        """Egy keresőszavas figyelő friss találatai rendre a közös listából jönnek-e (lásd COVER_MIN), és az a közös
+        lista most is fut (COVER_STALE): egy szünetelő, tiltott vagy rég nem letöltött közös lista nem lassítja a
+        saját keresést."""
         hits, misses = ((alert.get("cover") or {}).get(site) or [0.0, 0.0])[:2]
-        return bool(alert.get("query")) and hits >= COVER_MIN and misses <= COVER_MISS * (hits + misses)
+        if not (alert.get("query") and hits >= COVER_MIN and misses <= COVER_MISS * (hits + misses)):
+            return False
+        now = self.clock()
+        with self._lock:
+            return bool(self._data["enabled"]) and any(
+                not feed.get("query") and not feed.get("off") and site in (feed.get("sites") or [])
+                and site in (feed.get("baseline") or []) and not (feed.get("errors") or {}).get(site)
+                and now - float((feed.get("last") or {}).get(site) or 0) <= COVER_STALE
+                for feed in self._data["alerts"])
 
     def _note_delays(self, site: str, rows: list[dict[str, Any]], now: float) -> None:
         """Az új hirdetések késése (a kártyán lévő feltöltési idő óta, posted_ago), oldalanként a legutóbbi MAX_DELAYS (a
@@ -1042,6 +1139,8 @@ class InstantWatch:
             return hits
         if hasattr(self.hunter, "flush_tips"):
             self.hunter.flush_tips(self.notify)     # a bizonytalan árú tippek („Érdemes megnézni”)
+        later = {listing_key(row["url"]) for row in waiting or []}
+        self._mark_done(alert["id"], [row for row in fresh if listing_key(row["url"]) not in later])
         self._followups(force=True)                 # a gyors riasztással jelzetteket a modell most nézi meg
         if waiting:
             self._keep_waiting(alert["id"], site, waiting)
@@ -1112,7 +1211,8 @@ class InstantWatch:
                 return []
             return [{"site": platform.name, "platform": site, "text": str(r.get("text") or "")[:180],
                      "price": int(r["price"]), "url": str(r["url"]),
-                     **({"title": str(r["title"])[:160]} if r.get("title") else {})} for r in rows[:MAX_ROWS]
+                     **({"title": str(r["title"])[:160]} if r.get("title") else {}),
+                     **({"seller": str(r["seller"])[:40]} if r.get("seller") else {})} for r in rows[:MAX_ROWS]
                     if r.get("url") and not r.get("auction")]
 
         with ThreadPoolExecutor(max_workers=max(1, len(self.platforms)), thread_name_prefix="jarvis-ar") as pool:

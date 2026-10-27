@@ -1031,7 +1031,13 @@ class WorkBrowserTests(unittest.TestCase):
                 {"id": "h1", "alert": "a", "alert_name": "Videókártyák", "at": time.time() - 120, "site": "Hardverapró",
                  "platform": "hardverapro", "text": "Palit RTX 3060 Ti Dual Budapest", "title": "Palit RTX 3060 Ti",
                  "price": 52000, "url": "https://hardverapro.hu/apro/palit/friss.html", "cheap": True,
-                 "reference": 100000, "profit": 36500, "deal": "q1"}]
+                 "reference": 100000, "profit": 36500, "deal": "q1"},
+                # utólag elutasítva (DealHunter._followup_apply → InstantWatch._deal_changed): nem „Megéri”
+                {"id": "h2", "alert": "a", "alert_name": "Videókártyák", "at": time.time() - 300, "site": "Hardverapró",
+                 "platform": "hardverapro", "text": "Zotac RTX 3070 Twin", "title": "Zotac RTX 3070 Twin",
+                 "price": 61000, "url": "https://hardverapro.hu/apro/zotac/friss.html", "cheap": False,
+                 "reference": 120000, "profit": 45000, "deal": "q2",
+                 "model_no": "a modell szerint nem ez: Csak a doboza."}]
         page = self.page
         page.set_viewport_size({"width": 390, "height": 844})
         page.click("#job-deals")
@@ -1078,6 +1084,9 @@ class WorkBrowserTests(unittest.TestCase):
         hits = page.inner_text("details:has-text('Friss hirdetések')")
         self.assertIn("Palit RTX 3060 Ti", hits)
         self.assertIn("2 perce", hits)
+        rejected = page.inner_text('details:has-text("Friss hirdetések") li:has-text("Zotac RTX 3070 Twin")')
+        self.assertIn("Utólag mégsem jó: a modell szerint nem ez: Csak a doboza.", rejected)
+        self.assertNotIn("Megéri", rejected, "az utólag elutasított nem marad „Megéri”")
         page.click('details:has-text("Friss hirdetések") [data-deal-buy="q1"]')
         page.wait_for_selector("#d-paid")
         self.assertEqual(page.input_value("#d-paid"), "52000")

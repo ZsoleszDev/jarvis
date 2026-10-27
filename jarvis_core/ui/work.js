@@ -657,7 +657,11 @@
     const hits = (I.hits || []).slice(0, 25).map((h) => `<li><span><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.title || h.text)}</a>
         <small class="muted">${esc(h.site)} · <b>${esc(price(h.price))}</b>${h.drop ? ` (leárazta: ${esc(price(h.drop))})` : ""} · ${esc(ago(h.at))} · ${esc(h.alert_name)}</small>
         ${h.reference ? `<small class="${h.cheap ? "" : "muted"}">${h.cheap ? "<b>Megéri:</b> " : ""}szokásos ár kb. ${esc(price(h.reference))}${h.profit > 0 ? ` · kb. ${esc(price(h.profit))} haszon` : ""}</small>` : ""}
-        ${(h.warnings || []).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}</span>
+        ${h.withdrawn ? `<small class="warn">${esc(h.withdrawn)}</small>`
+          : h.model_no ? `<small class="warn">Utólag mégsem jó: ${esc(h.model_no)}</small>`
+          : h.verified ? '<small class="muted">Ellenőrizve: az adatlapja, az állapota és a modell szerint</small>'
+          : h.unchecked ? `<small class="warn">A modell még nem nézte meg${h.model_pending ? " (amint lehet, megnézi)" : ""}</small>` : ""}
+        ${(h.warnings || []).filter((w) => !String(w).startsWith("utólag:")).map((w) => `<small class="warn">Figyelj: ${esc(w)}</small>`).join("")}</span>
         ${h.deal ? `<span class="row">${boughtOf(h.deal) ? cancelButton(boughtOf(h.deal), h.title || h.text)
           : `<button type="button" class="small" data-deal-buy="${esc(h.deal)}">Megvettem</button>`}</span>` : ""}</li>`).join("");
     const presets = (I.presets || []).map((p) => `<button type="button" class="small" data-ipreset="${esc(p.url)}">${esc(p.name)}</button>`).join("");

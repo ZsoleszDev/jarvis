@@ -508,9 +508,11 @@ function renderNotices() {
       "figyelő új találatát, vagy egy elkeltnek látszó hirdetést).</p>";
     return;
   }
+  // a később helyesbített (pl. utólag mégsem jó) értesítés áthúzva, a helyesbítés címével
   body.innerHTML = `<ul class="notices">${noticeList.map((n, i) => `
-    <li${n.read ? "" : ' class="new"'}><span><b>${escHtml(n.title)}</b>
+    <li${n.read ? "" : ' class="new"'}><span>${n.superseded ? `<s>${escHtml(n.title)}</s>` : `<b>${escHtml(n.title)}</b>`}
       <small class="muted">${n.at ? escHtml(shortDate(n.at)) : ""}</small></span>
+      ${n.superseded ? `<small class="warn">Helyesbítve: ${escHtml(n.superseded)}</small>` : ""}
       <span class="text">${escHtml(n.text)}</span>
       ${noticeButtons(n).length ? `<span class="row">${noticeButtons(n).map((a, j) =>
         `<button type="button" class="small" data-notice="${i}" data-act="${j}">${escHtml(a.label)}</button>`).join("")}</span>` : ""}

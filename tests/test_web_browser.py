@@ -33,7 +33,7 @@ from test_offline import FakeOllama, make_cfg, reply, tool_reply  # noqa: E402
 from jarvis_core import assistant as assistant_module  # noqa: E402
 from jarvis_core import web  # noqa: E402
 from jarvis_core.assistant import STALE_NOTE, Assistant  # noqa: E402
-from jarvis_core.browser import (ORDINAL_JS, SCAN_BASE, BrowserController, BrowserError,  # noqa: E402
+from jarvis_core.browser import (LISTINGS_JS, ORDINAL_JS, SCAN_BASE, BrowserController, BrowserError,  # noqa: E402
                                  format_snapshot, is_risky, is_search_field, match_option, same_site,
                                  short_href, wanted_state)
 from jarvis_core.config import load_config  # noqa: E402
@@ -384,6 +384,19 @@ class BrowserTests(unittest.TestCase):
         view = self.browser.back()
         self.assertIn("Visszaléptem", view)
         self.assertIn("Keresési találatok", view)
+
+    def test_listing_cards_with_a_promotion_help_link(self):
+        """A találati kártyák a böngészőben (LISTINGS_JS) is a szerkezetük szerint (mint a feeds.py): a mentett
+        Hardverapró-mintán (tests/data) az előresorolt kártya „Kerülj te is előre!” súgólinkje (hosszú title, nem
+        hirdetéscím) nem lesz a kártya linkje, a kártya nem vész el, és kiemeltként jelölt marad."""
+        html = (ROOT / "tests" / "data" / "hardverapro_eloresorolt.html").read_text(encoding="utf-8")
+        self.browser.page.set_content(html)
+        found = self.browser.page.evaluate(LISTINGS_JS)
+        self.assertEqual([(e["url"].rsplit("/", 2)[1], e["price"], bool(e.get("promoted"))) for e in found],
+                         [("sapphire_rx_580_nitro_4g", 22000, True), ("msi_rtx_3060_ventus_12g", 79000, True),
+                          ("sapphire_rx_580_nitro_8gb", 31000, False), ("powercolor_rx_580_red_dragon_8gb", 29500, False),
+                          ("gigabyte_gtx_1660_super_oc_6g", 52000, False), ("asus_dual_rtx_3060_ti_8gb", 96000, False)])
+        self.assertEqual(found[0]["title"], "Sapphire RX580 4G Nitro")
 
     def test_password_is_never_typed(self):
         with self.assertRaisesRegex(BrowserError, "Jelszót"):
