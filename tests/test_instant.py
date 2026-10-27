@@ -286,6 +286,39 @@ class FetcherTests(unittest.TestCase):
 
         self.fetcher = SiteFetcher(clock=self.clock, sleep=sleep, rng=random.Random(1), get=self.net)
 
+    def test_a_promising_listing_page_jumps_the_queue(self):
+        """Ha egy figyelő letöltése épp a szünetre vár, és közben egy megérő hirdetés adatlapja is jön (urgent), az megy
+        előbb; a szünet és az egyszerre egy kérés szabálya megmarad (utána a figyelőé jön, újabb szünettel)."""
+        sleepers, release = [], threading.Event()
+
+        def sleep(seconds):
+            sleepers.append(threading.current_thread().name)
+            release.wait(5)
+            self.clock.now += seconds
+
+        fetcher = SiteFetcher(clock=self.clock, sleep=sleep, rng=random.Random(1), get=self.net, gap=(5, 5))
+        self.net.pages["videokartya"] = (200, ha_page(HA_CARDS))
+        self.net.pages["_7/friss"] = page_html("Hibátlan, dobozában.")
+        listing_url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        fetcher.listings(listing_url, "hardverapro")
+        poll = threading.Thread(target=fetcher.listings, args=(listing_url + "?x=1", "hardverapro"), name="figyelo")
+        poll.start()
+        while not sleepers:
+            time.sleep(0.01)                   # a figyelő letöltése a szünetre vár
+        page = threading.Thread(target=fetcher.page, args=("https://hardverapro.hu/apro/palit_7/friss.html",
+                                                           "hardverapro"), kwargs={"urgent": True}, name="adatlap")
+        page.start()
+        while "adatlap" not in sleepers:
+            time.sleep(0.01)
+        release.set()
+        poll.join(5)
+        page.join(5)
+        urls = [url for _at, url in self.net.asked]
+        self.assertEqual([u.rsplit("/", 1)[1] for u in urls], ["index.html", "friss.html", "index.html?x=1"],
+                         "az adatlap előrement")
+        self.assertGreaterEqual(self.net.asked[2][0] - self.net.asked[1][0], 5, "utána is megvolt a szünet")
+        self.assertEqual(fetcher.used("hardverapro"), 3, "mindhárom kérés lement, egyik sem maradt a sorban")
+
     def test_one_request_at_a_time_with_a_pause_between(self):
         self.net.pages["videokartya"] = (200, ha_page(HA_CARDS))
         url = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
@@ -485,7 +518,8 @@ def page_html(text: str) -> tuple[int, str]:
 class InstantTests(InstantCase):
     def test_tells_only_when_a_new_listing_is_worth_buying(self):
         """Az első letöltés csak megjegyzi, ami fent van (a régi olcsóról sem szól); utána az új hirdetések közül csak a
-        megérőről szól: a hirdetés oldalát is átnézi, és egy rövid modellkérdés után."""
+        megérőről szól: a hirdetés oldalát is átnézi, és egy rövid modellkérdés után (gyors riasztás nélkül)."""
+        self.hunter.set_fast_alert(False)
         self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
         self.hunter.set_enabled(True)
         self.watch.add("RTX 3060 Ti", ["hardverapro"])
@@ -673,6 +707,27 @@ class InstantTests(InstantCase):
         self.assertTrue(extra["tip"])
         self.assertFalse(any("_7/friss" in url for _at, url in self.net.asked), "az oldalát nem töltötte le")
         self.assertEqual(self.pings, [])
+
+    def test_a_fast_alert_rings_first_and_the_model_checks_after_the_batch(self):
+        """Gyors riasztás (alapból be): az adatlap és az újraszámolás után rögtön csenget, a modell a köteg után nézi
+        meg (ha rendben, ellenőrzött lesz, és nem szól újra)."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:2])
+        self.net.pages["_7/friss"] = page_html("Hibátlan, dobozában, számlával.")
+        self.watch.tick()
+        [(_kind, title, text, extra)] = self.notices
+        self.assertEqual(title, "Megéri: Palit RTX 3060 Ti Dual")
+        self.assertTrue(extra["urgent"])
+        self.assertIn("de a modell még nem nézte meg (gyors riasztás: a modell utána nézi meg)", text)
+        [deal] = self.hunter.state()["deals"]
+        self.assertEqual((deal["verified"], deal.get("model_pending")), (True, None), "a köteg után megnézte")
+        self.assertEqual(len([c for c in self.hunter.llm.calls if "Keresett termék" in c[1]["content"]]), 1)
 
     def test_the_sellers_other_listings_can_make_a_better_buy(self):
         """Egy jó találat után megnézi az eladó többi hirdetését (a hirdetés oldalán lévő „további hirdetései” linkről, a
@@ -1370,6 +1425,7 @@ class InstantTests(InstantCase):
         a megérőről az adatlap és az újraszámolás után rögtön sürgősen szól („a modell még nem nézte meg”); ami csak a
         modellel ismerhető fel (a megnevezés), az vár. Amint a modell szabad, utólag megnézi a jelzett találatot: ha
         rendben, ellenőrzött lesz (nem szól újra); ha a modell szerint nem ez, szól („Mégsem: …”, nem riaszt)."""
+        self.hunter.set_fast_alert(False)      # (itt a modell foglaltsága a téma)
         self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
         self.hunter.set_enabled(True)
         self.watch.add("https://hardverapro.hu/aprok/hardver/videokartya/index.html")
@@ -1574,6 +1630,101 @@ class InstantTests(InstantCase):
         finally:
             self.watch.stop()
         self.assertEqual(self.net.threads, {"jarvis-azonnali"})
+
+
+class WarmTests(InstantCase):
+    """Előmelegítés ráérő időben (InstantWatch._warm → DealHunter.warm): a gyakran felbukkanó termékek árai előre."""
+
+    def setUp(self):
+        super().setUp()
+        self.hunter._vetted = {}
+        comps = [(60000, "hardverapro"), (58000, "jofogas"), (59000, "hardverapro"), (61000, "jofogas"),
+                 (62000, "hardverapro"), (60500, "jofogas")]
+        self.hunter.book.add([{"text": f"Nintendo Switch Lite szürke {n}", "price": p, "platform": site,
+                               "url": f"https://{'hardverapro.hu/apro' if site == 'hardverapro' else 'www.jofogas.hu/b'}"
+                                      f"/lite_{n}/friss.html"} for n, (p, site) in enumerate(comps)])
+        for n in range(len(comps)):
+            self.net.pages[f"lite_{n}/friss"] = page_html("Nintendo Switch Lite. Hibátlan, töltővel.")
+        self.lite = self.hunter.book.key("Nintendo Switch Lite")[0]
+        self.watch.add("Nintendo Switch Lite", ["hardverapro"])
+        self.watch.set_enabled(True)
+
+    def read(self) -> list[str]:
+        return [url for _at, url in self.net.asked if "/lite_" in url]
+
+    def test_a_frequent_products_comparables_are_read_ahead(self):
+        """Ráérő időben a gyakran felbukkanó termék összehasonlítóinak leírását előre elolvassa, egyszerre egyet (egy
+        látott hirdetésnél még nem): mire a következő friss hirdetése jön, az ára már biztos, így a csengetés előtt nem kell
+        leírásokat olvasnia. Ha már biztos az ára, nem olvas többet."""
+        for _ in range(2):                     # (a címéből és a modell megnevezéséből is): egy hirdetés egyszer számít
+            self.hunter._note_demand(self.lite, "https://hardverapro.hu/apro/switch_lite_8/friss.html")
+        self.assertEqual(self.watch._warm(force=True), "", "egy hirdetését látta: még nem")
+        self.later(30)
+        self.hunter._note_demand(self.lite, "https://www.jofogas.hu/b/switch_lite_9.htm")
+        self.assertEqual(self.watch._warm(force=True), "leírás: switch lite")
+        self.assertEqual(len(self.read()), 1, "egyszerre egy leírás")
+        self.assertEqual(self.watch._warm(force=True), "", "a következő kicsit később jön")
+        self.clock.now += deals_module.WARM_AGAIN
+        self.assertTrue(self.watch._warm(force=True).startswith("leírás: "))
+        self.assertEqual(len(self.read()), 2)
+        self.clock.now += deals_module.WARM_RETRY
+        self.assertEqual(self.watch._warm(force=True), "", "két hibátlan összehasonlító: az ára már biztos")
+        self.assertEqual((len(self.read()), self.hunter.funnel()["counts"].get("warm_reads")), (2, 2))
+        self.results([ha_card(1, "Régi kontroller", "2 000 Ft")])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Nintendo Switch Lite", "30 000 Ft"), ha_card(1, "Régi kontroller", "2 000 Ft")])
+        self.net.pages["_7/friss"] = page_html("Nintendo Switch Lite, hibátlanul működik, töltővel.")
+        self.watch.tick()
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Nintendo Switch Lite"])
+        self.assertEqual(len(self.read()), 2, "a szólás előtt nem kellett leírást olvasnia")
+
+    def test_not_at_peak_time_nor_on_a_busy_hour_nor_when_stopped(self):
+        """Csúcsidőben, ha a figyelő ebben az órában a keretének felét már elhasználta, Leállítva és Szünetben nem
+        melegít elő; egy meg nem nyíló összehasonlítót többször nem próbál."""
+        for n in range(2):
+            self.hunter._note_demand(self.lite, f"https://hardverapro.hu/apro/switch_lite_{8 + n}/friss.html")
+        with mock.patch.object(self.watch, "_factor", return_value=0.5):
+            self.assertEqual(self.watch._warm(force=True), "", "csúcsidőben nem")
+        with mock.patch.object(self.fetcher, "used", return_value=instant_module.INSTANT_HOURLY // 2):
+            self.assertEqual(self.watch._warm(force=True), "", "a keret fele már elment")
+        self.watch.allowed = lambda: False
+        self.assertEqual(self.watch._warm(force=True), "", "Szünetben nem")
+        self.watch.allowed = lambda: True
+        self.watch.set_enabled(False)
+        self.assertEqual(self.watch._warm(force=True), "", "Leállítva nem")
+        self.assertEqual(self.read(), [])
+        self.watch.set_enabled(True)
+        self.net.pages["lite_0/friss"] = (404, "nincs")
+        self.assertEqual(self.watch._warm(force=True), "leírás: switch lite", "a meg nem nyíló helyett a következő")
+        self.clock.now += deals_module.WARM_AGAIN
+        self.assertEqual(self.watch._warm(force=True), "leírás: switch lite")
+        self.assertEqual([url.rsplit("/", 2)[1] for url in self.read()], ["lite_0", "lite_5", "lite_3"],
+                         "a meg nem nyílót nem kérte újra")
+
+    def test_in_a_quiet_hour_it_checks_the_price_of_a_product_with_few_prices(self):
+        """Egy gyakran felbukkanó, de kevés árú termék árát csendes órában (mindkét oldal ráér) megnézi a két oldalon
+        (az árbázisba kerül), átlagos órában nem; ha utána elég ára van, kicsivel később az összehasonlítóit olvassa."""
+        self.hunter.book.add([{"text": f"Sony WH-1000XM4 fejhallgató {n}", "price": 70000 + n * 500,
+                               "url": f"https://www.jofogas.hu/b/sony_{n}.htm", "platform": "jofogas"} for n in range(2)])
+        sony = self.hunter.book.key("Sony WH-1000XM4 fejhallgató")[0]
+        for n in range(2):
+            self.hunter._note_demand(sony, f"https://www.jofogas.hu/b/sony_{8 + n}.htm")
+        self.net.pages["stext=Sony%20WH-1000XM4"] = (200, ha_page([ha_card(60 + n, f"Sony WH-1000XM4 {n}",
+                                                                          f"{69 + n} 000 Ft") for n in range(4)]))
+        for n in range(4):
+            self.net.pages[f"_{60 + n}/friss"] = page_html("Sony WH-1000XM4, hibátlan, dobozában.")
+        self.assertEqual(self.watch._warm(force=True), "", "átlagos órában nem keres")
+        with mock.patch.object(self.watch, "_factor", return_value=2.0):
+            self.assertTrue(self.watch._warm(force=True).startswith("árkeresés: "))
+        searched = sorted(url for _t, url in self.net.asked if "sony" in url.lower())
+        self.assertEqual(searched, ["https://hardverapro.hu/aprok/keres.php?stext=Sony%20WH-1000XM4",
+                                    "https://www.jofogas.hu/magyarorszag?q=Sony%20WH-1000XM4"],
+                         "mindkét oldalon megnézte, a címben írt alakkal")
+        self.assertEqual(self.hunter.book.reference(sony)["n"], 6, "az árbázisba került")
+        self.assertEqual(self.hunter.funnel()["counts"].get("warm_searches"), 1)
+        self.clock.now += deals_module.WARM_AGAIN
+        self.assertTrue(self.watch._warm(force=True).startswith("leírás: "), "most már az összehasonlítóit olvassa")
 
 
 class LinkedSearchTests(InstantCase):

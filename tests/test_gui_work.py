@@ -363,9 +363,13 @@ class WorkSecurityTests(unittest.TestCase):
         status, data = self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "min_profit": "4000"})
         self.assertEqual((status, data["max_buy"], data["browse"]["min_profit"], data["safe_only"]),
                          (200, 30000, 4000, True), "alapból csak a nyugodt szívvel megvehetőkről szól")
-        status, data = self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "safe_only": False})
-        self.assertFalse(data["safe_only"])
-        self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "safe_only": True})
+        self.assertTrue(data["fast_alert"], "alapból gyors riasztás: az adatlap után csenget, a modell utána néz")
+        status, data = self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "safe_only": False,
+                                                     "fast_alert": False})
+        self.assertEqual((data["safe_only"], data["fast_alert"]), (False, False))
+        status, data = self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "safe_only": True})
+        self.assertFalse(data["fast_alert"], "ami nem jött a kérésben, az marad")
+        self.post("/api/work/deals", {"action": "limits", "max_buy": "30 000", "fast_alert": True})
         self.assertEqual(self.post("/api/work/deals", {"action": "limits", "max_buy": "sok"})[0], 400)
         self.post("/api/work/deals", {"action": "limits", "max_buy": ""})
         # pótlási és javítási költség az állapot szerinti haszonhoz (Pótlás és javítás)
@@ -1056,9 +1060,12 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertTrue(page.locator("#d-maxbuy").is_hidden(), "a beállítások alapból össze vannak csukva")
         page.click('summary:has-text("Beállítások")')
         page.fill("#d-maxbuy", "30000")
+        self.assertTrue(page.is_checked("#d-fastalert"), "a gyors riasztás alapból be van kapcsolva")
+        page.uncheck("#d-fastalert")
         page.click("#d-limits")
         page.wait_for_selector('.toast:has-text("30 000 Ft fölött nem keresek")')
-        self.assertEqual(deals.state()["max_buy"], 30000)
+        self.assertEqual((deals.state()["max_buy"], deals.state()["fast_alert"]), (30000, False))
+        self.assertFalse(page.is_checked("#d-fastalert"))
         self.assertTrue(page.locator("#d-maxbuy").is_visible(), "ami nyitva volt, a frissítés után is nyitva marad")
         page.click('details[data-fold="instant"] > summary')
         page.fill("#di-target", "RTX 3080 Ti")
@@ -1275,7 +1282,8 @@ class WorkBrowserTests(unittest.TestCase):
                          "median": 99500, "similar": 6, "profit": 5050, "at": time.time() - 60,
                          "explore": "Alkuképes (az árbázisból)",
                          "haggle": {"offer": 83000, "cut": 0.13, "days": 12, "cuts": 1, "p0": 99000, "flex": ["sürgős"]}})
-        for name, amount in (("seen", 1240), ("new", 85), ("candidates", 3), ("not_cheap", 40), ("unsure", 2)):
+        for name, amount in (("seen", 1240), ("new", 85), ("candidates", 3), ("not_cheap", 40), ("unsure", 2),
+                             ("warm_reads", 12), ("warm_searches", 2)):
             deals.tally(name, amount=amount)
         page = self.page
         page.click("#job-deals")
@@ -1283,8 +1291,8 @@ class WorkBrowserTests(unittest.TestCase):
         today = page.inner_text(".funnel")
         self.assertTrue(today.startswith("Ma: 1") and "240 hirdetés · 85 új · 3 jelölt" in today, today)
         page.click('summary:has-text("Napló")')
-        self.assertIn("Kiesett: 40 nem elég olcsó, 2 bizonytalan ár (Érdemes megnézni).",
-                      page.inner_text('details[data-fold="journal"]'))
+        self.assertIn("Kiesett: 40 nem elég olcsó, 2 bizonytalan ár (Érdemes megnézni). Ráérő időben: 12 előre "
+                      "elolvasott leírás, 2 árkeresés.", page.inner_text('details[data-fold="journal"]'))
         page.click('summary:has-text("Napló")')
         card = page.inner_text('li:has([data-deal-open="al1"])')
         for part in ("alku", "kért ár 95 000 Ft", "ajánlj 83 000 Ft-ot (13%-kal kevesebb)", "12 napja fent", "már leárazta"):

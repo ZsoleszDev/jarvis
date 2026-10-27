@@ -323,8 +323,41 @@ class DealTests(HunterCase):
 
     # --- a modell nélküli keresés ---
 
+    def test_a_fast_alert_rings_before_the_model_and_the_model_checks_right_after(self):
+        """Gyors riasztás (alapból be): az adatlap és az újraszámolás után rögtön csenget („a modell még nem nézte
+        meg”), és a kör modell-sora rögtön utána megnézi: ha rendben, ellenőrzött lesz (nem szól újra); ha a modell
+        szerint nem ez, „Mégsem: …” jön (nem riaszt), és a találatnál is látszik. Kikapcsolva a modell a csengetés előtt
+        kérdez."""
+        self.assertTrue(self.hunter.state()["fast_alert"])
+        self.ready()
+        self.hunter.run(notify=self.notify)
+        [(_kind, title, text, extra)] = self.notices
+        self.assertEqual(title, "Olcsó: Gigabyte RTX 3060 Ti Gaming OC")
+        self.assertTrue(extra["urgent"])
+        self.assertIn("de a modell még nem nézte meg (gyors riasztás: a modell utána nézi meg)", text)
+        [deal] = self.hunter.state()["deals"]
+        self.assertEqual((deal["verified"], deal.get("model_pending"), deal.get("unchecked"), deal["note"]),
+                         (True, None, None, "Ugyanaz a kártya."), "a kör modell-sora utána megnézte")
+        self.llm.ok = False
+        other = self.make("nem-az")
+        self.ready(other)
+        self.notices.clear()
+        other.run(notify=self.notify)
+        self.assertEqual([n[1] for n in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC",
+                                                        "Mégsem: Gigabyte RTX 3060 Ti Gaming OC"])
+        self.assertFalse({"urgent", "deal"} & set(self.notices[1][3]), "a „Mégsem” nem riaszt")
+        [deal] = other.state()["deals"]
+        self.assertIn("Csak a doboza", deal["model_no"])
+        slow = self.make("lassu")
+        self.assertFalse(slow.set_limits(fast_alert=False)["fast_alert"])
+        self.ready(slow)
+        self.notices.clear()
+        slow.run(notify=self.notify)
+        self.assertEqual(self.notices, [], "kikapcsolva a modell előbb nemet mondott")
+
     def test_the_model_can_say_no_and_without_a_model_it_still_rings(self):
         self.llm.ok = False
+        self.hunter.set_fast_alert(False)      # a modell a csengetés előtt kérdez
         self.ready()
         self.hunter.run(notify=self.notify)
         self.assertEqual(self.notices, [])
@@ -530,11 +563,21 @@ class DealTests(HunterCase):
         self.browser.results = RESULTS
         self.llm.suspicious = True
         other = self.make("modell")
+        other.set_fast_alert(False)            # a modell a csengetés előtt kérdez
         self.ready(other)
         other.run(notify=self.notify)
         self.assertEqual((self.notices, other.state()["deals"]), ([], []))
         self.assertIn("a modell szerint gyanús: Előre utalást kér",
                       " ".join(e["text"] for e in other.journal.entries()))
+        # gyors riasztásnál előbb szól, de ha a modell utólag gyanúsnak látja: „Mégsem”, és lekerül a találatok közül
+        fast = self.make("gyors")
+        self.ready(fast)
+        fast.run(notify=self.notify)
+        self.assertEqual([n[1] for n in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC",
+                                                        "Mégsem: Gigabyte RTX 3060 Ti Gaming OC"])
+        self.assertIn("a modell szerint gyanús: Előre utalást kér", self.notices[1][2])
+        self.assertEqual(fast.state()["deals"], [])
+        self.assertTrue(any(e["text"].startswith("Gyanús, utólag levettem") for e in fast.journal.entries()))
 
     def test_the_model_sees_the_listing_photos_too(self):
         """A végső modellkérdés a hirdetés első két fotóját is megkapja (letöltve, kicsinyítve): a sérülés, a letöltött
@@ -2091,6 +2134,7 @@ class ConditionDealTests(HunterCase):
 
     def setUp(self):
         super().setUp()
+        self.hunter.set_fast_alert(False)         # (itt az ellenőrzött ajánlat a téma: a modell a csengetés előtt kérdez)
         self.browser.results = []                 # a többi oldalon nincs több találat
         self.browser.by_url = [("konzol", [LITE_CHEAP])]
         self.browser.pages = {

@@ -705,13 +705,17 @@
                       ["suspicious", "gyanús"], ["risky", "kockázatos"], ["gone", "elkelt"], ["defect", "hibás"],
                       ["model_no", "a modell szerint nem az"], ["muted", "elrejtett termék"],
                       ["bundle", "csomag (a csomagbontásnak)"], ["clothing", "ruha, cipő (azzal nem kereskedem)"]];
+  // ráérő időben (deals.warm): az összehasonlítók előre elolvasott leírásai és a kevés árú termékek árkeresései
+  const FUNNEL_SPARE = [["warm_reads", "előre elolvasott leírás"], ["warm_searches", "árkeresés"]];
   const thousands = (n) => Number(n).toLocaleString("hu-HU");
   function funnelLine(full) {
     const c = (deals.funnel || {}).counts || {};
     const main = FUNNEL_MAIN.filter(([k]) => c[k] || k === "seen").map(([k, label]) => `${thousands(c[k] || 0)} ${label}`);
     if (!full) return c.seen ? `Ma: ${main.join(" · ")}` : "";
     const out = FUNNEL_OUT.filter(([k]) => c[k]).map(([k, label]) => `${thousands(c[k])} ${label}`);
-    return c.seen ? `Ma: ${main.join(" · ")}${out.length ? `. Kiesett: ${out.join(", ")}.` : ""}` : "Ma még nem néztem hirdetést.";
+    const spare = FUNNEL_SPARE.filter(([k]) => c[k]).map(([k, label]) => `${thousands(c[k])} ${label}`);
+    return c.seen ? `Ma: ${main.join(" · ")}${out.length ? `. Kiesett: ${out.join(", ")}.` : ""}`
+      + (spare.length ? ` Ráérő időben: ${spare.join(", ")}.` : "") : "Ma még nem néztem hirdetést.";
   }
   // Az eladónak szóló üzenet: egy alkuképes hirdetésnél az ajánlat (az {ár} helyén a javasolt összeg), különben az
   // „Megvan még?”.
@@ -1058,6 +1062,8 @@
         </div>
         <label class="check"><input id="d-safeonly" type="checkbox" ${deals.safe_only !== false ? "checked" : ""}>
           Csak a nyugodt szívvel megvehetőkről szólj</label>
+        <label class="check"><input id="d-fastalert" type="checkbox" ${deals.fast_alert !== false ? "checked" : ""}>
+          Gyors riasztás: az adatlap után rögtön szólj, a modell utána nézze meg</label>
         <div class="row"><button type="button" class="small" id="d-limits">Mentés</button></div>
         <label class="check"><input id="d-haggle" type="checkbox" ${(deals.haggle || {}).on !== false ? "checked" : ""}>
           Alkuképes hirdetések is (régóta fent lévő vagy friss, kicsit drága)</label>
@@ -1168,7 +1174,7 @@
     });
     $("d-limits").addEventListener("click", async () => {
       if (await dealAction({ action: "limits", max_buy: $("d-maxbuy").value, min_profit: $("d-minprofit").value,
-                             safe_only: $("d-safeonly").checked }))
+                             safe_only: $("d-safeonly").checked, fast_alert: $("d-fastalert").checked }))
         J.toast($("d-maxbuy").value ? `Rendben: ${price($("d-maxbuy").value)} fölött nem keresek.` : "Rendben: bármilyen árban keresek.");
     });
     if ($("di-add")) {

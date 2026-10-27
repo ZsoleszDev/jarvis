@@ -15,6 +15,7 @@ böngészőt használja, mint eddig. Csak olvas: nem küld űrlapot, nem jelentk
 from __future__ import annotations
 
 import ipaddress
+import itertools
 import json
 import random
 import re
@@ -45,6 +46,9 @@ CACHE_MAX = 64             # ennyi találati oldalt jegyez meg (listings max_age
 LIST_PREFS = {"order": "time", "dir": "d", "block": 100}
 PREFS_RETRY = 6 * 3600
 TIMEOUT = 15.0
+# Elsőbbség: egy oldalon egyszerre egy kérés megy, a szünetekkel; a várakozók közül a sürgős (egy megérő hirdetés
+# adatlapja: urgent) megy előbb, a többi érkezési sorrendben. Aki nem soros, ilyen sűrűn nézi, sorra került-e (mp).
+TURN_POLL = 0.05
 BLOCK_FIRST = 3600         # tiltás után ennyi szünet (másodperc); ismétlésnél a duplája, legfeljebb BLOCK_MAX
 BLOCK_MAX = 86400
 EMPTY_PAUSE = 6 * 3600     # ha egymás után EMPTY_LIMIT-szer nem talál hirdetést, ennyi ideig a böngésző marad
@@ -670,8 +674,11 @@ class SiteFetcher:
         self.gap, self.hourly = gap, hourly
         self._get = get                     # tesztekhez: (url, headers, timeout) → válasz; alapból requests
         self._sessions: dict[str, requests.Session] = {}
-        self._locks = {site: threading.Lock() for site in self.sites}
         self._state_lock = threading.RLock()
+        # oldal → a várakozó kérések (elsőbbség, sorszám): a legkisebb jön; és ahol épp megy egy kérés
+        self._turns: dict[str, list[tuple[int, int]]] = {site: [] for site in self.sites}
+        self._busy: set[str] = set()
+        self._tickets = itertools.count()
         self._next: dict[str, float] = {}            # oldal → mikortól jöhet a következő kérés
         self._recent: dict[str, deque] = {site: deque() for site in self.sites}
         self._tagged: dict[tuple[str, str], deque] = {}   # (oldal, címke) → a hívó kéréseinek ideje (Quota)
@@ -706,7 +713,7 @@ class SiteFetcher:
             while recent and now - recent[0] > 3600:
                 recent.popleft()
             return self.usable(platform) and self._next.get(platform, 0.0) <= now and len(recent) < self.hourly \
-                and not self._locks[platform].locked()
+                and platform not in self._busy and not self._turns.get(platform)
 
     def status(self) -> dict[str, dict[str, Any]]:
         """A felületnek: oldalanként tilt-e (meddig, miért), és az utóbbi órában hány kérés volt."""
@@ -834,19 +841,20 @@ class SiteFetcher:
             return self._next_pages.get(url, "")
 
     def page(self, url: str, platform: str, check: Callable[[], None] = lambda: None,
-             quota: Quota | None = None) -> dict[str, Any]:
-        """Egy hirdetés oldala böngésző nélkül (mint a browser.look): cím, szöveg, rövid darabok, feliratok."""
-        final, html = self._fetch(url, platform, check, quota)
+             quota: Quota | None = None, urgent: bool = False) -> dict[str, Any]:
+        """Egy hirdetés oldala böngésző nélkül (mint a browser.look): cím, szöveg, rövid darabok, feliratok. urgent: egy
+        megérő hirdetés adatlapja: a várakozó letöltések előtt megy (TURN_POLL)."""
+        final, html = self._fetch(url, platform, check, quota, urgent)
         return parse_page(html, final)
 
     def _fetch(self, url: str, platform: str, check: Callable[[], None],
-               quota: Quota | None = None) -> tuple[str, str]:
+               quota: Quota | None = None, urgent: bool = False) -> tuple[str, str]:
         if platform not in self.sites or not self._ours(url, platform):
             raise FeedError("Ezt az oldalt a böngészővel olvasom.", "off")
         if not self.usable(platform):
             raise FeedError("Ez az oldal most csak a böngészővel megy (tiltott, vagy nem találtam rajta hirdetést).",
                             "blocked")
-        final, status, html = self._send(url, platform, check, quota=quota)
+        final, status, html = self._send(url, platform, check, quota=quota, urgent=urgent)
         if status in BLOCKED_STATUS or (status < 400 and len(html) < 20000 and CHALLENGE_RE.search(html[:20000])
                                         and not PRICE_RE.search(html)):
             self._block(platform, f"robot-ellenőrzés vagy tiltás ({status})")
@@ -860,10 +868,15 @@ class SiteFetcher:
         return final, html
 
     def _send(self, url: str, platform: str, check: Callable[[], None], data: dict[str, str] | None = None,
-              extra: dict[str, str] | None = None, quota: Quota | None = None) -> tuple[str, int, str]:
+              extra: dict[str, str] | None = None, quota: Quota | None = None,
+              urgent: bool = False) -> tuple[str, int, str]:
         """Egy kérés a tempó szerint: oldalanként egyszerre egy, szünettel, az óránkénti kereten belül (quota: a hívó
-        része: a címkéje szerinti kerete, és a többieknek meghagyott tartalék)."""
-        with self._locks[platform]:              # oldalanként egyszerre egy kérés
+        része: a címkéje szerinti kerete, és a többieknek meghagyott tartalék). A várakozók közül a sürgős (urgent: egy
+        megérő hirdetés adatlapja) jön előbb, a többi érkezési sorrendben; egy épp a szünetre váró kérés is előreengedi."""
+        ticket = (0 if urgent else 1, next(self._tickets))
+        with self._state_lock:
+            self._turns[platform].append(ticket)
+        try:
             while True:
                 check()
                 now = self.clock()
@@ -879,26 +892,37 @@ class SiteFetcher:
                             mine.popleft()
                         if len(mine) >= quota.cap:
                             raise FeedError("Ebben az órában már sokat kérdeztem ezt az oldalt.", "busy")
+                    ours = min(self._turns[platform]) == ticket and platform not in self._busy
                     wait = self._next.get(platform, 0.0) - now
-                if wait <= 0:
-                    break
-                self.sleep(min(wait, 1.0))
+                    if ours and wait <= 0:     # sorra került: megy (a kérése ezzel számít a keretbe)
+                        self._turns[platform].remove(ticket)
+                        self._busy.add(platform)
+                        stamp = self.clock()
+                        self._recent[platform].append(stamp)
+                        if quota:
+                            self._tagged.setdefault((platform, quota.tag), deque()).append(stamp)
+                        self.requests += 1
+                        break
+                if ours:
+                    self.sleep(min(wait, 1.0))         # ő jön: a szünet végéig (közben egy sürgős előreléphet)
+                else:
+                    time.sleep(TURN_POLL)              # egy másik kérés megy, vagy előbb jön
+        except BaseException:
             with self._state_lock:
-                stamp = self.clock()
-                self._recent[platform].append(stamp)
-                if quota:
-                    self._tagged.setdefault((platform, quota.tag), deque()).append(stamp)
-                self.requests += 1
-            started = time.monotonic()
-            try:
-                return self._download(url, platform, data, extra)
-            finally:
-                with self._state_lock:
-                    slow = self._slow.get(platform, 1.0)
-                    slow = min(SLOW_MAX, slow * SLOW_STEP) if time.monotonic() - started > SLOW_RESPONSE \
-                        else max(1.0, slow * SLOW_EASE)
-                    self._slow[platform] = slow
-                    self._next[platform] = self.clock() + self.rng.uniform(*self.gap) * slow
+                if ticket in self._turns[platform]:
+                    self._turns[platform].remove(ticket)
+            raise
+        started = time.monotonic()
+        try:
+            return self._download(url, platform, data, extra)
+        finally:
+            with self._state_lock:
+                self._busy.discard(platform)
+                slow = self._slow.get(platform, 1.0)
+                slow = min(SLOW_MAX, slow * SLOW_STEP) if time.monotonic() - started > SLOW_RESPONSE \
+                    else max(1.0, slow * SLOW_EASE)
+                self._slow[platform] = slow
+                self._next[platform] = self.clock() + self.rng.uniform(*self.gap) * slow
 
     def _ours(self, url: str, platform: str) -> bool:
         if self.domains is None:
