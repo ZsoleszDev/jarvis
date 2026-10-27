@@ -89,10 +89,52 @@ BURST = 0.5
 # utána vette észre (oldalanként a legutóbbi MAX_DELAYS), a felületen az elmúlt DELAY_WINDOW középértéke látszik.
 MAX_DELAYS = 300
 DELAY_WINDOW = 6 * 3600
+# Kiemelt hirdetések elöl: a Hardverapró egy kategóriájának elején az „Előresorolt” (fizetett) hirdetések akár egy fél
+# oldalt is kitesznek, és mindig ugyanazok. A figyelő megjegyzi, hány ilyen áll az elején (lead), és a következő
+# letöltésnél a cím offset= paraméterével átugorja őket, LEAD_MARGIN kiemeltet meghagyva jelzőnek: ha a letöltött oldal
+# nem kiemelttel kezdődik, a kiemeltek elfogyhattak, és lehet, hogy egy új hirdetést is átugrott, ezért rögtön újra
+# letölti az elejétől. Ha bemásolt címben offset= van, azt kezdő becslésnek veszi (a címből kiveszi, maga kezeli).
+LEAD_SITES = ("hardverapro",)
+LEAD_MARGIN = 5
+# Közös friss lista: egy keresőszó nélküli figyelő (pl. Hardverapró › Hardver, a legújabb elöl) egy letöltéssel minden
+# keresőszóra hoz friss hirdetést. Ha egy keresőszavas figyelő találatai rendre ebben is megvannak (legalább COVER_MIN,
+# és legfeljebb COVER_MISS arányban jött olyan, ami csak a saját keresésében volt), azt csak COVERED_EVERY percenként
+# tölti le külön (biztonsági hálónak), és a keretből COVERED_WEIGHT résszel számít: így a közös lista sűrűbben jöhet.
+COVER_MIN = 5
+COVER_MISS = 0.1
+COVER_DECAY = 0.98
+COVERED_EVERY = 15
+COVERED_WEIGHT = 0.25
 _POSTED_RE = re.compile(r"\b(ma|tegnap),?\s+(\d{1,2})[:.](\d{2})\b")
 
 
 RHYTHM_TEXT = {0.5: "csúcsidő: sűrűbben nézem", 2.0: "csendes óra: ritkábban nézem"}
+
+
+def split_offset(url: str) -> tuple[str, int]:
+    """A cím offset= paraméter nélkül, és az értéke (0, ha nincs)."""
+    parts = urllib.parse.urlsplit(url)
+    pieces = [piece for piece in parts.query.split("&") if piece]
+    found = [piece for piece in pieces if piece.split("=", 1)[0] == "offset"]
+    if not found:
+        return url, 0                          # (a cím változatlan: a kódolását sem írja át)
+    value = found[-1].split("=", 1)[1] if "=" in found[-1] else ""
+    query = "&".join(piece for piece in pieces if piece not in found)
+    return urllib.parse.urlunsplit(parts._replace(query=query)), int(value) if value.isdigit() else 0
+
+
+def with_offset(url: str, offset: int) -> str:
+    """A cím offset= paraméterrel (0-nál nélküle)."""
+    base, _old = split_offset(url)
+    if offset <= 0:
+        return base
+    parts = urllib.parse.urlsplit(base)
+    return urllib.parse.urlunsplit(parts._replace(query="&".join(q for q in (parts.query, f"offset={offset}") if q)))
+
+
+def leading_promoted(rows: list[dict[str, Any]]) -> int:
+    """Hány kiemelt hirdetés áll a lista elején."""
+    return next((n for n, row in enumerate(rows) if not row.get("promoted")), len(rows))
 
 
 def posted_ago(text: str, now: float) -> float | None:
@@ -248,6 +290,8 @@ class InstantWatch:
         állapota (tilt-e), és hány kérés megy így óránként."""
         with self._lock:
             alerts = json.loads(json.dumps(self._data["alerts"]))
+            for alert in alerts:                # amelyik oldalon a közös lista hozza a találatait (ritkábban nézi)
+                alert["covered"] = [k for k in alert.get("sites") or [] if self._covered(alert, k)]
             hits = [dict(h) for h in self._data["hits"]]
             enabled = self._data["enabled"]
         status = self.fetcher.status() if self.fetcher is not None else {}
@@ -268,8 +312,9 @@ class InstantWatch:
         from .deals import BROWSE_LANES
         if "hardverapro" not in self.platforms:
             return []
-        return [{"name": name, "url": target} for name, target in BROWSE_LANES.get("hardverapro", [])
-                if target.startswith("http")]
+        every = [{"name": "Minden hardver (közös friss lista)", "url": "https://hardverapro.hu/aprok/hardver/index.html"}]
+        return every + [{"name": name, "url": target} for name, target in BROWSE_LANES.get("hardverapro", [])
+                        if target.startswith("http")]
 
     @staticmethod
     def _load_per_hour(alerts: list[dict[str, Any]]) -> dict[str, int]:
@@ -566,14 +611,18 @@ class InstantWatch:
         else:
             minutes = min(max(int(alert.get("every") or DEFAULT_EVERY) * factor, EVERY_CHOICES[0]), MAX_EVERY)
             seconds = max(minutes * 60, floor)
+        if self._covered(alert, site):         # a közös lista hozza a találatait: külön csak biztonsági hálónak
+            seconds = max(seconds, COVERED_EVERY * 60)
         return seconds * self.rng.uniform(*JITTER)
 
     def _floor(self, site: str) -> float:
         """A legrövidebb idő két letöltés között egy figyelőnél (másodperc): az oldal figyelői (a bekapcsoltak) a keret
-        POLL_SHARE részén egyenletesen osztoznak."""
+        POLL_SHARE részén egyenletesen osztoznak (a közös listából lefedett keresőszavas figyelő COVERED_WEIGHT
+        résszel)."""
         with self._lock:
-            pairs = sum(1 for a in self._data["alerts"] if not a.get("off") and site in (a.get("sites") or []))
-        return max(1, pairs) * 3600 / max(1.0, INSTANT_HOURLY * POLL_SHARE)
+            pairs = sum(COVERED_WEIGHT if self._covered(a, site) else 1.0 for a in self._data["alerts"]
+                        if not a.get("off") and site in (a.get("sites") or []))
+        return max(1.0, pairs) * 3600 / max(1.0, INSTANT_HOURLY * POLL_SHARE)
 
     def _learn(self, site: str, fresh: int, now: float) -> None:
         """A ritmushoz: ebben az órában ennyi új (illő) hirdetés jött ezen az oldalon (a hívó menti)."""
@@ -653,9 +702,9 @@ class InstantWatch:
         interval = self._interval(alert, site, now)
         with self._lock:
             self._next[key] = now + interval
-        url = self._url(alert, site)
+        base = self._url(alert, site)
         try:
-            rows = self._rows(self.fetcher.listings(url, site, self._check_on, quota=QUOTA), site)
+            rows, url = self._fetch_rows(alert, site, base)
         except FeedError as exc:
             self._failed(alert, site, exc)
             return []
@@ -663,7 +712,7 @@ class InstantWatch:
         # a Hardveraprón a sorrend nem a címben van: a lista beállítása (feeds.SiteFetcher.view) is a cím része itt
         view = self.fetcher.view(site) if hasattr(self.fetcher, "view") else ""
         result = self._absorb(alert, site, rows, now, count=True, resorted=resorted,
-                              used=f"{url}#{view}" if view else url, plain=self._plain_url(alert, site))
+                              used=f"{base}#{view}" if view else base, plain=split_offset(self._plain_url(alert, site))[0])
         if result is None:                    # közben törölted
             return []
         first, fresh, overflow = result
@@ -691,6 +740,33 @@ class InstantWatch:
                 self._jobs.put((alert, site, fresh))   # az értékelés a saját szálán: a letöltés közben mehet tovább
             return []
         return self._report(alert, site, fresh)
+
+    def _fetch_rows(self, alert: dict[str, Any], site: str, base: str) -> tuple[list[dict[str, Any]], str]:
+        """A figyelő oldalának letöltése; ahol lehet (LEAD_SITES), az elején álló kiemelt hirdetések nélkül (lásd
+        LEAD_MARGIN). (a hirdetések, a letöltött cím). FeedError, ha nem sikerült."""
+        base, given = split_offset(base)
+        if site not in LEAD_SITES:
+            return self._rows(self.fetcher.listings(base, site, self._check_on, quota=QUOTA), site), base
+        lead = int((alert.get("lead") or {}).get(site, given) or 0)
+        offset = max(0, lead - LEAD_MARGIN)
+        url = with_offset(base, offset)
+        rows = self._rows(self.fetcher.listings(url, site, self._check_on, quota=QUOTA), site)
+        if offset and rows and not rows[0].get("promoted"):
+            # nem kiemelttel kezdődik: a kiemeltek elfogyhattak, és egy új hirdetés az átugrott részbe eshetett
+            offset, url = 0, base
+            if self._has_budget(site):
+                rows = self._rows(self.fetcher.listings(base, site, self._check_on, quota=QUOTA), site)
+            else:
+                rows = []
+        if rows:
+            lead = offset + leading_promoted(rows)
+        elif offset == 0:
+            lead = 0
+        with self._lock:
+            stored = next((a for a in self._data["alerts"] if a.get("id") == alert["id"]), None)
+            if stored is not None:
+                stored.setdefault("lead", {})[site] = lead     # (az _absorb menti)
+        return rows, url
 
     def _rows(self, rows: list[dict[str, Any]], site: str) -> list[dict[str, Any]]:
         """A letöltött hirdetések (az elejükből MAX_ROWS, a licitek nélkül); az árbázis is tanul belőlük."""
@@ -732,6 +808,8 @@ class InstantWatch:
                     first = "resort"                  # más címről (más sorrendben) jött: most csak megjegyzi
                 urls[site] = used
             fresh_rows: list[bool] = []               # a nem kiemelt hirdetések: újak-e (az oldal sorrendjében)
+            # ahol az elején álló kiemelteket átugorja (LEAD_SITES), egy (eddig nem látott) kiemelt sem új hirdetés
+            skips = site in LEAD_SITES and bool((stored.get("lead") or {}).get(site))
             for row in rows:
                 ident = listing_key(row["url"])
                 old = seen.get(ident)
@@ -741,8 +819,14 @@ class InstantWatch:
                 if first:
                     continue
                 drop = isinstance(old, list) and len(old) > 1 and row["price"] <= int(old[1]) * (1 - DROP)
+                if row.get("promoted") and skips:
+                    continue                          # a kiemeltek blokkját átugorja: ezek nem új hirdetések
                 if (old is None or drop) and self._fits(stored, row):
                     fresh.append({**row, "drop": int(old[1]) if drop else None})
+            if not first and not stored.get("query"):
+                self._share(stored, site, rows, now)
+            elif not first and stored.get("query") and count:
+                self._covered_note(stored, site, misses=len(fresh))
             if len(seen) > MAX_SEEN:
                 for ident, _value in sorted(seen.items(), key=lambda kv: float(kv[1][0]))[:len(seen) - MAX_SEEN]:
                     seen.pop(ident, None)
@@ -765,6 +849,40 @@ class InstantWatch:
         # valami; a kiemelt hirdetések (elöl, többnyire régiek) ebbe nem számítanak
         overflow = not first and len(fresh_rows) >= OVERFLOW_MIN and all(fresh_rows[-OVERFLOW_TAIL:])
         return first, fresh, overflow
+
+    def _share(self, feed: dict[str, Any], site: str, rows: list[dict[str, Any]], now: float) -> None:
+        """Egy közös lista (keresőszó nélküli figyelő) friss hirdetései a keresőszavas figyelőknek is: amelyikre illik,
+        annak a látottjai közé kerül (így a saját letöltése nem méri fel újra), és a lefedettségébe beszámít (_covered).
+        A hívó tartja a zárat, és ment."""
+        for alert in self._data["alerts"]:
+            if alert is feed or not alert.get("query") or alert.get("off") or site not in (alert.get("sites") or []) \
+                    or site not in (alert.get("baseline") or []):
+                continue
+            seen = self._data["seen"].setdefault(alert["id"], {})
+            hits = 0
+            for row in rows:
+                ident = listing_key(row["url"])
+                if ident not in seen and not row.get("promoted") and self._fits(alert, row):
+                    seen[ident] = [now, row["price"]]
+                    hits += 1
+            if hits:
+                self._covered_note(alert, site, hits=hits)
+
+    @staticmethod
+    def _covered_note(alert: dict[str, Any], site: str, hits: int = 0, misses: int = 0) -> None:
+        """A lefedettség: hány friss találata jött a közös listából (hits), és hány csak a saját letöltéséből (misses);
+        a régebbiek súlya minden új adatnál COVER_DECAY-szeresére csökken."""
+        if not hits and not misses:
+            return
+        cover = alert.setdefault("cover", {}).setdefault(site, [0.0, 0.0])
+        cover[0] = round(cover[0] * COVER_DECAY + hits, 3)
+        cover[1] = round(cover[1] * COVER_DECAY + misses, 3)
+
+    @staticmethod
+    def _covered(alert: dict[str, Any], site: str) -> bool:
+        """Egy keresőszavas figyelő friss találatai rendre a közös listából jönnek-e (lásd COVER_MIN)."""
+        hits, misses = ((alert.get("cover") or {}).get(site) or [0.0, 0.0])[:2]
+        return bool(alert.get("query")) and hits >= COVER_MIN and misses <= COVER_MISS * (hits + misses)
 
     def _note_delays(self, site: str, rows: list[dict[str, Any]], now: float) -> None:
         """Az új hirdetések késése (a kártyán lévő feltöltési idő óta, posted_ago), oldalanként a legutóbbi MAX_DELAYS (a

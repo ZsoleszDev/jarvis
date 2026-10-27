@@ -646,6 +646,8 @@
       const last = Math.max(0, ...Object.values(a.last || {}));
       return `<li><span><b>${esc(a.name)}</b>
           <small class="muted">${esc(sites)}${esc(range)}${(a.exclude || []).length ? ` · kivéve: ${esc(a.exclude.join(", "))}` : ""} · ${a.every} percenként</small>
+          ${(a.covered || []).length ? '<small class="muted">A közös friss listából jönnek a találatai: külön csak negyedóránként nézem.</small>' : ""}
+          ${Math.max(0, ...Object.values(a.lead || {})) > 0 ? `<small class="muted">Az elején álló ${esc(Math.max(...Object.values(a.lead)))} kiemelt hirdetést nem töltöm le.</small>` : ""}
           <small class="muted">${a.off ? "szünetel" : last ? `utoljára ${esc(ago(last))}` : "még nem nézte"}${a.found ? ` · eddig ${a.found} új` : ""}${a.found_at ? ` (legutóbb ${esc(ago(a.found_at))})` : ""}</small>
           ${Object.values(a.errors || {}).map((e) => `<small class="warn">${esc(e)}</small>`).join("")}
           ${a.url ? `<small><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small>` : ""}</span>

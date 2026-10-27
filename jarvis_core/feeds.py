@@ -435,8 +435,12 @@ def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[d
     pattern = LISTING_URL.get(platform)
     if pattern is not None and any(pattern.search(e["url"]) for e in out):
         out = [e for e in out if pattern.search(e["url"])]
-    if sum(1 for e in out if e.get("promoted")) * 2 > len(out):
-        for entry in out:                         # a hirdetések többsége nem lehet kiemelt: ez valami más jel
+    promoted = sum(1 for e in out if e.get("promoted"))
+    lead = next((n for n, e in enumerate(out) if not e.get("promoted")), len(out))
+    if promoted * 2 > len(out) and (lead != promoted or lead == len(out)):
+        # a hirdetések többsége nem lehet kiemelt: ez valami más jel; kivéve, ha a kiemeltek egy blokkban, elöl vannak
+        # (a Hardverapró egy kategóriájának elején az „Előresorolt” hirdetések akár egy fél oldalt is kitesznek)
+        for entry in out:
             entry.pop("promoted", None)
     return out or _ld_listings(tree.ld_json, base_url)
 
