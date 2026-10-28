@@ -253,6 +253,36 @@ def from_price(text: str) -> bool:
     return False
 
 
+# Egy többtételes hirdetés ára az egészre vonatkozik („egyben”, „együtt”, „összesen”, „mindet egy áron”), darabár
+# („/db”, „darabár”, „egyenként”), vagy a legolcsóbb tételé („-tól”, „ártól”, „legolcsóbb”, „tételenként”).
+_WHOLE_PRICE = re.compile(r"\b(?:egyben|egyutt|osszesen|mindet|komplett(?:en)?|egy aron|egy osszegben|az egeszert)\b")
+_CHEAPEST = re.compile(r"\b(?:artol|legolcsobb\w*|tetelenkent|darabonkent is|kulon is)\b")
+
+
+def price_scope(text: str) -> tuple[str, str]:
+    """Mire vonatkozik egy többtételes hirdetés ára: („egyben”: az egészre, ezt írja; „darabár”: darabár, „-tól” ár, vagy
+    tételenként is kapható, így az ár egy tételé lehet; „kétséges”: mindkettőre utal, nem derül ki, melyik az ár; „”: egyik
+    sem derül ki; és az idézet a hirdetésből, amiből ez kiderül)."""
+    original = " ".join((text or "").split())
+    folded = fold(original)
+
+    def quote(match: re.Match[str]) -> str:
+        start, end = max(0, match.start() - 25), min(len(original), match.end() + 25)
+        return (original if len(folded) == len(original) else folded)[start:end].strip()
+
+    whole = _WHOLE_PRICE.search(folded)
+    piece = _PER_PIECE.search(folded) or _CHEAPEST.search(folded) or (
+        next((m for m in _FROM_PRICE.finditer(folded) if from_price(m.group(0))), None))
+    if piece and whole:
+        first, second = quote(piece), quote(whole)
+        return "kétséges", first if first == second else f"{first} … {second}"
+    if piece:
+        return "darabár", quote(piece)
+    if whole:
+        return "egyben", quote(whole)
+    return "", ""
+
+
 def several_products(text: str) -> bool:
     """Több különböző termék egy hirdetésben, egy áron („RTX 3060 / 3070 / 3080”, „Ryzen 5 5600X + B550 alaplap”): az
     ár nem egy meghatározott darabé, és a címből nem rendelhető egyértelműen egyikhez sem. Két valódi termék kell hozzá:
@@ -521,38 +551,59 @@ LEARN_AFTER = 3            # ennyiszer kell egy ismeretlen márkának előfordul
 def basis_entry(sample: dict[str, Any], source: str = "árbázis") -> dict[str, Any]:
     """Egy összehasonlító ár a találat „mihez mérte” listájához: cím, ár, oldal (kulcs), webcím, és honnan (az árbázisból,
     vagy most találta: „most”); ha azóta eltűnt (lehet, hogy elkelt, de nem tudni, mennyiért), azt is; az eladó (v), ha
-    tudjuk."""
+    tudjuk, és mikor látta utoljára (seen)."""
     entry = {"t": str(sample.get("t") or ""), "p": int(sample["p"]), "s": str(sample.get("site") or ""),
              "u": str(sample.get("url") or ""), "src": source}
     if sample.get("gone"):
         entry["gone"] = True
     if sample.get("seller"):
         entry["v"] = str(sample["seller"])
+    if sample.get("last"):
+        entry["seen"] = int(float(sample["last"]))   # mikor látta utoljára (a frissességhez: deals.reliability)
     return entry
 
 
 SELLER_CAP = 2             # egy eladótól legfeljebb ennyi ár számít egy termék szokásos árába
+RECENT_SEEN = 2 * 86400    # ennyin belül látott (és nem eltűnt) hirdetés most is fent lehet
+
+
+def listed_days(sample: dict[str, Any], now: float) -> float | None:
+    """Hány napja van fent egy hirdetés (az első látása óta), ha most is fent lehet (nem tűnt el, és RECENT_SEEN-en
+    belül láttuk); None, ha nem tudni, vagy már nincs fent."""
+    at, last = float(sample.get("at") or 0), float(sample.get("last") or 0)
+    if not at or sample.get("gone") or now - last > RECENT_SEEN:
+        return None
+    return round(max(0.0, now - at) / 86400, 1)
 
 
 def _same_title(text: str) -> str:
     return " ".join(re.sub(r"[^\w]+", " ", fold(text or "")).split())
 
 
-def independent(samples: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def independent(samples: list[dict[str, Any]], own: dict[str, Any] | None = None
+                ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """A független árak egy termékhez: ugyanaz a hirdetés több helyen (ugyanaz a cím és az ár, pl. a Hardveraprón és a
     Jófogáson is fent van) egyszer számít; egy eladótól legfeljebb SELLER_CAP (sok hasonló hirdetése nem sok független
-    ár: egy kereskedő a saját árszintjét mutatja). Az első marad (a hívó sorrendje: a frissebb elöl). (megtartottak,
-    kizártak: a mintájuk a why okkal). A minta book.samples- vagy basis_entry-alakú (t, p, site/s, seller/v)."""
+    ár: egy kereskedő a saját árszintjét mutatja). Az első marad (a hívó sorrendje: a frissebb elöl). own: a vizsgált
+    hirdetés (t, p, v): a máshova is feltett példánya (ugyanaz a cím, és ugyanaz az ár vagy az eladó) nem a saját
+    összehasonlítója. (megtartottak, kizártak: a mintájuk a why okkal). A minta book.samples- vagy basis_entry-alakú
+    (t, p, site/s, seller/v)."""
     kept, out = [], []
     titles: dict[tuple[str, int], dict[str, Any]] = {}
     sellers: dict[str, int] = {}
+    mine = _same_title(str((own or {}).get("t") or ""))
+    mine_by = fold(str((own or {}).get("v") or "")).strip()
     for sample in samples:
         title = _same_title(str(sample.get("t") or ""))
+        seller = fold(str(sample.get("seller") or sample.get("v") or "")).strip()
+        if own and len(mine) >= 8 and title == mine and (int(sample["p"]) == int(own.get("p") or 0)
+                                                         or (seller and seller == mine_by)):
+            out.append({**sample, "why": "valószínűleg maga a vizsgált hirdetés (máshol is fent van)"})
+            continue
         twin = titles.get((title, int(sample["p"]))) if len(title) >= 8 else None
         if twin is not None:
             out.append({**sample, "why": "valószínűleg ugyanaz a hirdetés, máshol is fent van (egyszer számít)"})
             continue
-        seller = fold(str(sample.get("seller") or sample.get("v") or "")).strip()
         if seller and sellers.get(seller, 0) >= SELLER_CAP:
             out.append({**sample, "why": f"ugyanattól az eladótól ({sample.get('seller') or sample.get('v')}): "
                                          f"legfeljebb {SELLER_CAP} hirdetése számít"})
@@ -824,6 +875,7 @@ class PriceBook:
                         samples.append(sample)
         with self._lock:
             name = (self._keys.get(key) or {}).get("name") or key
+        now = self.clock()
         samples.sort(key=lambda s: -float(s.get("last") or 0))
         samples, twins = independent(samples)   # egy hirdetés egyszer, egy eladótól legfeljebb SELLER_CAP
         stats = price_stats([s["p"] for s in samples])
@@ -834,7 +886,8 @@ class PriceBook:
                  "name": name, "key": key, "sites": sorted({s["site"] for s in kept if s["site"]}),
                  # mihez mérte: a beszámított árak, és a kilógók (nagyon olcsó vagy drága: kimaradt a szokásos árból)
                  "basis": {"used": [basis_entry(s) for s in sorted(kept, key=lambda s: s["p"])],
-                           "out": [{**basis_entry(s), "why": "kilógó ár (kimaradt a szokásos árból)"}
+                           "out": [{**basis_entry(s), "why": "kilógó ár (kimaradt a szokásos árból)",
+                                    **({"outlier": "olcsó", "up": listed_days(s, now)} if s["p"] < stats["min"] else {})}
                                    for s in sorted(samples, key=lambda s: s["p"]) if s not in kept]
                            + [{**basis_entry(s), "why": s["why"]} for s in twins]}}
         sold = [s["p"] for s in kept if s["gone"]]

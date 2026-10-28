@@ -76,8 +76,42 @@ _SPEED_RE = re.compile(r"\b(\d{4})\s*(?:mhz|mt/?s)?\b")
 _GPU_VARIANT_RE = re.compile(r"\b(2048|2304|1792)\s*sp\b")
 _INTERFACE_RE = (("nvme", re.compile(r"\b(?:nvme|pcie\s*(?:gen)?\s*[345]|pci-?e)\b")),
                  ("sata", re.compile(r"\b(?:sata\w*|2[.,]5 ?(?:col|\"|inch)?)\b")))
+# Az SSD csatolója a típusából (a típus csak ilyennel készült): Samsung 970/980/990, WD SN… NVMe; 860/870, MX500, BX500,
+# A400 SATA; a Samsung T5/T7 külső (USB).
+_SSD_IFACE_BY_MODEL = (("nvme", re.compile(r"\b(?:9[789]0 (?:evo|pro)|990 pro|sn[5-8]\d0|nv[123]|kc[23]000|p[235] plus|"
+                                           r"p[235])\b")),
+                       ("sata", re.compile(r"\b(?:8[67]0 (?:evo|qvo)|mx500|bx500|a400)\b")),
+                       ("usb", re.compile(r"\bt[57](?: shield| touch)?\b")))
 _HEALTH_RE = re.compile(r"\b(?:health|allapot|elettartam|egeszseg)\w*\W{0,3}(\d{2,3}) ?%")
 _WRITTEN_RE = re.compile(r"\b(\d+(?:[.,]\d+)?) ?(tb|gb) (?:irva|irt|written|tbw)\b|\btbw\W{0,3}(\d+)")
+
+
+def _literal(text: str, pattern: str) -> str:
+    """Az eredeti szöveg darabja, ami a mintára illik (az ékezet nélküli, kisbetűs alakban keresve; ha a kettő hossza
+    egyezik, az eredetiből: ez az idézet), vagy „”."""
+    original = " ".join((text or "").split())
+    folded = fold(original)
+    match = re.search(pattern, folded)
+    if not match:
+        return ""
+    return (original if len(folded) == len(original) else folded)[match.start():match.end()]
+
+
+def _words_literal(text: str, words: str) -> str:
+    """A szavak („rtx 3060 ti”, „samsung 970 plus”) eredeti alakja a szövegben: a részek közt szóköz, kötőjel, vagy egy
+    közbeékelt szó („Samsung 970 EVO Plus”) is lehet; „” ha nincs meg."""
+    parts = [re.escape(word) for word in words.split() if word]
+    if not parts:
+        return ""
+    return _literal(text, r"\b" + r"(?:\s*-?\s*|\W+\w+\W+)".join(parts) + r"\b")
+
+
+def _cap_pattern(size: str) -> str:
+    """Egy kapacitás („4gb”, „1tb”) leírt alakjai: „4G”, „4 GB”, „4GB”, „4 giga”, „1 tera”."""
+    match = re.match(r"^(\d+)(g|t)b$", size)
+    if not match:
+        return re.escape(size)
+    return rf"\b{match.group(1)}\s*{match.group(2)}(?:b|ib|iga\w*|era\w*)?\b"
 
 
 def _attr(value: Any, source: str, evidence: str) -> dict[str, Any]:
@@ -126,6 +160,11 @@ def extract(title: str, details: str = "") -> dict[str, Any]:
             if name not in attrs and value not in (None, ""):
                 attrs[name] = _attr(value, source, evidence)
     chip_key = attrs.pop("chip_key", None)
+    by_model = attrs.pop("iface_by_model", None)
+    if kind == "ssd" and by_model is not None and "interface" not in attrs:
+        # a csatoló nincs kiírva, de a típus csak ilyennel készült (pl. a 970 EVO Plus NVMe): nem kitalált adat
+        attrs["interface"] = _attr(by_model["value"], "típus",
+                                   f"a {by_model['evidence']} {str(by_model['value']).upper()}-s")
     if kind == "gpu" and "vram" not in attrs and chip_key is not None:
         size = implied_size(str(chip_key["value"]))
         if size:                               # a típus csak egy memóriamérettel készült (pl. GTX 1080: 8 GB)
@@ -149,18 +188,18 @@ def _gpu(text: str) -> dict[str, tuple[Any, str]]:
                 break
         chip = " ".join(parts)
         found = product_key(chip)
-        out["chip"] = (chip, chip.upper())
+        out["chip"] = (chip, _words_literal(text, chip) or chip.upper())
         if found:
             out["chip_key"] = (found[0], chip)
     sizes = [size for size in capacities(words) if _gigabytes(size) <= 48]
     if sizes:
-        out["vram"] = (sizes[0], sizes[0].upper())
+        out["vram"] = (sizes[0], _literal(text, _cap_pattern(sizes[0])) or sizes[0].upper())
     variant = _GPU_VARIANT_RE.search(fold(text))
     if variant:
         out["variant"] = (f"{variant.group(1)}sp", variant.group(0))
     maker = next((w for w in words if w in BRANDS or w in _GPU_MAKERS), "")
     if maker:
-        out["maker"] = (maker, maker)
+        out["maker"] = (maker, _words_literal(text, maker) or maker)
     return out
 
 
@@ -179,25 +218,30 @@ def _ram(text: str) -> dict[str, tuple[Any, str]]:
     out: dict[str, tuple[Any, str]] = {}
     generation = next((w for w in words if re.match(r"^(?:lp)?ddr[2-5]$", w)), "")
     if generation:
-        out["generation"] = (generation, generation.upper())
+        digit = generation[-1]
+        out["generation"] = (generation, _literal(text, rf"\b(?:lp)?ddr\s*-?\s*{digit}\w*|\bpc{digit}\b[-\d]*")
+                             or generation.upper())
     kit = next((match for match in (_KIT.match(w) for w in words) if match), None)
     single = re.search(r"\b1 ?x ?(\d{1,2}) ?gb\b", folded)
     if kit:
         modules, size = int(kit.group(1)), int(kit.group(2))
-        out["layout"] = (f"{modules}x{size}gb", kit.group(0).upper())
-        out["total"] = (f"{modules * size}gb", kit.group(0).upper())
+        quote = _literal(text, rf"\b{modules}\s*[x×*]\s*{size}\s*(?:gb|g)?\b") or kit.group(0).upper()
+        out["layout"] = (f"{modules}x{size}gb", quote)
+        out["total"] = (f"{modules * size}gb", _literal(text, _cap_pattern(f"{modules * size}gb")) or quote)
     else:
         sizes = [size for size, kind in sized(text) if kind != "storage" and _gigabytes(size) <= 512]
         if sizes:
-            out["total"] = (sizes[0], sizes[0].upper())
+            out["total"] = (sizes[0], _literal(text, _cap_pattern(sizes[0])) or sizes[0].upper())
             if single:
-                out["layout"] = (f"1x{single.group(1)}gb", single.group(0).upper())
+                out["layout"] = (f"1x{single.group(1)}gb", _literal(text, r"\b1 ?x ?\d{1,2} ?gb\b") or
+                                 single.group(0).upper())
             elif "kit" in words or "keszlet" in words:
-                out["layout"] = ("kit", "kit")          # több modul, de nem tudni, hogyan
+                out["layout"] = ("kit", _literal(text, r"\b(?:kit|keszlet)\w*") or "kit")   # több modul, de hogyan?
     if "sodimm" in words:
-        out["form"] = ("sodimm", "SO-DIMM")
+        out["form"] = ("sodimm", _literal(text, r"\bso\W?dimm\b|\b(?:laptop|notebook)\w*\s+(?:ram|memoria)\w*")
+                       or "SO-DIMM")
     elif re.search(r"\b(?:u?dimm|asztali\w*|desktop)\b", folded):
-        out["form"] = ("dimm", "DIMM")
+        out["form"] = ("dimm", _literal(text, r"\b(?:u?dimm|asztali\w*|desktop)\b") or "DIMM")
     server = re.search(r"\b(?:ecc|reg|registered|rdimm|lrdimm|szerver\w*)\b", folded)
     if server:
         out["server"] = ("igen", server.group(0))
@@ -206,7 +250,7 @@ def _ram(text: str) -> dict[str, tuple[Any, str]]:
         out["speed"] = (speed.group(1), speed.group(0))
     maker = next((w for w in words if w in BRANDS or w in _RAM_MAKERS), "")
     if maker:
-        out["maker"] = (maker, maker)
+        out["maker"] = (maker, _words_literal(text, maker) or maker)
     return out
 
 
@@ -221,10 +265,10 @@ def _phone(text: str) -> dict[str, tuple[Any, str]]:
     if key:
         model = " ".join(word for word in key[1].split() if not is_capacity(word))
         if model:
-            out["model"] = (model, model)
+            out["model"] = (model, _words_literal(text, model) or model)
     storage = [size for size, kind in sized(text) if kind == "storage" or (not kind and _gigabytes(size) >= 32)]
     if storage:
-        out["storage"] = (storage[0], storage[0].upper())
+        out["storage"] = (storage[0], _literal(text, _cap_pattern(storage[0])) or storage[0].upper())
     lock = _LOCK_RE.search(folded)
     if lock and not _LOCK_DENIED.search(folded[max(0, lock.start() - 12):lock.end() + 14]):
         out["lock"] = ("aktiválási zár", lock.group(0))
@@ -263,14 +307,20 @@ def _ssd(text: str) -> dict[str, tuple[Any, str]]:
     if key:
         model = " ".join(word for word in key[1].split() if not is_capacity(word))
         if model:
-            out["model"] = (model, model)
+            out["model"] = (model, _words_literal(text, model) or model)
     sizes = [size for size, kind in sized(text) if kind != "ram"]
     if sizes:
-        out["capacity"] = (max(sizes, key=_gigabytes), max(sizes, key=_gigabytes).upper())
+        biggest = max(sizes, key=_gigabytes)
+        out["capacity"] = (biggest, _literal(text, _cap_pattern(biggest)) or biggest.upper())
     for name, pattern in _INTERFACE_RE:
         match = pattern.search(folded)
         if match:
             out["interface"] = (name, match.group(0))
+            break
+    for name, pattern in _SSD_IFACE_BY_MODEL:
+        match = pattern.search(folded)
+        if match:
+            out["iface_by_model"] = (name, match.group(0))
             break
     health = _HEALTH_RE.search(folded)
     if health:

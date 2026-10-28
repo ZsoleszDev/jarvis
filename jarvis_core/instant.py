@@ -35,8 +35,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, DealError, Deferred, deal_action, excluded, matches_query,
-                    newest_first, parse_words, safety_text)
+from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, VERIFIED_TEXT, DealError, Deferred, deal_action, excluded,
+                    matches_query, newest_first, parse_words, safety_text, valuation_text)
 from .feeds import FAST_SITES, FeedError, Quota
 from .pricebook import wearable
 from .llm import background_calls
@@ -58,6 +58,10 @@ LINKED_EVERY = 5
 LINK_CHECK = 30            # ennyi másodpercenként nézi meg, változtak-e a keresések
 MAX_SEEN = 500             # figyelőnként ennyi látott hirdetést jegyez meg
 MAX_HITS = 60
+# A találat adatai, amik a friss hirdetések listájába is átkerülnek (és egy utólagos változásnál frissülnek): az állapot,
+# a költségek, a becslés (sáv, megbízhatóság, a javasolt legmagasabb vételár), a változat, és ami nincs megadva.
+HIT_DEAL_KEYS = ("condition_text", "cost_parts", "cond_band", "max_buy", "resale_range", "profit_range", "reliability",
+                 "fees_unset", "identity", "sale_mode", "unpriced")
 MAX_ROWS = 120             # egy letöltésből ennyi hirdetést néz: az oldal egészét (a Hardverapró 100-at mutat, és az
                            # elején többnyire a fizetett kiemelések vannak); az értékelést a várólista korlátozza
 OVERFLOW_MIN = 10          # ha egy letöltésen legalább ennyi (nem kiemelt) hirdetés van, és az oldal alján lévő
@@ -431,8 +435,8 @@ class InstantWatch:
                            model_pending=bool(deal.get("model_pending")), profit=deal.get("profit", hit.get("profit")),
                            reference=deal.get("median", hit.get("reference")), safety=deal.get("safety"),
                            warnings=deal.get("warnings") or [])
-                for key in ("condition_text", "cost_parts", "cond_band", "model_no"):
-                    if deal.get(key):
+                for key in (*HIT_DEAL_KEYS, "model_no"):
+                    if deal.get(key) is not None and deal.get(key) != "":
                         hit[key] = deal[key]
                     else:
                         hit.pop(key, None)
@@ -1112,7 +1116,7 @@ class InstantWatch:
                    "sites": deal.get("sites") or [], "safety": deal.get("safety"),
                    "warnings": deal.get("warnings") or [], "verified": bool(deal.get("verified")),
                    "unchecked": deal.get("unchecked") or "", "model_pending": bool(deal.get("model_pending")),
-                   **{k: deal[k] for k in ("condition_text", "cost_parts", "cond_band") if deal.get(k)}}
+                   **{k: deal[k] for k in HIT_DEAL_KEYS if deal.get(k) is not None and deal.get(k) != ""}}
             hit["title"] = hit["title"] or hit["text"]
             hits.append(hit)
             with self._lock:
@@ -1265,8 +1269,11 @@ class InstantWatch:
         extra = [part for part in hit.get("cost_parts") or [] if part.get("what") != "posta"]
         if extra:
             text += ". Levonva: " + ", ".join(f"{part['what']} kb. {format_price(part['amount'])}" for part in extra)
+        text += "." + valuation_text(hit).rstrip(".") if valuation_text(hit) else ""
+        if hit.get("identity"):
+            text += f". Változat: {hit['identity']}"
         if hit.get("verified"):
-            text += ". Ellenőriztem: az adatlapja és az állapota alapján is megéri"
+            text += ". " + VERIFIED_TEXT.rstrip(".")
         elif hit.get("unchecked"):
             text += (f". Az adatlapja és az állapota alapján megéri, de a modell még nem nézte meg ({hit['unchecked']})"
                      + ("; amint lehet, megnézi, és ha mégsem jó, szólok" if hit.get("model_pending") else ""))

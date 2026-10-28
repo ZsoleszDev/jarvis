@@ -20,6 +20,7 @@ from test_work import jpeg  # noqa: E402
 from jarvis_core.deals import (BUNDLE_INBOX, LEFTOVER_RATIO, PIECE_COST, SHIPPING, DealError,  # noqa: E402
                                DealHunter, assess_bundle, bundle_like, bundle_parts, bundle_value, careful_low,
                                safe_sale)
+from jarvis_core.pricebook import price_scope  # noqa: E402
 from jarvis_core.selling import round_price  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
 
@@ -126,7 +127,7 @@ class BundleMathTests(unittest.TestCase):
         self.assertEqual((many["level"], many["why"]), ("jó", ["sok munka: 20 külön hirdetés"]))
         one = assess_bundle(deal(0.8, 6000, top=0.7))
         self.assertIn("az érték nagy része egy tételen múlik: nézd meg a fotón, tényleg az-e", one["why"])
-        self.assertEqual(assess_bundle(deal(0.8, 6000))["good"][0], "60% haszon")
+        self.assertEqual(assess_bundle(deal(0.8, 6000))["good"][0], "kb. 60% becsült haszon")
 
     def test_a_bought_bundle_splits_into_items(self):
         """A vételár és a posta az értékük arányában oszlik szét, forintra pontosan; az apróságok egy tárgyban."""
@@ -200,6 +201,32 @@ class BundleSearchTests(BundleCase):
         self.assertEqual(self.notices, [])
         self.assertIn("Nem csomag (vagy nem derül ki, mi van benne): „Márkás konzolok egyben eladók” 3 000 Ft.",
                       self.journal())
+
+    def test_a_per_piece_price_is_not_a_bundle_price(self):
+        """Egy többtételes hirdetés ára lehet darabár vagy a legolcsóbb tételé („3 000 Ft/db”, „2 000 Ft-tól”): azt
+        egyben nem méri fel (a modellt sem kérdezi meg, mi van benne), és a naplóba írja, miért; ha mindkettőre utal
+        („darabonként is, egyben 5 000”), az sem tisztázott. A csomagnak hirdetett, darabárt nem író hirdetés ára az
+        egészé."""
+        self.browser.pages[BRANDED["url"]] = {**BRANDED_PAGE, "text": "Márkás konzolcsomag: 3 PS4 kontroller, 5 PS4 "
+                                              "játék. Ár: 6 000 Ft/db, a kábelek ajándék. Eladó: Kata (25 értékelés)"}
+        self.consoles()
+        self.hunter.run(notify=self.notify)
+        self.assertEqual((self.notices, self.llm.asked("tételenként")), ([], []), "darabárral nem csomag")
+        [line] = [t for t in self.journal() if t.startswith("Csomag, de")]
+        self.assertIn("az ára darabár vagy a legolcsóbb tételé („", line)
+        self.assertIn("6 000 Ft/db", line)
+        self.assertIn("egyben nem mértem fel (kérdezd meg az eladót, mennyi az egész)", line)
+        mixed = listing(5, "Márkás konzolcsomag 8 db", 5000, "www.jofogas.hu")
+        self.browser.by_url = [("konzolcsomag", [mixed])]
+        self.browser.pages[mixed["url"]] = {**BRANDED_PAGE, "text": "PS4 játékok, darabonként is, egyben 5000 Ft."}
+        self.hunter.run(notify=self.notify, force=True)
+        self.assertTrue(any("nem derül ki, hogy az ára az egészre vonatkozik-e, vagy darabár" in t and
+                            "Márkás konzolcsomag 8 db" in t for t in self.journal()), self.journal())
+        self.assertEqual(self.llm.asked("tételenként"), [])
+        self.assertEqual(price_scope("Márkás konzolcsomag: 3 PS4 kontroller, 5 PS4 játék"), ("", ""),
+                         "a csomagnak hirdetett, darabárt nem író: az egész ára (a csomagbontás felméri)")
+        self.assertEqual(price_scope("Játékok egyben eladók")[0], "egyben")
+        self.assertEqual(price_scope("PS4 játékok 2 000 Ft-tól")[0], "darabár")
 
     def test_a_risky_bundle_is_not_told_unless_you_want_it(self):
         """Csak becsült darabárak, és nem hozza a dupláját: kockázatos; erről csak akkor szól, ha a „csak nyugodt szívvel”

@@ -191,6 +191,23 @@ class HaggleCostTests(HunterCase):
         self.assertIn("Ha 44 000 Ft-ért odaadja (20%-kal kevesebb), kb. 5 050 Ft a haszon (a posta mellett levonva: "
                       "töltő pótlása kb. 3 000 Ft).", text)
 
+    def test_the_selling_costs_count_in_the_offer_too(self):
+        """Az eladás megadott költségei (itt 1 000 Ft csomagolás) az alkunál is levonódnak, mint a többi jelöltnél: a
+        javasolt ajánlat ennyivel kisebb, a haszon minden költséggel számolva, és az értesítésben is látszik."""
+        self.page("Nintendo Switch Lite. Hibátlanul működik, a kijelzője ép, töltő nélkül adom. Eladó: Ancsa (8 értékelés)")
+        self.hunter.add_cost("töltő", "", 3000)
+        self.hunter.set_fees({"packaging": "1000", "sell_pct": "0", "sell_fixed": "0", "reserve_pct": "0"})
+        self.hunter.run(notify=self.notify)
+        [(_kind, _title, text, _extra)] = self.haggles()
+        [deal] = self.hunter.state()["deals"]
+        offer = deal["haggle"]["offer"]
+        self.assertLess(offer, 44000, "kisebb ajánlat, mint csomagolás nélkül")
+        self.assertEqual(deal["profit"], 53550 - offer - 1500 - 3000 - 1000)
+        self.assertEqual([c["what"] for c in deal["cost_parts"]], ["posta", "töltő pótlása", "csomagolás"])
+        self.assertIn("töltő pótlása kb. 3 000 Ft, csomagolás kb. 1 000 Ft", text)
+        self.assertNotIn("fees_unset", deal, "minden eladási költség meg van adva (a 0 is)")
+        self.assertLessEqual(offer, deal["max_buy"])
+
     def test_an_unknown_repair_cost_is_uncertain_not_zero(self):
         """Ha a kijelző javításának költségét nem adtad meg (és nincs hasonló hibájú összehasonlító), az alku
         bizonytalan: nem jön alku-értesítés pozitív haszonnal, hanem az Érdemes megnézni listába kerül, az okkal (a

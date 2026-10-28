@@ -566,9 +566,13 @@ class InstantTests(InstantCase):
         self.assertEqual((kind, title), ("deal", "Megéri: Palit RTX 3060 Ti Dual"),
                          "a drága Zotacról és a hibás EVGA-ról nem szól")
         self.assertIn("Hardverapró: „Palit RTX 3060 Ti Dual” 52 000 Ft, most került fel. A szokásos ára kb. 100 000 Ft", text)
-        self.assertIn("kb. 36 500 Ft haszon lehet. Állapot: működés: működik („Hibátlan”). Ellenőriztem: az adatlapja és "
-                      "az állapota alapján is megéri. Biztos befektetés: 70% haszon, a leírása szerint hibátlanul működik. "
-                      "Ugyanaz a kártya.", text, "az állapota bizonyítékkal, mennyire biztos, és a modell is megnézte")
+        self.assertIn("kb. 36 500 Ft haszon lehet. Állapot: működés: működik („Hibátlan”). Gyors eladásnál kb. "
+                      "81 000 Ft–99 000 Ft (becslés); legfeljebb 70 000 Ft-ért érdemes megvenni (minden költséggel); a "
+                      "szokásos árat te adtad meg (vagy hagytad jóvá)", text, "a becslés sávja és a legmagasabb vételár")
+        self.assertIn("Ellenőrizve: az adatlapja megnyílt, a leírása és az állapota alapján újraszámoltam, és a modell is "
+                      "átnézte. A haszon hirdetési árakból becsült, nem garancia. Alacsony kockázat: kb. 70% becsült "
+                      "haszon, a leírása szerint hibátlanul működik. Ugyanaz a kártya.", text,
+                      "az állapota bizonyítékkal, mennyire biztos, és a modell is megnézte (nem ígéret)")
         self.assertEqual([p[1] for p in self.pings], ["Ígéretes új hirdetés: EVGA RTX 3060 Ti XC",
                                                       "Ígéretes új hirdetés: Palit RTX 3060 Ti Dual"],
                          "a gyors jelzés az ellenőrzés előtt ment (a hibás EVGA-ról is: az csak az adatlapon derült ki)")
@@ -614,8 +618,9 @@ class InstantTests(InstantCase):
         self.assertTrue(deal["verified"])
         self.assertEqual([e["why"] for e in deal["basis"]["out"] if "lite_0" in e["u"]],
                          ["a leírása szerint hibás a kijelzője"])
-        self.assertEqual(sorted(len(v["issues"]) for v in self.hunter._vetted.values()), [0, 0, 1])
-        self.assertEqual(sorted(v["state"] for v in self.hunter._vetted.values()), ["hibás", "hibátlan", "hibátlan"])
+        comps = {k: v for k, v in self.hunter._vetted.items() if "/lite_" in k}   # (a jelölt saját állapota is ott van)
+        self.assertEqual(sorted(len(v["issues"]) for v in comps.values()), [0, 0, 1])
+        self.assertEqual(sorted(v["state"] for v in comps.values()), ["hibás", "hibátlan", "hibátlan"])
 
     def test_a_description_silent_about_the_condition_is_not_a_clean_comparable(self):
         """Ha az összehasonlítók leírása az állapotról nem ír („szürke, személyes átvétel”), azok állapota ismeretlen
@@ -1042,7 +1047,9 @@ class InstantTests(InstantCase):
         [from_price] = [why for title, why in out.items() if title.startswith("Sony WH-1000XM4 fejhallgatók 50 000 Ft-tól")]
         self.assertEqual(from_price, "„-tól” ár: nem egy meghatározott darab ára")
         self.assertEqual({e["t"]: e["why"] for e in original["basis"]["out"]}["Sony WH-1000XM4 fekete"],
-                         "kilógó ár (kimaradt a szokásos árból)", "A szokásos árából a kilógóan olcsó B kimaradt")
+                         "olcsó, a leírása szerint ugyanilyen és hibátlan, de friss hirdetés (hamar elkelhet, nem a "
+                         "piaci ár): a szokásos árba nem számít; ha megéri, jelöltként külön ellenőrzöm",
+                         "A szokásos árából a kilógóan olcsó B kimaradt, az okkal (friss: nem viszi lejjebb A árát)")
         self.assertEqual((spawned["band"][0] <= 70000 <= spawned["band"][1], spawned["resale"], spawned["costs"]),
                          (True, round(min(spawned["median"] * 0.9, spawned["low"])), 1500))
         self.assertEqual(spawned["profit"], spawned["resale"] - spawned["price"] - spawned["costs"],
