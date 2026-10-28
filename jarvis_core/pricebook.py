@@ -111,6 +111,7 @@ _ALIASES = ((r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbala
             # a mennyiség magyar toldalékkal („128GB-os”, „1 TB-os”, „8 GB-s”, „144Hz-es”, „65W-os”): ugyanaz, mint a
             # „128GB” (különben a „128gbos” egy típusjelnek látszana, és a kapacitás sem derülne ki)
             (r"\b((?:[1-8] ?x ?)?\d+) ?(gb|tb|mb|ghz|mhz|hz|mah|wh|w|k) ?- ?(?:os|es|as|s)\b", r"\1\2"),
+            (r"\blga ?(\d{3,4})(?: ?-? ?v\d)?\b", r"lga\1"),   # a foglalat („LGA 1151 v2”) egy szó
             (r"\bso ?-?dimm\b", "sodimm"), (r"\b(lp)?ddr ([2-5])\b", r"\1ddr\2"), (r"\bpc([2-5])l?-?\d{4,5}[a-z]?\b", r"ddr\1"),
             (r"\b(lp)?ddr([2-5]) ?- ?(?=\d)", r"\1ddr\2 "), (r"\b((?:lp)?ddr[2-5]) ?-?(?:es|as|os)\b", r"\1"),
             # a laptop-memória SO-DIMM (de egy laptop a benne lévő memóriával nem az: ehhez a memória szava, vagy a
@@ -166,12 +167,16 @@ _PRICE_IN_TITLE = re.compile(r"\b\d+(?:[ .]\d{3})*\s*(?:,-|(?:ft|huf|forint|e ?f
 _DATE = re.compile(r"\b(?:19|20)\d{2} ?[./] ?[01]?\d\b(?: ?[./] ?[0-3]?\d\b)?\.?(?: ?-?ig\b)?")
 _WARRANTY_YEAR = re.compile(r"\b((?:garanci|gari\b|gar\b|jotallas|szamla)\w*)\W{0,3}(?:19|20)\d{2}\b")
 # Mértékegység vagy méret egy szám után (8gb, 4k, 42es, 38-as, 120hz): nem a típusjel.
+# (A processzor magjainak és szálainak száma is ilyen: „8-Core”, „16 mag 32 szál”, „24mag/32szál”: a típusából adott.)
 _UNIT = re.compile(r"^\d+(?:gb|tb|mb|ghz|mhz|hz|w|v|mah|wh|cm|mm|m|l|ml|kg|col|inch|in|db|ft|e|p|es|as|os|"
-                   r"ig|tol|ra|re|ban|ben|bol)$|^\d{1,2}[xk]$|^\d{1,3}g$")   # a 5600X, 12600K, 5600G típusjel
+                   r"ig|tol|ra|re|ban|ben|bol|core|cores|mag|magos|szal|szalas|thread|threads)$|"
+                   r"^\d{1,2}[xk]$|^\d{1,3}g$")   # a 5600X, 12600K, 5600G típusjel
 _UNIT_WORDS = {"gb", "tb", "mb", "ghz", "mhz", "hz", "w", "v", "mah", "wh", "cm", "mm", "m", "l", "ml", "kg", "g", "col",
                "inch", "db", "darab", "ft", "ev", "eves", "honap", "honapos", "ho", "het", "hetes", "nap", "napos", "ora",
-               "perc", "licit", "meret",
-               "es", "as", "os"}
+               "perc", "licit", "meret", "core", "cores", "mag", "magos", "szal", "szalas", "thread", "threads",
+               "megtekintes", "es", "as", "os"}
+# A processzor foglalata („AM5”, „LGA1700”, „LGA 1151 v2”): a típusából adott, a processzor kulcsába nem kerül.
+_SOCKET = re.compile(r"^(?:am[2-5]|lga\d{3,4}|fm[12]|s\d{3})$")
 # „2x”, „3 db”: több darab egy áron. A memóriakészlet („2 x 8GB”, „2x 8 GB”) egy termék (a kulcsa „2x8gb”, mint a „2x8GB”
 # írásmódé), nem több darab.
 # A csatlakozók, a ventilátorok száma sem („4x DP”, „2x HDMI”, „4 db DisplayPort”, „2x M.2”, „2x ventilátor”, „2x 8 pin”,
@@ -434,8 +439,9 @@ def several_products(text: str) -> bool:
     words = _words(text)
     if sum(1 for w in _model_tokens(words) if _GPU_CHIP.match(w)) >= 2 and set(words) & GPU_FAMILIES:
         return True
-    parts = {tuple(tokens) for tokens in (_model_tokens(_words(part))
-                                          for part in re.split(r"[/+,;]|\b(?:es|vagy)\b", fold(text or ""))) if tokens}
+    # (a tizedesvessző nem felsorolás: „4,7GHz”, „3,8 GHz”)
+    parts = {tuple(tokens) for tokens in (_model_tokens(_words(part)) for part in
+                                          re.split(r"[/+;]|(?<!\d),|,(?!\d)|\b(?:es|vagy)\b", fold(text or ""))) if tokens}
     return len(parts) >= 2
 
 
@@ -669,6 +675,9 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         # konzol: a gyártói cikkszám („CFI-7121”, „CUH-2216B”) a gyártási sorozat, nem a változat (az a Slim, Pro, Digital,
         # OLED, a típusszám, pl. a Switch 2, és a tárhely): a „PS5 Pro 2TB (CFI-7121)” ugyanaz, mint a „PS5 Pro 2TB”
         picked = [t for t in picked if not (len(t) >= 5 and re.search(r"[a-z]", t) and re.search(r"\d", t))] or picked
+    if "ryzen" in families or any(_CPU_TIER.match(w) for w in words):
+        # processzor: a foglalata („AM5”, „LGA1700”) a típusából adott: a „Ryzen 5 7600 AM5” = „Ryzen 5 7600”
+        picked = [t for t in picked if not _SOCKET.match(t)] or picked
     if set(families) & GPU_FAMILIES and not {"laptop", "pc"} & set(picked):
         # videókártya: a lapka, a jelzője (Ti, Super, XT, XTX) és a fajtája marad, a kártyagyártó típusneve (G1, F15,
         # Ultra, Air…) és egy évszám (a garancia vége) nem

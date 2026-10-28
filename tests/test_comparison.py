@@ -234,6 +234,23 @@ class RealTitleTests(unittest.TestCase):
         self.assertEqual(key("Gyári új, 36 hónap garanciás (Skynet computer) Ryzen 7 9700X 8x5,5 GHz eladó"),
                          key("Ryzen 7 9700X"))
 
+    def test_real_processor_titles(self):
+        """A foglalat („AM5”, „LGA1151 V2”), a magok és szálak száma („8-Core”, „16 mag 32 szál”, „24mag/32szál”) és a
+        tizedesvessző („4,7GHz”) nem választja szét a processzort a többi ugyanilyentől (és nem teszi „több termékké”)."""
+        for title, plain in (("AMD Ryzen 5 7600 3,8GHz AM5", "Ryzen 5 7600"),
+                             ("AMD Ryzen 7 5800X3D 8-Core Processor (3.40 GHz)", "Ryzen 7 5800X3D"),
+                             ("BONTATLAN - Intel Core i7-13700K 3.5GHz 16-Core - GARIVAL", "i7-13700K"),
+                             ("Intel Core i3 8100 4mag 4 szál 3,6Ghz 65W", "i3 8100"),
+                             ("Intel Core i7-9700 8-Core 3.0GHz - 4,7GHz Boost LGA1151 V2", "i7 9700"),
+                             ("Intel Core I9 14900K - 24mag/32szál - Új, 1 év gari - Eladó!", "i9-14900K"),
+                             ("BESZÁMÍTÁS! AMD Ryzen 9 5950X 16 mag 32 szál processzor garanciával hibátlan működéssel",
+                              "Ryzen 9 5950X")):
+            self.assertTrue(usable(title), title)
+            self.assertEqual(key(title), key(plain), title)
+        self.assertFalse(usable("i3 8100 és i3 8100T"))
+        self.assertFalse(usable("Ryzen 5 5600X, B550 alaplap"))
+        self.assertIn("am4", key("MSI B550 Tomahawk AM4 alaplap").split(), "egy alaplapnál a foglalat marad")
+
     def test_memory_on_a_graphics_card_is_not_a_memory_module(self):
         title = "Nvidia Quadro P400 2Gb DDR5 videókártya"
         self.assertNotEqual(key(title), key("2GB DDR5"))
