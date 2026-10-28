@@ -255,6 +255,38 @@ class RealTitleTests(unittest.TestCase):
         self.assertEqual(key("DDR4-2400 asztali memória 8GB és 16GB"), "")
         self.assertEqual(key("Kingston FURY Beast 32GB DDR5 5200MHz- több db elérhető! - akár 1x32Gb akár 2x32Gb akár "
                              "4x32Gb"), "")
+        # a SO-DIMM mellett a „laptop / Mini PC” a modul helye, nem egy gép; a vegyes, több méretű kínálat nem egy termék
+        oem = "Több darab OEM 16GB DDR4 SO-DIMM laptop / Mini PC memória - 1 év Garancia / Számla"
+        self.assertTrue(usable(oem))
+        self.assertEqual(key(oem), "16gb ddr4 sodimm")
+        self.assertEqual(key("Laptop/NUC SODIMM ram vegyesen 8-16GB DDR4"), "")
+        self.assertEqual(key("asztali PC és laptop RAM DDR3, DDR4, 4GB, 8GB"), "")
+        self.assertNotEqual(key("Lenovo laptop 16GB DDR4 512GB SSD"), "16gb ddr4", "egy laptop nem memóriamodul")
+
+    def test_a_coolers_name_and_port_counts_are_not_several_pieces(self):
+        """A „Ventus 2X”, „Windforce 3X”, „MECH 2X” a hűtő neve, a „4x DP”, „2x HDMI”, „4db DisplayPort”, „2x ventilátor”
+        a kártya leírása: egy videókártya, nem több darab egy áron (különben kimaradna az összehasonlításból, és csomagnak
+        nézné). A valódi darabszám marad: „2x RTX 3070”, „PS5 kontroller 2 db”, „2x 4K monitor”."""
+        for title in ("MSI RTX 4060 Ventus 2X Black OC 8GB", "MSI GeForce RTX 3070 Ventus 3X OC 8GB",
+                      "Gigabyte GTX 1650 Windforce 2X OC 4GB", "nVIDIA Quadro P2000 / 5GB GDDR5 / 4x DP / 4x 5K felbontás",
+                      "Asus Dual RTX 3060 12GB 2x HDMI 3x DP", "Sapphire Pulse RX 6600 2x ventilátor", "RTX 3080 2x 8 pin",
+                      "MSI MPG X570 Gaming Plus 2x M.2"):
+            self.assertTrue(usable(title), title)
+        self.assertEqual(key("MSI GeForce RTX 3070 Ventus 3X OC 8GB"), key("RTX 3070 8GB"))
+        for title in ("2x RTX 3070 8GB", "2 db RTX 3070", "PS5 kontroller 2 db", "2x 4K monitor", "Samsung 4 db 8GB DDR4"):
+            self.assertFalse(usable(title), title)
+
+    def test_a_quantity_with_a_hungarian_suffix(self):
+        """„128GB-os”, „1 TB-os”, „8 GB-s”, „2x8GB-os”, „144Hz-es”: ugyanaz, mint a „128GB” (különben egy „128gbos”
+        típusjel lenne, és a kapacitás sem derülne ki); a processzor „8x4.5GHz”-e (magok, órajel) nem memóriakészlet."""
+        self.assertEqual(key("iPhone 13 128GB-os fekete"), key("iPhone 13 128GB"))
+        self.assertEqual(key("iPhone 13 128 GB-os"), key("iPhone 13 128GB"))
+        self.assertEqual(key("Samsung 970 EVO Plus 1 TB-os NVMe"), key("Samsung 970 EVO Plus 1TB"))
+        self.assertEqual(key("Laptop RAM, DDR4, 16 GB-os modul (újszerű, hibátlan) keresi gazdáját"), "16gb ddr4 sodimm")
+        self.assertEqual(key("Kingston 8 GB-s DDR4"), "8gb ddr4")
+        self.assertEqual(key("Kingston 2x8GB-os DDR4 kit"), "2x8gb ddr4")
+        self.assertEqual(key("Samsung Odyssey G5 27 col 144Hz-es monitor"), key("Samsung Odyssey G5 27 col 144Hz monitor"))
+        self.assertEqual(key("AMD Ryzen 7 5800X3D 8x4.5GHz"), key("Ryzen 7 5800X3D"))
 
 
 class SearchTermTests(unittest.TestCase):

@@ -105,6 +105,9 @@ _ALIASES = ((r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbala
             (r"\bsamsung (?=(?:[saz]\d{1,2}(?:ultra|plus|edge|fe|[a-z])?|note ?\d{1,2}|z ?(?:fold|flip))\b)", "galaxy "),
             # memória: a „SO DIMM” egy szó, a „DDR 4” is „ddr4”; a modul szabványneve („PC4-21300”) a generációja; a
             # „DDR4-3200” a generáció és a sebesség (két szó: különben a „ddr43200” sem a generációt, sem a sebességet nem adja)
+            # a mennyiség magyar toldalékkal („128GB-os”, „1 TB-os”, „8 GB-s”, „144Hz-es”, „65W-os”): ugyanaz, mint a
+            # „128GB” (különben a „128gbos” egy típusjelnek látszana, és a kapacitás sem derülne ki)
+            (r"\b((?:[1-8] ?x ?)?\d+) ?(gb|tb|mb|ghz|mhz|hz|mah|wh|w|k) ?- ?(?:os|es|as|s)\b", r"\1\2"),
             (r"\bso ?-?dimm\b", "sodimm"), (r"\b(lp)?ddr ([2-5])\b", r"\1ddr\2"), (r"\bpc([2-5])l?-?\d{4,5}[a-z]?\b", r"ddr\1"),
             (r"\b(lp)?ddr([2-5]) ?- ?(?=\d)", r"\1ddr\2 "), (r"\b((?:lp)?ddr[2-5]) ?-?(?:es|as|os)\b", r"\1"),
             # a laptop-memória SO-DIMM (de egy laptop a benne lévő memóriával nem az: ehhez a memória szava, vagy a
@@ -133,7 +136,8 @@ _SPLITS = ((re.compile(r"\bi([3579]) ?(\d{4,5}[a-z]{0,3})\b"), r"i\1 \2"),
            # „8GB + 8GB” két modul: ugyanaz a készlet, mint a „2x8GB” (nem egy 8 GB-os modul ára)
            (re.compile(r"\b(\d{1,2}) ?gb(?: ?\+ ?\1 ?gb){1,3}\b"), lambda m: f"{m.group(0).count('+') + 1}x{m.group(1)}gb"),
            (re.compile(r"\b([1-8]) ?x ?(2|4|8|16|32|64) ?gb\b"), r"\1x\2gb"),
-           (re.compile(r"\b([1-8])x(4|8|16|32|64)\b(?! ?(?:cm|mm|m|db)\b)"), r"\1x\2gb"))
+           # (a „8x4.5GHz” a processzor magjai és órajele, a „2x8 pin” a tápcsatlakozó: nem memóriakészlet)
+           (re.compile(r"\b([1-8])x(4|8|16|32|64)\b(?![.,]\d)(?! ?(?:cm|mm|m|db|ghz|mhz|pin\w*|tus\w*)\b)"), r"\1x\2gb"))
 _KIT = re.compile(r"^([1-8])x(\d{1,2})gb$")
 # Videókártyán a „4G”, „6G”, „12G” a memória (VRAM): ugyanaz, mint a „4GB” (a GTX 1060 3 és 6 GB-os is, más áron).
 # Telefonnál (és máshol) a „4G”, „5G” a mobilhálózat, nem méret: ott nem így olvassa.
@@ -166,7 +170,14 @@ _UNIT_WORDS = {"gb", "tb", "mb", "ghz", "mhz", "hz", "w", "v", "mah", "wh", "cm"
                "es", "as", "os"}
 # „2x”, „3 db”: több darab egy áron. A memóriakészlet („2 x 8GB”, „2x 8 GB”) egy termék (a kulcsa „2x8gb”, mint a „2x8GB”
 # írásmódé), nem több darab.
-_PIECES = re.compile(r"\b[2-9] ?x\b(?! ?\d{1,2} ?g(?:b|ib)?\b)|\b[2-9] ?(?:db|darab|par)\b")
+# A csatlakozók, a ventilátorok száma sem („4x DP”, „2x HDMI”, „4 db DisplayPort”, „2x M.2”, „2x ventilátor”, „2x 8 pin”,
+# „4x 5K felbontás”): az egy termék leírása. A videókártya hűtőjének neve („Ventus 2X”, „Windforce 3X”, „MECH 2X”): _COOLER.
+_FEATURE = (r"(?! ?(?:dp|displayport|mini ?dp|hdmi|dvi|vga|usb\w*|type ?c|thunderbolt|sata\w*|m\.? ?2|nvme|pcie?\w*|"
+            r"lan|rj45|ethernet|antenn\w*|ventilator\w*|venti\w*|fan|fans|slot\w*|port\w*|kimenet\w*|bemenet\w*|"
+            r"csatlakoz\w*|\d{1,2} ?(?:pin\w*|tus\w*)|[2-8]k felbontas\w*)\b)")
+_PIECES = re.compile(r"\b[2-9] ?x\b(?! ?\d{1,2} ?g(?:b|ib)?\b)" + _FEATURE + r"|\b[2-9] ?(?:db|darab)\b" + _FEATURE +
+                     r"|\b[2-9] ?par\b")
+_COOLER = re.compile(r"\b(?:ventus|windforce|wf|mech)\s?[23]\s?x\b")
 # Ömlesztett vagy összetett csomag („ruhacsomag”, „ömlesztve”, „gyűjtemény”, „játékok egyben”): az ár nem egy darabé.
 _HEAP = re.compile(r"\b\w+csomag\w*|\b(omlesztve|omlesztett|gyujtemeny\w*|egyben elado\w*|elado\w* egyben)\b|"
                    r"\b\w{3,}k egyben\b")
@@ -331,7 +342,7 @@ def unusable(text: str) -> str:
         return "több méret egy hirdetésben (az ár valamelyiké, vagy a legolcsóbbé)"
     # a kereskedő „TÖBB DARAB” (készletről, garanciával, számlával) hirdetése darabár, nem egy csomag ára
     lots = _MANY.sub(" ", folded) if _STOCK.search(folded) and not _WHOLE_PRICE.search(folded) else folded
-    if _LOT_RE.search(lots) or _PIECES.search(folded) or _HEAP.search(folded):
+    if _LOT_RE.search(lots) or _PIECES.search(_COOLER.sub(" ", folded)) or _HEAP.search(folded):
         return "csomag vagy több darab egy áron"
     if _PARTS_RE.search(folded):
         return "alkatrész vagy hibás"
@@ -606,8 +617,11 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         if term not in picked:
             picked.append(term)
     generation = next((t for t in picked if _RAM_GEN.match(t)), "")
+    # (a „laptop” vagy „PC” szó egy gépet is jelölhet, de a SO-DIMM szó mellett a modul helyét írja le: „16GB DDR4
+    # SO-DIMM laptop / Mini PC memória”; egy gép címében a tárhelye mérete is ott szokott lenni, az pedig két méret)
     if memory and generation and not families and not any(_CPU_TIER.match(w) for w in words) and \
-            not {"laptop", "pc"} & set(picked) and not any(w in _NOT_MODULE or _CHIPSET.match(w) for w in words):
+            (not {"laptop", "pc"} & set(picked) or "sodimm" in picked) and \
+            not any(w in _NOT_MODULE or _CHIPSET.match(w) for w in words):
         # memóriamodul: a generáció, a kiszerelés (2x8gb), a fajta (SO-DIMM, ECC, regisztrált, kit) és a mérete dönti el
         # az árát; a gyártó, a sorozatnév, a sebesség és az időzítés csak közelítő eltérés (specs.APPROX), ezért nem kerül
         # a kulcsba (ahogy a videókártyánál a kártyagyártó sem): a „Kingston Fury 16GB DDR4 3200” és a „Corsair 16GB
