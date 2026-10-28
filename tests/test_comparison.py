@@ -29,7 +29,7 @@ from test_web_browser import HAS_CHROMIUM  # noqa: E402
 from jarvis_core import specs  # noqa: E402
 from jarvis_core.deals import DealHunter, FRESH_DAYS, matches_query  # noqa: E402
 from jarvis_core.feeds import newest_first, parse_listings  # noqa: E402
-from jarvis_core.pricebook import PriceBook, product_key, usable  # noqa: E402
+from jarvis_core.pricebook import PriceBook, implied_size, product_key, usable  # noqa: E402
 from jarvis_core.selling import PLATFORMS, ItemStore, PriceResearcher, listing_key  # noqa: E402
 
 DAY = 86400
@@ -287,6 +287,41 @@ class RealTitleTests(unittest.TestCase):
         self.assertEqual(key("Kingston 2x8GB-os DDR4 kit"), "2x8gb ddr4")
         self.assertEqual(key("Samsung Odyssey G5 27 col 144Hz-es monitor"), key("Samsung Odyssey G5 27 col 144Hz monitor"))
         self.assertEqual(key("AMD Ryzen 7 5800X3D 8x4.5GHz"), key("Ryzen 7 5800X3D"))
+
+
+class RealPhoneAndConsoleTitleTests(unittest.TestCase):
+    """Valódi Jófogás-címek (az „iphone 13” és a „ps5” keresés első oldala, a legújabbak elöl, 2026. október)."""
+
+    def test_battery_health_and_a_dealers_number_are_not_the_model(self):
+        """Az akkumulátor állapota („Akku: 100%”, „Aksi 100%”) és a kereskedő sorszáma („004 Apple iPhone 13”) nem
+        típusjel: különben ezek a hirdetések a többi ugyanilyen iPhone mellől egy külön kulcsra (vagy „több termék”
+        alá) kerülnének."""
+        plain = key("iPhone 13 128GB")
+        self.assertEqual(key("Apple iPhone 13 (128GB) - Akku: 100% - Szín: Fekete"), plain)
+        self.assertEqual(key("iPhone 13 Pro Graphite 128GB 2 ÉV Garanciával Számlával Aksi 100%"), key("iPhone 13 Pro 128GB"))
+        self.assertEqual(key("004 Apple iphone 13 256GB, 88% akkumulátor, 12 hónap garancia!"), key("iPhone 13 256GB"))
+        mini = "005 Apple iphone 13 Mini 128GB, 100% akkumulátor, 12 hónap garancia!"
+        self.assertTrue(usable(mini))
+        self.assertEqual(key(mini), key("iPhone 13 Mini 128GB"))
+
+    def test_an_iphones_memory_is_not_a_variant(self):
+        """Az iPhone memóriája („6 GB Ram”) a típusából adott: csak a tárhelye választja szét a változatokat."""
+        self.assertEqual(key("Apple iPhone 13 Pro Max Kártyafüggetlen 128 GB 6 GB Ram, 12 hó"), key("iPhone 13 Pro Max 128GB"))
+        self.assertNotEqual(key("iPhone 13 Pro 256GB"), key("iPhone 13 Pro 128GB"))
+
+    def test_console_titles(self):
+        """A konzol gyártói cikkszáma („CFI-7121”) nem változat; a „digitális” a Digital kiadás; a garancia hónapja („3
+        hó”) nem típusszám; a csak egy tárhellyel készült konzol kapacitás nélküli címe is az a változat; a kereskedő
+        „beszámítás is” hirdetése eladás."""
+        self.assertEqual(key("Eladó egy új és bontatlan Sony PS5 pro 2TB konzol (CFI-7121)"), key("PS5 Pro 2TB"))
+        self.assertEqual(key("PS5 Pro 2TB CFI-7021 6 hó garanciával beszámítás is -konzol üzletből"), key("PS5 Pro 2TB"))
+        self.assertTrue(usable("Akciós Új PS5 Pro 3 év garanciával konzol üzletből - beszámítás is"))
+        self.assertEqual(key("Playstation 5 PS5 825GB digitális 3 hó garanciával konzol üzletből"), key("PS5 Digital 825GB"))
+        self.assertEqual(key("Playstation 5 PS5 Slim Digital Konzol Garanciával 2027 júniusig!"), key("PS5 Slim Digital"))
+        self.assertEqual(implied_size(key("PS5 Pro")), "2tb")
+        self.assertEqual(implied_size(key("Nintendo Switch OLED")), "64gb")
+        self.assertEqual(implied_size(key("Xbox Series S")), "", "512 GB-os és 1 TB-os is van")
+        self.assertNotEqual(key("Nintendo Switch 2"), key("Nintendo Switch OLED"))
 
 
 class SearchTermTests(unittest.TestCase):

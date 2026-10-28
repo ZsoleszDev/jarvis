@@ -43,7 +43,8 @@ PRICE_CUT = 0.03           # ennyivel olcsóbb lett egy már látott hirdetés: 
 SLOW_RATE = 0.25           # ha az újranézett hirdetéseknek legfeljebb ennyi része tűnt el: lassan kel
 # A termékkulcs képzésének változata: ha a mentett árbázis régebbi, betöltéskor a kulcsokat újraképzi a nevükből, és az
 # így egybeeső termékek árait összevonja (rekey). 4: az egybeírt típusjel („3060Ti”), a család nélküli kártya és
-# processzor, a memória a gyártója és sebessége nélkül, a garancia dátuma nélkül.
+# processzor, a memória a gyártója és sebessége nélkül, a garancia dátuma, az akkumulátor százaléka, a konzol cikkszáma
+# és az iPhone memóriája nélkül, a toldalékos kapacitás („128GB-os”).
 KEY_VERSION = 4
 
 # Márkák (ékezet nélkül, kisbetűvel; a több szavasak egybeírva, lásd _ALIASES).
@@ -101,6 +102,8 @@ _ALIASES = ((r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbala
             (r"\bde ?'?longhi\b", "delonghi"), (r"\bx ?box\b", "xbox"), (r"\bapple watch\b", "watch"),
             (r"\blevi'?s\b", "levis"), (r"\bmeta quest\b", "quest"), (r"\boculus quest\b", "quest"),
             (r"\bseries ([xs])\b", r"series\1"), (r"\bxiaomi redmi\b", "redmi"), (r"\bgamer ?pc\b", "gamerpc"),
+            # „PS5 digitális”, „lemez nélküli”: a Digital kiadás
+            (r"\bdigitalis\b", "digital"), (r"\blemez ?nelkuli\b", "digital"),
             # a Samsung telefonja a „Galaxy” nélkül is az („Samsung S23 Ultra” = „Galaxy S23 Ultra”: egy termék, egy kulcs)
             (r"\bsamsung (?=(?:[saz]\d{1,2}(?:ultra|plus|edge|fe|[a-z])?|note ?\d{1,2}|z ?(?:fold|flip))\b)", "galaxy "),
             # memória: a „SO DIMM” egy szó, a „DDR 4” is „ddr4”; a modul szabványneve („PC4-21300”) a generációja; a
@@ -166,7 +169,8 @@ _WARRANTY_YEAR = re.compile(r"\b((?:garanci|gari\b|gar\b|jotallas|szamla)\w*)\W{
 _UNIT = re.compile(r"^\d+(?:gb|tb|mb|ghz|mhz|hz|w|v|mah|wh|cm|mm|m|l|ml|kg|col|inch|in|db|ft|e|p|es|as|os|"
                    r"ig|tol|ra|re|ban|ben|bol)$|^\d{1,2}[xk]$|^\d{1,3}g$")   # a 5600X, 12600K, 5600G típusjel
 _UNIT_WORDS = {"gb", "tb", "mb", "ghz", "mhz", "hz", "w", "v", "mah", "wh", "cm", "mm", "m", "l", "ml", "kg", "g", "col",
-               "inch", "db", "darab", "ft", "ev", "eves", "honap", "honapos", "nap", "ora", "perc", "licit", "meret",
+               "inch", "db", "darab", "ft", "ev", "eves", "honap", "honapos", "ho", "het", "hetes", "nap", "napos", "ora",
+               "perc", "licit", "meret",
                "es", "as", "os"}
 # „2x”, „3 db”: több darab egy áron. A memóriakészlet („2 x 8GB”, „2x 8 GB”) egy termék (a kulcsa „2x8gb”, mint a „2x8GB”
 # írásmódé), nem több darab.
@@ -269,8 +273,13 @@ def _infer_cpu(words: list[str]) -> list[str]:
     return out
 
 
+# Százalék a címben („Akku: 100%”, „Aksi 100%”, „85%-os akkumulátor”): az akkumulátor állapota, nem a termék része (a
+# „100” egy típusjelnek látszana, és a címet a többi ugyanilyen termék mellől egy külön kulcsra vinné).
+_PERCENT = re.compile(r"\b\d{1,3}(?:[.,]\d{1,2})? ?%(?: ?-? ?(?:os|es|as|s|ban|ben|ra|re|on|en|ig)\b)?")
+
+
 def _words(text: str) -> list[str]:
-    folded = fold(text or "")
+    folded = _PERCENT.sub(" ", fold(text or ""))
     for pattern, replacement in _ALIASES:
         folded = re.sub(pattern, replacement, folded)
     folded = _WARRANTY_YEAR.sub(r"\1 ", _DATE.sub(" ", folded))
@@ -433,7 +442,7 @@ def _model_tokens(words: list[str]) -> list[str]:
         if not re.search(r"\d", word) or _UNIT.match(word) or _CAPACITY.match(word) or _KIT.match(word) \
                 or _SPEC.match(word):
             continue
-        if word.isdigit() and (not 3 <= len(word) <= 5 or 1990 <= int(word) <= 2039
+        if word.isdigit() and (not 3 <= len(word) <= 5 or 1990 <= int(word) <= 2039 or word.startswith("0")
                                or (index + 1 < len(words) and words[index + 1] in _AFTER_NUMBER)):
             continue
         if word not in out:
@@ -602,6 +611,8 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
                 continue
             if re.match(r"^\d{1,2}x\d{1,2}$", word):
                 continue                       # „8x5,5 GHz” (magok), „6x4”: méret vagy darabszám, nem típusjel
+            if word.isdigit() and word.startswith("0"):
+                continue                       # „004 Apple iPhone 13”: a kereskedő sorszáma, nem típusjel
             if word.isdigit() and families and TYPE_WORDS.get(after) in ("kontroller", "jatek") and index > 1:
                 continue                       # „Switch OLED + 3 játék”: a darabszám nem típusjel
             # rövid szám csak a család, a márka, egy jelző vagy egy sorozatnév után típusjel („iPhone 13”, „Air Max 90”,
@@ -641,6 +652,10 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         return None
     elif len(picked) == 1 and not (model and len(picked[0]) >= 5 and not picked[0].isdigit()):
         return None
+    if set(families) & FAMILY_COMPLETE:
+        # konzol: a gyártói cikkszám („CFI-7121”, „CUH-2216B”) a gyártási sorozat, nem a változat (az a Slim, Pro, Digital,
+        # OLED, a típusszám, pl. a Switch 2, és a tárhely): a „PS5 Pro 2TB (CFI-7121)” ugyanaz, mint a „PS5 Pro 2TB”
+        picked = [t for t in picked if not (len(t) >= 5 and re.search(r"[a-z]", t) and re.search(r"\d", t))] or picked
     if set(families) & GPU_FAMILIES and not {"laptop", "pc"} & set(picked):
         # videókártya: a lapka, a jelzője (Ti, Super, XT, XTX) és a fajtája marad, a kártyagyártó típusneve (G1, F15,
         # Ultra, Air…) és egy évszám (a garancia vége) nem
@@ -652,6 +667,9 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         # a hosszú típusjel mellett az egy számjegy csak a szint („Ryzen 5 5600X” = „Ryzen 5600X”)
         picked = [t for t in picked if not (t.isdigit() and len(t) == 1)]
     sizes = capacities(words)
+    if "iphone" in families:
+        # az iPhone memóriája („6 GB RAM”) a típusából adott, nem választható változat: csak a tárhelye (16 GB-tól) számít
+        sizes = [size for size in sizes if _gigabytes(size) >= 16]
     kits = [_KIT.match(t) for t in picked if _KIT.match(t)]
     for kit in kits:                           # a „16GB (2x8GB)” összege nem külön változat
         total = f"{int(kit.group(1)) * int(kit.group(2))}gb"
@@ -661,10 +679,13 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
     return " ".join(sorted(picked + sizes)), " ".join(picked + sizes)
 
 
-# Videókártyák, amelyek csak egy memóriamérettel készültek (a gyártói adatlapok szerint): ezeknél a kapacitás nélküli cím
-# („GTX 1080”) is ez a változat. Más terméknél az árbázis pillanatnyi tartalmából nem következik, hogy nincs más változat
-# (az RTX 5060 Ti 8 és 16 GB-os is), ezért ott a kapacitás nélküli címek nem számítanak egy változathoz (implied_size).
+# Videókártyák (és konzolok), amelyek csak egy memória- (tárhely-) mérettel készültek (a gyártói adatlapok szerint): ezeknél
+# a kapacitás nélküli cím („GTX 1080”, „PS5 Pro”) is ez a változat. Más terméknél az árbázis pillanatnyi tartalmából nem
+# következik, hogy nincs más változat (az RTX 5060 Ti 8 és 16 GB-os is, az Xbox Series S 512 GB-os és 1 TB-os is), ezért
+# ott a kapacitás nélküli címek nem számítanak egy változathoz (implied_size).
 _SINGLE_CAPACITY = (
+    ("PS5 Pro", "2tb"), ("PS5 Slim", "1tb"), ("PS5 Slim Digital", "1tb"), ("Switch OLED", "64gb"),
+    ("Switch Lite", "32gb"), ("Switch 2", "256gb"),
     ("GTX 970", "4gb"), ("GTX 980", "4gb"), ("GTX 980 Ti", "6gb"), ("GTX 1050 Ti", "4gb"), ("GTX 1070", "8gb"),
     ("GTX 1070 Ti", "8gb"), ("GTX 1080", "8gb"), ("GTX 1080 Ti", "11gb"), ("GTX 1650", "4gb"), ("GTX 1650 Super", "4gb"),
     ("GTX 1660", "6gb"), ("GTX 1660 Super", "6gb"), ("GTX 1660 Ti", "6gb"), ("RTX 2060 Super", "8gb"),
