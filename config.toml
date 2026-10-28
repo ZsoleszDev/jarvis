@@ -113,7 +113,7 @@ exit_on_close = true
 gpu_bars = true
 
 [work]
-# A Munka menü. Első munkája az Adás/Vétel: kipipálod, hova kerüljön, feltöltöd a fotókat, leírod,
+# A Munka menü. Első munkája az Adás: kipipálod, hova kerüljön, feltöltöd a fotókat, leírod,
 # mit adsz el, és Jarvis feltölti (ha valami hiányzik, visszakérdez).
 enabled = true
 # Itt vannak a tárgyak (tárgyanként egy mappa a fotókkal) és az Alapadatok. A törölt a _torolt-ba kerül.

@@ -303,6 +303,13 @@ PAGES = {
     "items/555-hosszu-farmer-40-es-meret/index.html": OTHER_SELLER,
     "items/988-hosszu-farmer-40-es-meret/index.html": LOGGED_OUT_ITEM,
     "items/990-hosszu-farmer-40-es-meret/index.html": NEW_LAYOUT_ITEM,
+    # a hirdetésben kézzel átírt ár (a szerkesztett adatokban, ahogy a Vinted is közli), és egy elkelt hirdetés
+    "items/991-hosszu-farmer-40-es-meret/index.html": own_item("991", "Hosszú farmer 40-es méret").replace(
+        "</head>", '<script type="application/ld+json">{"@context": "https://schema.org", "@type": "Product", '
+                   '"name": "Hosszú farmer 40-es méret", "offers": {"@type": "Offer", "price": "3500.0", '
+                   '"priceCurrency": "HUF"}}</script></head>'),
+    "items/992-hosszu-farmer-40-es-meret/index.html": own_item("992", "Hosszú farmer 40-es méret").replace(
+        "<p>Ft4,000.00</p>", "<p>Ft4,000.00</p><span>Sold</span>"),
     "catalog/index.html": CATALOG,
     "member.html": "<!doctype html><html><head><meta charset='utf-8'><title>zsolesz | Vinted</title></head>"
                    "<body><h1>Your item is uploaded</h1></body></html>",
@@ -828,6 +835,69 @@ class VintedDelistTests(VintedBrowserBase):
         self.assertEqual(state["url"], self.site.url("items/987-hosszu-farmer-40-es-meret/"),
                          "a profilon látszó hirdetés címe, nem a profilé")
         self.assertEqual(self.work.settings["vinted_profile"], self.site.url("member/240394916/"))
+
+
+
+@unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
+class VintedRefreshTests(VintedBrowserBase):
+    """Az automatikus frissítés a Vinteden: levétel és újrafeltöltés, felrakásonként a másik képsorral, kérdés nélkül
+    (a bekapcsolásával jóváhagytad); előtte a hirdetésben kézzel átírt ár átvétele; az elkeltet nem tölti fel újra."""
+
+    def setUp(self):
+        super().setUp()
+        self.platform = Platform("vinted", "Vinted", self.site.url("fooldal.html"), self.site.url("vinted2.html"),
+                                 self.site.url("catalog/?search_text={q}"), ("127.0.0.1",),
+                                 "Vinted: tippek a teszthez.")
+        self.work.platforms["vinted"] = self.platform
+
+    posted = VintedDelistTests.posted
+    deleted = VintedDelistTests.deleted
+
+    def refreshed(self, url: str, alt_photos: int = 2):
+        item = self.posted(self.site.url(url))
+        for n in range(alt_photos):
+            self.store.add_photo(item.id, jpeg(color=(200, 40 * n, 40)), alt=True)
+        self.store.set_refresh(item.id, on=True, days=7, hour=19)
+        return item
+
+    def test_it_deletes_and_posts_again_with_the_other_photo_set_without_asking(self):
+        item = self.refreshed("items/987-hosszu-farmer-40-es-meret/")
+        since = self.store.get(item.id).online_since()
+        self.fake.chat_script = [pick("Jeans"), pick("Straight jeans"), pick("EU")]
+        self.app.run_work({"action": "refresh", "ids": [item.id]})
+        self.assertTrue(self.deleted("987"), "levette")
+        found = self.store.get(item.id)
+        self.assertEqual(found.platforms["vinted"]["status"], POSTED, "és újra feltöltötte")
+        self.assertEqual(self.sent()["photos"], "2", "a második képsorral (2 fotó, az alapban 1 van)")
+        self.assertEqual(self.ui.of("confirm"), [], "a törlés és a közzététel gombjára sem kérdezett")
+        self.assertEqual((found.refresh["set"], found.refresh["count"], found.refresh.get("repost")), (1, 1, None))
+        self.assertTrue(found.refresh["last"] and found.refresh["next"] > found.refresh["last"])
+        self.assertAlmostEqual(found.online_since(), since, delta=1, msg="a frissítés nem nullázza, mióta van fent")
+        [notice] = [n for n in self.app.notices.list() if n["title"].startswith("Frissítés:")]
+        self.assertIn("levettem és újra feltöltöttem (a 2. képsorral)", notice["text"])
+        self.assertIn("Legközelebb", notice["text"])
+
+    def test_a_price_lowered_on_vinted_is_taken_over_and_reposted(self):
+        item = self.refreshed("items/991-hosszu-farmer-40-es-meret/", alt_photos=0)
+        self.assertEqual(self.store.get(item.id).price, 4000)
+        self.fake.chat_script = [pick("Jeans"), pick("Straight jeans"), pick("EU")]
+        self.app.run_work({"action": "refresh", "ids": [item.id]})
+        found = self.store.get(item.id)
+        self.assertEqual(found.price, 3500, "a hirdetésben kézzel átírt árat átvette")
+        self.assertIn("price", found.edited, "Jarvis többé nem írja felül")
+        self.assertEqual(self.sent()["price"], "3500", "azzal töltötte fel újra")
+        self.assertEqual(self.sent()["photos"], "1", "második képsor nélkül az alap marad")
+        self.assertEqual(found.refresh["set"], 0)
+
+    def test_a_sold_listing_is_not_put_up_again(self):
+        item = self.refreshed("items/992-hosszu-farmer-40-es-meret/")
+        self.app.run_work({"action": "refresh", "ids": [item.id]})
+        self.assertFalse(self.deleted("992"))
+        found = self.store.get(item.id)
+        self.assertEqual(found.platforms["vinted"]["status"], POSTED, "nem nyúlt hozzá")
+        self.assertEqual(found.platforms["vinted"]["check"], "sold")
+        self.assertIn("nem töltöm fel újra", found.refresh["note"])
+        self.assertEqual(self.fake.chat_bodies(), [])
 
 
 if __name__ == "__main__":

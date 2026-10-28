@@ -840,8 +840,50 @@ LISTING_PAGE_JS = r"""
     if (SELLER.test(fold(clean(a.innerText || a.getAttribute('aria-label'))))) { seller = a.href; break; }
     if (!member && /\/member\/\d+/.test(a.getAttribute('href') || '')) member = a.href;
   }
+  // a hirdetés ára a szerkesztett adataiból (JSON-LD Product/Offer, meta, itemprop), vagy a Vinted ármezőjéből (a
+  // vevővédelemmel növelt ár nélkül): a hirdetésben kézzel átírt ár átvételéhez (selling.ItemStore.adopt_live_price)
+  const machine = (v) => (/^\s*\d+(\.\d+)?\s*$/.test(String(v)) ? Math.round(parseFloat(v)) : null);
+  const shownPrice = (t) => {
+    const m = clean(t).match(/(\d{1,3}(?:[ .,  ]\d{3})+|\d+)(?:[.,]\d{1,2})?/);
+    return m ? parseInt(m[1].replace(/[^\d]/g, ''), 10) || null : null;
+  };
+  const offerOf = (node, depth) => {
+    if (!node || typeof node !== 'object' || depth > 4) return null;
+    if (Array.isArray(node)) {
+      for (const one of node) { const p = offerOf(one, depth + 1); if (p) return p; }
+      return null;
+    }
+    if (node['@graph']) return offerOf(node['@graph'], depth + 1);
+    const offers = node.offers;
+    if (offers) {
+      for (const offer of Array.isArray(offers) ? offers : [offers]) {
+        const currency = String(offer.priceCurrency || 'HUF').toUpperCase();
+        const p = machine(offer.price !== undefined ? offer.price : offer.lowPrice);
+        if (p && currency === 'HUF') return p;
+      }
+    }
+    return null;
+  };
+  let price = null;
+  for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+    try { price = offerOf(JSON.parse(s.textContent), 0); } catch (e) { price = null; }
+    if (price) break;
+  }
+  if (!price) {
+    const meta = document.querySelector('meta[property="product:price:amount"], meta[property="og:price:amount"]');
+    if (meta) price = machine(meta.content);
+  }
+  if (!price) {
+    const el = document.querySelector('[itemprop="price"]');
+    if (el) price = machine(el.getAttribute('content')) || shownPrice(el.textContent);
+  }
+  if (!price) {
+    const el = document.querySelector('[data-testid="item-price"]');
+    if (el) price = shownPrice(el.textContent);
+  }
   return {title: document.title, url: location.href, text: parts.join(' ').slice(0, 4000), short, labels,
-          images: images.slice(0, 4), captcha: """ + CAPTCHA_FRAME_JS + r""", seller: seller || member};
+          images: images.slice(0, 4), captcha: """ + CAPTCHA_FRAME_JS + r""", seller: seller || member,
+          price: price && price < 100000000 ? price : null};
 }
 """
 

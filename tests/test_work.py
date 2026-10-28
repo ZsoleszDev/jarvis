@@ -1,4 +1,4 @@
-"""Az Adás/Vétel (Munka menü) tesztjei: tárgyak és fotók, mit kér az egyes oldal, az adatok a
+"""Az Adás (Munka menü) tesztjei: tárgyak és fotók, mit kér az egyes oldal, az adatok a
 leírásból, visszakérdezés, árellenőrzés, és a feltöltés oldalanként.
 
 A böngészős tesztek valódi (láthatatlan) Chromiumot indítanak helyi tesztoldalakkal; ha a
@@ -1350,7 +1350,7 @@ class WorkDeskTests(unittest.TestCase):
         self.assertEqual(self.store.get(item.id).public()["days_online"], 20)
 
     def test_tools_for_the_work_chat(self):
-        self.assertIn("Adás/Vétel fülön", self.box.call("item_list", {}))
+        self.assertIn("Adás fülön", self.box.call("item_list", {}))
         item = self.item(["vinted"])
         self.store.update(item.id, title="Kék pulóver", price=2000)
         self.assertIn(f"{item.id} | Kék pulóver | 2 000 Ft | vázlat | Vinted: még nincs fent",
@@ -1740,7 +1740,7 @@ class SellFlowTests(unittest.TestCase):
         self.assertNotIn("item_post", chat)
         self.assertNotIn("open_app", work)
         self.assertTrue({"item_list", "item_post", "browser_upload_photos", "browser_click"} <= work)
-        self.assertIn("Adás/Vétel", self.app.work_assistant.system_prompt)
+        self.assertIn("Adás", self.app.work_assistant.system_prompt)
 
     def test_modes_have_their_own_conversation(self):
         self.fake.chat_script = [reply("Szia!"), reply("Két tárgyad van.")]

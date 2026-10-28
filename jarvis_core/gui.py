@@ -55,7 +55,7 @@ DEAL_FIELDS = ("query", "sites", "max_price", "min_price", "discount", "min_prof
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
             "size", "condition", "color", "gender", "material", "price", "min_price", "location", "shipping", "bought_price",
             "sold_price", *LEDGER_FIELDS}
-ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold", "approve"}
+ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold", "approve", "refresh"}
 IS_WINDOWS = sys.platform == "win32"
 CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
        "connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'")
@@ -574,8 +574,8 @@ class _Handler(BaseHTTPRequestHandler):
         # A távoli ablakból (telefon, laptop) jött: a naplóban így jelenik meg.
         remote = self.headers.get("X-Jarvis-Remote") == "1"
         upload = PHOTO_POST_RE.match(path)
-        if upload:   # fotó: nyers képadat, nem JSON
-            return self._work_photo(upload.group(1), length)
+        if upload:   # fotó: nyers képadat, nem JSON (?set=alt: a második képsorhoz, lásd az automatikus frissítést)
+            return self._work_photo(upload.group(1), length, alt=parse_qs(parsed.query).get("set", [""])[0] == "alt")
         if length > 262144:
             return self._json(413, {"ok": False})
         try:
@@ -672,7 +672,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, self._jobs_info())
         return self._json(404, {"ok": False})
 
-    def _work_photo(self, item_id: str, length: int) -> None:
+    def _work_photo(self, item_id: str, length: int, alt: bool = False) -> None:
         work = self._work()
         if work is None:
             return self._json(503, {"ok": False, "error": "A Munka menü még indul."})
@@ -682,7 +682,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(413, {"ok": False, "error": "A kép túl nagy (legfeljebb 25 MB)."})
         data = self.rfile.read(length)
         try:
-            item = work.store.add_photo(item_id, data)
+            item = work.store.add_photo(item_id, data, alt=alt)
         except ItemError as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
         self._json(200, {"ok": True, "item": item.public()})
@@ -762,6 +762,9 @@ class _Handler(BaseHTTPRequestHandler):
                     extra["delist"] = bool(body.get("delist"))
                 app.submit_work(action, ids, platform, **extra)
                 return self._json(202, {"ok": True})
+            if path == "/api/work/refresh":   # automatikus frissítés: be/ki, hány naponta, hány óra körül
+                item = work.store.set_refresh(item_id, on=body.get("on"), days=body.get("days"), hour=body.get("hour"))
+                return self._json(200, {"ok": True, "item": item.public()})
             if path == "/api/work/dossier":
                 item = work.store.get(item_id)
                 name = str(item.platforms.get(str(body.get("platform") or ""), {}).get("dossier") or "")

@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from .browser import BrowserError
 from .replay import norm_text
-from .selling import ON_SITE, POSTED, Item, ItemStore, Platform, listing_key
+from .selling import ON_SITE, POSTED, Item, ItemStore, Platform, format_price, listing_key
 from .vinted import _GONE_RE, logged_out
 
 LIVE, SOLD, GONE, BLOCKED, UNKNOWN = "live", "sold", "gone", "blocked", "unknown"
@@ -58,6 +58,25 @@ def classify(page: dict[str, Any], url: str, title: str = "", platform: str = ""
     if (_GONE_RE.search(head) or _ENDED_RE.search(head)) and not (own and own in heading):
         return GONE, "az oldala szerint már nem található"
     return LIVE, ""
+
+
+# Ahol a hirdetés oldaláról az árat átvesszük, ha ott kézzel átírtad (adopt_price): a Vinteden (ott a frissítés újra
+# feltölti, és nem a régi árral kell). A többi oldalon a hirdetés a saját árával marad fent.
+PRICE_SITES = ("vinted",)
+
+
+def adopt_price(store: ItemStore, item_id: str, key: str, page: dict[str, Any]) -> str:
+    """A hirdetés oldalán látott ár: ha ott kézzel átírtad, átveszi (ItemStore.adopt_live_price). Visszaadja, mit
+    írt át (a naplónak és az értesítésnek), vagy üreset."""
+    if key not in PRICE_SITES or not page.get("price"):
+        return ""
+    old = store.adopt_live_price(item_id, key, page["price"])
+    if old is None:
+        return ""
+    item = store.get(item_id)
+    where = ON_SITE.get(key) or key
+    return (f"{item.name}: {where} {format_price(old)} helyett {format_price(item.price)} az ára (ott írtad át); "
+            "a tárgy lapján is átírtam, és ezzel töltöm fel újra.")
 
 
 class ListingChecker:
@@ -135,6 +154,10 @@ class ListingChecker:
             counts[state] += 1
             if state in (SOLD, GONE) and before != state:
                 self._notify(notify, self.store.get(item.id), key, state, detail)
+            elif state == LIVE:
+                adopted = adopt_price(self.store, item.id, key, page)
+                if adopted:
+                    notify("post", f"Átvett ár: {item.name}", adopted, item=item.id, quiet=True)
         parts = [f"{counts[LIVE]} fent van"]
         for state, word in ((SOLD, "elkeltnek látszik"), (GONE, "már nincs fent"), (UNKNOWN, "nem nyílt meg")):
             if counts[state]:

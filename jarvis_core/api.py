@@ -592,7 +592,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
             raise ApiError(404, "not_found", "Ez a jóváhagyás már nem vár válaszra.")
         self._json(200, {"ok": True})
 
-    # --- Munka: Adás/Vétel ---------------------------------------------------------------------
+    # --- Munka: Adás ---------------------------------------------------------------------
 
     def r_work(self, query: dict[str, list[str]]) -> None:
         work = self._work()
