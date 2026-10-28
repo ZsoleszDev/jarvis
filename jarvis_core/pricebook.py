@@ -254,15 +254,17 @@ def from_price(text: str) -> bool:
 
 
 # Egy többtételes hirdetés ára az egészre vonatkozik („egyben”, „együtt”, „összesen”, „mindet egy áron”), darabár
-# („/db”, „darabár”, „egyenként”), vagy a legolcsóbb tételé („-tól”, „ártól”, „legolcsóbb”, „tételenként”).
+# („/db”, „darabár”, „egyenként”), vagy a legolcsóbb tételé („-tól”, „ártól”, „legolcsóbb”, „tételenként”). A „darabonként
+# is”, „külön is” csak annyi, hogy külön is kapható: egy „egyben” ár mellett az az egész ára.
 _WHOLE_PRICE = re.compile(r"\b(?:egyben|egyutt|osszesen|mindet|komplett(?:en)?|egy aron|egy osszegben|az egeszert)\b")
-_CHEAPEST = re.compile(r"\b(?:artol|legolcsobb\w*|tetelenkent|darabonkent is|kulon is)\b")
+_CHEAPEST = re.compile(r"\b(?:artol|legolcsobb\w*|tetelenkent)\b")
+_ALSO_SINGLE = re.compile(r"\b(?:darabonkent|egyenkent|kulon) is\b")
 
 
 def price_scope(text: str) -> tuple[str, str]:
     """Mire vonatkozik egy többtételes hirdetés ára: („egyben”: az egészre, ezt írja; „darabár”: darabár, „-tól” ár, vagy
-    tételenként is kapható, így az ár egy tételé lehet; „kétséges”: mindkettőre utal, nem derül ki, melyik az ár; „”: egyik
-    sem derül ki; és az idézet a hirdetésből, amiből ez kiderül)."""
+    a legolcsóbb tételé; „kétséges”: darabárra és egyben árra is utal, vagy csak annyit ír, hogy külön is kapható: nem
+    derül ki, melyik az ár; „”: egyik sem derül ki; és az idézet a hirdetésből, amiből ez kiderül)."""
     original = " ".join((text or "").split())
     folded = fold(original)
 
@@ -271,8 +273,9 @@ def price_scope(text: str) -> tuple[str, str]:
         return (original if len(folded) == len(original) else folded)[start:end].strip()
 
     whole = _WHOLE_PRICE.search(folded)
-    piece = _PER_PIECE.search(folded) or _CHEAPEST.search(folded) or (
-        next((m for m in _FROM_PRICE.finditer(folded) if from_price(m.group(0))), None))
+    also = _ALSO_SINGLE.search(folded)
+    piece = next((m for m in _PER_PIECE.finditer(folded) if not folded[m.end():m.end() + 3] == " is"), None) or \
+        _CHEAPEST.search(folded) or next((m for m in _FROM_PRICE.finditer(folded) if from_price(m.group(0))), None)
     if piece and whole:
         first, second = quote(piece), quote(whole)
         return "kétséges", first if first == second else f"{first} … {second}"
@@ -280,6 +283,8 @@ def price_scope(text: str) -> tuple[str, str]:
         return "darabár", quote(piece)
     if whole:
         return "egyben", quote(whole)
+    if also:
+        return "kétséges", quote(also)
     return "", ""
 
 
@@ -593,15 +598,18 @@ def independent(samples: list[dict[str, Any]], own: dict[str, Any] | None = None
     sellers: dict[str, int] = {}
     mine = _same_title(str((own or {}).get("t") or ""))
     mine_by = fold(str((own or {}).get("v") or "")).strip()
+    def other(a: str, b: str) -> bool:        # két ismert, különböző eladó: biztosan két hirdetés
+        return bool(a and b and a != b)
+
     for sample in samples:
         title = _same_title(str(sample.get("t") or ""))
         seller = fold(str(sample.get("seller") or sample.get("v") or "")).strip()
-        if own and len(mine) >= 8 and title == mine and (int(sample["p"]) == int(own.get("p") or 0)
-                                                         or (seller and seller == mine_by)):
+        if own and len(mine) >= 8 and title == mine and not other(seller, mine_by) and (
+                int(sample["p"]) == int(own.get("p") or 0) or (seller and seller == mine_by)):
             out.append({**sample, "why": "valószínűleg maga a vizsgált hirdetés (máshol is fent van)"})
             continue
         twin = titles.get((title, int(sample["p"]))) if len(title) >= 8 else None
-        if twin is not None:
+        if twin is not None and not other(seller, fold(str(twin.get("seller") or twin.get("v") or "")).strip()):
             out.append({**sample, "why": "valószínűleg ugyanaz a hirdetés, máshol is fent van (egyszer számít)"})
             continue
         if seller and sellers.get(seller, 0) >= SELLER_CAP:

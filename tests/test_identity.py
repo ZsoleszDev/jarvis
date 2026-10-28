@@ -221,6 +221,12 @@ class IndependentPriceTests(unittest.TestCase):
         self.assertEqual(found["n"], 5, "a két oldalon fent lévő egy hirdetés egyszer számít")
         self.assertEqual([e["why"] for e in found["basis"]["out"]],
                          ["valószínűleg ugyanaz a hirdetés, máshol is fent van (egyszer számít)"])
+        # ugyanaz az általános cím és kerek ár, de két ismert, különböző eladó: két hirdetés (mindkettő számít)
+        self.book.add([{"text": "Nintendo Switch Lite szürke", "price": 60000, "platform": "hardverapro",
+                        "url": f"https://hardverapro.hu/apro/szurke_{who}/friss.html", "seller": who}
+                       for who in ("anna", "bela")])
+        found = self.book.reference(self.book.key("Nintendo Switch Lite")[0])
+        self.assertEqual(found["n"], 7)
 
     def test_many_listings_of_one_seller_do_not_make_a_sure_price(self):
         self.book.add([{"text": f"Sapphire RX 580 8GB {n}", "price": 30000 + n * 100, "platform": "hardverapro",

@@ -204,8 +204,9 @@ class BundleSearchTests(BundleCase):
 
     def test_a_per_piece_price_is_not_a_bundle_price(self):
         """Egy többtételes hirdetés ára lehet darabár vagy a legolcsóbb tételé („3 000 Ft/db”, „2 000 Ft-tól”): azt
-        egyben nem méri fel (a modellt sem kérdezi meg, mi van benne), és a naplóba írja, miért; ha mindkettőre utal
-        („darabonként is, egyben 5 000”), az sem tisztázott. A csomagnak hirdetett, darabárt nem író hirdetés ára az
+        egyben nem méri fel (a modellt sem kérdezi meg, mi van benne), és a naplóba írja, miért; ha darabárra és egyben
+        árra is utal („2 000 Ft/db, egyben olcsóbban”), az sem tisztázott. A „darabonként is eladók” csak annyi, hogy külön
+        is kapható: egy „egyben” ár mellett az az egész ára. A csomagnak hirdetett, darabárt nem író hirdetés ára az
         egészé."""
         self.browser.pages[BRANDED["url"]] = {**BRANDED_PAGE, "text": "Márkás konzolcsomag: 3 PS4 kontroller, 5 PS4 "
                                               "játék. Ár: 6 000 Ft/db, a kábelek ajándék. Eladó: Kata (25 értékelés)"}
@@ -218,7 +219,7 @@ class BundleSearchTests(BundleCase):
         self.assertIn("egyben nem mértem fel (kérdezd meg az eladót, mennyi az egész)", line)
         mixed = listing(5, "Márkás konzolcsomag 8 db", 5000, "www.jofogas.hu")
         self.browser.by_url = [("konzolcsomag", [mixed])]
-        self.browser.pages[mixed["url"]] = {**BRANDED_PAGE, "text": "PS4 játékok, darabonként is, egyben 5000 Ft."}
+        self.browser.pages[mixed["url"]] = {**BRANDED_PAGE, "text": "PS4 játékok 2 000 Ft/db, egyben olcsóbban."}
         self.hunter.run(notify=self.notify, force=True)
         self.assertTrue(any("nem derül ki, hogy az ára az egészre vonatkozik-e, vagy darabár" in t and
                             "Márkás konzolcsomag 8 db" in t for t in self.journal()), self.journal())
@@ -227,6 +228,10 @@ class BundleSearchTests(BundleCase):
                          "a csomagnak hirdetett, darabárt nem író: az egész ára (a csomagbontás felméri)")
         self.assertEqual(price_scope("Játékok egyben eladók")[0], "egyben")
         self.assertEqual(price_scope("PS4 játékok 2 000 Ft-tól")[0], "darabár")
+        self.assertEqual(price_scope("PS4 játékok egyben 10 000 Ft, darabonként is eladók")[0], "egyben",
+                         "külön is kapható, de az ár az egészé")
+        self.assertEqual(price_scope("PS4 játékok, darabonként is eladók")[0], "kétséges",
+                         "nem tudni, az ár egy darabé vagy mindé")
 
     def test_a_risky_bundle_is_not_told_unless_you_want_it(self):
         """Csak becsült darabárak, és nem hozza a dupláját: kockázatos; erről csak akkor szól, ha a „csak nyugodt szívvel”
