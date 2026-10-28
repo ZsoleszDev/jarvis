@@ -3847,6 +3847,13 @@ class DealHunter:
         """Keresőszó a többi oldalra egy termékhez: a nevének azok a szavai, amelyekből a termékkulcs lett, ahogy írták
         (a márka, a kártyagyártó típusneve nélkül: „MSI GeForce GTX 1080 OC 8GB” → „GTX 1080”), a kapacitás nélkül (a
         kapacitás nélküli címek is kellenek; a változatokat a _market_of választja szét)."""
+        found = self.book.key(query)
+        words = found[0].split() if found else []
+        if words and all(re.match(r"^(?:lp)?ddr[2-5]$|^(?:\dx)?\d+[gt]b$|^(?:sodimm|ecc|reg|kit)$", word) for word in words):
+            # memóriamodul: a mérete maga a termék, a gyártója, sebessége nem (a kulcsa sem): „16GB DDR4”, „2x8GB DDR4”
+            # (a SO-DIMM és a szerver-memória a keresésben nem kötelező szó: a különbséget a kulcs választja szét)
+            return " ".join(word.upper() for word in sorted(words, key=lambda word: not word[0].isdigit())
+                            if not word.isalpha())
         text = self.book.query(query) or query
         text = re.sub(r"\b\d+\s?(?:gb|tb)\b", " ", text, flags=re.IGNORECASE)
         return " ".join(text.split()) or query

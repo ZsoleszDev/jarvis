@@ -179,6 +179,92 @@ class TitleTests(unittest.TestCase):
         self.assertFalse(matches_query("RTX 3060 Ti", "RTX 3060 Ti hűtő ventilátor tartó"), "kiegészítő")
 
 
+class RealTitleTests(unittest.TestCase):
+    """Valódi Hardverapró-címek (a videókártya és a memória kategória első oldala, 2026. október)."""
+
+    def test_a_dealer_who_takes_trade_ins_is_selling(self):
+        """A „Beszámítás” a kereskedő eladó hirdetése (a régit beszámítja): az ára eladási ár, nem keresőhirdetés."""
+        for title in ("Gainward GeForce RTX 4080 Phoenix GS 16GB - Beszámítás",
+                      "BESZÁMÍTÁS! Asus ROG Strix RTX 3070 8GB videokártya garanciával hibátlan működéssel"):
+            self.assertTrue(usable(title), title)
+        self.assertFalse(usable("Videókártya felvásárlás"))
+        self.assertFalse(usable("Keresek 3060/3060ti/3070/3070ti/3080 kártyákat"))
+
+    def test_a_warranty_date_is_not_part_of_the_product(self):
+        self.assertEqual(key("ASUS TUF RTX 3080 V2 10GB OC Edition / ALZA GARANCIA 2027.03. Kifogástalan gyári állapot!"),
+                         key("RTX 3080 10GB"))
+        self.assertEqual(key("Asus TUF RTX 5090 , DOBOZOS, magyar alza garancia, 2028.05.17.-ig"), key("RTX 5090"))
+        self.assertEqual(key("iPhone 13 128GB garancia 2026"), key("iPhone 13 128GB"))
+        self.assertIn("2020", key("iPhone SE 2020 64GB").split(), "a típus évszáma marad")
+
+    def test_a_card_makers_model_name_is_not_a_variant(self):
+        """A videókártyánál csak a lapka jelzője (Ti, Super, XT) számít: az „Ultra”, „Air” a kártyagyártó típusneve."""
+        self.assertEqual(key("Új (open box) EVGA GeForce RTX 3070 FTW3 Ultra Gaming 8GB GDDR6"), key("RTX 3070 8GB"))
+        self.assertEqual(key("XFX Radeon RX9070XT Mercury OC Magnetic White Air"), key("RX 9070 XT"))
+        self.assertEqual(key("Eladó Asus Rog 1050TI"), key("GTX 1050 Ti"))
+
+    def test_an_amd_processor_without_ryzen_in_its_title(self):
+        """„Eladó: AMD 5800X” a Ryzen 7 5800X (a végződés nélküli szám csak egy processzor-szó mellett: az „AMD 7600”
+        lehet videókártya is); a „8x5,5 GHz” (magok) nem típusjel."""
+        self.assertEqual(key("Eladó: AMD 5800X"), key("Ryzen 7 5800X"))
+        self.assertEqual(key("AMD 5800X3D tálcás"), key("AMD Ryzen 7 5800X3D"))
+        self.assertEqual(key("AMD 3600 processzor"), key("Ryzen 5 3600"))
+        self.assertNotEqual(key("AMD 7600"), key("Ryzen 5 7600"))
+        self.assertEqual(key("Gyári új, 36 hónap garanciás (Skynet computer) Ryzen 7 9700X 8x5,5 GHz eladó"),
+                         key("Ryzen 7 9700X"))
+
+    def test_memory_on_a_graphics_card_is_not_a_memory_module(self):
+        title = "Nvidia Quadro P400 2Gb DDR5 videókártya"
+        self.assertNotEqual(key(title), key("2GB DDR5"))
+        self.assertNotEqual(specs.extract(title)["category"], "ram")
+
+    def test_real_memory_titles(self):
+        """A készlet a „kit” szóval, az „x” nélkül („(4 16GB)”) és a modul méretével együtt is ugyanaz; a kereskedő
+        „TÖBB DARAB … garancia” hirdetése darabár; a több generációt vagy méretet árusító hirdetés nem egy termék."""
+        self.assertEqual(key("G.Skill Ripjaws V 16GB (2x8GB) DDR4 3600MHz CL19 Red (F4-3600C19D-16GVRB) RAM kit eladó"),
+                         "2x8gb ddr4")
+        self.assertEqual(key("Corsair Vengeance RGB Pro 64GB (4 16GB) DDR4 3200MHz CL16"), "4x16gb ddr4")
+        self.assertEqual(key("16 GB NOTEBOOK DDR5 Kingston 5600MHz 8GB - KCP556SS6-8 RAM (2x8GB)"), "2x8gb ddr5 sodimm")
+        self.assertEqual(key("Válogatott DDR4 csúcs ramok, 32GB (2 x 16GB) DDR4-4000Mhz CL18 kit eladó!"), "2x16gb ddr4")
+        self.assertEqual(key("16gb DDR3 1333mhz PC ram"), "16gb ddr3", "a „PC RAM” asztali modul, nem egy gép")
+        dealer = "Samsung DDR4 8GB SODIMM laptop RAM 3200MHz TÖBB DARAB - 1 év garancia + számla"
+        self.assertTrue(usable(dealer))
+        self.assertEqual(key(dealer), "8gb ddr4 sodimm")
+        self.assertFalse(usable("Laptop RAM, memória, DDR4, DDR3, DDR3L, 2-4-8-16-32GB"))
+        self.assertEqual(key("DDR4-2400 asztali memória 8GB és 16GB"), "")
+        self.assertEqual(key("Kingston FURY Beast 32GB DDR5 5200MHz- több db elérhető! - akár 1x32Gb akár 2x32Gb akár "
+                             "4x32Gb"), "")
+
+
+class SearchTermTests(unittest.TestCase):
+    """Amivel a többi oldalon megnézi, mennyiért adják: a termék szavai, ahogy a hirdetések többsége írja."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.hunter = DealHunter(Path(self.tmp.name), PLATFORMS, None, None)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_glued_and_multi_word_names(self):
+        probe = self.hunter._probe_text
+        self.assertEqual(probe("MSI GeForce RTX3060TI Ventus 8GB"), "rtx 3060 ti", "szétválasztva, a gyártó nélkül")
+        self.assertEqual(probe("Gigabyte RTX 3060Ti Gaming OC"), "RTX 3060 ti", "egy szó egyszer")
+        self.assertEqual(probe("iPhone 14 ProMax 256GB"), "iPhone 14 pro max")
+        self.assertEqual(probe("PlayStation 5 Digital Edition"), "PlayStation 5 Digital", "nem csak „Digital”")
+        self.assertEqual(probe("Sony PlayStation 5 DualSense kontroller"), "PlayStation 5 kontroller")
+        self.assertEqual(probe("Xbox Series X 1TB"), "Xbox Series X")
+        self.assertEqual(probe("Steam Deck OLED 512GB"), "Steam Deck OLED")
+        self.assertEqual(probe("Sony WH-1000XM4 fejhallgató"), "Sony WH-1000XM4", "a kötőjeles alak marad")
+
+    def test_a_memory_module_is_searched_by_its_size(self):
+        """A memóriánál a méret maga a termék: „16GB DDR4” (nem csak „DDR4”), a gyártó és a sebesség nélkül."""
+        probe = self.hunter._probe_text
+        self.assertEqual(probe("Kingston Fury 16GB DDR4 3200"), "16GB DDR4")
+        self.assertEqual(probe("Corsair Vengeance 16GB (2x8GB) DDR4-3600 CL18"), "2X8GB DDR4")
+        self.assertEqual(probe("Kingston 8GB PC4-21300 laptop memória"), "8GB DDR4")
+
+
 class FreshnessTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -69,7 +69,7 @@ FAMILY_COMPLETE = {"switch", "ps4", "ps5", "steamdeck", "xbox"}
 MODIFIERS = {"ti", "super", "xt", "xtx", "pro", "max", "plus", "ultra", "mini", "lite", "se", "oled", "slim",
              "digital", "air", "fe", "seriesx", "seriess"}
 # Sorozatnév, ami után a típusszám jön („Redmi Note 10”, „Galaxy Tab S7”, „Mi Band 7”): csak a szám előtt számít.
-SERIES = {"note", "tab", "mi", "buds", "band", "fold", "flip", "gen", "series", "mark", "mk", "book", "pad"}
+SERIES = {"note", "tab", "mi", "buds", "band", "fold", "flip", "gen", "series", "mark", "mk", "book", "pad", "vega"}
 # A termék fajtája, ha ugyanaz a család mást is jelölhet (PS5 konzol, kontroller vagy játék).
 TYPE_WORDS = {"kontroller": "kontroller", "controller": "kontroller", "kontroler": "kontroller",
               "dualsense": "kontroller", "dualshock": "kontroller", "joystick": "kontroller", "gamepad": "kontroller",
@@ -85,6 +85,7 @@ TYPE_WORDS = {"kontroller": "kontroller", "controller": "kontroller", "kontroler
 # kártyagyártó típusneve (G1, Ventus, Eagle…) csak kicsit, ezért nem kerül a kulcsba (különben a hasonló árak szétesnek).
 GPU_FAMILIES = {"rtx", "gtx", "rx", "arc"}
 _GPU_CHIP = re.compile(r"^[a-z]?\d{3,4}$")
+_GPU_MODIFIERS = {"ti", "super", "xt", "xtx"}
 # Processzor: az „Intel Core i5-10400F” és az „i5 10400F” ugyanaz; az Intel/AMD márka mellette nem kell a kulcsba.
 _CPU_TIER = re.compile(r"^i[3579]$")
 CPU_BRANDS = {"intel", "amd"}
@@ -104,10 +105,20 @@ _ALIASES = ((r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbala
             # memória: a „SO DIMM” egy szó, a „DDR 4” is „ddr4”; a modul szabványneve („PC4-21300”) a generációja; a
             # „DDR4-3200” a generáció és a sebesség (két szó: különben a „ddr43200” sem a generációt, sem a sebességet nem adja)
             (r"\bso ?-?dimm\b", "sodimm"), (r"\b(lp)?ddr ([2-5])\b", r"\1ddr\2"), (r"\bpc([2-5])l?-?\d{4,5}[a-z]?\b", r"ddr\1"),
-            (r"\b(lp)?ddr([2-5]) ?- ?(?=\d)", r"\1ddr\2 "),
-            # a laptop-memória SO-DIMM (de egy laptop a benne lévő memóriával nem az: ehhez a memória szava kell mellé)
-            (r"\b(?:laptop|notebook)(?:ba|hoz|os)? (ram|memoria\w*|memory)\b", r"sodimm \1"),
-            (r"\b(ram|memoria\w*|memory) (?:laptop|notebook)\w*", r"\1 sodimm"))
+            (r"\b(lp)?ddr([2-5]) ?- ?(?=\d)", r"\1ddr\2 "), (r"\b((?:lp)?ddr[2-5]) ?-?(?:es|as|os)\b", r"\1"),
+            # a laptop-memória SO-DIMM (de egy laptop a benne lévő memóriával nem az: ehhez a memória szava, vagy a
+            # DDR-generációja kell mellé: „laptop RAM”, „notebook DDR5”)
+            (r"\b(?:laptop|notebook)(?:ba|hoz|os)? (ram|memoria\w*|memory|(?:lp)?ddr[2-5])\b", r"sodimm \1"),
+            (r"\b(ram|memoria\w*|memory) (?:laptop|notebook)\w*", r"\1 sodimm"),
+            # az asztali gép memóriája („PC RAM”, „PC-be memória”): memóriamodul, nem egy gép
+            (r"\bpc ?-?(?:be|hez)? (?=(?:ram|memoria|memory|(?:lp)?ddr[2-5])\b)", ""), (r"\b(ram|memoria\w*|memory) pc\b", r"\1"),
+            # mérettartomány vagy -felsorolás („8-16GB”, „2-4-8-16-32GB”): több méret, nem a „816GB”
+            (r"\b\d{1,4}(?: ?- ?\d{1,4})+ ?(gb|tb)\b",
+             lambda m: " ".join(f"{n}{m.group(1)}" for n in re.findall(r"\d+", m.group(0)))),
+            # memóriakészlet az „x” nélkül („64GB (4 16GB)”: 4×16 GB), ha a darabszám és a méret szorzata az összeg
+            (r"\b(\d{1,3}) ?gb\W{1,3}([2-8]) (\d{1,2}) ?gb\b",
+             lambda m: (f"{m.group(1)}gb ({m.group(2)}x{m.group(3)}gb" if int(m.group(1)) == int(m.group(2)) * int(m.group(3))
+                        else m.group(0))))
 # Ugyanannak a típusjelnek egy alakja (a kötőjel már ki van véve): az „i5-10400F”, „i5 10400F”, „i510400f” egyaránt
 # „i5 10400f”, az „RTX3060” „rtx 3060”, a memóriakészlet „2x8 GB”, „2 x 8GB”, „2x8” egyaránt „2x8gb”. A típus jelzője
 # egybeírva is külön szó: az „RTX 3060Ti”, „RTX3060TI”, „6700XT”, „GTX 1660S” (a Super) ugyanaz, mint az „RTX 3060 Ti”,
@@ -136,10 +147,16 @@ _RAM_GEN = re.compile(r"^(?:lp)?ddr[2-5]$")
 # Ami mellett a DDR-generáció nem egy memóriamodulé, hanem egy másik terméké (alaplap, gép, processzor): ott a kulcs a
 # szokásos (a típusjelével, pl. „B450”).
 _NOT_MODULE = {"alaplap", "alaplapot", "alaplappal", "motherboard", "mainboard", "processzor", "cpu", "tablet",
-               "telefon"}
+               "telefon",
+               # a videókártya memóriája (a „DDR5” a kártyán GDDR5): nem memóriamodul
+               "videokartya", "vga", "quadro", "geforce", "radeon", "gpu", "grafikus"}
 _CHIPSET = re.compile(r"^[abhqxz]\d{3}[a-z]?$")
 # Ár a címben („95 000 Ft”, „25e”, „25.000,-”): nem a termék része.
 _PRICE_IN_TITLE = re.compile(r"\b\d+(?:[ .]\d{3})*\s*(?:,-|(?:ft|huf|forint|e ?ft|ezer)\b)")
+# Dátum a címben („garancia 2027.03.”, „2028.05.17.-ig”), és a garancia vagy a jótállás éve („Alza garancia 2027”): nem a
+# termék része (a „3080 2027” kulcs egy másik termék lenne). A típus évszáma („iPhone SE 2020”, „MacBook Pro 2019”) marad.
+_DATE = re.compile(r"\b(?:19|20)\d{2} ?[./] ?[01]?\d\b(?: ?[./] ?[0-3]?\d\b)?\.?(?: ?-?ig\b)?")
+_WARRANTY_YEAR = re.compile(r"\b((?:garanci|gari\b|gar\b|jotallas|szamla)\w*)\W{0,3}(?:19|20)\d{2}\b")
 # Mértékegység vagy méret egy szám után (8gb, 4k, 42es, 38-as, 120hz): nem a típusjel.
 _UNIT = re.compile(r"^\d+(?:gb|tb|mb|ghz|mhz|hz|w|v|mah|wh|cm|mm|m|l|ml|kg|col|inch|in|db|ft|e|p|es|as|os|"
                    r"ig|tol|ra|re|ban|ben|bol)$|^\d{1,2}[xk]$|^\d{1,3}g$")   # a 5600X, 12600K, 5600G típusjel
@@ -217,16 +234,40 @@ def _infer_gpu(words: list[str]) -> list[str]:
     return out
 
 
+# AMD-processzor a „Ryzen” nélkül („Eladó: AMD 5800X”, „5600X proci”): a típusszám a végződésével (X, X3D, G, XT, GE, F)
+# az AMD vagy egy processzor-szó mellett, a végződés nélküli („3600”) csak egy processzor-szó mellett (a videókártyák
+# száma is ilyen: „AMD 7600” lehet RX 7600 is). Így a kulcsa ugyanaz, mint a „Ryzen 7 5800X”-é.
+_RYZEN_SUFFIXED = re.compile(r"^[1-9]\d{3}(?:x3d|xt|x|g|ge|f)$")
+_RYZEN_BARE = re.compile(r"^[1-9][1-9]00$")
+_CPU_WORDS = {"processzor", "processzort", "proci", "cpu", "am4", "am5"}
+_NOT_RYZEN = {"athlon", "phenom", "sempron", "fx", "threadripper"}
+
+
+def _infer_cpu(words: list[str]) -> list[str]:
+    if set(words) & (FAMILIES | _NOT_RYZEN | _GPU_WORDS) or any(_CPU_TIER.match(w) for w in words):
+        return words
+    cpu = bool(set(words) & _CPU_WORDS)
+    if not cpu and "amd" not in words:
+        return words
+    out: list[str] = []
+    for word in words:
+        if _RYZEN_SUFFIXED.match(word) or (cpu and _RYZEN_BARE.match(word)):
+            out.append("ryzen")
+        out.append(word)
+    return out
+
+
 def _words(text: str) -> list[str]:
     folded = fold(text or "")
     for pattern, replacement in _ALIASES:
         folded = re.sub(pattern, replacement, folded)
+    folded = _WARRANTY_YEAR.sub(r"\1 ", _DATE.sub(" ", folded))
     folded = _PRICE_IN_TITLE.sub(" ", folded)
     folded = re.sub(r"(?<=[a-z0-9])-(?=[a-z0-9])", "", folded)      # WH-1000XM4 → wh1000xm4, i5-12400 → i512400
     for pattern, replacement in _SPLITS:                               # i512400 → i5 12400 (mint az „i5 12400”)
         folded = pattern.sub(replacement, folded)
     words = [re.sub(r"^1x(\d{1,2}gb)$", r"\1", word) for word in re.findall(r"[a-z0-9]+", folded)]   # 1x8GB = 8GB
-    words = _infer_gpu(words)
+    words = _infer_cpu(_infer_gpu(words))
     if any(word in _GPU_CONTEXT or word.startswith("gddr") for word in words):
         words = [f"{m.group(1)}gb" if (m := _GPU_VRAM.match(word)) else word for word in words]
     return words
@@ -256,6 +297,10 @@ _LOCKED = re.compile(r"\b(?:icloud\w*|aktivalasi zar\w*|fiok ?zar\w*|google ?fio
 _LOCK_DENIED = re.compile(r"\b(?:nincs|nem|mentes\w*|nelkul|free|kijelentkez\w*|torolve|torolt|lekotve|off)\b")
 
 
+_MANY = re.compile(r"\btobb (?:db|darab)\b")
+_STOCK = re.compile(r"\b(?:keszlet\w*|raktar\w*|elerheto\w*|garanci\w*|szamla\w*|szamlaval)\b")
+
+
 def locked(text: str) -> bool:
     """Zárolt telefon (iCloud, aktiválási vagy Google-fiók zár, lopott), és nincs tagadva („iCloud mentes”)."""
     folded = fold(text or "")
@@ -283,7 +328,9 @@ def unusable(text: str) -> str:
         return "zárolt (iCloud, aktiválási vagy fiókzár), nem eladható működő termék"
     if len(capacities(_words(text))) >= 3:
         return "több méret egy hirdetésben (az ár valamelyiké, vagy a legolcsóbbé)"
-    if _LOT_RE.search(folded) or _PIECES.search(folded) or _HEAP.search(folded):
+    # a kereskedő „TÖBB DARAB” (készletről, garanciával, számlával) hirdetése darabár, nem egy csomag ára
+    lots = _MANY.sub(" ", folded) if _STOCK.search(folded) and not _WHOLE_PRICE.search(folded) else folded
+    if _LOT_RE.search(lots) or _PIECES.search(folded) or _HEAP.search(folded):
         return "csomag vagy több darab egy áron"
     if _PARTS_RE.search(folded):
         return "alkatrész vagy hibás"
@@ -541,6 +588,8 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         elif re.search(r"\d", word):
             if _UNIT.match(word) or (word.isdigit() and (len(word) > 5 or set(word) == {"0"} or after in _UNIT_WORDS)):
                 continue
+            if re.match(r"^\d{1,2}x\d{1,2}$", word):
+                continue                       # „8x5,5 GHz” (magok), „6x4”: méret vagy darabszám, nem típusjel
             if word.isdigit() and families and TYPE_WORDS.get(after) in ("kontroller", "jatek") and index > 1:
                 continue                       # „Switch OLED + 3 játék”: a darabszám nem típusjel
             # rövid szám csak a család, a márka, egy jelző vagy egy sorozatnév után típusjel („iPhone 13”, „Air Max 90”,
@@ -563,15 +612,25 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
         # a kulcsba (ahogy a videókártyánál a kártyagyártó sem): a „Kingston Fury 16GB DDR4 3200” és a „Corsair 16GB
         # DDR4-3600 CL18” egy termék, és a „3200” vagy „3200MHz” írásmód sem választja szét. Méret nélkül nincs kulcs.
         picked = [t for t in picked if t == generation or _KIT.match(t) or t in _RAM_FORMS.values()]
-        if not any(_KIT.match(t) for t in picked) and not capacities(words):
-            return None
+        kits = [t for t in picked if _KIT.match(t)]
+        if kits:                               # a „2x8GB … kit” ugyanaz, mint a „2x8GB” (a felosztása ismert)
+            picked = [t for t in picked if t != "kit"]
+        parts = {size for m in map(_KIT.match, kits)   # a készlet összege és egy moduljának mérete nem külön termék
+                 for size in (f"{int(m.group(1)) * int(m.group(2))}gb", f"{int(m.group(2))}gb")}
+        sizes = [size for size in capacities(words) if size not in parts]
+        if len(kits) > 1 or len(sizes) > 1 or bool(kits) == bool(sizes) or \
+                len({w for w in words if _RAM_GEN.match(w)}) > 1:
+            return None                        # méret nélkül, vagy több méret, generáció (több termék) egy hirdetésben
+        return " ".join(sorted(picked + sizes)), " ".join(picked + sizes)
     elif not picked or not (model or (qualified and any(f in FAMILY_COMPLETE for f in families))):
         return None
     elif len(picked) == 1 and not (model and len(picked[0]) >= 5 and not picked[0].isdigit()):
         return None
     if set(families) & GPU_FAMILIES and not {"laptop", "pc"} & set(picked):
-        # videókártya: a lapka, a jelzője és a fajtája marad, a kártyagyártó típusneve (G1, F15…) nem
-        kept = [t for t in picked if t in FAMILIES or t in MODIFIERS or t in TYPE_WORDS.values() or _GPU_CHIP.match(t)]
+        # videókártya: a lapka, a jelzője (Ti, Super, XT, XTX) és a fajtája marad, a kártyagyártó típusneve (G1, F15,
+        # Ultra, Air…) és egy évszám (a garancia vége) nem
+        kept = [t for t in picked if t in FAMILIES or t in _GPU_MODIFIERS or t in TYPE_WORDS.values()
+                or (_GPU_CHIP.match(t) and not (t.isdigit() and 1990 <= int(t) <= 2039))]
         if any(_GPU_CHIP.match(t) for t in kept):
             picked = kept
     if any(len(t) >= 4 and re.search(r"\d", t) and not _KIT.match(t) for t in picked):
@@ -792,9 +851,40 @@ class PriceBook:
         if found is None:
             return ""
         wanted = set(found[0].split())
-        picked = [token for token in text.split() if set(_words(token)) & wanted]
-        have = set(_words(" ".join(picked)))
-        sizes = [size.upper() for size in capacities(_words(text)) if size not in have]   # a „16 GB” két szóban
+        # az egybeírt típusjel szétválasztva („RTX3060TI” → „rtx 3060 ti”, „ProMax” → „pro max”): a legtöbb hirdetés így
+        # írja, és az oldalak keresője az egybeírt alakra ezeket nem mindig adja; a kötőjeles alak marad („WH-1000XM4”),
+        # és egy szó egyszer („RTX 3060Ti”: „RTX 3060 ti”)
+        picked: list[str] = []
+        have: set[str] = set()
+        tokens = [token.strip("()[]{},;:!?\"'„”«»") for token in text.split()]
+        tokens = [token for token in tokens if token]
+        def joined(span: list[str]) -> set[str]:
+            """Ami csak a szavak együtt adnak (egy több szavas név: „PlayStation 5” = ps5, „Series X”, „Steam Deck”);
+            a kikövetkeztetett videókártya-család nem ilyen (az a lapka száma mellett magától is ott van)."""
+            alone = set().union(*(_words(token) for token in span)) if span else set()
+            return (set(_words(" ".join(span))) - alone - GPU_FAMILIES) & wanted
+
+        index = 0
+        while index < len(tokens):
+            # több szóból álló név: a legrövidebb rész, ami kiadja, ahogy írták („Sony PlayStation 5”: „PlayStation 5”)
+            for size in (2, 3):
+                span = tokens[index:index + size]
+                found_words = joined(span) if len(span) == size else set()
+                if found_words and not joined(span[1:]) & found_words:
+                    picked.append(" ".join(span))
+                    have.update(_words(" ".join(span)))
+                    index += size
+                    break
+            else:
+                token, index = tokens[index], index + 1
+                words = _words(token)
+                if not set(words) & wanted or set(words) <= have:
+                    continue
+                picked += [token] if "-" in token or len(words) < 2 else [word for word in words if word not in have]
+                have.update(words)
+        kits = {f"{int(m.group(1)) * int(m.group(2))}gb" for m in (_KIT.match(word) for word in wanted) if m}
+        sizes = [size.upper() for size in capacities(_words(text))   # a „16 GB” két szóban; a készlet összege nem
+                 if size not in have and size not in kits]
         return " ".join(picked + sizes) if picked else found[1]
 
     def learn_name(self, name: str) -> str:

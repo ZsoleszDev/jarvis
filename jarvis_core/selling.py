@@ -1422,7 +1422,8 @@ _STOPWORDS = {
 }
 # Kereső- és cserehirdetés: valaki venni vagy cserélni akar, az ára nem eladási ár. A „csere” csak akkor
 # számít, ha az eladás szava nincs mellette („Eladó vagy csere” még eladás).
-_WANTED_RE = re.compile(r"\b(keresek|keresem|keresunk|veszek|vennek|vennem|megvennem|felvasar\w*|beszamit\w*)\b")
+# (A „Beszámítás” nem ilyen: a kereskedő eladja a terméket, és a régit beszámítja az árba; a hirdetés ára eladási ár.)
+_WANTED_RE = re.compile(r"\b(keresek|keresem|keresunk|veszek|vennek|vennem|megvennem|felvasar\w*)\b")
 _SWAP_RE = re.compile(r"\b(csere|cseret|csereben|cserere|cserelnem|cserelnek|cserelek|elcserelnem|cserebere)\b")
 _SALE_RE = re.compile(r"\belad")
 # Csomag vagy több darab egyben: az ár nem egy darabé. A darabszám („3 db”, „x2”) csak elektronikán kívül
