@@ -1727,16 +1727,15 @@ class BrowseTests(HunterCase):
         self.assertTrue(self.journal()[1].startswith("Jó találat: „Gigabyte RTX 3060 Ti Gaming OC”"))
         self.assertFalse(self.hunter.available(), "egy rövid szünet, és vált")
         self.assertEqual(self.hunter.note(), "Hamarosan: Vinted.")
-        # a következő oldal (nem vár a Hardverapró pihenőjére): a Vinteden is tárgyakat keres (a kezdőoldal és a
-        # ruhamárkák helyett), és a ruhát kihagyja (azzal nem kereskedik)
+        # a következő oldal (nem vár a Hardverapró pihenőjére): a Vinteden az Elektronika kategória legújabbjait nézi
+        # (a kezdőoldal és a ruhamárkák helyett), és ami mégis ruha, azt kihagyja (azzal nem kereskedik)
         feed = [listing(40, "Nike pulóver", 8000, "www.vinted.hu"), listing(41, "Zara kabát", 12000, "www.vinted.hu"),
                 listing(42, "Retró kütyü X100", 9000, "www.vinted.hu")]
         self.browser.by_url = [("vinted.hu", feed)]
         self.clock.now += 61
         self.assertTrue(self.hunter.available())
         self.hunter.run(notify=self.notify)
-        self.assertRegex(self.browser.urls[-1],
-                         r"^https://www\.vinted\.hu/catalog\?search_text=(lego|airpods|nintendo|playstation|iphone)")
+        self.assertEqual(self.browser.urls[-1], "https://www.vinted.hu/catalog?catalog[]=2994&order=newest_first")
         pending = [r["text"] for r in self.hunter._pending]
         self.assertEqual(len(pending), 3, "az ismeretlen kütyü a következő kötegre vár")
         self.assertFalse([t for t in pending if "Nike" in t or "Zara" in t], "a ruhát kihagyta")
@@ -1913,6 +1912,80 @@ class BrowseTests(HunterCase):
                                "price": 70000, "site": "Hardverapró", "product_key": "3060 rtx ti"})
         self.hunter.mark_bought("b1", "item1")
         self.assertFalse(self.hunter._muted("3060 rtx ti", self.clock()), "amit megvettél, arról újra szól")
+
+    def test_by_default_it_looks_at_everything_new_not_at_chosen_products(self):
+        """Alapból egész kategóriák, a legújabb hirdetésekkel elöl: nincs beégetett termék (pl. iPhone) a böngészésben."""
+        lanes = self.hunter.state()["lanes"]
+        self.assertEqual({lane["site"] for lane in lanes}, {"hardverapro", "jofogas", "vinted", "vatera"})
+        for lane in lanes:
+            self.assertEqual((lane["kind"], lane["on"]), ("page", True), lane["name"])
+            self.assertNotRegex(lane["url"], r"[?&](q|search_text|stext)=", "kategória, nem keresőszó")
+        urls = {lane["site"]: lane["url"] for lane in lanes}
+        self.assertEqual(urls["vinted"], "https://www.vinted.hu/catalog?catalog[]=2994&order=newest_first")
+        self.assertEqual(urls["jofogas"], "https://www.jofogas.hu/magyarorszag/muszaki-cikkek-elektronika?sp=3")
+        self.assertIn("ob=5&obd=2", urls["vatera"], "a Vaterán is a legújabb elöl")
+
+    def test_start_pages_can_be_switched_off_added_and_removed(self):
+        hunter = self.hunter
+        hunter.set_browse(on=True, sites=["hardverapro", "jofogas"])
+        names = lambda: {lane["name"]: lane for lane in hunter.state()["lanes"]}  # noqa: E731
+        # egy beépített kikapcsolva: a listában marad, de a böngészés nem nézi
+        state = hunter.lane_switch("hardverapro:minden_hardver", False)
+        self.assertFalse(names()["Hardverapró: Minden hardver"]["on"])
+        picks = {hunter._pick_lane("hardverapro", [], False)["name"] for _ in range(200)}
+        self.assertNotIn("Hardverapró: Minden hardver", picks)
+        hunter.lane_switch("hardverapro:minden_hardver", True)
+        self.assertTrue(names()["Hardverapró: Minden hardver"]["on"])
+        # saját: egy keresőszó a bejelölt oldalakon (a legújabb elöl), egy oldal címe a sajátján
+        state = hunter.lane_add("Lego")
+        own = [lane for lane in state["lanes"] if lane["kind"] == "sajat"]
+        self.assertEqual([(lane["name"], lane["on"]) for lane in own], [("Hardverapró: Lego", True), ("Jófogás: Lego", True)])
+        self.assertTrue(names()["Jófogás: Lego"]["url"].endswith("?q=Lego&sp=3"))
+        state = hunter.lane_add("https://www.vinted.hu/catalog?search_text=nintendo%20switch")
+        lane = names()["Vinted: nintendo switch"]
+        self.assertEqual(lane["url"], "https://www.vinted.hu/catalog?search_text=nintendo%20switch&order=newest_first")
+        with self.assertRaises(DealError):
+            hunter.lane_add("Lego", "jofogas")          # már megvan
+        with self.assertRaises(DealError):
+            hunter.lane_add("https://example.com/lista")
+        with self.assertRaises(DealError):
+            hunter.lane_remove("hardverapro:videokartyak")   # a beépítettet kikapcsolni lehet
+        hunter.lane_switch(names()["Jófogás: Lego"]["id"], False)
+        self.assertFalse(names()["Jófogás: Lego"]["on"])
+        hunter.lane_remove(names()["Jófogás: Lego"]["id"])
+        self.assertNotIn("Jófogás: Lego", names())
+        self.assertIn("Új indulóoldal: Hardverapró: Lego, Jófogás: Lego.", self.journal())
+        self.assertIn("Kikapcsoltad ezt az indulóoldalt: Hardverapró: Minden hardver.", self.journal())
+
+    def test_a_removed_learned_page_is_not_learned_again_and_learning_can_be_off(self):
+        hunter = self.hunter
+        hunter.set_browse(on=True, sites=["hardverapro"], learn=False)
+        self.clock.now += 3 * 86400
+        for row in NORMAL[:2]:
+            hunter.book.revisited("3060 rtx ti", row["url"], gone=True)
+        hunter.run(notify=self.notify)
+        self.assertEqual([lane for lane in hunter.state()["lanes"] if lane["kind"] == "tanult"], [],
+                         "kikapcsolt öntanulással nem vesz fel magától")
+        self.assertFalse(hunter.state()["browse"]["learn"])
+        hunter.set_browse(learn=True)
+        with hunter._lock:
+            hunter._data["sites_state"]["learned"] = ""
+            hunter._data["session"] = {}
+        self.clock.now += 86400
+        hunter.run(notify=self.notify)
+        [lane] = [lane for lane in hunter.state()["lanes"] if lane["kind"] == "tanult"]
+        hunter.lane_remove(lane["id"])
+        self.assertEqual([lane for lane in hunter.state()["lanes"] if lane["kind"] == "tanult"], [])
+        self.assertIn("Törölted ezt az indulóoldalt: Hardverapró: rtx 3060 ti (nem veszem fel újra magamtól).",
+                      self.journal())
+        for _ in range(2):                       # később sem tanulja meg újra (az egy hónapos némítás után sem)
+            with hunter._lock:
+                hunter._data["session"] = {}
+            self.clock.now += 40 * 86400
+            for row in NORMAL[:2]:
+                hunter.book.revisited("3060 rtx ti", row["url"], gone=True)
+            hunter.run(notify=self.notify)
+        self.assertEqual([lane for lane in hunter.state()["lanes"] if lane["kind"] == "tanult"], [])
 
     def test_a_search_waiting_for_approval_does_not_wake_the_job(self):
         self.hunter.add_search("RTX 3060 Ti", ["hardverapro"])

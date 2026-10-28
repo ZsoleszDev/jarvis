@@ -39,6 +39,7 @@ kereskedés fülén); alapból ki van kapcsolva.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -362,23 +363,24 @@ LANE_BROWSER, LANE_FAST = "browser", "fast"
 SESSION_KEYS = {LANE_BROWSER: "session", LANE_FAST: "fast_session"}
 FAST_TICK = 3.0            # a gyors sor szála ilyen sűrűn nézi meg, van-e dolga
 BOOK_SAVE = 600            # a gyors sor az árbázist legfeljebb ennyi másodpercenként írja ki (nagy fájl)
-# Indulóoldalak: (név, keresőszó vagy teljes cím; üres = a kezdőoldal). A Hardverapró kategóriáit a címükkel.
+# Indulóoldalak: (név, keresőszó vagy teljes cím; üres = a kezdőoldal). Alapból egész kategóriák, a legújabb hirdetésekkel
+# elöl: nem egy-egy termékre keres, hanem mindent megnéz, ami újonnan felkerül (amit ismer, az árbázishoz méri, az
+# ismeretleneket a modell nevezi meg). A Vinteden az Elektronika (a ruhával nem kereskedik), a Jófogáson a Műszaki cikkek,
+# elektronika, a Vaterán a Műszaki cikk és mobil (innen jönnek a friss, 1 Ft-ról induló licitek is), a Hardveraprón a
+# hardver egésze és a felkapott kategóriái (2026 októberében ellenőrizve). A felületen bármelyik kikapcsolható, és
+# saját is felvehető (egy oldal címe vagy egy keresőszó: lane_add; a gyakoriak egy gombnyomással: LANE_PRESETS).
 _HA = "https://hardverapro.hu/aprok/hardver/"
-# A Vinteden sem ruhát néz (azzal nem kereskedik): a kezdőoldal és a ruhamárkák helyett tárgyakat.
 BROWSE_LANES: dict[str, list[tuple[str, str]]] = {
-    "vinted": [("Lego", "lego"), ("AirPods", "airpods"), ("Nintendo Switch", "nintendo switch"),
-               ("PlayStation", "playstation"), ("iPhone", "iphone")],
-    "hardverapro": [("Videókártyák", _HA + "videokartya/index.html"), ("Memóriák", _HA + "memoria/index.html"),
-                    ("SSD-k", _HA + "merevlemez_ssd/ssd/index.html"), ("Processzorok", _HA + "processzor/index.html"),
-                    ("Alaplapok", _HA + "alaplap/index.html")],
-    "jofogas": [("iPhone", "iphone"), ("PlayStation", "playstation"), ("Nintendo Switch", "nintendo switch"),
-                ("Lego", "lego"), ("AirPods", "airpods"), ("Dyson", "dyson"), ("Makita", "makita")],
-    # a Vaterán egy egész főkategória is (a legújabb elöl, a cím a felhasználótól): a friss, 1 Ft-ról induló licitek
-    # innen kerülnek a licitlistára, nem csak a kulcsszavas oldalakról
-    "vatera": [("Műszaki cikk és mobil", "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html?ob=5&obd=2"),
-               ("iPhone", "iphone"), ("Lego", "lego"), ("PlayStation", "playstation"), ("Nintendo", "nintendo"),
-               ("Fényképezőgép", "fényképezőgép")],
+    "vinted": [("Elektronika", "https://www.vinted.hu/catalog?catalog[]=2994&order=newest_first")],
+    "hardverapro": [("Minden hardver", _HA + "index.html"), ("Videókártyák", _HA + "videokartya/index.html"),
+                    ("Memóriák", _HA + "memoria/index.html"), ("SSD-k", _HA + "merevlemez_ssd/ssd/index.html"),
+                    ("Processzorok", _HA + "processzor/index.html"), ("Alaplapok", _HA + "alaplap/index.html")],
+    "jofogas": [("Műszaki cikkek, elektronika", "https://www.jofogas.hu/magyarorszag/muszaki-cikkek-elektronika?sp=3")],
+    "vatera": [("Műszaki cikk és mobil", "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html?ob=5&obd=2")],
 }
+# Saját indulóoldal egy gombnyomással (keresőszó, minden bejelölt oldalon): a korábbi beépített termékkeresések.
+LANE_PRESETS = ("Lego", "PlayStation", "Nintendo Switch", "AirPods", "iPhone", "Dyson", "Makita")
+MAX_OWN_LANES = 30
 # Öntanulás: a gyorsan kelő (vagy már többször jó találatot hozó) termékekből saját indulóoldal lesz (legfeljebb
 # MAX_LEARNED); ami LEARN_IDLE betöltés után sem hozott semmit, kimarad. Amit MUTE_AFTER-szer elrejtettél (és egyszer
 # sem vettél meg), arról MUTE_DAYS napig nem szól.
@@ -1451,8 +1453,12 @@ class DealHunter:
                 "started": float(data.get("started") or 0),
                 "browse": {"on": bool(browse.get("on")),
                            "sites": [s for s in browse.get("sites") or BROWSE_ORDER if s in BROWSE_ORDER],
-                           "min_profit": int(browse.get("min_profit") or WATCH_PROFIT)},
-                "lanes": dicts("lanes"),          # indulóoldal → mit hozott (és a tanultak címe)
+                           "min_profit": int(browse.get("min_profit") or WATCH_PROFIT),
+                           # öntanulás: a gyorsan kelő termékekből magától is felvesz indulóoldalt (alapból be)
+                           "learn": browse.get("learn") is not False},
+                # indulóoldal → mit hozott, és a tanultak meg a sajátjaid címe; a kikapcsolt („disabled”), a törölt
+                # tanult („removed”: nem tanulja újra)
+                "lanes": dicts("lanes"),
                 "session": data.get("session") if isinstance(data.get("session"), dict) else {},
                 "fast_session": data.get("fast_session") if isinstance(data.get("fast_session"), dict) else {},
                 "sites_state": {"ended": {}, "rest": {}, "blocked": {}, "learned": "",
@@ -1570,7 +1576,8 @@ class DealHunter:
                     "day": list(self._data["day"]), "book": self.book.stats(),
                     "browse": {**json.loads(json.dumps(self._data["browse"])),
                                "status": self._browse_status(self.clock())},
-                    "lanes": self._lane_list(), "journal": self.journal.entries(), "journal_days": self.journal.days(),
+                    "lanes": self._lane_list(), "lane_presets": list(LANE_PRESETS),
+                    "journal": self.journal.entries(), "journal_days": self.journal.days(),
                     "bundles": self._bundle_state(),
                     "funnel": self.funnel(),
                     "tips": sorted((dict(t) for t in self._data["tips"]), key=lambda t: -float(t.get("at") or 0)),
@@ -1740,8 +1747,9 @@ class DealHunter:
         with self._lock:
             return self._browse_status(self.clock()) if self._data["enabled"] else ""
 
-    def set_browse(self, on: Any = None, sites: Any = None, min_profit: Any = None) -> dict[str, Any]:
-        """Böngészés napközben: be/ki, melyik oldalakon, és legalább mennyi haszonnal szóljon."""
+    def set_browse(self, on: Any = None, sites: Any = None, min_profit: Any = None, learn: Any = None) -> dict[str, Any]:
+        """Böngészés napközben: be/ki, melyik oldalakon, legalább mennyi haszonnal szóljon, és felvehet-e magától
+        indulóoldalt a gyorsan kelő termékekből (öntanulás)."""
         profit = self._amount(min_profit, "A legkisebb haszon") if min_profit not in (None, "") else None
         with self._lock:
             browse = self._data["browse"]
@@ -1756,9 +1764,102 @@ class DealHunter:
                 browse["sites"] = chosen
             if profit:
                 browse["min_profit"] = profit
+            if learn is not None:
+                browse["learn"] = bool(learn)
             self._save()
         if on is not None:
             self.journal.add("Bekapcsoltad a napközbeni böngészést." if on else "Kikapcsoltad a napközbeni böngészést.")
+        if learn is not None:
+            self.journal.add("Az öntanulás be van kapcsolva: a gyorsan kelő termékekből magam is veszek fel indulóoldalt."
+                             if learn else "Kikapcsoltad az öntanulást: új indulóoldalt csak te veszel fel.")
+        return self.state()
+
+    def lane_add(self, target: str, site: str = "") -> dict[str, Any]:
+        """Saját indulóoldal a böngészéshez: egy oldal címe (egy kategória vagy egy találati oldal; a Vinteden és a
+        Jófogáson a legújabb elöl, ha nem adtál meg más rendezést), vagy egy keresőszó a megadott oldalon (ha nincs
+        megadva, a böngészés minden bejelölt oldalán, a legújabb elöl)."""
+        target = " ".join(str(target or "").split())[:300]
+        if not target:
+            raise DealError("Írj egy keresőszót, vagy másold be egy találati oldal vagy kategória címét.")
+        added: list[dict[str, Any]] = []
+        if re.match(r"https?://", target):
+            parts = urllib.parse.urlsplit(target)
+            host = (parts.hostname or "").removeprefix("www.")
+            found = next((k for k, p in self.platforms.items()
+                          if any(host == d or host.endswith("." + d) for d in p.domains)), None)
+            if found is None:
+                names = ", ".join(p.name for p in self.platforms.values())
+                raise DealError(f"Ezt az oldalt nem ismerem; ezekről másolj be egy oldalt: {names}.")
+            segments = [seg for seg in parts.path.split("/") if seg and not seg.startswith("index")
+                        and not seg.endswith((".php", ".html", ".htm"))]
+            query = urllib.parse.parse_qs(parts.query)
+            label = " ".join((query.get("q") or query.get("search_text") or query.get("stext") or
+                              [urllib.parse.unquote(segments[-1]).replace("-", " ").replace("_", " ") if segments
+                               else "saját oldal"])[0].split())[:40]
+            added.append({"site": found, "label": label, "url": newest_first(target, found)})
+        else:
+            keyword = target[:60]
+            chosen = [site] if site else list(self._data["browse"]["sites"])
+            for key in chosen:
+                platform = self.platforms.get(key)
+                if platform is None:
+                    raise DealError("Ezt az oldalt nem ismerem.")
+                url = platform.search_url.format(q=urllib.parse.quote(keyword))
+                added.append({"site": key, "label": keyword, "url": newest_first(url, key)})
+        names = []
+        with self._lock:
+            lanes = self._data["lanes"]
+            if sum(1 for lane in lanes.values() if lane.get("kind") == "sajat") + len(added) > MAX_OWN_LANES:
+                raise DealError(f"Legfeljebb {MAX_OWN_LANES} saját indulóoldal lehet.")
+            for item in added:
+                platform = self.platforms[item["site"]]
+                if any(lane["url"] == item["url"] for lane in self._all_lanes(item["site"])):
+                    continue                   # ez már az indulóoldalak között van
+                ident = f"sajat:{item['site']}:" + (re.sub(r"[^a-z0-9]+", "_", fold(item["label"])).strip("_") or "oldal")
+                if ident in lanes:             # ugyanaz a név, más oldal
+                    ident += "_" + hashlib.sha1(item["url"].encode("utf-8")).hexdigest()[:6]
+                name = f"{platform.name}: {item['label']}"
+                lanes[ident] = {"kind": "sajat", "site": item["site"], "name": name, "url": item["url"],
+                                "at": self.clock()}
+                names.append(name)
+            if not names:
+                raise DealError("Ez már az indulóoldalak között van.")
+            self._save()
+        self.journal.add("Új indulóoldal: " + ", ".join(names) + ".")
+        return self.state()
+
+    def lane_switch(self, lane_id: str, on: Any) -> dict[str, Any]:
+        """Egy indulóoldal be- vagy kikapcsolása (a beépítetteké és a sajátjaidé; a kikapcsoltat a böngészés kihagyja,
+        de a listában marad, és visszakapcsolható)."""
+        with self._lock:
+            lane = next((lane for site in BROWSE_ORDER for lane in self._all_lanes(site) if lane["id"] == lane_id), None)
+            if lane is None:
+                raise DealError("Ilyen indulóoldal nincs.")
+            if lane["kind"] == "tanult":
+                raise DealError("A tanult indulóoldalt törölni lehet (és nem tanulja meg újra).")
+            stats = self._data["lanes"].setdefault(lane_id, {})
+            if on:
+                stats.pop("disabled", None)
+            else:
+                stats["disabled"] = True
+            self._save()
+        self.journal.add(("Bekapcsoltad" if on else "Kikapcsoltad") + f" ezt az indulóoldalt: {lane['name']}.")
+        return self.state()
+
+    def lane_remove(self, lane_id: str) -> dict[str, Any]:
+        """Egy saját indulóoldal törlése, vagy egy tanulté (ezt a terméket többé nem veszi fel magától). A beépítettet
+        kikapcsolni lehet (lane_switch)."""
+        with self._lock:
+            lane = self._data["lanes"].get(lane_id) or {}
+            if lane.get("kind") == "sajat":
+                self._data["lanes"].pop(lane_id)
+            elif lane.get("kind") == "tanult" and not lane.get("removed"):
+                lane["removed"] = self.clock()
+            else:
+                raise DealError("Ezt az indulóoldalt nem lehet törölni (a beépítettet kikapcsolhatod).")
+            self._save()
+        self.journal.add(f"Törölted ezt az indulóoldalt: {lane.get('name') or lane_id}"
+                         + (" (nem veszem fel újra magamtól)." if lane.get("kind") == "tanult" else "."))
         return self.state()
 
     def journal_entries(self, day: str = "") -> list[dict[str, Any]]:
@@ -5381,12 +5482,14 @@ class DealHunter:
         return {"id": "bongeszes", "name": "Böngészés", "hours": WATCH_HOURS,
                 "min_profit": int(self._data["browse"].get("min_profit") or WATCH_PROFIT)}
 
-    def _lanes(self, site: str) -> list[dict[str, Any]]:
-        """Egy oldal indulóoldalai: a beépítettek (BROWSE_LANES) és a tanultak (_learn)."""
+    def _all_lanes(self, site: str) -> list[dict[str, Any]]:
+        """Egy oldal minden indulóoldala, az „on” jelzővel: a beépítettek (BROWSE_LANES; kikapcsolhatók), a tanultak
+        (_learn; ami nem hozott semmit, vagy amit töröltél, az nincs itt) és a sajátjaid (lane_add)."""
         platform = self.platforms.get(site)
         if platform is None:
             return []
         out = []
+        stats = self._data["lanes"]
         for name, target in BROWSE_LANES.get(site, ()):
             if not target:
                 url, kind = platform.home, "feed"
@@ -5398,13 +5501,23 @@ class DealHunter:
             else:
                 url, kind = newest_first(platform.search_url.format(q=urllib.parse.quote(target)), site), "page"
             ident = f"{site}:" + re.sub(r"[^a-z0-9]+", "_", fold(name)).strip("_")
-            out.append({"id": ident, "site": site, "name": f"{platform.name}: {name}", "url": url, "kind": kind})
-        for ident, lane in self._data["lanes"].items():
-            if lane.get("kind") == "tanult" and lane.get("site") == site and lane.get("url") and not lane.get("off") \
+            out.append({"id": ident, "site": site, "name": f"{platform.name}: {name}", "url": url, "kind": kind,
+                        "on": not (stats.get(ident) or {}).get("disabled")})
+        for ident, lane in list(stats.items()):
+            if lane.get("site") != site or not lane.get("url"):
+                continue
+            if lane.get("kind") == "tanult" and not lane.get("off") and not lane.get("removed") \
                     and not wearable(str(lane.get("name") or "")):
                 out.append({"id": ident, "site": site, "name": str(lane.get("name") or ident), "url": lane["url"],
-                            "kind": "tanult"})
+                            "kind": "tanult", "on": True})
+            elif lane.get("kind") == "sajat":
+                out.append({"id": ident, "site": site, "name": str(lane.get("name") or ident), "url": lane["url"],
+                            "kind": "sajat", "on": not lane.get("disabled")})
         return out
+
+    def _lanes(self, site: str) -> list[dict[str, Any]]:
+        """Egy oldal bekapcsolt indulóoldalai (_all_lanes): ezek közül választ a böngészés."""
+        return [lane for lane in self._all_lanes(site) if lane["on"]]
 
     def _lane_weight(self, lane_id: str) -> float:
         """Öntanulás: amelyik indulóoldal több jelöltet és jó találatot hozott (és amit meg is vettél), azt gyakrabban
@@ -5428,10 +5541,10 @@ class DealHunter:
         return self.rng.choices(fresh, weights)[0]
 
     def _lane_list(self) -> list[dict[str, Any]]:
-        """A felületnek: az indulóoldalak, és mit hoztak eddig."""
+        """A felületnek: az indulóoldalak (a kikapcsoltak is), és mit hoztak eddig."""
         out = []
         for site in BROWSE_ORDER:
-            for lane in self._lanes(site):
+            for lane in self._all_lanes(site):
                 stats = self._data["lanes"].get(lane["id"]) or {}
                 out.append({**lane, **{k: int(stats.get(k) or 0) for k in
                                        ("pages", "rows", "candidates", "deals", "bought", "dismissed")}})
@@ -5818,15 +5931,20 @@ class DealHunter:
         state["learned"] = today
         lanes, notes = self._data["lanes"], []
         for ident, lane in list(lanes.items()):
-            if lane.get("kind") != "tanult":
-                continue
+            if lane.get("kind") != "tanult" or lane.get("removed"):
+                continue                       # (amit töröltél, azt nem tanulja meg újra)
             if lane.get("off"):
                 if now - float(lane["off"]) > MUTE_DAYS * 86400:
                     lanes.pop(ident)           # egy hónap múlva újra megtanulhatja
             elif int(lane.get("pages") or 0) >= LEARN_IDLE and not lane.get("deals") and not lane.get("candidates"):
                 lane["off"] = now
                 notes.append(f"leállítottam a(z) {lane.get('name')} figyelését (nem hozott semmit)")
-        learned = [lane for lane in lanes.values() if lane.get("kind") == "tanult" and not lane.get("off")]
+        if not self._data["browse"].get("learn", True):   # az öntanulást kikapcsoltad: új indulóoldalt nem vesz fel
+            if notes:
+                self.journal.add("Tanultam: " + "; ".join(notes) + ".", at=now)
+            return
+        learned = [lane for lane in lanes.values() if lane.get("kind") == "tanult" and not lane.get("off")
+                   and not lane.get("removed")]
         have = {lane.get("key") for lane in lanes.values() if lane.get("kind") == "tanult"}
         recent = Counter(d["product_key"] for d in self._data["deals"] if d.get("product_key")
                          and not d.get("dismissed") and now - float(d.get("at") or 0) < 14 * 86400)
