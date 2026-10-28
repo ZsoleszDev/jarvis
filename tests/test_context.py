@@ -307,6 +307,9 @@ class StallTests(unittest.TestCase):
                                                          ["element", "text"]),
                           lambda element, text: "HIBA: ez nem beírható mező.", ephemeral=True)
         assistant = Assistant(self.cfg, self.llm, self.box, "rendszer")
+        # Az eszközleírások már kb. 3400 tokent foglalnak: 8192-es kontextusban a 4. körre átlépné a 60%-ot, és a
+        # (szándékos) teljes tömörítés a hibaüzenetet is elavultnak jelölné. Itt az elakadás-jelzés a téma.
+        assistant.context_tokens = 16384
         self.fake.chat_script = [tool_reply("browser_click", {"element": 1})]
         self.fake.chat_script += [tool_reply("browser_type", {"element": 4, "text": "póló"}) for _ in range(10)]
         self.assertEqual(assistant.ask("írd be"), STALL_REPLY.format(name="browser_type"))
