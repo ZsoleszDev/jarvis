@@ -466,8 +466,26 @@ class DealTests(HunterCase):
         self.assertEqual(len(self.notices), 1, "egyszer szól")
         self.assertEqual(self.hunter.state()["searches"][0]["market"]["median"], 100000)
 
+    def test_a_much_lower_current_price_level_is_used_for_a_search(self):
+        """A jóváhagyott szokásos ár (100 000) régi: most a hirdetések többsége kb. 60 000. Egy 55 000-es hirdetés a régi
+        árhoz mérve nagy haszon lenne, a mostanihoz mérve nem éri meg: nem szól róla. Ha a mostanihoz mérve is megéri,
+        szól, és megmondja, mihez mérte."""
+        now = [listing(50 + n, f"RTX 3060 Ti videókártya {n + 20}", 60000 + n * 500) for n in range(8)]
+        self.browser.results = now + [listing(70, "MSI RTX 3060 Ti Ventus", 55000)]
+        self.ready()
+        self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: nincs új olcsó hirdetés.")
+        self.browser.results.append(listing(71, "Gigabyte RTX 3060 Ti Eagle", 35000))
+        self.assertEqual(self.hunter.run(notify=self.notify, force=True), "1 keresés: 1 olcsó hirdetés.")
+        [(_kind, _title, text, _extra)] = [n for n in self.notices if n[1].startswith("Olcsó")]
+        self.assertIn("a mostani árhoz mértem", text)
+        self.assertIn("kevesebbért, mint a jóváhagyott 100 000 Ft", text)
+
     def test_only_eight_candidates_per_round_the_rest_next_time(self):
-        self.browser.results = NORMAL + [listing(40 + n, f"RTX 3060 Ti Gamer {n}", 50000 + n * 100) for n in range(10)]
+        # (a szokásos árú hirdetések vannak többen: ha az olcsók lennének, az lenne a mostani ár, lásd
+        # test_a_much_lower_current_price_level_is_used_for_a_search)
+        more = [listing(60 + n, f"RTX 3060 Ti videókártya {n + 7}", 95000 + n * 1000) for n in range(6)]
+        self.browser.results = NORMAL + more + [listing(40 + n, f"RTX 3060 Ti Gamer {n}", 50000 + n * 100)
+                                                for n in range(10)]
         self.ready()
         self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: 8 olcsó hirdetés.")
         self.assertEqual(len(self.browser.looked), 8)

@@ -59,6 +59,27 @@ class ListingIdTests(unittest.TestCase):
                          "vatera.hu#3123456789")
         self.assertEqual(listing_key("https://www.jofogas.hu/1234567.htm"), "jofogas.hu#1234567", "a régi alak marad")
 
+    def test_an_older_price_book_is_merged_by_the_new_keys(self):
+        """A régebbi árbázis (kv 3) betöltéskor az új kulcsokra rendeződik: a gyártónként külön memóriakészletek és az
+        egybeírt „RTX3060TI” ára egy termékhez kerül."""
+        import json
+
+        def samples(prefix: str, title: str, prices: list[int]) -> list[dict]:
+            return [{"p": price, "at": 1.0, "last": Clock()(), "url": f"https://hardverapro.hu/apro/{prefix}_{n}/friss.html",
+                     "site": "hardverapro", "t": f"{title} {n}"} for n, price in enumerate(prices)]
+
+        old = {"kv": 3, "keys": {
+            "2x8gb ddr4 kingston": {"name": "kingston 2x8gb ddr4", "samples": samples("k", "Kingston 2x8GB DDR4", [24000] * 3)},
+            "2x8gb corsair ddr4": {"name": "corsair 2x8gb ddr4", "samples": samples("c", "Corsair 2x8GB DDR4", [26000] * 3)},
+            "8gb rtx3060ti": {"name": "rtx3060ti 8gb", "samples": samples("r", "RTX3060TI 8GB", [90000] * 2)},
+            "3060 8gb rtx ti": {"name": "rtx 3060 ti 8gb", "samples": samples("s", "RTX 3060 Ti 8GB", [95000] * 3)}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "arbazis.json").write_text(json.dumps(old), encoding="utf-8")
+            book = PriceBook(Path(tmp), Clock())
+            self.assertEqual(len(book.samples("2x8gb ddr4")), 6)
+            self.assertEqual(len(book.samples("3060 8gb rtx ti")), 5)
+            self.assertNotIn("8gb rtx3060ti", book.keys())
+
     def test_the_price_book_keeps_every_listing_of_a_model(self):
         """Hat i5-12400F hirdetés két oldalon: hat ár (régen a címükben álló „12400” miatt oldalanként egy maradt, és
         nem lett szokásos ár)."""

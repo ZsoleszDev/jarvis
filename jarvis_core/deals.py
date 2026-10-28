@@ -2742,6 +2742,15 @@ class DealHunter:
         """Modell nélkül, a jóváhagyott szokásos árhoz mérve: a még nem látott (vagy azóta leárazott) hirdetések
         közül, ami megéri. A többit látottnak jegyzi, az árukkal (a leárazás észrevételéhez)."""
         reference = int(search["reference"])
+        # ha most (ezen az oldalon, elég hirdetés alapján) jóval olcsóbban adják, mint a jóváhagyott szokásos ár, lejjebb
+        # ment az árszint: a jelölt hasznát a mostani árhoz méri (a jóváhagyott áron túlbecsülné; az ármozgásról a
+        # _drift szól), és ezt a találatban meg is mondja
+        lower = ""
+        current = price_stats([int(row["price"]) for row in kept])
+        if current and current["n"] >= MIN_PRICES and current["median"] < reference * (1 - DRIFT):
+            lower = (f"most kb. {format_price(round_price(current['median']))}-ért adják ({current['n']} hirdetés), "
+                     f"kevesebbért, mint a jóváhagyott {format_price(reference)}: a mostani árhoz mértem")
+            reference = round_price(current["median"])
         since = float(search.get("checked_from") or 0)
         now = self.clock()
         out: list[dict[str, Any]] = []
@@ -2781,6 +2790,9 @@ class DealHunter:
             self._save()
         for row in haggles:
             self._haggle_search(search, row, reference)
+        if lower:
+            for deal in out:
+                deal.setdefault("warnings", []).append(lower)
         return sorted(out, key=lambda d: -d["profit"])
 
     def _calibrated(self, game: _Round, search: dict[str, Any], rows: list[dict[str, Any]],

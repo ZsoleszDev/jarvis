@@ -42,8 +42,9 @@ SOLD_MIN = 3               # ennyi elkelt (újranézéskor eltűnt) hirdetés á
 PRICE_CUT = 0.03           # ennyivel olcsóbb lett egy már látott hirdetés: leárazta
 SLOW_RATE = 0.25           # ha az újranézett hirdetéseknek legfeljebb ennyi része tűnt el: lassan kel
 # A termékkulcs képzésének változata: ha a mentett árbázis régebbi, betöltéskor a kulcsokat újraképzi a nevükből, és az
-# így egybeeső termékek árait összevonja (rekey).
-KEY_VERSION = 3
+# így egybeeső termékek árait összevonja (rekey). 4: az egybeírt típusjel („3060Ti”), a család nélküli kártya és
+# processzor, a memória a gyártója és sebessége nélkül, a garancia dátuma nélkül.
+KEY_VERSION = 4
 
 # Márkák (ékezet nélkül, kisbetűvel; a több szavasak egybeírva, lásd _ALIASES).
 BRANDS = {
