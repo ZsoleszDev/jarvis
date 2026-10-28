@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import parts
 from .pricebook import (_CHIPSET, _CPU_TIER, _GPU_CHIP, _KIT, _NOT_MODULE, BRANDS, GPU_FAMILIES, MODIFIERS, TYPE_WORDS,
                         _words, capacities, implied_size, is_capacity, product_key, ram_context, sized)
 from .textutil import fold
@@ -54,6 +55,12 @@ APPROX: dict[str, tuple[str, ...]] = {"gpu": ("maker",), "ram": ("speed", "maker
 # van, és nem tudni, melyik).
 VARIANT_ATTRS = {"gpu": ("vram",), "ram": ("generation", "total"), "phone": ("storage",), "console": (),
                  "ssd": ("capacity",)}
+# Ezek nélkül nem lehet biztos az ár, és a hirdetés leírásából többnyire kiderülnek: amíg a címből nem derülnek ki, a
+# jelöltről nem szól (nem is pittyen); az adatlap leírásával újra kiolvassa (deals._respec), és ha onnan sem derül ki, az
+# olcsóbb fajtához méri, vagy ha azt nem ismeri elég biztosan, csak az Érdemes megnézni listába teszi. A memóriánál a
+# kivitel: a laptop- (SO-DIMM) és az asztali memória (DIMM) más termék, más áron.
+DETAIL_ATTRS = {"ram": ("form",)}
+FORM_SHOWN = {parts.SODIMM: "SO-DIMM (laptop-memória)", parts.DIMM: "DIMM (asztali memória)"}
 
 _PHONE_BRANDS = {"apple", "samsung", "xiaomi", "redmi", "huawei", "oneplus", "oppo", "realme", "honor", "motorola", "nokia",
                  "google", "poco", "sony", "nothing"}
@@ -65,7 +72,17 @@ _SSD_MODELS = re.compile(r"\b(?:9[789]0 (?:evo|pro)|8[67]0 (?:evo|qvo)|sn[5-8]\d
 _NOT_PART = {"laptop", "pc", "kontroller", "jatek"}
 _LOCK_RE = re.compile(r"\b(?:icloud\w*|aktivalasi zar\w*|aktivalasi zarral|fiokzar\w*|fiok ?zar\w*|frp\w*|"
                       r"google ?fiok\w* zar\w*|zarolt\w*|lopott\w*|blacklist\w*|feketelist\w*)\b")
-_LOCK_DENIED = re.compile(r"\b(?:nincs|nem|mentes|nelkul|free|kijelentkez\w*|torolve|torolt)\b")
+# A zár tagadása közvetlenül előtte („nincs iCloud”, „nem iCloudos”) vagy utána („iCloud mentes”, „iCloud: kijelentkezve”,
+# „iCloud nincs rajta”); a „zárolt, nem tudom kijelentkeztetni” nem tagadás.
+_LOCK_BEFORE = re.compile(r"\b(?:nincs\w*|nem|semmi(?:lyen)?)\W+(?:\w+\W+)?$")
+_LOCK_AFTER = re.compile(r"^\W*(?:mentes\w*|free|nelkul\w*|nincs\w*|kijelentkeztetve|kijelentkezve|kileptetve|torolve|"
+                         r"torolt|lekotve|off)\b")
+
+
+def _lock_denied(folded: str, match: re.Match[str]) -> bool:
+    """A zár említése tagadva van-e (_LOCK_BEFORE, _LOCK_AFTER)."""
+    return bool(_LOCK_BEFORE.search(folded[max(0, match.start() - 20):match.start()])
+                or _LOCK_AFTER.search(folded[match.end():match.end() + 25]))
 _UNLOCKED_RE = re.compile(r"\b(?:fuggetlen\w*|kartyafuggetlen\w*|unlocked)\b")
 _NETLOCK_RE = re.compile(r"\b(?:telekom\w*|yettel\w*|vodafone\w*|telenor\w*|one ?(?:hu|mobil)\w*|halozatfugg\w*|"
                          r"szolgaltato ?fugg\w*|fuggo)\b")
@@ -145,9 +162,18 @@ def category(title: str) -> str:
     return ""
 
 
-def extract(title: str, details: str = "") -> dict[str, Any]:
+# A leírásból biztonsággal kiolvasható tulajdonságok (deals._respec): a leírásban sok más szám és szó is van (a „16GB
+# RAM-mal teszteltem” egy videókártya leírásában nem a VRAM-ja), ezért onnan csak az jön, amit a szövege egyértelműen
+# kimond: a memória kivitele (laptopba, SO-DIMM, a modul cikkszáma) és a szerver-memória, a telefon zárolása, a csonkított
+# videókártya (2048SP).
+DETAIL_TRUSTED: dict[str, tuple[str, ...]] = {"ram": ("form", "server"), "phone": ("lock",), "gpu": ("variant",),
+                                              "console": (), "ssd": ()}
+
+
+def extract(title: str, details: str = "", only: dict[str, tuple[str, ...]] | None = None) -> dict[str, Any]:
     """A hirdetés termékadatai: {category, attrs: {név: {value, source, evidence}}, missing: [a hiányzó kritikus
-    tulajdonságok]}. A cím az elsődleges; a leírásból csak az jön, ami a címben nincs (a forrása „leírás")."""
+    tulajdonságok]}. A cím az elsődleges; a leírásból csak az jön, ami a címben nincs (a forrása „leírás"); only
+    (termékkörönként a tulajdonságok, pl. DETAIL_TRUSTED): a leírásból csak ezek."""
     kind = category(title)
     out: dict[str, Any] = {"category": kind, "attrs": {}, "missing": []}
     if not kind:
@@ -158,6 +184,8 @@ def extract(title: str, details: str = "") -> dict[str, Any]:
             continue
         found = _EXTRACT[kind](text)
         for name, (value, evidence) in found.items():
+            if source == "leírás" and only is not None and name not in only.get(kind, ()):
+                continue
             if name not in attrs and value not in (None, ""):
                 attrs[name] = _attr(value, source, evidence)
     chip_key = attrs.pop("chip_key", None)
@@ -220,8 +248,10 @@ def _ram(text: str) -> dict[str, tuple[Any, str]]:
     generation = next((w for w in words if re.match(r"^(?:lp)?ddr[2-5]$", w)), "")
     if generation:
         digit = generation[-1]
+        # (ha a címben nincs DDR szó: a cikkszámból vagy a termékcsaládból és a sebességből, parts.generation_sign)
+        sign = parts.generation_sign(text)[1]
         out["generation"] = (generation, _literal(text, rf"\b(?:lp)?ddr\s*-?\s*{digit}\w*|\bpc{digit}\b[-\d]*")
-                             or generation.upper())
+                             or (sign and _literal(text, re.escape(sign) + r"[\w-]*")) or generation.upper())
     kit = next((match for match in (_KIT.match(w) for w in words) if match), None)
     single = re.search(r"\b1 ?x ?(\d{1,2}) ?gb\b", folded)
     if kit:
@@ -238,14 +268,16 @@ def _ram(text: str) -> dict[str, tuple[Any, str]]:
                                  single.group(0).upper())
             elif "kit" in words or "keszlet" in words:
                 out["layout"] = ("kit", _literal(text, r"\b(?:kit|keszlet)\w*") or "kit")   # több modul, de hogyan?
-    if "sodimm" in words:
-        out["form"] = ("sodimm", _literal(text, r"\bso\W?dimm\b|\b(?:laptop|notebook)\w*\s+(?:ram|memoria)\w*")
-                       or "SO-DIMM")
-    elif re.search(r"\b(?:u?dimm|asztali\w*|desktop)\b", folded):
-        out["form"] = ("dimm", _literal(text, r"\b(?:u?dimm|asztali\w*|desktop)\b") or "DIMM")
+    # a kivitel: a SO-DIMM és a DIMM szó, a modul címkéje és cikkszáma, a termékcsalád, vagy a szöveg (laptopba, asztali
+    # gépbe); ha ellentmondásos, nem derül ki (parts.ram_form)
+    form = parts.ram_form(text)
+    if form.form:
+        out["form"] = (form.form, _literal(text, re.escape(form.evidence)) or form.evidence)
     server = re.search(r"\b(?:ecc|reg|registered|rdimm|lrdimm|szerver\w*)\b", folded)
     if server:
         out["server"] = ("igen", server.group(0))
+    elif form.server:
+        out["server"] = ("igen", _literal(text, re.escape(form.evidence)) or form.evidence)
     speed = next((m for m in _SPEED_RE.finditer(folded) if 1066 <= int(m.group(1)) <= 9600), None)
     if speed:
         out["speed"] = (speed.group(1), speed.group(0))
@@ -270,9 +302,9 @@ def _phone(text: str) -> dict[str, tuple[Any, str]]:
     storage = [size for size, kind in sized(text) if kind == "storage" or (not kind and _gigabytes(size) >= 32)]
     if storage:
         out["storage"] = (storage[0], _literal(text, _cap_pattern(storage[0])) or storage[0].upper())
-    lock = _LOCK_RE.search(folded)
-    if lock and not _LOCK_DENIED.search(folded[max(0, lock.start() - 12):lock.end() + 14]):
-        out["lock"] = ("aktiválási zár", lock.group(0))
+    lock = next((m for m in _LOCK_RE.finditer(folded) if not _lock_denied(folded, m)), None)
+    if lock:
+        out["lock"] = ("aktiválási zár", _literal(text, re.escape(lock.group(0))) or lock.group(0))
     unlocked, netlock = _UNLOCKED_RE.search(folded), _NETLOCK_RE.search(folded)
     if unlocked:
         out["network"] = ("független", unlocked.group(0))
@@ -344,6 +376,8 @@ def _value(spec: dict[str, Any], name: str) -> Any:
 
 def _shown(value: Any) -> str:
     text = str(value)
+    if text in FORM_SHOWN:
+        return FORM_SHOWN[text]
     return text.upper() if re.match(r"^\d+(?:x\d+)?(?:gb|tb)$", text) else text
 
 
@@ -374,11 +408,18 @@ def compare(want: dict[str, Any], have: dict[str, Any]) -> tuple[str, list[str]]
         if mine is not None and theirs is not None:
             if mine != theirs:
                 excluded.append(f"más {ATTR_NAMES[name]} ({_shown(theirs)}, ez {_shown(mine)})")
+        elif name == "form" and mine == parts.DIMM and theirs is None:
+            # az asztali memóriához a kivitel nélküli hasonló közelítő: a felismerhető laptop-memóriák (címke,
+            # cikkszám, „laptop” szó) külön kulcson vannak, a maradék többnyire asztali (a laptop-memóriánál fordítva nem:
+            # ott csak a felismerten laptop-memória a mérce)
+            approx.append("a kivitele nem derül ki (valószínűleg asztali)")
         elif mine is not None and theirs is None:
             unsure.append(f"nem derül ki: {ATTR_NAMES[name]}")
-        elif mine is None and theirs is not None and name in VARIANT_ATTRS.get(kind, ()):
-            # a vizsgáltnál nem derül ki (pl. a memória): egy ismert változathoz mérve közelítő (a hívó a legolcsóbb
-            # változatot választja, így óvatos); ha csak a változatlanokhoz mérhető, az ára nem biztos (unsure_variant)
+        elif mine is None and theirs is not None and (name in VARIANT_ATTRS.get(kind, ())
+                                                      or name in DETAIL_ATTRS.get(kind, ())):
+            # a vizsgáltnál nem derül ki (pl. a memória, a modul kivitele): egy ismert változathoz mérve közelítő (a hívó
+            # a legolcsóbb változatot választja, így óvatos); ha csak a változatlanokhoz mérhető, az ára nem biztos
+            # (unsure_variant, needs_detail)
             approx.append(f"ennél a hirdetésnél nem derül ki: {ATTR_NAMES[name]} (ez {_shown(theirs)})")
         elif mine is None and theirs is not None and name == "layout" and not str(theirs).startswith("1x"):
             unsure.append(f"más kiszerelés lehet ({_shown(theirs)})")
@@ -400,6 +441,62 @@ def unsure_variant(spec: dict[str, Any]) -> list[str]:
     ára nem lehet biztos (pl. egy „RX 580” lehet 4 és 8 GB-os is)."""
     kind = spec.get("category") or ""
     return [ATTR_NAMES[name] for name in VARIANT_ATTRS.get(kind, ()) if name in (spec.get("missing") or [])]
+
+
+def needs_detail(spec: dict[str, Any]) -> list[str]:
+    """Ami a vizsgált hirdetésből még nem derül ki, pedig nélküle nem lehet biztos az ára, és a leírásából többnyire
+    kiderül (DETAIL_ATTRS: a memória kivitele): a nevük („kivitel”), vagy üres."""
+    kind = spec.get("category") or ""
+    return [ATTR_NAMES[name] for name in DETAIL_ATTRS.get(kind, ()) if name not in (spec.get("attrs") or {})]
+
+
+def learned(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """A kritikus (CRITICAL) és a leírásból kiolvasandó (DETAIL_ATTRS) tulajdonságok közül, ami a leírással (after)
+    derült ki, a cím alapján (before) még nem, vagy mást mondott: a nevük (a belső név, pl. „form”)."""
+    kind = after.get("category") or ""
+    if not kind or kind != (before.get("category") or kind):
+        return []
+    names = list(CRITICAL.get(kind, {})) + [n for n in DETAIL_ATTRS.get(kind, ()) if n not in CRITICAL.get(kind, {})]
+    out = []
+    for name in names:
+        new, old = (after.get("attrs") or {}).get(name), (before.get("attrs") or {}).get(name)
+        if new is not None and (old is None or old.get("value") != new.get("value")):
+            out.append(name)
+    return out
+
+
+def keyed(key: str, spec: dict[str, Any]) -> str:
+    """A termékkulcs a hirdetés termékadataival kiegészítve: a laptop-memória (SO-DIMM) kulcsában benne van a
+    „sodimm” (pricebook.product_key), akkor is, ha ez csak a leírásból derült ki."""
+    if not key or spec.get("category") != "ram":
+        return key
+    words = key.split()
+    form = ((spec.get("attrs") or {}).get("form") or {}).get("value")
+    if form == parts.SODIMM and "sodimm" not in words:
+        words.append("sodimm")
+    return " ".join(sorted(words))
+
+
+def facts(spec: dict[str, Any], names: list[str]) -> str:
+    """A megnevezett tulajdonságok röviden, ahogy egy mondatban állnak („laptop-memória (SO-DIMM)”, „zárolt
+    (aktiválási zár)”, „szerver-memória”), a felületnek és a naplónak."""
+    attrs = spec.get("attrs") or {}
+    out = []
+    for name in names:
+        if name not in attrs:
+            continue
+        value = attrs[name]["value"]
+        if name == "form":
+            out.append({parts.SODIMM: "laptop-memória (SO-DIMM)", parts.DIMM: "asztali memória (DIMM)"}.get(value, value))
+        elif name == "server":
+            out.append("szerver-memória (ECC, regisztrált)")
+        elif name == "lock":
+            out.append("zárolt (aktiválási zár)")
+        elif name == "variant":
+            out.append(f"csonkított változat ({str(value).upper()})")
+        else:
+            out.append(f"{ATTR_NAMES.get(name, name)}: {_shown(value)}")
+    return "; ".join(out)
 
 
 def describe(spec: dict[str, Any]) -> str:

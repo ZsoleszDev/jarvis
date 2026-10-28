@@ -1068,7 +1068,8 @@ class InstantWatch:
         azzal nem kereskedik (a ruhára szóló keresőszavad ettől még megy)."""
         if _WANTED_RE.search(fold(row["text"])):
             return False
-        if alert.get("query") and not matches_query(alert["query"], row["text"]):
+        # (a cím dönt, ha van: a kártya szövegében a város és az eladó neve is ott van, pl. „notebookdoki”)
+        if alert.get("query") and not matches_query(alert["query"], str(row.get("title") or row["text"])):
             return False
         if not alert.get("query") and wearable(str(row.get("title") or row["text"])):
             return False

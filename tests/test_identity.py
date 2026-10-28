@@ -145,7 +145,7 @@ class SpecsTests(unittest.TestCase):
         self.assertEqual(compare("Kingston 2x8GB DDR4 3200", "Corsair 16GB DDR4 3200")[0], specs.BIZONYTALAN)
         self.assertEqual(compare("Kingston 8GB DDR3 1600", "Kingston 8GB DDR4 1600")[0], specs.KIZART)
         self.assertEqual(compare("Kingston 8GB DDR4 SO-DIMM 2666", "Kingston 8GB DDR4 2666 asztali"),
-                         (specs.KIZART, ["más kivitel (dimm, ez sodimm)"]))
+                         (specs.KIZART, ["más kivitel (DIMM (asztali memória), ez SO-DIMM (laptop-memória))"]))
         self.assertEqual(compare("Kingston 8GB DDR4 SO-DIMM 2666", "Kingston 8GB DDR4 2666")[0], specs.BIZONYTALAN,
                          "a kivitel nem derül ki: lehet asztali")
         self.assertEqual(compare("Samsung 16GB DDR4 2400", "Samsung 16GB DDR4 ECC REG 2400")[0], specs.KIZART)
