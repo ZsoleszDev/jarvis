@@ -276,10 +276,23 @@ def _infer_cpu(words: list[str]) -> list[str]:
 # Százalék a címben („Akku: 100%”, „Aksi 100%”, „85%-os akkumulátor”): az akkumulátor állapota, nem a termék része (a
 # „100” egy típusjelnek látszana, és a címet a többi ugyanilyen termék mellől egy külön kulcsra vinné).
 _PERCENT = re.compile(r"\b\d{1,3}(?:[.,]\d{1,2})? ?%(?: ?-? ?(?:os|es|as|s|ban|ben|ra|re|on|en|ig)\b)?")
+# Magyar toldalék kötőjellel egy típusjelen („RTX 3070-es”, „GTX 1060-as”, „iPhone 13-as”, „5600X-es”, „PS5-ös”,
+# „PS5-öt”): a típusjel maga. Különben a „3070es” mértékegységnek, az „5600xes” egy másik típusjelnek látszana, és a
+# hirdetés kulcs nélkül maradna, vagy külön kulcsra kerülne. A többi toldalék marad: a „-hoz”, „-be”, „-nek” egy
+# kiegészítőé („RTX 3070-hez backplate”: _FOR_IT), a „-vel”, „-on” egy másik termékről szól („PC RTX 3070-nel”, „PS5-ön
+# futó játék”), az időt jelölő („2027-ig”, „2019-től”) évszám (_UNIT).
+_HU_SUFFIXES = r"(?:as|es|os|s|at|et|ot|t)"
+_SUFFIX = re.compile(r"\b([a-z]*\d[a-z0-9]*)-" + _HU_SUFFIXES + r"\b")
+_SUFFIX_END = re.compile(r"\d[a-z0-9]*-" + _HU_SUFFIXES + r"$")
+
+
+def _unsuffixed(token: str) -> str:
+    """Egy szó a kötőjeles magyar toldaléka nélkül, ahogy írták („3070-es” → „3070”, „PS5-ös” → „PS5”)."""
+    return token[:token.rfind("-")] if _SUFFIX_END.search(fold(token)) else token
 
 
 def _words(text: str) -> list[str]:
-    folded = _PERCENT.sub(" ", fold(text or ""))
+    folded = _SUFFIX.sub(r"\1", _PERCENT.sub(" ", fold(text or "")))
     for pattern, replacement in _ALIASES:
         folded = re.sub(pattern, replacement, folded)
     folded = _WARRANTY_YEAR.sub(r"\1 ", _DATE.sub(" ", folded))
@@ -892,13 +905,14 @@ class PriceBook:
         # és egy szó egyszer („RTX 3060Ti”: „RTX 3060 ti”)
         picked: list[str] = []
         have: set[str] = set()
-        tokens = [token.strip("()[]{},;:!?\"'„”«»") for token in text.split()]
+        tokens = [_unsuffixed(token.strip("()[]{},;:!?\"'„”«»")) for token in text.split()]   # „3070-es” → „3070”
         tokens = [token for token in tokens if token]
         def joined(span: list[str]) -> set[str]:
             """Ami csak a szavak együtt adnak (egy több szavas név: „PlayStation 5” = ps5, „Series X”, „Steam Deck”);
-            a kikövetkeztetett videókártya-család nem ilyen (az a lapka száma mellett magától is ott van)."""
+            a kikövetkeztetett videókártya-család és a Ryzen nem ilyen (az a típusszám mellett magától is ott van: az
+            „AMD 5800X” vagy az „5600X processzor” keresése a „Ryzen 7 5800X” című hirdetéseket is hozza)."""
             alone = set().union(*(_words(token) for token in span)) if span else set()
-            return (set(_words(" ".join(span))) - alone - GPU_FAMILIES) & wanted
+            return (set(_words(" ".join(span))) - alone - GPU_FAMILIES - {"ryzen"}) & wanted
 
         index = 0
         while index < len(tokens):

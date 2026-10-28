@@ -276,6 +276,23 @@ class RealTitleTests(unittest.TestCase):
         for title in ("2x RTX 3070 8GB", "2 db RTX 3070", "PS5 kontroller 2 db", "2x 4K monitor", "Samsung 4 db 8GB DDR4"):
             self.assertFalse(usable(title), title)
 
+    def test_a_model_number_with_a_hungarian_suffix(self):
+        """„RTX 3070-es”, „GTX 1060-as”, „iPhone 13-as”, „5600X-es”, „PS5-ös”, „S23-as”: a típusjel maga (eddig a
+        hirdetés kulcs nélkül maradt, vagy egy külön kulcsra került, így nem volt mihez mérni). Az időt jelölő toldalék
+        („2027-ig”) marad: az évszám így sem kerül a kulcsba."""
+        for title, plain in (("RTX 3070-es videókártya", "RTX 3070"), ("Gigabyte RTX 3060-as 12GB", "RTX 3060 12GB"),
+                             ("GTX 1060-as 6GB", "GTX 1060 6GB"), ("iPhone 13-as 128GB", "iPhone 13 128GB"),
+                             ("Ryzen 5 5600X-es processzor", "Ryzen 5 5600X"), ("Intel i5 12400F-es proci", "i5-12400F"),
+                             ("PS5-ös kontroller", "PS5 kontroller"), ("Samsung S23-as 256GB", "Galaxy S23 256GB"),
+                             ("Sony WH-1000XM4-es fejhallgató", "Sony WH-1000XM4"),
+                             ("Nintendo Switch 2-es konzol", "Nintendo Switch 2"), ("RTX 3080 2027-ig garancia", "RTX 3080")):
+            self.assertTrue(key(title), title)
+            self.assertEqual(key(title), key(plain), title)
+        # a „-hoz”, „-hez” egy kiegészítőé (hozzá való), a „-vel” egy másik termékről szól (a gép, benne a kártyával)
+        for title in ("RTX 3070-hez backplate", "GTX 1080-hoz hűtő", "iPhone 13-hoz tok"):
+            self.assertFalse(usable(title), title)
+        self.assertNotEqual(key("Gamer PC RTX 3070-nel"), key("RTX 3070"))
+
     def test_a_quantity_with_a_hungarian_suffix(self):
         """„128GB-os”, „1 TB-os”, „8 GB-s”, „2x8GB-os”, „144Hz-es”: ugyanaz, mint a „128GB” (különben egy „128gbos”
         típusjel lenne, és a kapacitás sem derülne ki); a processzor „8x4.5GHz”-e (magok, órajel) nem memóriakészlet."""
@@ -344,6 +361,15 @@ class SearchTermTests(unittest.TestCase):
         self.assertEqual(probe("Xbox Series X 1TB"), "Xbox Series X")
         self.assertEqual(probe("Steam Deck OLED 512GB"), "Steam Deck OLED")
         self.assertEqual(probe("Sony WH-1000XM4 fejhallgató"), "Sony WH-1000XM4", "a kötőjeles alak marad")
+
+    def test_suffixes_and_a_processor_without_ryzen(self):
+        """A magyar toldalék nélkül („RTX 3070-es” → „RTX 3070”), és a processzornál a típusszám a „Ryzen” nélkül írt
+        címekből is (az „AMD 5800X” keresés a „Ryzen 7 5800X” című hirdetéseket nem hozná)."""
+        probe = self.hunter._probe_text
+        self.assertEqual(probe("Eladó RTX 3070-es videókártya"), "RTX 3070")
+        self.assertEqual(probe("Ryzen 5 5600X-es processzor"), "Ryzen 5600X")
+        self.assertEqual(probe("Eladó: AMD 5800X"), "5800X")
+        self.assertEqual(probe("Sony WH-1000XM4-es fejhallgató"), "Sony WH-1000XM4")
 
     def test_a_memory_module_is_searched_by_its_size(self):
         """A memóriánál a méret maga a termék: „16GB DDR4” (nem csak „DDR4”), a gyártó és a sebesség nélkül."""
