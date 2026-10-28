@@ -160,8 +160,24 @@
   (csomagolás, eladási díj, egyéb, tartalék; a meg nem adott látszik), javasolt legmagasabb vételár, az eladás módja
   (ahogy van, hasonló hibájúként, javítva); „Alacsony kockázat” a „Biztos befektetés” helyett, „eltűnt (talán
   elkelt)”, az „Ellenőrizve” pontos jelentése.
+- Pontos árazás (parts.py, specs.py, deals._respec, audit.py): a laptop- és az asztali memória külön (a modul címkéje,
+  a gyártói cikkszám, a termékcsalád és a szöveg alapján; a cikkszámból a generáció is; kivitel nélküli keresésre a
+  laptop-memória nem jelölt); a külön eladott alkatrész (gyári hűtő, lemezmeghajtó, kijelző, akkumulátor, alaplap,
+  vízhűtés, fél fülhallgató, hiányos Lego) és a másolat nem összehasonlító és nem jelölt; a kiegészítő a cím fejszava (a
+  „töltővel”, „töltő nélkül”, „+ tok” a készülék: eddig ezek kimaradtak); „S21+” = Plus; „kontroller nélkül” konzol;
+  „2 kontrollerrel” darabszáma nem típusjel; szerszám alapgépe külön; a zár tagadása csak közvetlenül mellette. Az
+  adatlap után a leírásból biztonsággal kiolvasható adatokkal (kivitel, szerver, zár, 2048SP) újraméri a jelöltet, és
+  az ismeretlen kivitelű memóriát az olcsóbbhoz méri (vagy ha azt nem ismeri, csak tipp). KEY_VERSION 5: a régi
+  árbázis átrendeződik, a nem a termékhez tartozó árak kimaradnak. `python -m jarvis_core.audit`: a mentett találatok
+  és az árbázis a mostani szabályokkal, csak olvasva.
 
 ## Élesben kipróbálandó
+- Pontos árazás a valódi címeken: a cikkszám-minták (parts._FORM_SIGNS, _GENERATION_SIGNS) a gyakori gyártóknál
+  kiegészítendők (pl. ADATA, Patriot, TeamGroup, Lexar cikkszámai); a „laptop” szó a gép címében (parts.machine) nem
+  téveszt-e meg; az alkatrész-szavak (parts.PART_STEMS) és a fejszó-szabály (head: puszta alak, „nélkül”, „-val/-vel”,
+  „+”, állapotszó, javítás) a valódi címeken nem zár-e ki készüléket (a napló „a termék egy része” sorai mutatják); a
+  `python -m jarvis_core.audit` kimenete a gépen lévő adatokon. Hány ismeretlen kivitelű memória lesz csak tipp (ha
+  sok, a laptop-memóriák ára kevés: a böngészés vehetne fel egy „SO-DIMM” indulóoldalt).
 - Azonnali figyelő: a feltöltési idő a valódi kártyákon (instant._POSTED_RE: „ma 14:07”, „tegnap 23:50”; a Jófogáson
   más lehet, akkor nincs késés-adat); a keretarányos ütem (POLL_SHARE 0,75, PEAK_EVERY 1 perc, BURST 0,5) és a 90-es
   keret mennyire terheli az oldalakat. A Hardverapró kiemeltjeinek átugrása (LEAD_SITES, offset=): hogy a valódi oldalon

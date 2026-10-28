@@ -15,6 +15,7 @@ elkelt, feljegyzi, hány nap után. Ebből látszik, mi kel el gyorsan, és mi �
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -24,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import parts
 from .selling import (_LOT_RE, _PARTS_RE, _SALE_RE, _SWAP_RE, _WANTED_RE, listing_key, price_stats, round_price)
 from .textutil import fold
 
@@ -44,8 +46,11 @@ SLOW_RATE = 0.25           # ha az újranézett hirdetéseknek legfeljebb ennyi 
 # A termékkulcs képzésének változata: ha a mentett árbázis régebbi, betöltéskor a kulcsokat újraképzi a nevükből, és az
 # így egybeeső termékek árait összevonja (rekey). 4: az egybeírt típusjel („3060Ti”), a család nélküli kártya és
 # processzor, a memória a gyártója és sebessége nélkül, a garancia dátuma, az akkumulátor százaléka, a konzol cikkszáma
-# és az iPhone memóriája nélkül, a toldalékos kapacitás („128GB-os”).
-KEY_VERSION = 4
+# és az iPhone memóriája nélkül, a toldalékos kapacitás („128GB-os”). 5: a laptop-memória (SO-DIMM) a címkéjéről,
+# cikkszámáról, termékcsaládjáról és a „laptop” szóból is; a modul címkéje egészében a generáció; a „+” Plus változat
+# („Galaxy S21+”); a „kontroller nélkül” konzol; a darabszám a ragozott tartozék előtt („2 kontrollerrel”); a szerszám
+# akku nélküli alapgépe.
+KEY_VERSION = 5
 
 # Márkák (ékezet nélkül, kisbetűvel; a több szavasak egybeírva, lásd _ALIASES).
 BRANDS = {
@@ -82,7 +87,9 @@ TYPE_WORDS = {"kontroller": "kontroller", "controller": "kontroller", "kontroler
               # laptopcsaládok (a kártyagyártók típusneveivel nem ütköznek): a „Legion 5 RTX 3060” laptop, nem kártya
               **{name: "laptop" for name in ("legion", "omen", "zephyrus", "victus", "ideapad", "vivobook", "zenbook",
                                              "aspire", "pavilion", "latitude", "inspiron", "alienware", "helios",
-                                             "katana", "thinkbook", "elitebook", "probook")}}
+                                             "katana", "thinkbook", "elitebook", "probook")},
+              # szerszám akku és töltő nélkül (alapgép, „szóló”): más változat, mint a készlet (parts.body_only)
+              "alapgep": "alapgep"}
 # Videókártya: a lapka (RTX 3060, RX 6600, Arc A770), a jelzője (Ti, Super, XT) és a memória dönti el az árát; a
 # kártyagyártó típusneve (G1, Ventus, Eagle…) csak kicsit, ezért nem kerül a kulcsba (különben a hasonló árak szétesnek).
 GPU_FAMILIES = {"rtx", "gtx", "rx", "arc"}
@@ -96,7 +103,8 @@ FAKE_PRONE = {"airpods", "nike", "jordan", "adidas", "northface", "moncler", "st
               "lacoste", "dyson", "lego", "dualsense", "kontroller", "watch", "beats"}
 # Ezek nem mondanak semmit a termékről (és két cím között eltérhetnek).
 _NOISE = {"geforce", "radeon", "nvidia", "edition", "gaming", "oc", "dual"}
-_ALIASES = ((r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbalance"), (r"\bdr\.? ?martens\b", "drmartens"),
+_ALIASES = ((parts.PLUS_MODEL.pattern, " plus"),   # a típusjelhez tapadó „+” a Plus változat („Galaxy S21+”)
+            (r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbalance"), (r"\bdr\.? ?martens\b", "drmartens"),
             (r"\b(the )?north face\b", "northface"), (r"\bstone island\b", "stoneisland"), (r"\bray ?-?ban\b", "rayban"),
             (r"\btp ?-?link\b", "tplink"), (r"\bsteam deck\b", "steamdeck"), (r"\bjoy ?-?con\w*\b", "joycon"),
             (r"\bde ?'?longhi\b", "delonghi"), (r"\bx ?box\b", "xbox"), (r"\bapple watch\b", "watch"),
@@ -112,7 +120,11 @@ _ALIASES = ((r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbala
             # „128GB” (különben a „128gbos” egy típusjelnek látszana, és a kapacitás sem derülne ki)
             (r"\b((?:[1-8] ?x ?)?\d+) ?(gb|tb|mb|ghz|mhz|hz|mah|wh|w|k) ?- ?(?:os|es|as|s)\b", r"\1\2"),
             (r"\blga ?(\d{3,4})(?: ?-? ?v\d)?\b", r"lga\1"),   # a foglalat („LGA 1151 v2”) egy szó
-            (r"\bso ?-?dimm\b", "sodimm"), (r"\b(lp)?ddr ([2-5])\b", r"\1ddr\2"), (r"\bpc([2-5])l?-?\d{4,5}[a-z]?\b", r"ddr\1"),
+            # a modul címkéje („PC4-2666V-SA1-11”, „PC3L-12800S-11-12-B4”) egészében a generációja (a kiviteléről, a
+            # „S”-ről: parts.ram_form, a _words előtte nézi meg); a „DDR3L” (alacsony feszültségű) DDR3
+            (r"\bso ?-?dimm\b", "sodimm"), (r"\b(lp)?ddr ([2-5])\b", r"\1ddr\2"),
+            (r"\bpc([2-5])l?-?\d{4,5}[a-z]{0,2}(?:-(?:[a-z]{1,2}\d{0,2}|\d{1,4})){0,4}\b", r"ddr\1"),
+            (r"\bddr3l\b", "ddr3"),
             (r"\b(lp)?ddr([2-5]) ?- ?(?=\d)", r"\1ddr\2 "), (r"\b((?:lp)?ddr[2-5]) ?-?(?:es|as|os)\b", r"\1"),
             # a laptop-memória SO-DIMM (de egy laptop a benne lévő memóriával nem az: ehhez a memória szava, vagy a
             # DDR-generációja kell mellé: „laptop RAM”, „notebook DDR5”)
@@ -191,10 +203,6 @@ _COOLER = re.compile(r"\b(?:ventus|windforce|wf|mech)\s?[23]\s?x\b")
 _HEAP = re.compile(r"\b\w+csomag\w*|\b(omlesztve|omlesztett|gyujtemeny\w*|egyben elado\w*|elado\w* egyben)\b|"
                    r"\b\w{3,}k egyben\b")
 _FOR_IT = re.compile(r"\w{2,}(?:hoz|hez)$")     # „iphonehoz”, „13hoz”, „kontrollerhez”: kiegészítő hozzá
-# Kiegészítő (tok, töltő, kábel…): nem maga a termék ára.
-_ACCESSORY = re.compile(r"\b(tolto\w*|dokkolo\w*|tok|tokja|tokok|vedotok\w*|borito\w*|skin|matrica\w*|kabel\w*|"
-                        r"allvany\w*|tarto|szilikon\w*|grip\w*|csere ?gomb\w*|ujjvedo\w*|kijelzovedo\w*|uvegfolia\w*|"
-                        r"folia|szij\w*|pant)\b")
 
 
 # Ruha, cipő és a divatmárkák (ékezet nélkül): ezekkel az automata kereskedés nem foglalkozik (nem veszi meg, hogy
@@ -297,7 +305,15 @@ def _unsuffixed(token: str) -> str:
 
 
 def _words(text: str) -> list[str]:
-    folded = _SUFFIX.sub(r"\1", _PERCENT.sub(" ", fold(text or "")))
+    """A cím (vagy keresőszó) szavai egységes alakban (lásd _ALIASES, _SPLITS); egy cím szavait sokszor kérik
+    (kulcs, méret, használhatóság, összehasonlítás), ezért a legutóbbiakat megjegyzi (_words_of)."""
+    return list(_words_of(text or ""))
+
+
+@functools.lru_cache(maxsize=8192)
+def _words_of(text: str) -> tuple[str, ...]:
+    plain = fold(text)
+    folded = _SUFFIX.sub(r"\1", _PERCENT.sub(" ", plain))
     for pattern, replacement in _ALIASES:
         folded = re.sub(pattern, replacement, folded)
     folded = _WARRANTY_YEAR.sub(r"\1 ", _DATE.sub(" ", folded))
@@ -309,7 +325,21 @@ def _words(text: str) -> list[str]:
     words = _infer_cpu(_infer_gpu(words))
     if any(word in _GPU_CONTEXT or word.startswith("gddr") for word in words):
         words = [f"{m.group(1)}gb" if (m := _GPU_VRAM.match(word)) else word for word in words]
-    return words
+    if not any(_RAM_GEN.match(word) for word in words):
+        generation = parts.ram_generation(plain)
+        if generation:                     # „Samsung 8GB M471A1K43DB1”: a cikkszáma szerint DDR4 memóriamodul
+            words.append(generation)
+    if ram_context(words) and "sodimm" not in words:
+        # a laptop-memória a címkéjéről, a cikkszámáról, a termékcsaládjáról is (parts.ram_form: „PC4-2666V-SA1”,
+        # „M471A1K43DB1”, „Kingston FURY Impact”), és a „laptop” szóból is, ha nem egy egész gép címe (processzor, SSD,
+        # kijelző nélkül): így a kulcsa a laptop-memóriáké, nem keveredik az asztali memóriával
+        form = parts.ram_form(plain)
+        if form.form == parts.SODIMM and (form.strong or not (parts.machine(plain) or set(words) & FAMILIES
+                                                              or len(capacities(words)) > 1)):
+            words.append("sodimm")         # (a gyenge jel, a „laptop” szó egy gép címében a gépé: MacBook, 8GB 256GB)
+    if "alapgep" not in words and parts.body_only(plain):
+        words.append("alapgep")            # szerszám akku és töltő nélkül: más változat, mint a készlet
+    return tuple(words)
 
 
 def ram_context(words: list[str]) -> bool:
@@ -355,7 +385,9 @@ def unusable(text: str) -> str:
     bérleti összeg, darabár, árlista (több méret), kiegészítő, „-tól” ár, vagy több termék egy hirdetésben. Üres, ha
     az ára használható."""
     folded = fold(text or "")
-    if _WANTED_RE.search(folded) or (_SWAP_RE.search(folded) and not _SALE_RE.search(folded)):
+    # (a „csere után”, „cseréje után” egy javítás, nem csere: „akku csere után”)
+    swap = re.sub(r"\bcsere(?:je)? utan\w*", " ", folded)
+    if _WANTED_RE.search(folded) or (_SWAP_RE.search(swap) and not _SALE_RE.search(folded)):
         return "kereső- vagy cserehirdetés"
     if _INSTALLMENT.search(folded):
         return "részletfizetési vagy bérleti összeg, nem a vételár"
@@ -373,12 +405,23 @@ def unusable(text: str) -> str:
         return "csomag vagy több darab egy áron"
     if _PARTS_RE.search(folded):
         return "alkatrész vagy hibás"
-    if _ACCESSORY.search(folded) or any(_FOR_IT.match(w) for w in _words(text)):
+    copy = parts.not_original(text)
+    if copy:
+        return f"nem eredeti termék („{copy}”)"
+    # kiegészítő: a cím fejszava egy tok, töltő, kábel… (a „töltővel”, „töltő nélkül”, „+ tok” a készülék: parts.head)
+    if parts.accessory(text) or any(_FOR_IT.match(w) for w in _words(text)):
         return "kiegészítő, nem maga a termék"
     if from_price(text):
         return "„-tól” ár: nem egy meghatározott darab ára"
     if several_products(text):
         return "több termék egy hirdetésben"
+    # a termék egy része, külön eladva („Ryzen 5 3600 gyári hűtő”, „PS5 Slim lemezmeghajtó”, „Switch OLED kijelző”):
+    # a kulcsa a termékéé lenne, de az ára nem a termék ára (parts.component)
+    if parts.might_be_part(text):
+        key = product_key(text)
+        part = parts.component(text, key[0].split() if key else ())
+        if part:
+            return f"a termék egy része, nem maga a termék ({part})"
     return ""
 
 
@@ -589,6 +632,18 @@ def size_conflict(wanted: list[tuple[str, str]], have: list[tuple[str, str]], st
     return strict and not want_all <= got_all
 
 
+# A konzol tartozékai ragozva is („2 kontrollerrel”, „3 játékkal”): a darabszám előttük nem típusjel.
+_COUNTED = ("kontroller", "kontroler", "controller", "joycon", "jatek")
+
+
+def _counted(word: str) -> str:
+    """A szó fajtája (TYPE_WORDS), ragozott alakban is („kontrollerrel” → kontroller, „játékokkal” → jatek)."""
+    if word in TYPE_WORDS:
+        return TYPE_WORDS[word]
+    stem = next((stem for stem in _COUNTED if word.startswith(stem)), "")
+    return TYPE_WORDS.get(stem, "") if stem else ""
+
+
 def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> tuple[str, str] | None:
     """A termékkulcs egy hirdetés címéből: (kulcs, név). A kulcs a rendezett szavak (így a sorrend nem számít), a név
     ahogy a címben jönnek. Benne van a termékcsalád (vagy, ha nincs, a márka), a típusjel (szám vagy számot tartalmazó
@@ -617,6 +672,8 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
             term, qualified = word, True
         elif word in TYPE_WORDS:
             term = TYPE_WORDS[word]
+            if after.startswith("nelkul"):
+                continue                       # „Xbox Series X kontroller nélkül”: a konzol, nem egy kontroller
             if term in ("kontroller", "jatek") and families and (before.isdigit() or before in ("es", "plusz")) and \
                     index > 1:
                 continue                       # „PS5 + 2 kontroller”: a konzol plusz tartozéka, nem kontroller-hirdetés
@@ -632,8 +689,8 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
                 continue                       # „8x5,5 GHz” (magok), „6x4”: méret vagy darabszám, nem típusjel
             if word.isdigit() and word.startswith("0"):
                 continue                       # „004 Apple iPhone 13”: a kereskedő sorszáma, nem típusjel
-            if word.isdigit() and families and TYPE_WORDS.get(after) in ("kontroller", "jatek") and index > 1:
-                continue                       # „Switch OLED + 3 játék”: a darabszám nem típusjel
+            if word.isdigit() and families and _counted(after) in ("kontroller", "jatek") and index > 1:
+                continue                       # „Switch OLED + 3 játék”, „PS5 2 kontrollerrel”: a darabszám nem típusjel
             # rövid szám csak a család, a márka, egy jelző vagy egy sorozatnév után típusjel („iPhone 13”, „Air Max 90”,
             # „Note 10”), különben inkább méret vagy darabszám; a márka utáni 30–56 is inkább méret („Nike 42”)
             if word.isdigit() and len(word) <= 2:
@@ -841,14 +898,17 @@ class PriceBook:
         összevonása (egy hirdetés egyszer, a legutóbb látott alakjában; termékenként legfeljebb MAX_SAMPLES). Egy ár a
         saját címe szerinti változatához kerül, ha az a termék pontosabb alakja (a kulcs minden szava benne van, és még
         egy változat is: pl. a régi „580 rx” alatt a „Sapphire RX580 4G” a „4gb 580 rx”-hez; a „4G” régen nem
-        számított méretnek); más esetben (pl. amit a modell nevezett meg) marad, ahol volt."""
+        számított méretnek); más esetben (pl. amit a modell nevezett meg) marad, ahol volt. Ami a mostani szabályok
+        szerint nem a termék ára (pl. a „Ryzen 5 3600 gyári hűtő” a processzorok között), kimarad."""
         merged: dict[str, dict[str, Any]] = {}
         for old, entry in self._keys.items():
             found = self.key(str(entry.get("name") or old))
             key, label = found if found is not None else (old, str(entry.get("name") or old))
             for sample in entry["samples"]:
                 title = str(sample.get("t") or "")
-                own = self.key(title) if title and usable(title) else None
+                if title and not usable(title):
+                    continue                   # a mostani szabályok szerint nem a termék ára (pl. egy alkatrésze)
+                own = self.key(title) if title else None
                 place, name = (own if own is not None and own[0] != key and set(key.split()) < set(own[0].split())
                                else (key, label))
                 target = merged.setdefault(place, {**entry, "name": name, "samples": []})

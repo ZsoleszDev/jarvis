@@ -57,15 +57,15 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import condition as conditions
-from . import specs
+from . import parts, specs
 from .browser import DECLINED, LISTING_PAGE_JS, BrowserError, is_risky
 from .feeds import NEWEST, FeedError, chosen_sort, fetch_image, newest_first  # noqa: F401 (NEWEST: innen is)
 from .listings import BLOCKED, GONE, SOLD, classify
 from .llm import background_calls
 from .journal import Journal, day_of
 from .pricebook import (SOLD_MIN, TITLE_KEEP, PriceBook, _words, basis_entry, fake_prone, implied_size, independent,
-                        is_capacity, listed_days, pace, price_scope, size_conflict, sized, sizes_of, speed_text, unusable,
-                        usable, wearable)
+                        is_capacity, listed_days, pace, price_scope, product_key, ram_context, size_conflict, sized,
+                        sizes_of, speed_text, unusable, usable, wearable)
 from .replay import norm_text
 from .selling import (_PARTS_RE, _SALE_RE, _STOPWORDS, _SWAP_RE, _WANTED_RE, ON_SITE, Item, ItemError, Platform, _shared,
                       _tokens, format_price, listing_key, parse_price, prefilter, price_stats, round_price, vision_jpeg)
@@ -412,9 +412,6 @@ SYNONYMS = {
     "telefon": ("mobil", "mobiltelefon", "okostelefon"), "fulhallgato": ("headset", "fejhallgato"),
     "fejhallgato": ("headset", "fulhallgato"),
 }
-# Kiegészítő a keresett dologhoz (töltő, tok, kábel…), vagy „-hoz/-hez” alak („kontrollerhez”): nem maga a termék.
-_ACCESSORY_RE = re.compile(r"\b(tolto\w*|dokkolo\w*|tok|tokja|vedotok\w*|borito\w*|skin|matrica\w*|kabel\w*|"
-                           r"allvany\w*|tarto|szilikon\w*|grip\w*|csere ?gomb\w*|ujjvedo\w*)\b")
 _NO_REVIEWS_RE = re.compile(r"nincs(enek)? (meg )?ertekeles\w*|meg nincs ertekeles\w*|no reviews yet|\b0 ertekeles")
 # Alku (ékezet nélkül): a fix áras hirdetésre nem érdemes ajánlatot tenni; az alkuképes, a sürgős, a költözés miatti
 # eladó többnyire enged.
@@ -1143,6 +1140,11 @@ def _split_size(key: str) -> tuple[str, str]:
     return " ".join(w for w in words if not is_capacity(w)), " ".join(w for w in words if is_capacity(w))
 
 
+# A memória kivitelének szavai (a keresésben): ha a hirdetés kivitele ugyanaz, nem kell betű szerint benne lenniük.
+_FORM_WORDS = {"laptop", "laptopba", "notebook", "notebookba", "sodimm", "so", "dimm", "udimm", "asztali", "desktop", "pc",
+               "mini", "macbook"}
+
+
 def matches_query(query: str, text: str, strict_size: bool = False) -> bool:
     """A hirdetés tényleg a keresett dolog-e: a keresés minden szava (vagy a rokon szava, SYNONYMS) benne van; négy
     szónál hosszabb keresésnél egy hiányozhat, de a kapacitás nem: ha a keresésben van (500GB, 1TB), és a hirdetésben
@@ -1157,6 +1159,16 @@ def matches_query(query: str, text: str, strict_size: bool = False) -> bool:
     have = _tokens(text) | _norm_tokens(text)
     if not readings:
         return True
+    # a laptop- (SO-DIMM) és az asztali memória más termék: a kivitel nélküli keresés („16GB DDR4”) az asztalié (vagy
+    # amiről nem derül ki); a laptop-memóriát a keresésben kell kérni („SO-DIMM”, „laptop”). Ha a kivitel egyezik, a
+    # szava nem kell betű szerint („laptop” a keresésben, a hirdetésben csak a cikkszáma: parts.ram_form)
+    if ram_context(_words(query)) or ram_context(_words(text)):
+        want_form, have_form = parts.ram_form(query).form, parts.ram_form(text).form
+        if have_form and have_form != (want_form or parts.DIMM):
+            return False
+        if want_form and want_form == have_form:
+            readings = [reading - _FORM_WORDS for reading in readings]
+            readings = [reading for reading in readings if reading] or [set()]
     want_sizes = sized(query)
     if want_sizes and size_conflict(want_sizes, sized(text), strict_size):
         return False                           # más kapacitás (a RAM és a tárhely külön számít, lásd size_conflict)
@@ -1169,9 +1181,19 @@ def matches_query(query: str, text: str, strict_size: bool = False) -> bool:
     else:
         return False
     folded = fold(query)
-    accessory = [m.group(0) for m in _ACCESSORY_RE.finditer(fold(text)) if m.group(0) not in folded]
+    # egy kiegészítő (a cím fejszava egy tok, töltő…; a „töltővel”, „töltő nélkül” a készülék: parts.accessory) vagy a
+    # termék egy része („gyári hűtő”, „kijelző”: parts.component) nem maga a termék, hacsak nem ezt keresed
+    stem = parts.accessory(text)
+    if stem and stem not in folded:
+        return False
+    key = product_key(text)
+    part, name = parts.part_of(text, key[0].split() if key else ())
+    if name and not (part and re.search(rf"\b{part}", folded)):
+        asked = product_key(query)             # („iPhone 13 kijelző”, „ThinkPad billentyűzet”: épp ezt keresed)
+        if not parts.component(query, asked[0].split() if asked else ()):
+            return False
     for_it = [w for w in have if w.endswith(("hoz", "hez")) and any(w.startswith(q) and w != q for q in wanted)]
-    return not accessory and not for_it
+    return not for_it
 
 
 def expected_profit(reference: int, price: int, low: int | None = None) -> int:
@@ -2630,7 +2652,8 @@ class DealHunter:
         for row in kept:
             unique.setdefault(listing_key(row["url"]) if row["url"] else row["text"], row)
         words, low = search.get("exclude") or [], search.get("min_price")
-        return [row for row in unique.values() if matches_query(search["query"], row["text"], strict_size)
+        return [row for row in unique.values()
+                if matches_query(search["query"], str(row.get("title") or row["text"]), strict_size)
                 and not excluded(words, row["text"]) and not (low and row["price"] < low)]
 
     @staticmethod
@@ -3087,7 +3110,7 @@ class DealHunter:
             if not self._within_reach(row):
                 self.tally("over_limit", [row])
                 continue                       # a vételi limit fölött: nem jegyzi látottnak (ha emeled, sorra kerül)
-            search = next((s for s in running if matches_query(s["query"], row["text"])
+            search = next((s for s in running if matches_query(s["query"], str(row.get("title") or row["text"]))
                            and not excluded(s.get("exclude") or [], row["text"])), None)
             if search is None and wearable(row.get("title") or row["text"]):
                 wear.append(row)               # ruhával nem kereskedik (a kifejezett keresésed ettől még mehet)
@@ -3893,11 +3916,26 @@ class DealHunter:
         hirdetésről egyszer; értesítés (a telefonon egy rövid pittyenés: notice.tip) naponta legfeljebb TIPS_PER_DAY
         (utána csak a listában)."""
         usual = int(found["price"])
-        profit = expected_profit(usual, int(row["price"]), careful_low(found))
+        low = careful_low(found)
+        product = self.book.key(query)
+        # ha a címéből nem derül ki, laptop- vagy asztali memória-e: a laptop-memóriák (az olcsóbbak) ára a mérce, ha
+        # ismert; különben a figyelmeztetés a tippben (a leírása után úgyis újraméri: _respec)
+        caution = ""
+        spec = specs.extract(str(row.get("title") or row["text"]))
+        if specs.needs_detail(spec) and spec.get("category") == "ram" and product:
+            laptop = self.book.reference(specs.keyed(product[0], {**spec, "attrs": {
+                **spec.get("attrs", {}), "form": {"value": parts.SODIMM}}}), exclude=row["url"])
+            if laptop is not None and int(laptop["price"]) < usual:
+                usual, low = int(laptop["price"]), careful_low(laptop)
+                caution = (" A címéből nem derül ki, laptop- vagy asztali memória-e: a laptop-memóriák (az olcsóbbak) "
+                           "árához mértem.")
+            elif laptop is None:
+                caution = (" A címéből nem derül ki, laptop- vagy asztali memória-e: a laptop-memória olcsóbb lehet, "
+                           "nézd meg a fotóján.")
+        profit = expected_profit(usual, int(row["price"]), low)
         if profit <= 0 or not row.get("url") or wearable(f"{row.get('title') or row['text']} {query}"):
             return
         now = self.clock()
-        product = self.book.key(query)
         site = row.get("site") or (self.platforms[row["platform"]].name if row.get("platform") in self.platforms
                                    else row.get("platform") or "")
         tip = {"id": secrets.token_hex(5), "url": row["url"], "title": str(row.get("title") or row["text"])[:120],
@@ -3909,7 +3947,7 @@ class DealHunter:
         sites = ", ".join(tip["sites"]) or "?"
         text = (f"{site}: „{tip['title']}” {format_price(tip['price'])}. Bizonytalan ár: csak {tip['n']} hasonló "
                 f"hirdetés ({sites}) szerint kb. {format_price(usual)}-ért adják, így kb. {format_price(profit)} haszon "
-                "lehet benne. Nézd meg magad, mielőtt megveszed; ha összegyűlik elég ár, újra felmérem.")
+                f"lehet benne.{caution} Nézd meg magad, mielőtt megveszed; ha összegyűlik elég ár, újra felmérem.")
         self._put_tip(tip, f"Érdemes megnézni: {tip['title'][:50]}", text)
 
     def _put_tip(self, tip: dict[str, Any], title: str, text: str) -> bool:
@@ -6052,6 +6090,8 @@ class DealHunter:
         PING_TTL-en belül egyszer."""
         if notify is None or not deal.get("url"):
             return False
+        if specs.needs_detail(specs.extract(str(deal.get("title") or deal.get("text") or ""))):
+            return False                       # pl. laptop- vagy asztali memória: csak a leírása után tudni, mennyit ér
         key, now = listing_key(deal["url"]), self.clock()
         with self._lock:
             self._pinged = {k: at for k, at in self._pinged.items() if now - at < PING_TTL}
@@ -6227,6 +6267,92 @@ class DealHunter:
                                    f"{format_price(deal['profit'])} haszon marad, ez már kevés")
         return "ok", ""
 
+    def _respec(self, deal: dict[str, Any]) -> tuple[str, str, str] | None:
+        """Az adatlap után a jelölt termékadatai a leírásával együtt (specs.extract, a leírásból csak ami biztonsággal
+        kiolvasható: specs.DETAIL_TRUSTED). Ha a leírásból kiderül valami, ami a címből nem (pl. laptop-memória, SO-DIMM:
+        a cikkszámáról, a „laptopba” szóból; zárolt telefon; csonkított videókártya), a szokásos árat ehhez igazítja: a
+        laptop-memóriáét az árbázis laptop-memóriáiból (specs.keyed), és az összehasonlítókat a teljes termékadataihoz méri
+        (_screened). Ha egy kiolvasandó adat (specs.DETAIL_ATTRS: a memória kivitele) a leírásból sem derül ki, az olcsóbb
+        fajtához méri, ha azt elég biztosan ismeri; különben ellenőrizetlen (Érdemes megnézni), az okkal. Ha a leírása
+        szerint nem eredeti (másolat, dummy), hibás. A felmért keresésed (a szokásos árát te hagytad jóvá), a licit, az alku
+        és a csomag marad, ahogy volt. Visszaadja a végső állapotot (_verdict: állapot, miért, hold), ha emiatt kiesik vagy
+        ellenőrizetlen lesz; None, ha marad (és közben a szokásos ára, a mihez mérte frissülhetett: a haszon, a költségek
+        és a legmagasabb vételár utána, a _reprice-ban számolódik újra)."""
+        if deal.get("auction") or deal.get("haggle") or deal.get("bundle") or (deal.get("basis") or {}).get("given"):
+            return None
+        title = str(deal.get("title") or deal.get("text") or "")
+        details = str(deal.get("details") or "")
+        copy = parts.not_original(details) if details else ""
+        if copy:
+            return "hibás", f"a leírása szerint nem eredeti („{copy}”)", ""
+        first = specs.extract(title)
+        full = specs.extract(title, details, only=specs.DETAIL_TRUSTED)
+        news, open_ = specs.learned(first, full), specs.needs_detail(full)
+        if not news and not open_:
+            return None
+        if "lock" in news:                     # zárolt telefon: nem eladható működő termék (nincs hozzá mérce)
+            return "hibás", f"a leírása szerint zárolt („{full['attrs']['lock']['evidence']}”)", ""
+        found = self.book.key(title)
+        base = found[0] if found else str(deal.get("product_key") or "")
+        if not base:
+            return None
+        own = {"t": title, "p": int(deal["price"]), "v": str(deal.get("seller") or "")}
+        want = {**full, "own": own}
+        key = specs.keyed(base, full)
+        reference = self._screened(self.book.reference(key, exclude=deal["url"]), want)
+        what = specs.facts(full, news)
+        if open_ and full.get("category") == "ram":
+            # a leírásból sem derül ki, laptop- vagy asztali memória-e: az olcsóbb fajtához mér (a kivitel nélküli
+            # árak között mindkettő lehet), ha a laptop-memória árát elég biztosan ismeri
+            laptop = {**full, "attrs": {**full.get("attrs", {}),
+                                        "form": {"value": parts.SODIMM, "source": "feltevés", "evidence": ""}}}
+            laptop_key = specs.keyed(base, laptop)
+            other = self._screened(self.book.reference(laptop_key, exclude=deal["url"]), {**laptop, "own": own})
+            if other is None or not other.get("sure"):
+                return "ellenőrizetlen", ("nem derül ki, hogy laptop- (SO-DIMM) vagy asztali memória-e, és a "
+                                          "laptop-memória árát még nem ismerem elég biztosan; nézd meg a fotóján (a "
+                                          "laptop-modul fele olyan hosszú), vagy kérdezd meg az eladót"), "leírás"
+            cheaper = "a laptop-memóriák" if reference is None or int(other["price"]) < int(reference["price"]) \
+                else "az asztali memóriák"
+            if cheaper == "a laptop-memóriák":
+                reference, key = other, laptop_key
+            what = f"nem derül ki, laptop- vagy asztali memória-e; {cheaper} (az olcsóbbak)"
+            reference = {**reference, "variant_note": f"{what} árához mértem"}
+        elif open_:
+            return "ellenőrizetlen", f"a hirdetésből nem derül ki: {', '.join(open_)}", "leírás"
+        if reference is None:
+            return "ellenőrizetlen", (f"a leírása szerint {what}: ehhez még kevés a hasonló ár" if what else
+                                      "kevés a hasonló ár"), ""
+        price = int(deal.get("offer") or deal["price"])
+        value = self._valued(price, reference, str(deal.get("query") or reference.get("name") or title),
+                             int(deal.get("floor") or WATCH_PROFIT))
+        if not value["cheap"]:
+            if open_:
+                return "nem éri meg", (f"{what} kb. {format_price(value['reference'])}-ért mennek, így nem éri "
+                                       "meg"), ""
+            return "nem éri meg", (f"a leírása szerint {what}: a hasonlók kb. {format_price(value['reference'])}-ért "
+                                   "mennek, így nem éri meg"), ""
+        if not value["sure"]:
+            return "ellenőrizetlen", (reference.get("unsure_why") or reference.get("stale") or
+                                      f"{'' if open_ else 'a leírása szerint '}{what}: ehhez kevés a biztos "
+                                      "összehasonlító ár"), ""
+        # marad: a szokásos ára és a mihez mérte a teljes termékadataihoz igazodik
+        deal.update(median=int(value["reference"]), margin=int(value["reference"]) - int(deal["price"]),
+                    low=value.get("low"), similar=value.get("n"), sites=self._site_names(value.get("sites")) or None,
+                    spread=value.get("spread"), sold=value.get("sold"), band=value.get("band"),
+                    basis=value.get("basis"), refs=value.get("refs"), product_key=self.book.canon(key), respec_key=key)
+        for name in ("identity", "variant_note", "clean_n", "competitor"):
+            if value.get(name) is not None:
+                deal[name] = value[name]
+            else:
+                deal.pop(name, None)
+        if what and isinstance(deal.get("basis"), dict):
+            note = f"{what[0].upper()}{what[1:]} árához mértem." if open_ else f"A leírása szerint {what}: ehhez mértem."
+            deal["basis"] = {**deal["basis"], "note": note}
+        for name in [k for k, v in deal.items() if v is None]:
+            deal.pop(name)
+        return None
+
     def _verdict(self, deal: dict[str, Any], ok: bool | None, fast: bool = False) -> tuple[str, str, str]:
         """A jelölt végső minősítése az adatlap és a modellkérdés után: (állapot, miért, hold). Az állapot
         „ellenőrzött” (sürgősen szól róla), „ellenőrizetlen” (az Érdemes megnézni listába: _unverified), „hibás” vagy
@@ -6238,6 +6364,9 @@ class DealHunter:
         if not deal.get("page_checked"):
             warnings = deal.get("warnings") or []
             return "ellenőrizetlen", warnings[-1] if warnings else "az adatlapját nem tudtam megnézni", ""
+        respec = self._respec(deal)            # a leírásából kiderülhet, hogy más a terméke (pl. laptop-memória)
+        if respec is not None:
+            return respec
         state, why = self._reprice(deal)
         if state == "bizonytalan":
             return "ellenőrizetlen", why, "állapot"
@@ -6436,7 +6565,8 @@ class DealHunter:
         cond = deal.get("condition") or {}
         tip = {"id": secrets.token_hex(5), "url": deal["url"], "title": title, "price": int(deal["price"]),
                "site": deal.get("site") or "", "platform": str(deal.get("platform") or ""), "query": deal["query"],
-               "key": product[0] if product else "", "usual": int(deal["median"]),
+               # (ha a leírása szerint más a terméke, pl. laptop-memória: _respec, azzal)
+               "key": deal.get("respec_key") or (product[0] if product else ""), "usual": int(deal["median"]),
                "n": int(deal.get("similar") or 0), "sites": list(deal.get("sites") or []),
                "profit": int(deal["profit"]), "at": now, "checked": now, "watch": str(deal.get("search") or ""),
                "min_profit": int(deal.get("floor") or WATCH_PROFIT), "why": why, "unverified": True,
@@ -6500,7 +6630,7 @@ class DealHunter:
             running = [json.loads(json.dumps(s)) for s in self._data["searches"] if search_status(s) == "fut"]
             floor = int(min_profit or self._data["browse"].get("min_profit") or WATCH_PROFIT)
         price = int(row["price"])
-        search = next((s for s in running if matches_query(s["query"], row["text"])
+        search = next((s for s in running if matches_query(s["query"], str(row.get("title") or row["text"]))
                        and not excluded(s.get("exclude") or [], row["text"])), None)
         if search is not None:                 # a jóváhagyott szokásos ára: biztos
             reference = int(search["reference"])
