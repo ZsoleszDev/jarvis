@@ -1927,8 +1927,8 @@ class WarmTests(InstantCase):
             self.assertTrue(self.watch._warm(force=True).startswith("árkeresés: "))
         searched = sorted(url for _t, url in self.net.asked if "sony" in url.lower())
         self.assertEqual(searched, ["https://hardverapro.hu/aprok/keres.php?stext=Sony%20WH-1000XM4",
-                                    "https://www.jofogas.hu/magyarorszag?q=Sony%20WH-1000XM4"],
-                         "mindkét oldalon megnézte, a címben írt alakkal")
+                                    "https://www.jofogas.hu/magyarorszag?q=Sony%20WH-1000XM4&sp=3"],
+                         "mindkét oldalon megnézte, a címben írt alakkal, a legújabb hirdetésekkel elöl")
         self.assertEqual(self.hunter.book.reference(sony)["n"], 6, "az árbázisba került")
         self.assertEqual(self.hunter.funnel()["counts"].get("warm_searches"), 1)
         self.clock.now += deals_module.WARM_AGAIN

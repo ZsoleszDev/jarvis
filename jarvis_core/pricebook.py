@@ -31,6 +31,8 @@ MAX_KEYS = 1500            # ennyi terméket őriz (a legrégebben látottak esn
 MAX_SAMPLES = 30           # termékenként ennyi árat (a legújabbakat)
 TITLE_KEEP = 100           # egy ár mellé a hirdetés címének eleje (a találatnál látszik, mihez mérte; a termékadatai)
 MAX_AGE = 45 * 86400       # ennél régebben látott ár már nem számít a szokásos árba
+RECENT = 14 * 86400        # a nemrég látott árak: ha ezek maguk is elegendők, és legalább RECENT_GAP-pel olcsóbbak a
+RECENT_GAP = 0.05          # régebbieknél, lejjebb ment az árszint, és csak ezek számítanak (_reference)
 MIN_SAMPLES = 5            # legalább ennyi ár kell egy szokásos árhoz
 REVISIT_AFTER = 2 * 86400  # egy hirdetést legkorábban ennyi idő múlva néz meg újra (elkelt-e)
 REVISIT_AGAIN = 3 * 86400  # ha akkor még fent volt, ennyi múlva újra
@@ -97,15 +99,27 @@ _ALIASES = ((r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbala
             (r"\bde ?'?longhi\b", "delonghi"), (r"\bx ?box\b", "xbox"), (r"\bapple watch\b", "watch"),
             (r"\blevi'?s\b", "levis"), (r"\bmeta quest\b", "quest"), (r"\boculus quest\b", "quest"),
             (r"\bseries ([xs])\b", r"series\1"), (r"\bxiaomi redmi\b", "redmi"), (r"\bgamer ?pc\b", "gamerpc"),
-            # memória: a „SO DIMM” egy szó, a „DDR 4” is „ddr4”; a modul szabványneve („PC4-21300”) a generációja
+            # a Samsung telefonja a „Galaxy” nélkül is az („Samsung S23 Ultra” = „Galaxy S23 Ultra”: egy termék, egy kulcs)
+            (r"\bsamsung (?=(?:[saz]\d{1,2}(?:ultra|plus|edge|fe|[a-z])?|note ?\d{1,2}|z ?(?:fold|flip))\b)", "galaxy "),
+            # memória: a „SO DIMM” egy szó, a „DDR 4” is „ddr4”; a modul szabványneve („PC4-21300”) a generációja; a
+            # „DDR4-3200” a generáció és a sebesség (két szó: különben a „ddr43200” sem a generációt, sem a sebességet nem adja)
             (r"\bso ?-?dimm\b", "sodimm"), (r"\b(lp)?ddr ([2-5])\b", r"\1ddr\2"), (r"\bpc([2-5])l?-?\d{4,5}[a-z]?\b", r"ddr\1"),
+            (r"\b(lp)?ddr([2-5]) ?- ?(?=\d)", r"\1ddr\2 "),
             # a laptop-memória SO-DIMM (de egy laptop a benne lévő memóriával nem az: ehhez a memória szava kell mellé)
             (r"\b(?:laptop|notebook)(?:ba|hoz|os)? (ram|memoria\w*|memory)\b", r"sodimm \1"),
             (r"\b(ram|memoria\w*|memory) (?:laptop|notebook)\w*", r"\1 sodimm"))
 # Ugyanannak a típusjelnek egy alakja (a kötőjel már ki van véve): az „i5-10400F”, „i5 10400F”, „i510400f” egyaránt
-# „i5 10400f”, az „RTX3060” „rtx 3060”, a memóriakészlet „2x8 GB”, „2 x 8GB”, „2x8” egyaránt „2x8gb”.
+# „i5 10400f”, az „RTX3060” „rtx 3060”, a memóriakészlet „2x8 GB”, „2 x 8GB”, „2x8” egyaránt „2x8gb”. A típus jelzője
+# egybeírva is külön szó: az „RTX 3060Ti”, „RTX3060TI”, „6700XT”, „GTX 1660S” (a Super) ugyanaz, mint az „RTX 3060 Ti”,
+# „6700 XT”, „GTX 1660 Super”; az „iPhone 14 ProMax”, „14Pro”, „S23Ultra” mint az „iPhone 14 Pro Max”, „14 Pro”, „S23 Ultra”.
 _SPLITS = ((re.compile(r"\bi([3579]) ?(\d{4,5}[a-z]{0,3})\b"), r"i\1 \2"),
-           (re.compile(r"\b(rtx|gtx|rx)(\d{3,4})\b"), r"\1 \2"),
+           (re.compile(r"\b(rtx|gtx) ?(\d{3,4})s\b"), r"\1 \2 super"),
+           (re.compile(r"\b(rtx|gtx|rx)(\d{3,4})(?=ti\b|xtx\b|xt\b|super\b|\b)"), r"\1 \2"),
+           (re.compile(r"\b(\d{3,4})(ti|xtx|xt|super)\b"), r"\1 \2"),
+           (re.compile(r"\b([a-z]?\d{1,2})(promax|pro|max|plus|ultra|mini|lite|fe|edge)\b"), r"\1 \2"),
+           (re.compile(r"\bpro ?max\b"), "pro max"),
+           # „8GB + 8GB” két modul: ugyanaz a készlet, mint a „2x8GB” (nem egy 8 GB-os modul ára)
+           (re.compile(r"\b(\d{1,2}) ?gb(?: ?\+ ?\1 ?gb){1,3}\b"), lambda m: f"{m.group(0).count('+') + 1}x{m.group(1)}gb"),
            (re.compile(r"\b([1-8]) ?x ?(2|4|8|16|32|64) ?gb\b"), r"\1x\2gb"),
            (re.compile(r"\b([1-8])x(4|8|16|32|64)\b(?! ?(?:cm|mm|m|db)\b)"), r"\1x\2gb"))
 _KIT = re.compile(r"^([1-8])x(\d{1,2})gb$")
@@ -118,6 +132,12 @@ _GPU_VRAM = re.compile(r"^(1|2|3|4|6|8|10|11|12|16|20|24|32|48)g$")
 _RAM_FORMS = {"sodimm": "sodimm", "ecc": "ecc", "reg": "reg", "registered": "reg", "rdimm": "reg", "lrdimm": "reg",
               "kit": "kit", "keszlet": "kit"}
 _RAM_CONTEXT = re.compile(r"^(?:lp)?ddr[2-5]\w*$|^(?:ram|memoria\w*|memory|dimm|sodimm|rdimm)$")
+_RAM_GEN = re.compile(r"^(?:lp)?ddr[2-5]$")
+# Ami mellett a DDR-generáció nem egy memóriamodulé, hanem egy másik terméké (alaplap, gép, processzor): ott a kulcs a
+# szokásos (a típusjelével, pl. „B450”).
+_NOT_MODULE = {"alaplap", "alaplapot", "alaplappal", "motherboard", "mainboard", "processzor", "cpu", "tablet",
+               "telefon"}
+_CHIPSET = re.compile(r"^[abhqxz]\d{3}[a-z]?$")
 # Ár a címben („95 000 Ft”, „25e”, „25.000,-”): nem a termék része.
 _PRICE_IN_TITLE = re.compile(r"\b\d+(?:[ .]\d{3})*\s*(?:,-|(?:ft|huf|forint|e ?ft|ezer)\b)")
 # Mértékegység vagy méret egy szám után (8gb, 4k, 42es, 38-as, 120hz): nem a típusjel.
@@ -126,7 +146,9 @@ _UNIT = re.compile(r"^\d+(?:gb|tb|mb|ghz|mhz|hz|w|v|mah|wh|cm|mm|m|l|ml|kg|col|i
 _UNIT_WORDS = {"gb", "tb", "mb", "ghz", "mhz", "hz", "w", "v", "mah", "wh", "cm", "mm", "m", "l", "ml", "kg", "g", "col",
                "inch", "db", "darab", "ft", "ev", "eves", "honap", "honapos", "nap", "ora", "perc", "licit", "meret",
                "es", "as", "os"}
-_PIECES = re.compile(r"\b[2-9] ?(x|db|darab|par)\b")   # „2x”, „3 db”: több darab egy áron
+# „2x”, „3 db”: több darab egy áron. A memóriakészlet („2 x 8GB”, „2x 8 GB”) egy termék (a kulcsa „2x8gb”, mint a „2x8GB”
+# írásmódé), nem több darab.
+_PIECES = re.compile(r"\b[2-9] ?x\b(?! ?\d{1,2} ?g(?:b|ib)?\b)|\b[2-9] ?(?:db|darab|par)\b")
 # Ömlesztett vagy összetett csomag („ruhacsomag”, „ömlesztve”, „gyűjtemény”, „játékok egyben”): az ár nem egy darabé.
 _HEAP = re.compile(r"\b\w+csomag\w*|\b(omlesztve|omlesztett|gyujtemeny\w*|egyben elado\w*|elado\w* egyben)\b|"
                    r"\b\w{3,}k egyben\b")
@@ -162,6 +184,39 @@ def wearable(text: str) -> bool:
     return bool(_WEAR_RE.search(fold(text or "")))
 
 
+# Videókártya a családja (RTX, GTX, RX) nélkül („MSI 3060 Ti”, „Sapphire Pulse 6700 XT”, „Zotac 3070 8GB”): az ismert
+# lapkaszám, és mellette egy biztos jel (a lapka jelzője: Ti, Super, XT; egy videókártya-szó; egy csak videókártyát
+# gyártó cég; az NVIDIA-lapkáknál egy kártya- és alaplapgyártó is, a felbontásnak is olvasható 1080 kivételével). Így a
+# kulcsa és a termékadatai ugyanazok, mint a családdal írt címé. Az AMD-lapkák száma a processzoroké is (Ryzen 5 7600):
+# ott csak a videókártya biztos jele számít; processzor, memória és monitor mellett soha.
+_NVIDIA_CHIPS = {**{n: "gtx" for n in ("950", "960", "970", "980", "1050", "1060", "1070", "1080", "1630", "1650", "1660")},
+                 **{n: "rtx" for n in ("2060", "2070", "2080", "3050", "3060", "3070", "3080", "3090", "4060", "4070",
+                                       "4080", "4090", "5050", "5060", "5070", "5080", "5090")}}
+_AMD_CHIPS = ("460", "470", "480", "550", "560", "570", "580", "590", "5500", "5600", "5700", "6400", "6500", "6600",
+              "6650", "6700", "6750", "6800", "6900", "6950", "7600", "7650", "7700", "7800", "7900", "9060", "9070")
+_GPU_WORDS = {"videokartya", "vga", "geforce", "radeon", "vram", "grafikus"}
+_GPU_ONLY_MAKERS = {"sapphire", "powercolor", "xfx", "zotac", "palit", "gainward", "pny", "inno3d", "evga", "galax", "kfa2"}
+_BOARD_MAKERS = {"asus", "msi", "gigabyte", "asrock", "biostar"}
+_NOT_GPU = {"ryzen", "monitor", "tv", "televizio", "kijelzo", "projektor"}
+
+
+def _infer_gpu(words: list[str]) -> list[str]:
+    """A család nélküli videókártya-lapka elé a családja (_NVIDIA_CHIPS, _AMD_CHIPS), ha mellette van biztos jel."""
+    if set(words) & (FAMILIES | _NOT_GPU) or any(_CPU_TIER.match(w) for w in words) or ram_context(words):
+        return words
+    strong = any(w in _GPU_WORDS or w in _GPU_ONLY_MAKERS or w.startswith("gddr") for w in words)
+    board = bool(set(words) & _BOARD_MAKERS)
+    out: list[str] = []
+    for index, word in enumerate(words):
+        after = words[index + 1] if index + 1 < len(words) else ""
+        if word in _NVIDIA_CHIPS and (strong or after in ("ti", "super") or (board and word != "1080")):
+            out.append(_NVIDIA_CHIPS[word])
+        elif word in _AMD_CHIPS and (strong or after in ("xt", "xtx")):
+            out.append("rx")
+        out.append(word)
+    return out
+
+
 def _words(text: str) -> list[str]:
     folded = fold(text or "")
     for pattern, replacement in _ALIASES:
@@ -171,6 +226,7 @@ def _words(text: str) -> list[str]:
     for pattern, replacement in _SPLITS:                               # i512400 → i5 12400 (mint az „i5 12400”)
         folded = pattern.sub(replacement, folded)
     words = [re.sub(r"^1x(\d{1,2}gb)$", r"\1", word) for word in re.findall(r"[a-z0-9]+", folded)]   # 1x8GB = 8GB
+    words = _infer_gpu(words)
     if any(word in _GPU_CONTEXT or word.startswith("gddr") for word in words):
         words = [f"{m.group(1)}gb" if (m := _GPU_VRAM.match(word)) else word for word in words]
     return words
@@ -499,9 +555,19 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
             continue
         if term not in picked:
             picked.append(term)
-    if not picked or not (model or (qualified and any(f in FAMILY_COMPLETE for f in families))):
+    generation = next((t for t in picked if _RAM_GEN.match(t)), "")
+    if memory and generation and not families and not any(_CPU_TIER.match(w) for w in words) and \
+            not {"laptop", "pc"} & set(picked) and not any(w in _NOT_MODULE or _CHIPSET.match(w) for w in words):
+        # memóriamodul: a generáció, a kiszerelés (2x8gb), a fajta (SO-DIMM, ECC, regisztrált, kit) és a mérete dönti el
+        # az árát; a gyártó, a sorozatnév, a sebesség és az időzítés csak közelítő eltérés (specs.APPROX), ezért nem kerül
+        # a kulcsba (ahogy a videókártyánál a kártyagyártó sem): a „Kingston Fury 16GB DDR4 3200” és a „Corsair 16GB
+        # DDR4-3600 CL18” egy termék, és a „3200” vagy „3200MHz” írásmód sem választja szét. Méret nélkül nincs kulcs.
+        picked = [t for t in picked if t == generation or _KIT.match(t) or t in _RAM_FORMS.values()]
+        if not any(_KIT.match(t) for t in picked) and not capacities(words):
+            return None
+    elif not picked or not (model or (qualified and any(f in FAMILY_COMPLETE for f in families))):
         return None
-    if len(picked) == 1 and not (model and len(picked[0]) >= 5 and not picked[0].isdigit()):
+    elif len(picked) == 1 and not (model and len(picked[0]) >= 5 and not picked[0].isdigit()):
         return None
     if set(families) & GPU_FAMILIES and not {"laptop", "pc"} & set(picked):
         # videókártya: a lapka, a jelzője és a fajtája marad, a kártyagyártó típusneve (G1, F15…) nem
@@ -886,6 +952,17 @@ class PriceBook:
         now = self.clock()
         samples.sort(key=lambda s: -float(s.get("last") or 0))
         samples, twins = independent(samples)   # egy hirdetés egyszer, egy eladótól legfeljebb SELLER_CAP
+        # ha a nemrég látott árak (RECENT) maguk is elegendők, és jóval alacsonyabbak a régebbieknél, lejjebb ment az
+        # árszint (pl. megjelent az új generáció): azokhoz mér, a régebbi árak nem emelik a szokásos árat (ahogy a
+        # deals._market_of is a most talált hirdetésekhez mér). Fordítva nem: a drágább friss kínálat nem viszi feljebb.
+        older: list[dict[str, Any]] = []
+        recent = [s for s in samples if now - float(s.get("last") or 0) <= RECENT]
+        if MIN_SAMPLES <= len(recent) < len(samples):
+            everything, latest = price_stats([s["p"] for s in samples]), price_stats([s["p"] for s in recent])
+            if everything and latest and latest["confidence"] == "megbízható" and \
+                    latest["median"] < everything["median"] * (1 - RECENT_GAP):
+                older = [s for s in samples if now - float(s.get("last") or 0) > RECENT]
+                samples = recent
         stats = price_stats([s["p"] for s in samples])
         if not stats or stats["n"] < MIN_SAMPLES or stats["confidence"] != "megbízható":
             return None
@@ -897,7 +974,11 @@ class PriceBook:
                            "out": [{**basis_entry(s), "why": "kilógó ár (kimaradt a szokásos árból)",
                                     **({"outlier": "olcsó", "up": listed_days(s, now)} if s["p"] < stats["min"] else {})}
                                    for s in sorted(samples, key=lambda s: s["p"]) if s not in kept]
-                           + [{**basis_entry(s), "why": s["why"]} for s in twins]}}
+                           + [{**basis_entry(s), "why": s["why"]} for s in twins]
+                           + [{**basis_entry(s), "why": "régebbi ár (azóta lejjebb ment az árszint)"} for s in older]}}
+        if older:
+            found["note"] = found["basis"]["note"] = ("a nemrég látott hirdetések olcsóbbak a korábbiaknál: azokhoz "
+                                                      "mértem")
         sold = [s["p"] for s in kept if s["gone"]]
         if len(sold) >= SOLD_MIN:
             found["sold"] = {"n": len(sold), "median": round_price(statistics.median(sold))}
@@ -937,6 +1018,8 @@ class PriceBook:
         return out
 
     def revisited(self, key: str, url: str, gone: bool) -> None:
+        """Az újranézés eredménye: eltűnt (talán elkelt), vagy még fent van; ez utóbbi most látott hirdetés is (last: a
+        friss árak közé számít, ahogy egy találati oldalon újra látott hirdetés)."""
         now, ident = self.clock(), listing_key(url)
         with self._lock:
             for sample in (self._keys.get(key) or {}).get("samples") or []:
@@ -944,6 +1027,8 @@ class PriceBook:
                     sample["checked"] = now
                     if gone:
                         sample["gone"] = now
+                    else:
+                        sample["last"] = now
                     self._dirty = True
 
     def lookup(self, text: str, limit: int = 6) -> list[dict[str, Any]]:

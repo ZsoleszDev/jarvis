@@ -674,6 +674,27 @@ LISTINGS_JS = r"""
     }
     return clean(text);
   };
+  // a kártya ármezője: az első, legbelső elem vagy szövegdarab, aminek a szövege csak egy ár (mint a feeds.py
+  // _lone_price), a régi (áthúzott, „old”) ár nélkül. A kártya egészében egy szomszédos szám (a fotók száma, a cím végén
+  // álló típusszám) az ezres tagolású ár elé kerül, és vele egy számnak látszana („5 299 900 Ft”, „PS5 199 990 Ft”).
+  const PRICE_ONLY = new RegExp('^\\D{0,12}' + PRICE.source + '\\D{0,12}$', 'i');
+  const lonePrice = (node) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const t = clean(child.textContent);
+        if (PRICE_ONLY.test(t)) return t;
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE || child.matches('script, style, noscript, template, svg') ||
+          struck(child) || /old/i.test(child.getAttribute('class') || '')) continue;
+      const t = priceText(child);
+      if (!PRICE.test(t)) continue;
+      const inner = lonePrice(child);
+      if (inner) return inner;
+      if (PRICE_ONLY.test(t)) return t;
+    }
+    return '';
+  };
   const SKIP = 'header, nav, footer, [role=banner], [role=navigation], [role=contentinfo]';
   const PROFILE = /\/(member|members|user|users|profil|profile|seller|felhasznalo)(\/|$|\?)/i;
   const LISTING_HREF = /\/apro\/[^/]+\/|_\d+\.htm/;
@@ -740,7 +761,7 @@ LISTINGS_JS = r"""
     if (seen.has(card.href)) continue;
     const text = priceText(card.node);
     const fixed = text.match(FIXED);
-    const m = fixed || text.match(PRICE) || card.label.match(PRICE);
+    const m = fixed || lonePrice(card.node).match(PRICE) || text.match(PRICE) || card.label.match(PRICE);
     if (!m) continue;
     const price = parseInt(m[1].replace(/[^\d]/g, ''), 10);
     if (!(price > 0 && price < 10000000)) continue;

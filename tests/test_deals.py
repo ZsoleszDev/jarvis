@@ -1591,7 +1591,7 @@ class PriceBookTests(unittest.TestCase):
             "Xiaomi Redmi Note 10 Pro": "10 note pro redmi", "Xbox Series X 1TB": "1tb seriesx xbox",
             # a kapacitás más változat, más ár: külön kulcs (a „16 GB” két szóban és az „1000GB” is)
             "RTX 5060 Ti 16 GB": "16gb 5060 rtx ti", "Samsung 970 EVO Plus 1000GB": "1tb 970 plus samsung",
-            "Corsair Vengeance LPX 16GB DDR4 3200MHz": "16gb corsair ddr4",
+            "Corsair Vengeance LPX 16GB DDR4 3200MHz": "16gb ddr4",
             "MacBook Air M1 8GB 256GB": "256gb 8gb air m1 macbook",
             "Xbox Series S": "seriess xbox", "Nintendo Switch OLED": "oled switch", "Ryzen 5 5600X": "5600x ryzen",
         }
