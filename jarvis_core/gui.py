@@ -868,8 +868,15 @@ class _Handler(BaseHTTPRequestHandler):
             if action == "watch_add":
                 return self._json(200, {"ok": True, **deals.add_watch(str(body.get("target") or ""), body.get("min_profit"),
                                                                      body.get("hours"), body.get("every"))})
-            if action == "browse":      # böngészés napközben: be/ki, oldalak, legkisebb haszon
-                state = deals.set_browse(body.get("on"), body.get("sites"), body.get("min_profit"))
+            if action == "lane_add":    # saját indulóoldal a böngészéshez (egy oldal címe, vagy egy keresőszó)
+                return self._json(200, {"ok": True, **deals.lane_add(str(body.get("target") or ""),
+                                                                    str(body.get("site") or ""))})
+            if action == "lane_switch":  # egy indulóoldal be/ki
+                return self._json(200, {"ok": True, **deals.lane_switch(str(body.get("id") or ""), bool(body.get("on")))})
+            if action == "lane_remove":  # egy saját vagy tanult indulóoldal törlése
+                return self._json(200, {"ok": True, **deals.lane_remove(str(body.get("id") or ""))})
+            if action == "browse":      # böngészés napközben: be/ki, oldalak, legkisebb haszon, öntanulás
+                state = deals.set_browse(body.get("on"), body.get("sites"), body.get("min_profit"), body.get("learn"))
                 # bekapcsoláskor rögtön kezd (nem várja meg az ütemező csendes perceit)
                 if body.get("on") and app is not None and app.scheduler is not None and "deals" in app.scheduler.jobs \
                         and deals.available():

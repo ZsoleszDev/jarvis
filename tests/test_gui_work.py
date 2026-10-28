@@ -151,10 +151,25 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertEqual((status, data["browse"]["on"], data["browse"]["sites"], data["browse"]["min_profit"]),
                          (200, True, ["hardverapro", "vinted"], 8000))
         self.assertEqual(data["journal"][0]["text"], "Bekapcsoltad a napközbeni böngészést.")
-        self.assertTrue(any(lane["name"] == "Vinted: Lego" for lane in data["lanes"]))
+        self.assertTrue(any(lane["name"] == "Vinted: Elektronika" for lane in data["lanes"]), "egy egész kategória")
+        # az indulóoldalak a felületről: saját hozzáadása, ki-be kapcsolás, törlés, öntanulás
+        status, data = self.post("/api/work/deals", {"action": "lane_add", "target": "Lego", "site": "vinted"})
+        [own] = [lane for lane in data["lanes"] if lane["kind"] == "sajat"]
+        self.assertEqual((status, own["name"], own["on"]), (200, "Vinted: Lego", True))
+        self.assertEqual(self.post("/api/work/deals", {"action": "lane_add", "target": "Lego", "site": "vinted"})[0], 400,
+                         "már megvan")
+        status, data = self.post("/api/work/deals", {"action": "lane_switch", "id": own["id"], "on": False})
+        self.assertEqual((status, [l["on"] for l in data["lanes"] if l["id"] == own["id"]]), (200, [False]))
+        status, data = self.post("/api/work/deals", {"action": "lane_remove", "id": own["id"]})
+        self.assertEqual((status, [l for l in data["lanes"] if l["kind"] == "sajat"]), (200, []))
+        self.assertEqual(data["lane_presets"][0], "Lego")
+        status, data = self.post("/api/work/deals", {"action": "browse", "learn": False})
+        self.assertEqual((status, data["browse"]["learn"]), (200, False))
         self.assertEqual(self.post("/api/work/deals", {"action": "browse", "sites": []})[0], 400, "legalább egy oldal")
         status, data = self.post("/api/work/deals", {"action": "journal", "day": data["journal_days"][0]})
-        self.assertEqual((status, data["entries"][0]["text"]), (200, "Bekapcsoltad a napközbeni böngészést."))
+        texts = [entry["text"] for entry in data["entries"]]
+        self.assertEqual((status, texts[0]), (200, "Kikapcsoltad az öntanulást: új indulóoldalt csak te veszel fel."))
+        self.assertIn("Bekapcsoltad a napközbeni böngészést.", texts)
         self.post("/api/work/deals", {"action": "browse", "on": False})
         status, data = self.post("/api/work/deals", {"action": "day", "start": "8", "end": "22"})
         self.assertEqual((status, data["day"]), (200, [8, 22]))
@@ -1024,6 +1039,38 @@ class WorkBrowserTests(unittest.TestCase):
         page.click("#job-sales")
         page.click("#job-deals")
         page.wait_for_selector("#d-query", state="visible")
+
+    def test_start_pages_from_the_window(self):
+        """A Böngészés indulóoldalai a felületről: a beépített kategória kikapcsolható és visszakapcsolható, egy
+        keresőszó egy gombnyomással felvehető és törölhető, az öntanulás kikapcsolható."""
+        page, deals = self.page, self.h.app.work.deals
+        page.click("#job-deals")
+        page.wait_for_selector("#d-run-toggle")
+        page.click('summary:has-text("Böngészés")')
+        page.click('summary:has-text("Indulóoldalak")')
+        page.wait_for_selector("#dl-target", state="visible")
+        lanes = page.locator('details[data-fold="lanes"] li')
+        self.assertIn("Vinted: Elektronika", page.inner_text('details[data-fold="lanes"]'))
+        first = deals.state()["lanes"][0]
+        page.click(f'[data-lane-switch="{first["id"]}"]')
+        self.wait_for(lambda: deals.state()["lanes"][0]["on"] is False)
+        page.wait_for_selector(f'[data-lane-switch="{first["id"]}"]:has-text("Bekapcsolás")')
+        self.assertIn("kikapcsolva", lanes.first.inner_text())
+        page.click(f'[data-lane-switch="{first["id"]}"]')
+        self.wait_for(lambda: deals.state()["lanes"][0]["on"] is True)
+        page.click('[data-lane-preset="Lego"]')
+        self.wait_for(lambda: any(lane["kind"] == "sajat" for lane in deals.state()["lanes"]))
+        own = [lane for lane in deals.state()["lanes"] if lane["kind"] == "sajat"]
+        page.wait_for_selector(f'[data-lane-remove="{own[0]["id"]}"]')
+        for lane in own:
+            page.click(f'[data-lane-remove="{lane["id"]}"]')
+            self.wait_for(lambda lane=lane: lane["id"] not in {l["id"] for l in deals.state()["lanes"]})
+        page.fill("#dl-target", "Makita")
+        page.select_option("#dl-site", "jofogas")
+        page.click('#d-lane button[type="submit"]')
+        self.wait_for(lambda: [l["name"] for l in deals.state()["lanes"] if l["kind"] == "sajat"] == ["Jófogás: Makita"])
+        page.uncheck("#d-blearn")
+        self.wait_for(lambda: deals.state()["browse"]["learn"] is False)
 
     def test_selling_costs_from_the_window(self):
         """Az Eladási költségek blokk: a fejlécen látszik, hány nincs megadva; a mezők kitöltése és a Mentés után a

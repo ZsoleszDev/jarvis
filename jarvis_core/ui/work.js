@@ -1061,8 +1061,12 @@
         ${r.speed_text ? `<small class="muted">${esc(r.speed_text)}</small>` : ""}</span></li>`).join("") || '<li class="muted">Ilyet még nem láttam.</li>'}</ul>`;
     const running = !!deals.running;
     const b = deals.browse || { on: false, sites: [], min_profit: 5000, status: "" };
-    const laneRows = (deals.lanes || []).map((l) => `<li><span><b>${esc(l.name)}</b>${l.kind === "tanult" ? ' <small class="warn">tanult</small>' : ""}
-        <small class="muted">${l.pages} oldal · ${l.candidates} jelölt · ${l.deals} jó találat${l.bought ? ` · ${l.bought} megvett` : ""}</small></span></li>`).join("");
+    // az indulóoldalak: a beépítettek (kategóriák, a legújabb elöl) és a sajátok ki-be kapcsolhatók, a saját és a tanult
+    // törölhető (a tanultat nem veszi fel újra)
+    const laneRows = (deals.lanes || []).map((l) => `<li${l.on === false ? ' class="muted"' : ""}><span><b>${esc(l.name)}</b>${l.kind === "tanult" ? ' <small class="warn">tanult</small>' : ""}${l.kind === "sajat" ? ' <small class="tag">saját</small>' : ""}${l.on === false ? ' <small class="muted">kikapcsolva</small>' : ""}
+        <small class="muted">${l.pages} oldal · ${l.candidates} jelölt · ${l.deals} jó találat${l.bought ? ` · ${l.bought} megvett` : ""}</small>
+        <small><a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small></span>
+        <span class="row">${l.kind !== "tanult" ? `<button type="button" class="small quiet" data-lane-switch="${esc(l.id)}" data-on="${l.on === false ? "1" : ""}">${l.on === false ? "Bekapcsolás" : "Kikapcsolás"}</button>` : ""}${l.kind !== "page" && l.kind !== "feed" ? `<button type="button" class="small quiet" data-lane-remove="${esc(l.id)}">Törlés</button>` : ""}</span></li>`).join("");
     const hhmm = (t) => new Date(t * 1000).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit" });
     const entries = (journalDay ? journalEntries : deals.journal) || [];
     const journalRows = entries.map((e) => `<li><span><small class="muted">${esc(hhmm(e.at))}</small> ${esc(e.text)}</span></li>`).join("")
@@ -1195,7 +1199,18 @@
       ${section("browse", "Böngészés", `
         <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-bsite" value="${esc(s.key)}" ${(b.sites || []).includes(s.key) ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>
         <div class="row"><button type="button" class="small" id="d-bsave">Oldalak mentése</button></div>
-        ${laneRows ? `<details class="setup" data-fold="lanes"${openSections.has("lanes") ? " open" : ""}><summary>Indulóoldalak, és mit hoztak eddig</summary><ul class="dealist">${laneRows}</ul></details>` : ""}`)}
+        <details class="setup" data-fold="lanes"${openSections.has("lanes") ? " open" : ""}><summary>Indulóoldalak, és mit hoztak eddig</summary>
+          <p><small class="muted">Alapból egész kategóriákat nézek, a legújabb hirdetésekkel elöl: mindent, ami újonnan felkerül.
+            Bármelyiket kikapcsolhatod, és felvehetsz sajátot (egy oldal címét vagy egy keresőszót).</small></p>
+          <ul class="dealist">${laneRows || '<li class="muted">Nincs indulóoldal.</li>'}</ul>
+          <form id="d-lane" class="compose" autocomplete="off">
+            <input id="dl-target" placeholder="Keresőszó (pl. Lego), vagy egy kategória vagy találati oldal címe">
+            <div class="row"><label>Hol: <select id="dl-site"><option value="">a bejelölt oldalakon</option>${deals.sites.map((s) => `<option value="${esc(s.key)}">${esc(s.name)}</option>`).join("")}</select></label>
+              <button type="submit" class="primary">Indulóoldal hozzáadása</button></div>
+            ${(deals.lane_presets || []).length ? `<div class="row presets"><small class="muted">Gyorsan:</small>${deals.lane_presets.map((p) => `<button type="button" class="small" data-lane-preset="${esc(p)}">${esc(p)}</button>`).join("")}</div>` : ""}
+          </form>
+          <label class="check"><input type="checkbox" id="d-blearn" ${b.learn === false ? "" : "checked"}> Öntanulás: a gyorsan kelő termékekből magam is felveszek indulóoldalt</label>
+        </details>`)}
       ${section("watches", `Figyelt oldalak (${(deals.watches || []).length})`, `
         <ul class="dealist">${(deals.watches || []).map((w) => `<li><span><b>${esc(w.name)}</b>
             <small class="muted">legalább ${esc(price(w.min_profit))} haszon${(w.platform || "vatera") === "vatera" ? ` · licitnél a zárás előtt legfeljebb ${w.hours} órával` : ""} · ${esc(every(w.every))}</small>
@@ -1278,6 +1293,19 @@
       const sites = [...box.querySelectorAll('input[name="d-bsite"]:checked')].map((i) => i.value);
       if (await dealAction({ action: "browse", sites })) J.toast("Mentve.");
     });
+    $("d-lane").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (await dealAction({ action: "lane_add", target: $("dl-target").value, site: $("dl-site").value }))
+        J.toast("Felvettem: a böngészés ezt is nézi.");
+    });
+    for (const b of box.querySelectorAll("[data-lane-preset]")) b.addEventListener("click", async () => {
+      if (await dealAction({ action: "lane_add", target: b.dataset.lanePreset })) J.toast(`Felvettem: ${b.dataset.lanePreset}.`);
+    });
+    for (const b of box.querySelectorAll("[data-lane-switch]")) b.addEventListener("click", () =>
+      dealAction({ action: "lane_switch", id: b.dataset.laneSwitch, on: !!b.dataset.on }));
+    for (const b of box.querySelectorAll("[data-lane-remove]")) b.addEventListener("click", () =>
+      dealAction({ action: "lane_remove", id: b.dataset.laneRemove }));
+    $("d-blearn").addEventListener("change", (e) => dealAction({ action: "browse", learn: e.target.checked }));
     $("d-jday").addEventListener("change", async (e) => {
       journalDay = e.target.value;
       journalEntries = null;

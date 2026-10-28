@@ -333,9 +333,10 @@ class InstantWatch:
         from .deals import BROWSE_LANES
         if "hardverapro" not in self.platforms:
             return []
-        every = [{"name": "Minden hardver (közös friss lista)", "url": "https://hardverapro.hu/aprok/hardver/index.html"}]
-        return every + [{"name": name, "url": target} for name, target in BROWSE_LANES.get("hardverapro", [])
-                        if target.startswith("http")]
+        every = "https://hardverapro.hu/aprok/hardver/index.html"
+        return [{"name": "Minden hardver (közös friss lista)", "url": every}] + \
+            [{"name": name, "url": target} for name, target in BROWSE_LANES.get("hardverapro", [])
+             if target.startswith("http") and target != every]   # (a „Minden hardver” egyszer)
 
     @staticmethod
     def _load_per_hour(alerts: list[dict[str, Any]]) -> dict[str, int]:
