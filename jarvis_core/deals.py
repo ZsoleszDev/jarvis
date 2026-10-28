@@ -59,16 +59,16 @@ from typing import Any, Callable, Iterable
 from . import condition as conditions
 from . import specs
 from .browser import DECLINED, LISTING_PAGE_JS, BrowserError, is_risky
-from .feeds import FeedError, chosen_sort, fetch_image
+from .feeds import NEWEST, FeedError, chosen_sort, fetch_image, newest_first  # noqa: F401 (NEWEST: innen is)
 from .listings import BLOCKED, GONE, SOLD, classify
 from .llm import background_calls
 from .journal import Journal, day_of
-from .pricebook import (SOLD_MIN, TITLE_KEEP, PriceBook, basis_entry, fake_prone, implied_size, independent,
+from .pricebook import (SOLD_MIN, TITLE_KEEP, PriceBook, _words, basis_entry, fake_prone, implied_size, independent,
                         is_capacity, listed_days, pace, price_scope, size_conflict, sized, sizes_of, speed_text, unusable,
                         usable, wearable)
 from .replay import norm_text
-from .selling import (_PARTS_RE, _SALE_RE, _SWAP_RE, _WANTED_RE, ON_SITE, Item, ItemError, Platform, _shared, _tokens,
-                      format_price, listing_key, parse_price, prefilter, price_stats, round_price, vision_jpeg)
+from .selling import (_PARTS_RE, _SALE_RE, _STOPWORDS, _SWAP_RE, _WANTED_RE, ON_SITE, Item, ItemError, Platform, _shared,
+                      _tokens, format_price, listing_key, parse_price, prefilter, price_stats, round_price, vision_jpeg)
 from .textutil import fold
 from .vinted import BUTTON_KINDS, consent_button, elem_key, logged_out, new_elements
 from .web import UNTRUSTED_NOTE
@@ -87,10 +87,7 @@ MAX_SEEN = 5000
 EVERY_CHOICES = (30, 60, 180, 360)   # percben: milyen sűrűn nézi meg egy keresés találatait
 DEFAULT_EVERY = 60
 SITE_MIN_MINUTES = {"vinted": 120}   # a Vintedet legfeljebb kétóránként (ott a robot-ellenőrzés a kockázat)
-# A legújabb hirdetések elöl (a fizetett kiemelések után): a Vinted, a Jófogás és a Vatera találati oldalán a cím
-# paramétere (2026 októberében ellenőrizve). A Hardveraprón a rendezés nem a címben, hanem a munkamenetben van: azt a
-# böngésző nélküli letöltő állítja be magának (feeds.LIST_PREFS: új hirdetések elöl, 100 egy oldalon).
-NEWEST = {"vinted": "&order=newest_first", "jofogas": "&sp=3", "vatera": "&ob=5&obd=2"}
+# (A legújabb hirdetések elöl: feeds.NEWEST, feeds.newest_first; innen is elérhető.)
 MAX_PAGES = 8              # egy körben legfeljebb ennyi jelölt hirdetés oldalát nyitja meg (a többi a következőre)
 # A gyors oldalak (Hardverapró, Jófogás) találati oldalát, ha az azonnali figyelő ennyi másodpercen belül már letöltötte,
 # a kör nem kéri le újra (feeds.SiteFetcher.listings max_age): ugyanannyi kérésből több idő jut az új hirdetésekre.
@@ -277,6 +274,11 @@ WIDE_SPREAD = 0.45
 # napon belül látott ár friss), a szórás, a változat biztonsága és az összehasonlítók ellenőrzött állapota. A gyors
 # eladási becslés bizonytalansága (sale_range) ehhez igazodik: ennyivel lehet kevesebb vagy több.
 FRESH_DAYS = 7
+# Friss összehasonlítás: egy szokásos ár csak akkor elég (enough), ha legalább FRESH_MIN hasonló árat FRESH_DAYS napon
+# belül láttunk (vagy most találtunk). A régebben látott árak elavultak lehetnek (a hirdetés azóta elkelt, lejjebb ment az
+# árszint): ilyenkor előbb a többi oldalon is megnézi, mennyiért adják most (a kör _resale-je, az azonnali figyelő
+# _recheck-je, ráérő időben az előmelegítés), és csak a friss árakkal szól.
+FRESH_MIN = 3
 SALE_MARGIN = {"magas": 0.05, "közepes": 0.1, "alacsony": 0.2, "megadott": 0.1}
 # Az eladás költségei a beállításokból (set_fees): csomagolás (Ft), eladási díj (az eladási ár %-a), egyéb eladási
 # költség (Ft, pl. kiemelés), tartalék (az eladási ár %-a, a váratlanra). Ami nincs megadva, az nem csendben nulla: a
@@ -732,6 +734,19 @@ def reliability(deal: dict[str, Any], now: float) -> dict[str, Any]:
     return {"level": level, "why": why, "good": good}
 
 
+def fresh_count(entries: list[dict[str, Any]], now: float) -> int:
+    """Hány összehasonlító ár friss: most találtuk (src „most”), vagy FRESH_DAYS napon belül láttuk (seen)."""
+    return sum(1 for entry in entries if entry.get("src") == "most"
+               or (entry.get("seen") is not None and now - float(entry["seen"]) <= FRESH_DAYS * 86400))
+
+
+def stale_text(searched: bool = False) -> str:
+    """Miért nem elég a szokásos ár, ha a hasonló árak régiek (fresh_count): searched, ha már most is keresett."""
+    if searched:
+        return f"most kevés hasonló hirdetést találtam, a többi hasonló árat {FRESH_DAYS} napnál régebben láttam"
+    return f"a hasonló árak nagy részét {FRESH_DAYS} napnál régebben láttam (előbb a mostani árakat nézem meg)"
+
+
 def sale_range(sale: int, median: int, level: str) -> list[int]:
     """A gyors eladási becslés sávja a megbízhatóság szerint (SALE_MARGIN): ennyivel lehet kevesebb vagy több (a felső
     vége legfeljebb a kínálati ár mediánja)."""
@@ -1117,15 +1132,9 @@ def _joined_sizes(text: str) -> str:
     return _SIZE_GAP.sub("", text or "")
 
 
-def newest_first(url: str, platform: str) -> str:
-    """A találati oldal címe a legújabb hirdetésekkel elöl (NEWEST), ha a címben nincs már rendezés (a te választásod,
-    pl. a Vaterán a „hamarosan lejár”)."""
-    extra = NEWEST.get(platform, "")
-    if not extra or chosen_sort(url):
-        return url
-    parts = urllib.parse.urlsplit(url)
-    return urllib.parse.urlunsplit(parts._replace(query="&".join(q for q in (parts.query, extra.lstrip("&")) if q),
-                                                  fragment=""))
+def _norm_tokens(text: str) -> set[str]:
+    """A szöveg szavai a termékkulcs egységes alakjában (pricebook._words), a semmitmondó szavak nélkül."""
+    return {word for word in _words(text) if len(word) > 1 and word not in _STOPWORDS}
 
 
 def _split_size(key: str) -> tuple[str, str]:
@@ -1142,17 +1151,22 @@ def matches_query(query: str, text: str, strict_size: bool = False) -> bool:
     is kell lennie a hirdetésben (a kapacitás nélküli hirdetés is lehet más változat). Így a „PS5 kontroller” keresésre
     a PS5-játék nem jelölt, és egy 500 GB-os SSD ára nem az 1 TB-osokéból jön."""
     query, text = _joined_sizes(query), _joined_sizes(text)
-    wanted = _tokens(query)
-    have = _tokens(text)
-    if not wanted:
+    # a szavak az írásmódjuk szerint és egységes alakban is (pricebook._words: az „RTX3060Ti” = „RTX 3060 Ti”, a
+    # „PlayStation 5” = „PS5”, az „i5-12400F” = „i5 12400F”): a keresés bármelyik alakja egyezhet
+    readings = [reading for reading in (_tokens(query), _norm_tokens(query)) if reading]
+    have = _tokens(text) | _norm_tokens(text)
+    if not readings:
         return True
     want_sizes = sized(query)
-    if want_sizes:
-        if size_conflict(want_sizes, sized(text), strict_size):
-            return False                       # más kapacitás (a RAM és a tárhely külön számít, lásd size_conflict)
-        wanted = {w for w in wanted if not w.startswith(_RAM_WORD)} or wanted   # a „RAM” csak a méretet írja le
-    hits = sum(1 for word in wanted if _shared({word, *SYNONYMS.get(word, ())}, have))
-    if hits < (len(wanted) if len(wanted) <= 4 else len(wanted) - 1):
+    if want_sizes and size_conflict(want_sizes, sized(text), strict_size):
+        return False                           # más kapacitás (a RAM és a tárhely külön számít, lásd size_conflict)
+    for wanted in readings:
+        if want_sizes:
+            wanted = {w for w in wanted if not w.startswith(_RAM_WORD)} or wanted   # a „RAM” csak a méretet írja le
+        hits = sum(1 for word in wanted if _shared({word, *SYNONYMS.get(word, ())}, have))
+        if hits >= (len(wanted) if len(wanted) <= 4 else len(wanted) - 1):
+            break
+    else:
         return False
     folded = fold(query)
     accessory = [m.group(0) for m in _ACCESSORY_RE.finditer(fold(text)) if m.group(0) not in folded]
@@ -2728,6 +2742,15 @@ class DealHunter:
         """Modell nélkül, a jóváhagyott szokásos árhoz mérve: a még nem látott (vagy azóta leárazott) hirdetések
         közül, ami megéri. A többit látottnak jegyzi, az árukkal (a leárazás észrevételéhez)."""
         reference = int(search["reference"])
+        # ha most (ezen az oldalon, elég hirdetés alapján) jóval olcsóbban adják, mint a jóváhagyott szokásos ár, lejjebb
+        # ment az árszint: a jelölt hasznát a mostani árhoz méri (a jóváhagyott áron túlbecsülné; az ármozgásról a
+        # _drift szól), és ezt a találatban meg is mondja
+        lower = ""
+        current = price_stats([int(row["price"]) for row in kept])
+        if current and current["n"] >= MIN_PRICES and current["median"] < reference * (1 - DRIFT):
+            lower = (f"most kb. {format_price(round_price(current['median']))}-ért adják ({current['n']} hirdetés), "
+                     f"kevesebbért, mint a jóváhagyott {format_price(reference)}: a mostani árhoz mértem")
+            reference = round_price(current["median"])
         since = float(search.get("checked_from") or 0)
         now = self.clock()
         out: list[dict[str, Any]] = []
@@ -2767,6 +2790,9 @@ class DealHunter:
             self._save()
         for row in haggles:
             self._haggle_search(search, row, reference)
+        if lower:
+            for deal in out:
+                deal.setdefault("warnings", []).append(lower)
         return sorted(out, key=lambda d: -d["profit"])
 
     def _calibrated(self, game: _Round, search: dict[str, Any], rows: list[dict[str, Any]],
@@ -3266,7 +3292,8 @@ class DealHunter:
             if other != size:
                 label = other.upper() if other else "a kapacitás nem derül ki"
                 out += [{**sample, "why": f"más változat ({label})"} for sample in group.values()]
-        group = sorted(groups[size].values(), key=lambda sample: sample["src"] != "most")   # a most látott elöl
+        # a most látott elöl, utána a legutóbb látott (két egyforma hirdetésből a frissebb marad: independent)
+        group = sorted(groups[size].values(), key=lambda sample: (sample["src"] != "most", -float(sample.get("seen") or 0)))
         found = dict(found)
         # összehasonlíthatóság a vizsgált hirdetéshez (a termékadataik szerint, specs.compare): a kizárt és a
         # bizonytalan kimarad, az okkal; a közelítő jelölve beszámít. Egy jó szöveges hasonlóság egy kritikus eltérést
@@ -3309,6 +3336,8 @@ class DealHunter:
         labels = self._cheap_label(self._outliers(group, found), found)
         group = [labels.get(listing_key(sample["u"]), sample) if sample.get("u") else sample for sample in group]
         found["enough"] = bool(found["sure"])  # elég ár van (sure_price), de a leírások nélkül ez még nem biztos
+        if found["enough"] and fresh_count(group, now) < FRESH_MIN:
+            found["enough"], found["stale"] = False, stale_text(bool(rows))   # régi árak: a mostaniak kellenek
         unsure = specs.unsure_variant(want)
         if unsure and size:                    # egy ismert változathoz (a legolcsóbbhoz) mérve: óvatos, lehet biztos
             found["variant_note"] = (f"a hirdetésből nem derül ki: {', '.join(unsure)}; a legolcsóbb változathoz "
@@ -3623,6 +3652,8 @@ class DealHunter:
             basis.update(used=kept)            # (a közelítők jelölve)
             out["basis"] = basis
         out["enough"] = sure_price(out)
+        if out["enough"] and fresh_count(kept, self.clock()) < FRESH_MIN:
+            out["enough"], out["stale"] = False, stale_text()   # elavult lehet: előbb a mostani árak (FRESH_MIN)
         unsure = specs.unsure_variant(want) if want else []
         if unsure and any(is_capacity(word) for word in str(out.get("key") or "").split()):
             # a vizsgáltnál nem derül ki a változat, de egy ismert változat (az árbázis szerint a legolcsóbb) a mérce
@@ -3828,6 +3859,13 @@ class DealHunter:
         """Keresőszó a többi oldalra egy termékhez: a nevének azok a szavai, amelyekből a termékkulcs lett, ahogy írták
         (a márka, a kártyagyártó típusneve nélkül: „MSI GeForce GTX 1080 OC 8GB” → „GTX 1080”), a kapacitás nélkül (a
         kapacitás nélküli címek is kellenek; a változatokat a _market_of választja szét)."""
+        found = self.book.key(query)
+        words = found[0].split() if found else []
+        if words and all(re.match(r"^(?:lp)?ddr[2-5]$|^(?:\dx)?\d+[gt]b$|^(?:sodimm|ecc|reg|kit)$", word) for word in words):
+            # memóriamodul: a mérete maga a termék, a gyártója, sebessége nem (a kulcsa sem): „16GB DDR4”, „2x8GB DDR4”
+            # (a SO-DIMM és a szerver-memória a keresésben nem kötelező szó: a különbséget a kulcs választja szét)
+            return " ".join(word.upper() for word in sorted(words, key=lambda word: not word[0].isdigit())
+                            if not word.isalpha())
         text = self.book.query(query) or query
         text = re.sub(r"\b\d+\s?(?:gb|tb)\b", " ", text, flags=re.IGNORECASE)
         return " ".join(text.split()) or query
@@ -3840,6 +3878,7 @@ class DealHunter:
         self._mark(row)
         self.tally("unsure", [row])
         basis = (found["unsure_why"] if found and found.get("unsure_why") else
+                 found["stale"] if found and found.get("stale") else
                  f"csak {found['n']} hasonló árat találtam ({', '.join(self._site_names(found['sites'])) or '?'})"
                  if found else "nem találtam hozzá elég hasonlót")
         self.journal.add(f"Nem biztos, hogy megéri: „{(row.get('title') or row['text'])[:60]}” "
@@ -4399,7 +4438,10 @@ class DealHunter:
         self._mark(row)
         probe = {"id": watch["id"], "query": self._probe_text(query)}
         product = self.book.key(query)
-        have = {s["site"] for s in self.book.samples(product[0], exclude=row["url"])} if product else set()
+        # ahol az árbázisban már friss (FRESH_DAYS napon belül látott) ára van, ott nem keres újra; a régi ár nem elég
+        now = self.clock()
+        have = {s["site"] for s in self.book.samples(product[0], exclude=row["url"])
+                if now - float(s.get("last") or 0) <= FRESH_DAYS * 86400} if product else set()
         sites = [k for k in RESALE_SITES if k in self.platforms and k not in have]
         if game.no_browser:
             sites = [k for k in sites if self.fetcher is not None and self.fetcher.usable(k)]

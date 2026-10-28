@@ -1198,8 +1198,9 @@ class InstantWatch:
 
     def _search(self, query: str) -> list[dict[str, Any]]:
         """Mennyiért adják máshol: a keresőszó találatai a gyors oldalakon (böngésző nélkül), az oldalak egyszerre (a
-        letöltő oldalanként egy kérést enged, a szünetekkel). A figyelő keretéből megy (mindkét oldalon): ha nincs hely
-        (vagy Szünet van), Deferred (a hirdetés vár)."""
+        letöltő oldalanként egy kérést enged, a szünetekkel), a legújabb hirdetések elöl (newest_first: a mostani árak, nem
+        a régóta fent lévők vagy a fizetett kiemelések). A figyelő keretéből megy (mindkét oldalon): ha nincs hely (vagy
+        Szünet van), Deferred (a hirdetés vár)."""
         self._go()
         sites = list(self.platforms)
         if not self._room(sites):
@@ -1207,8 +1208,8 @@ class InstantWatch:
 
         def one(site: str, platform: Platform) -> list[dict[str, Any]]:
             try:
-                rows = self.fetcher.listings(platform.search_url.format(q=urllib.parse.quote(query)), site,
-                                             self._check_on, quota=QUOTA)
+                rows = self.fetcher.listings(newest_first(platform.search_url.format(q=urllib.parse.quote(query)), site),
+                                             site, self._check_on, quota=QUOTA)
             except FeedError as exc:
                 if exc.kind == "busy":
                     raise

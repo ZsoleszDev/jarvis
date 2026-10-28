@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import photos as photocheck
-from .feeds import FeedError
+from .feeds import FeedError, newest_first
 from .textutil import fold, only_hu_amount
 
 ITEM_ID_RE = re.compile(r"^[0-9a-f]{8}$")
@@ -1422,7 +1422,8 @@ _STOPWORDS = {
 }
 # Kereső- és cserehirdetés: valaki venni vagy cserélni akar, az ára nem eladási ár. A „csere” csak akkor
 # számít, ha az eladás szava nincs mellette („Eladó vagy csere” még eladás).
-_WANTED_RE = re.compile(r"\b(keresek|keresem|keresunk|veszek|vennek|vennem|megvennem|felvasar\w*|beszamit\w*)\b")
+# (A „Beszámítás” nem ilyen: a kereskedő eladja a terméket, és a régit beszámítja az árba; a hirdetés ára eladási ár.)
+_WANTED_RE = re.compile(r"\b(keresek|keresem|keresunk|veszek|vennek|vennem|megvennem|felvasar\w*)\b")
 _SWAP_RE = re.compile(r"\b(csere|cseret|csereben|cserere|cserelnem|cserelnek|cserelek|elcserelnem|cserebere)\b")
 _SALE_RE = re.compile(r"\belad")
 # Csomag vagy több darab egyben: az ár nem egy darabé. A darabszám („3 db”, „x2”) csak elektronikán kívül
@@ -1452,13 +1453,33 @@ def _shared(wanted: set[str], have: set[str]) -> set[str]:
                                                   (len(h) >= 4 and w.startswith(h)) for h in have)}
 
 
+# A hirdetés száma az oldal saját webcímformája szerint: a Vinteden /items/<szám>-<cím>, a Jófogáson <cím>_<szám>.htm, a
+# Vaterán <cím>-<szám>.html (a szám a végén). A hirdetés címéből lett szakaszban lévő szám nem azonosító („i5-12400F”,
+# „Lego 75192”, „20000 mAh”): ha azt venné, minden ilyen hirdetés egynek látszana (egy ár az árbázisban, és az új
+# hirdetés „már látott”). A Hardveraprón nincs szám a webcímben (/apro/<cím>/friss.html, az azonos címűeknél _2, _5 a
+# cím végén): ott az útvonal az azonosító.
+_LISTING_IDS = (("vinted", re.compile(r"/items/(\d{5,})")),
+                ("jofogas", re.compile(r"_(\d{5,})\.html?$")),
+                ("vatera", re.compile(r"[-_](\d{5,})\.html?$")))
+
+
 def listing_key(url: str) -> str:
-    """Egy hirdetés azonosítója a webcíméből: a gép és a hirdetés száma (ha van), különben az útvonal. Így a
-    saját hirdetésed más paraméterekkel vagy más címmel (slug) is felismerhető."""
+    """Egy hirdetés azonosítója a webcíméből: a gép és a hirdetés száma (az oldal webcímformája szerint, _LISTING_IDS),
+    különben az útvonal (a Hardveraprón mindig az). Így a saját hirdetésed más paraméterekkel vagy más címmel (slug)
+    is felismerhető, és két különböző hirdetés nem esik egybe attól, hogy a címükben ugyanaz a szám van."""
     parts = urllib.parse.urlsplit(url or "")
     host = (parts.hostname or "").removeprefix("www.")
+    labels = host.split(".")
+    path = host + parts.path.rstrip("/").lower()
+    for name, pattern in _LISTING_IDS:
+        if name in labels:
+            found = pattern.search(parts.path)
+            if found:
+                return f"{host}#{found.group(1)}"
+    if "hardverapro" in labels:
+        return path
     number = re.search(r"\d{5,}", parts.path)
-    return f"{host}#{number.group(0)}" if number else host + parts.path.rstrip("/").lower()
+    return f"{host}#{number.group(0)}" if number else path
 
 
 def _same_listing(words: set[str], price: int, other: set[str], other_price: int) -> bool:
@@ -1608,7 +1629,8 @@ class PriceResearcher:
         for site in sites:
             if progress:
                 progress(f"{site.name}: „{query}”")
-            url = site.search_url.format(q=urllib.parse.quote(query))
+            # a legújabb hirdetések elöl: a mostani árak (nem a régóta fent lévőké vagy a kiemelteké)
+            url = newest_first(site.search_url.format(q=urllib.parse.quote(query)), site.key)
             try:
                 found = self._listings(site, url, browser)
             except NeedsBrowser:

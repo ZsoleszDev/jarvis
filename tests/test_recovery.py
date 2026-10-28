@@ -564,8 +564,17 @@ class BrowserCrashTests(unittest.TestCase):
     def url(self, name: str) -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}/{name}"
 
+    @staticmethod
+    def _is_node(proc: psutil.Process) -> bool:
+        # Linuxon a Node a fő szálát nevezi el („MainThread”), így a folyamatnév nem árulkodik: a futtatott fájl igen.
+        try:
+            program = Path((proc.cmdline() or [""])[0]).name
+        except psutil.Error:
+            program = ""
+        return "node" in proc.name().lower() or program.lower().startswith("node")
+
     def kill(self, driver: bool) -> None:
-        drivers = [p for p in self.spawned if "node" in p.name().lower()]
+        drivers = [p for p in self.spawned if self._is_node(p)]
         self.assertTrue(drivers, "a Playwright-meghajtó megvan")
         targets = drivers if driver else [p for p in self.spawned
                                           if p not in drivers and p.ppid() in {d.pid for d in drivers}]

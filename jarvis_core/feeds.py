@@ -287,6 +287,24 @@ def chosen_sort(url: str) -> bool:
                urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query, keep_blank_values=True))
 
 
+# A legújabb hirdetések elöl (a fizetett kiemelések után): a Vinted, a Jófogás és a Vatera találati oldalán a cím
+# paramétere (2026 októberében ellenőrizve). A Hardveraprón a rendezés nem a címben, hanem a munkamenetben van: azt a
+# böngésző nélküli letöltő állítja be magának (LIST_PREFS: új hirdetések elöl, 100 egy oldalon).
+NEWEST = {"vinted": "&order=newest_first", "jofogas": "&sp=3", "vatera": "&ob=5&obd=2"}
+
+
+def newest_first(url: str, platform: str) -> str:
+    """A találati oldal címe a legújabb hirdetésekkel elöl (NEWEST), ha a címben nincs már rendezés (a te választásod,
+    pl. a Vaterán a „hamarosan lejár”). Az árösszehasonlítás is így keres: a mostani árak kellenek, nem a régóta fent
+    lévő (vagy előresorolt) hirdetéseké."""
+    extra = NEWEST.get(platform, "")
+    if not extra or chosen_sort(url):
+        return url
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit(parts._replace(query="&".join(q for q in (parts.query, extra.lstrip("&")) if q),
+                                                  fragment=""))
+
+
 # Fizetett kiemelés (a találatok elején, többnyire régi hirdetések): az osztálynevéből („highlighted”, „kiemelt”,
 # „featured”…) vagy egy rövid címkéből („Kiemelt”, „Előresorolt”, „Szponzorált”) a kártyán vagy a kiemeltek blokkján.
 _PROMO_CLASS = re.compile(r"(?:^|[\s_-])(?:kiemel\w*|highlight(?:ed)?|featured|promoted|promo|sponsored|premium|"
@@ -437,8 +455,8 @@ def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[d
         if card["href"] in seen:
             continue
         text = card["node"].text_without_struck()
-        match = FIXED_RE.search(text) or PRICE_RE.search(_price_text(card["node"])) or PRICE_RE.search(text) or \
-            PRICE_RE.search(card["label"])
+        match = FIXED_RE.search(text) or PRICE_RE.search(_price_text(card["node"])) or \
+            PRICE_RE.search(_lone_price(card["node"])) or PRICE_RE.search(text) or PRICE_RE.search(card["label"])
         if not match:
             continue
         price = _amount(match.group(1))
@@ -510,6 +528,35 @@ def _price_text(card: Node) -> str:
                 if PRICE_RE.search(text):
                     return text
             queue.append(child)
+    return ""
+
+
+# Egy elem (vagy egy szövegdarab), aminek a szövege csak egy ár, legfeljebb egy rövid felirattal („Ár: 12 000 Ft”).
+_PRICE_ONLY = re.compile(r"^\D{0,12}" + _PRICE + r"\D{0,12}$", re.IGNORECASE)
+
+
+def _lone_price(node: Node) -> str:
+    """A kártyán az első (a dokumentum sorrendjében), legbelső elem vagy szövegdarab, aminek a szövege csak egy ár
+    („299 900 Ft”), az áthúzott (régi, „old”) ár nélkül; üres, ha nincs ilyen. Ha a kártyának nincs „price” osztályú
+    ármezője (_price_text), ez kell ahhoz, hogy egy szomszédos szám ne olvadjon az árba: a kártya egészében a fotók
+    száma vagy a cím végén álló típusszám az ár elé kerül („5 299 900 Ft”, „PS5 199 990 Ft”), és az ezres
+    tagolású árral együtt egy számnak látszana (5 299 900 Ft)."""
+    for child in node.children:
+        if isinstance(child, str):
+            text = clean(child)
+            if _PRICE_ONLY.match(text):
+                return text
+            continue
+        if child.tag in NO_TEXT or child._struck() or "old" in child.attrs.get("class", "").lower():
+            continue
+        text = child.text_without_struck()
+        if not PRICE_RE.search(text):
+            continue
+        inner = _lone_price(child)
+        if inner:
+            return inner
+        if _PRICE_ONLY.match(text):
+            return text
     return ""
 
 

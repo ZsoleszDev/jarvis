@@ -26,8 +26,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .pricebook import (_GPU_CHIP, _KIT, BRANDS, GPU_FAMILIES, MODIFIERS, TYPE_WORDS, _words, capacities, implied_size,
-                        is_capacity, product_key, ram_context, sized)
+from .pricebook import (_CHIPSET, _CPU_TIER, _GPU_CHIP, _KIT, _NOT_MODULE, BRANDS, GPU_FAMILIES, MODIFIERS, TYPE_WORDS,
+                        _words, capacities, implied_size, is_capacity, product_key, ram_context, sized)
 from .textutil import fold
 
 PONTOS, KOZELITO, KIZART, BIZONYTALAN = "pontos", "közelítő", "kizárt", "bizonytalan"
@@ -131,8 +131,9 @@ def category(title: str) -> str:
         return ""                              # laptop, gép, kontroller, játék: nem az alkatrész maga
     if set(words) & GPU_FAMILIES and any(_GPU_CHIP.match(w) for w in words):
         return "gpu"
-    if ram_context(words) and not set(words) & {"iphone", "ipad", "galaxy", "pixel", "macbook", "thinkpad"}:
-        return "ram"
+    if ram_context(words) and not set(words) & {"iphone", "ipad", "galaxy", "pixel", "macbook", "thinkpad"} and \
+            not any(_CPU_TIER.match(w) or w in _NOT_MODULE or _CHIPSET.match(w) for w in words):
+        return "ram"                           # (egy alaplap vagy processzor a DDR4 szóval nem memóriamodul)
     if set(words) & _CONSOLE_FAMILIES and not {TYPE_WORDS[w] for w in words if w in TYPE_WORDS} & {"kontroller", "jatek"}:
         return "console"                       # (egy játék vagy egy kontroller a konzolhoz nem a konzol)
     if _SSD_WORDS.search(folded) or _SSD_MODELS.search(folded):

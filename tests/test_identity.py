@@ -47,16 +47,17 @@ class ProductKeyTests(unittest.TestCase):
     def test_ram_kit_layout_generation_and_form(self):
         """Memória: a 2×4 GB összesen 8 GB, de nem ugyanaz a kiszerelés, mint az 1×8 GB (az „1x8GB” és a „8GB” egy
         modul); a 2×8 GB összesen 16 GB, és nem egy 16 GB-os modul; a „16GB kit” sem az. A DDR3 és a DDR4 (a „DDR 3”,
-        „PC4-21300” alakban is), a DIMM és a SO-DIMM (laptop-memória), és a szerver-memória (ECC, REG) külön termék."""
-        self.assertEqual(key("Kingston 2x4GB DDR4 2666"), "2666 2x4gb ddr4 kingston")
+        „PC4-21300” alakban is), a DIMM és a SO-DIMM (laptop-memória), és a szerver-memória (ECC, REG) külön termék. A
+        gyártó, a sorozatnév, a sebesség és az időzítés nem (ezek közelítő eltérések, specs.APPROX)."""
+        self.assertEqual(key("Kingston 2x4GB DDR4 2666"), "2x4gb ddr4")
         self.assertEqual(key("Kingston 1x8GB DDR4 2666"), key("Kingston 8GB DDR4 2666"))
         self.assertNotEqual(key("Kingston 2x4GB DDR4 2666"), key("Kingston 8GB DDR4 2666"))
-        self.assertEqual(key("Corsair Vengeance 16GB (2x8GB) DDR4 3200"), "2x8gb 3200 corsair ddr4", "az összeg nem külön")
+        self.assertEqual(key("Corsair Vengeance 16GB (2x8GB) DDR4 3200"), "2x8gb ddr4", "az összeg nem külön")
         self.assertNotEqual(key("Corsair Vengeance 2x8GB DDR4 3200"), key("Corsair Vengeance 16GB DDR4 3200"))
         self.assertNotEqual(key("Corsair Vengeance 16GB kit DDR4 3200"), key("Corsair Vengeance 16GB DDR4 3200"))
         self.assertNotEqual(key("Corsair 8GB DDR3 1600"), key("Corsair 8GB DDR4 1600"))
         self.assertEqual(key("Corsair 8GB DDR 3 1600"), key("Corsair 8GB DDR3 1600"))
-        self.assertEqual(key("Kingston 8GB PC4-21300 laptop memória"), "8gb ddr4 kingston sodimm")
+        self.assertEqual(key("Kingston 8GB PC4-21300 laptop memória"), "8gb ddr4 sodimm")
         self.assertEqual(key("Kingston 8GB DDR4 SO-DIMM"), key("Kingston 8GB DDR4 SO DIMM"))
         self.assertNotEqual(key("Kingston 8GB DDR4 SO-DIMM"), key("Kingston 8GB DDR4"))
         self.assertNotEqual(key("Samsung 16GB DDR4 ECC REG 2400"), key("Samsung 16GB DDR4 2400"))
