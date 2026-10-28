@@ -115,35 +115,50 @@ def from_model(data: Any, text: str) -> dict[str, Any]:
 
 # --- kulcsszavak (ékezet nélkül), modell nélkül -------------------------------------------------------------------
 
-_SCREEN = r"(?:kijelzo\w*|kepernyo\w*|display\w*|lcd|screen\w*|ernyo\w*)"
+# (a kijelzővédő fólia nem a kijelző)
+_SCREEN = r"(?:kijelzo(?!vedo|folia)\w*|kepernyo(?!vedo)\w*|display\w*|lcd|screen(?! ?protector)\w*|ernyo\w*)"
 # a szavak között szóköz (vagy kettőspont, kötőjel), de vessző, pont nem: egy tagmondaton belül
 _W = r"(?:\s+|\s*[:–-]\s*)"
 _GAP = rf"{_W}(?:\w+\s+){{0,3}}?"
-_DISPLAY_BAD = re.compile(rf"\b{_SCREEN}{_GAP}(?:repedt|repedes\w*|torott|tores\w*|hibas\w*|csikos|beeg\w*|"
-                          rf"pixelhiba\w*|halott pixel\w*|serult|folt\w*|nem mukodik|nem jelenit)|\b(?:repedt|torott|"
-                          rf"hibas|serult|csikos|beegett)\w*{_GAP}{_SCREEN}")
+# A kijelző hibái (a hiba szava a „bad” csoport: a tagadást ehhez mérjük, _negated). A folt, a világosabb folt, a
+# nyomáshiba, a beégés, a pixelhiba: a nyomás- és beégésnyom, a pixelhiba magában is a kijelzőé.
+_DISPLAY_FAULT = (r"repedt|repedes\w*|torott|tores\w*|hibas\w*|csikos|beeg\w*|pixelhib\w*|halott pixel\w*|serult\w*|"
+                  r"(?:vilagosabb |sotetebb |sarga |feher |fekete )?folt\w*|foltos|nyomashib\w*|nyomasfolt\w*|"
+                  r"nyomod\w*|nem mukodik|nem jelenit\w*|szellemkep\w*")
+_DISPLAY_BAD = re.compile(rf"\b{_SCREEN}{_GAP}(?P<bad>{_DISPLAY_FAULT})|"
+                          rf"\b(?P<bad2>(?:vilagosabb |sotetebb |sarga |feher |fekete )?folt\w*|repedt|torott|hibas|"
+                          rf"serult|csikos|beegett|beeges\w*|nyomashib\w*|nyomasfolt\w*|pixelhib\w*)\w*{_GAP}{_SCREEN}|"
+                          rf"\b(?P<bad3>nyomashib\w*|nyomasfolt\w*|beeges\w*|pixelhib\w*|halott pixel\w*)")
 _SCRATCH = r"(?:karcos|karcolt|karcolas\w*|kopott|karc(?!\s*(?:nelkul|mentes)))\b"
-_DISPLAY_SCRATCH = re.compile(rf"\b{_SCREEN}{_GAP}{_SCRATCH}|\b(?:karcos|karcolt|kopott)\w*{_GAP}{_SCREEN}")
-_DISPLAY_OK = re.compile(rf"\b{_SCREEN}{_GAP}(?:hibatlan|karcmentes|ep|tokeletes|serulesmentes|karc nelkul\w*)|"
-                         rf"\b(?:hibatlan|karcmentes|tokeletes)\w*{_GAP}{_SCREEN}")
+_DISPLAY_SCRATCH = re.compile(rf"\b{_SCREEN}{_GAP}(?P<bad>{_SCRATCH})|\b(?P<bad2>karcos|karcolt|kopott|karc)\w*"
+                              rf"{_GAP}{_SCREEN}")
+_DISPLAY_OK = re.compile(rf"\b{_SCREEN}{_GAP}(?:hibatlan|karcmentes|ep|tokeletes|serulesmentes|karc nelkul\w*|"
+                         rf"foltmentes|hibamentes)|"
+                         rf"\b(?:hibatlan|karcmentes|tokeletes|foltmentes|hibamentes)\w*{_GAP}{_SCREEN}")
 _BATTERY = r"(?:akku\w*|akkumulator\w*|battery|elem\w*)"
-_BATTERY_BAD = re.compile(rf"\b{_BATTERY}{_GAP}(?:hibas|halott|felfujodott|duzzadt|cserelendo|nem tolt)")
-_BATTERY_WEAK = re.compile(rf"\b{_BATTERY}{_GAP}(?:gyenge|hamar lemerul\w*|gyorsan merul\w*|gyorsan lemerul\w*|"
+_BATTERY_BAD = re.compile(rf"\b{_BATTERY}{_GAP}(?P<bad>hibas|halott|felfujodott|duzzadt|cserelendo|nem tolt)")
+_BATTERY_WEAK = re.compile(rf"\b{_BATTERY}{_GAP}(?P<bad>gyenge|hamar lemerul\w*|gyorsan merul\w*|gyorsan lemerul\w*|"
                            rf"rossz|kopott|fogy\w*)")
 _BATTERY_OK = re.compile(rf"\b{_BATTERY}{_GAP}(?:jo|kivalo|uj|tokeletes|hibatlan|csereltetett|cserelt|bírja|birja)")
 _BATTERY_PCT = re.compile(rf"\b{_BATTERY}{_W}(?:\w+{_W}){{0,3}}?(\d{{2,3}}) ?%")
-_FUNCTION_BAD = re.compile(r"\b(?:nem kapcsol be|nem indul\w*|nem mukodik|nem mukodo|mukodeskeptelen|"
+_FUNCTION_BAD = re.compile(r"\b(?P<bad>nem kapcsol be|nem indul\w*|nem mukodik|nem mukodo\w*|mukodeskeptelen|"
                            r"javitasra szorul\w*|alkatresz\w*|for parts|nem tolt)\b")
 # a magában álló „hibátlan” (pl. „Hibátlan, dobozában.”) is a működésről szól; a „hibátlan kijelző” csak a kijelzőről
-_FUNCTION_OK = re.compile(r"\b(?:(?:hibatlanul|tokeletesen|jol|rendesen|kifogastalanul|100 ?%-?ban) mukodik|mukodokepes|"
+# egy tagmondat elején („Működik, …”, „egyébként minden működik”; a tagadottat _negated kiszűri)
+_FUNCTION_OK = re.compile(r"(?:^|[.;!?,]\s*)(?:\w+\s+){0,2}?mukodik\b(?!\s*-\s*e\b)|"
+                          r"\b(?:(?:hibatlanul|tokeletesen|jol|rendesen|kifogastalanul|100 ?%-?(?:ban|osan)) mukodik|mukodokepes|"
+                          r"mukodo|"
                           r"mukodo allapot\w*|minden funkcio\w* mukodik|hibatlan mukodes\w*|mukodese hibatlan|"
                           r"hibatlan allapot\w*|"
                           r"(?<!nem )hibatlan(?!\s+(?:kijelzo|kepernyo|akku|kulso|hatlap|burkolat|doboz)))\b")
-_PART = r"(tolto\w*|adapter\w*|tapegyseg\w*|kabel\w*|doboz\w*|kontroller\w*|joy-?con\w*)"
-_MISSING = (re.compile(rf"\b{_PART}{_W}(?:\w+{_W}){{0,1}}?nelkul\b"),
-            re.compile(rf"\b(?:nincs|nem jar|nem tartozik|hianyzik|hianyoznak)\s+(?:(?:hozza|vele|mellette|meg|a|az)"
+_PART = r"(?P<part>tolto\w*|adapter\w*|tapegyseg\w*|kabel\w*|doboz\w*|kontroller\w*|joy-?con\w*)"
+# A hiányzó tartozék („töltő nélkül”, „nincs hozzá töltő”, „a töltője nincs meg”); a tagadott („a töltő nem
+# hiányzik”) nem az (_negated: a hiány szava a „bad” csoport).
+_MISSING = (re.compile(rf"\b{_PART}{_W}(?:\w+{_W}){{0,1}}?(?P<bad>nelkul\w*)"),
+            re.compile(rf"\b(?P<bad>nincs|nem jar|nem tartozik|hianyzik|hianyoznak)\s+(?:(?:hozza|vele|mellette|meg|a|az)"
                        rf"\s+){{0,2}}{_PART}"),
-            re.compile(rf"\b{_PART}{_W}(?:\w+{_W}){{0,1}}?(?:nincs|nem jar|hianyzik|elveszett)\b"))
+            re.compile(rf"\b{_PART}{_W}(?:\w+{_W}){{0,1}}?(?P<bad>nincs|nem jar|nem tartozik|nem tartozek|hianyzik|"
+                       rf"elveszett)\b"))
 _PRESENT = re.compile(r"\b(?:eredeti\s+)?(toltovel|toltojevel|adapterrel|kabellel|dobozzal|dobozaval|dobozaban|"
                       r"tolto(?:je)? is|eredeti tolto\w*)\b")
 _PRESENT_TOO = re.compile(rf"\b{_PART}\s+(?:is\s+)?(?:megvan|van|jar hozza|tartozik hozza)\b")
@@ -154,32 +169,97 @@ _WARRANTY_NO = re.compile(rf"\b(?:nincs|lejart|nem){_W}(?:\w+{_W}){{0,1}}?garanc
                           r"nelkul)")
 
 
-def _snippet(match: re.Match[str], folded: str, text: str) -> str:
+def _snippet(match: re.Match[str], folded: str, text: str, span: tuple[int, int] | None = None) -> str:
     """A találat szövege az eredetiből (az ékezettel), ha a hossz egyezik; különben az ékezet nélküli."""
-    start, end = match.span()
+    start, end = span or match.span()
     source = text if len(text) == len(folded) else folded
-    return " ".join(source[start:end].split())[:EVIDENCE_MAX]
+    return " ".join(source[start:end].split()).lstrip(".,;:!? ")[:EVIDENCE_MAX]
+
+
+# Tagadás: „nincs folt a kijelzőn”, „a kijelzőn nincs folt”, „nem repedt a kijelző”, „se karc, se folt”, „a töltő nem
+# hiányzik”, „folt nélkül”. A tagadószó a hiba szava előtt (ugyanabban a tagmondatban, legfeljebb NEG_WORDS szóval
+# előbb), a talált szakaszon belül, vagy rögtön utána („folt nincs”, „folt sincs”, „karc nem látszik”).
+_NEGATOR = re.compile(r"\b(?:nincs\w*|sincs\w*|nem|sem|se|semmi\w*|semmilyen\w*|egyetlen)\b")
+_AFTER_NEG = re.compile(r"^\W*(?:\w+\s+)?(?:mentes\w*|nelkul\w*|nincs\w*|sincs\w*|nem lat\w*|nem eszrevehet\w*)\b")
+_CLAUSE_END = re.compile(r"[.;!?,()\n]|\b(?:de|viszont|azonban|hanem|csak|kiveve)\b")
+NEG_WORDS = 3
+
+
+def _bad_span(match: re.Match[str]) -> tuple[int, int]:
+    """A találat kulcsszava (a „bad” csoport; ha nincs ilyen, az utolsó szava: „kijelző nem hibátlan” → hibátlan)."""
+    for name in ("bad", "bad2", "bad3"):
+        if name in match.re.groupindex and match.group(name) is not None:
+            return match.span(name)
+    start, end = match.span()
+    last = re.search(r"\w+\W*$", match.group(0))
+    return (start + last.start(), end) if last else (start, end)
+
+
+def _negated(folded: str, match: re.Match[str]) -> bool:
+    """A talált hiba tagadva van-e (lásd _NEGATOR): a hiba szavát magát („nem működik”) nem számolja tagadásnak."""
+    start, end = match.span()
+    bad_start, bad_end = _bad_span(match)
+    inside = folded[start:bad_start] + " " + folded[bad_end:end]
+    if _NEGATOR.search(inside):
+        return True
+    if re.search(r"(?:mentes|nelkul)\w*$", folded[bad_start:bad_end]) and not \
+            re.match(r"nelkul", folded[bad_start:bad_end]):
+        return True                            # „foltmentes”, „hibamentes”
+    before = folded[:start]
+    cut = max((m.end() for m in _CLAUSE_END.finditer(before)), default=0)
+    words = before[cut:].split()[-NEG_WORDS:] if not _CLAUSE_END.match(folded, start) else []
+    if any(_NEGATOR.fullmatch(word) for word in words):
+        return True                            # (a találat egy új tagmondattal kezdődik: az előző nem számít)
+    after = folded[end:]
+    stop = _CLAUSE_END.search(after)
+    return bool(_AFTER_NEG.match(after[:stop.start()] if stop else after))
+
+
+def _find(pattern: re.Pattern[str], folded: str) -> tuple[re.Match[str] | None, re.Match[str] | None]:
+    """Az első nem tagadott találat, és az első tagadott (ha van): („nincs folt a kijelzőn” → (None, a tagadott))."""
+    negated = None
+    for match in pattern.finditer(folded):
+        if not _negated(folded, match):
+            return match, negated
+        negated = negated or match
+    return None, negated
 
 
 def from_text(text: str) -> dict[str, Any]:
-    """Az állapot a hirdetés szövegéből kulcsszavakkal (az idézet a talált szövegrész). Ami nem derül ki, ismeretlen."""
+    """Az állapot a hirdetés szövegéből kulcsszavakkal (az idézet a talált szövegrész). Ami nem derül ki, ismeretlen.
+    A tagadott hiba („nincs folt a kijelzőn”, „nem repedt”) nem hiba; a kijelzőnél és az akkunál ez a jó állapot
+    bizonyítéka, ha más nem szól róla."""
     out = unknown()
     raw = " ".join(str(text or "").split())
     folded = fold(raw)
 
     def find(pattern: re.Pattern[str]) -> str:
-        match = pattern.search(folded)
+        match, _negated_match = _find(pattern, folded)
         return _snippet(match, folded, raw) if match else ""
 
-    for aspect, rules in (("display", ((_DISPLAY_BAD, "hibás"), (_DISPLAY_SCRATCH, "karcos"), (_DISPLAY_OK, "ép"))),
-                          ("battery", ((_BATTERY_BAD, "hibás"), (_BATTERY_WEAK, "gyenge"), (_BATTERY_OK, "jó"))),
-                          ("function", ((_FUNCTION_BAD, "hibás"), (_FUNCTION_OK, "működik"))),
-                          ("warranty", ((_WARRANTY_NO, "nincs"), (_WARRANTY_YES, "van")))):
+    def denial(match: re.Match[str]) -> str:
+        """A tagadott hiba idézete a tagadószóval együtt („Nincs folt a kijelzőn”)."""
+        start, end = match.span()
+        before = folded[:start]
+        cut = max((m.end() for m in _CLAUSE_END.finditer(before)), default=0)
+        negators = list(_NEGATOR.finditer(before, cut))
+        return _snippet(match, folded, raw, (negators[-1].start() if negators else start, end))
+
+    for aspect, rules, good in (
+            ("display", ((_DISPLAY_BAD, "hibás"), (_DISPLAY_SCRATCH, "karcos"), (_DISPLAY_OK, "ép")), "ép"),
+            ("battery", ((_BATTERY_BAD, "hibás"), (_BATTERY_WEAK, "gyenge"), (_BATTERY_OK, "jó")), "jó"),
+            ("function", ((_FUNCTION_BAD, "hibás"), (_FUNCTION_OK, "működik")), ""),
+            ("warranty", ((_WARRANTY_NO, "nincs"), (_WARRANTY_YES, "van")), "")):
+        denied = ""
         for pattern, state in rules:
-            evidence = find(pattern)
-            if evidence:
-                out[aspect] = {"state": state, "evidence": evidence}
+            match, negated = _find(pattern, folded)
+            if match is not None:
+                out[aspect] = {"state": state, "evidence": _snippet(match, folded, raw)}
                 break
+            if negated is not None and state in _BAD[aspect] and not denied:
+                denied = denial(negated)
+        if out[aspect]["state"] == UNKNOWN and denied and good:
+            out[aspect] = {"state": good, "evidence": denied}   # „nincs folt a kijelzőn”: a kijelző ép
     if out["battery"]["state"] == UNKNOWN:
         match = _BATTERY_PCT.search(folded)
         if match:
@@ -187,13 +267,18 @@ def from_text(text: str) -> dict[str, Any]:
             state = "jó" if percent >= 85 else "gyenge" if percent < 80 else UNKNOWN
             if state != UNKNOWN:
                 out["battery"] = {"state": state, "evidence": _snippet(match, folded, raw)}
-    missing, evidence = set(), ""
+    missing, evidence, denied_parts = set(), "", set()
     for pattern in _MISSING:
         for match in pattern.finditer(folded):
-            missing.add(part_name(match.group(1)))
+            part = part_name(match.group("part"))
+            if _negated(folded, match):
+                denied_parts.add(part)         # „a töltő nem hiányzik”: megvan
+                continue
+            missing.add(part)
             evidence = evidence or _snippet(match, folded, raw)
-    out["present"] = sorted({part_name(m.group(1)) for pattern in (_PRESENT, _PRESENT_TOO)
-                             for m in pattern.finditer(folded)} - missing)
+    out["present"] = sorted(({part_name(m.group("part") if "part" in m.re.groupindex else m.group(1))
+                              for pattern in (_PRESENT, _PRESENT_TOO) for m in pattern.finditer(folded)}
+                             | denied_parts) - missing)
     if missing:
         out["accessories"] = {"state": "hiányos", "evidence": evidence}
         out["missing"] = sorted(missing)
@@ -253,8 +338,19 @@ def issue_text(found: list[str]) -> str:
 
 
 def clean(cond: dict[str, Any] | None) -> bool:
-    """Hibátlan összehasonlító: nincs az árat érintő hibája (az ismeretlen szempont nem hiba)."""
+    """Nincs az árat érintő hibája (az ismeretlen szempont nem hiba). Hibátlannak ez még kevés: clean_evidence."""
     return not issues(cond)
+
+
+def clean_evidence(cond: dict[str, Any] | None) -> str:
+    """Bizonyítottan hibátlan-e (egy összehasonlító „ellenőrzötten hibátlan” csak ezzel lehet): nincs az árat érintő
+    hibája, és a leírása szerint működik (a „működik”, „hibátlan” idézettel). Az idézet, vagy „”, ha a leírás nem
+    mond ilyet: egy az állapotáról nem író hirdetés ismeretlen állapotú, nem hibátlan."""
+    cond = cond or {}
+    if issues(cond):
+        return ""
+    function = cond.get("function") or {}
+    return str(function.get("evidence") or "működik") if function.get("state") == "működik" else ""
 
 
 def best_band(wanted: list[str], refs: list[dict[str, Any]], reference: int,

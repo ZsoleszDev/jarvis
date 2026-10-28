@@ -19,12 +19,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_deals import Clock, FakeBrowser, FakeLlm  # noqa: E402
 
+from jarvis_core import condition as conditions_module  # noqa: E402
 from jarvis_core import deals as deals_module  # noqa: E402
 from jarvis_core.deals import DealHunter  # noqa: E402
 from jarvis_core.feeds import FeedError, SiteFetcher, fetch_image, parse_listings, parse_page, public_host  # noqa: E402
 from jarvis_core import instant as instant_module  # noqa: E402
 from jarvis_core.instant import InstantError, InstantWatch, posted_ago  # noqa: E402
 from jarvis_core.selling import PLATFORMS  # noqa: E402
+
+DATA = Path(__file__).resolve().parent / "data"   # mentett oldalminták
 
 
 def ha_card(n: int, title: str, price: str, city: str = "Budapest") -> str:
@@ -37,6 +40,11 @@ def ha_card(n: int, title: str, price: str, city: str = "Budapest") -> str:
         <div class="uad-col uad-col-info"><div class="uad-price">{price}</div><div class="uad-ultralight">ma 14:0{n % 10}</div></div>
         <div class="uad-col uad-col-seller"><a href="/tag/eladó{n}.html">eladó{n}</a> (12 értékelés)</div>
       </div></li>"""
+
+
+def card_url(n: int, title: str) -> str:
+    """Egy ha_card hirdetés webcíme."""
+    return f"https://hardverapro.hu/apro/{title.lower().replace(' ', '_')}_{n}/friss.html"
 
 
 def promo_card(n: int, title: str, price: str) -> str:
@@ -131,6 +139,25 @@ class ParseTests(unittest.TestCase):
         everywhere = [card.replace('class="media"', 'class="media premium"') for card in plain]
         rows = parse_listings(ha_page(everywhere), "https://hardverapro.hu/aprok/x/index.html", "hardverapro")
         self.assertFalse(any(r.get("promoted") for r in rows))
+
+    def test_a_promoted_card_with_a_help_link_keeps_its_listing_link(self):
+        """Mentett minta (tests/data): egy előresorolt kártyán a cím alatt egy „Kerülj te is előre!” súgólink, aminek a
+        title-je hosszabb a hirdetés címénél, és a webcíme nem hirdetés. Ez nem lehet a kártya linkje (korábban ez nyert,
+        és a kártya el is veszett, mert a címe nem hirdetéscím): a hirdetés linkje és címe a kártya szerkezetéből jön, a
+        kártya kiemeltként megmarad. A súgólink a kép előtt is lehet; oldaltípus nélkül (más oldal) sem nyer."""
+        html = (DATA / "hardverapro_eloresorolt.html").read_text(encoding="utf-8")
+        base = "https://hardverapro.hu/aprok/hardver/videokartya/index.html"
+        rows = parse_listings(html, base, "hardverapro")
+        self.assertEqual([(r["url"].rsplit("/", 2)[1], r["price"], r.get("title"), bool(r.get("promoted"))) for r in rows],
+                         [("sapphire_rx_580_nitro_4g", 22000, "Sapphire RX580 4G Nitro", True),
+                          ("msi_rtx_3060_ventus_12g", 79000, "MSI RTX 3060 Ventus 2X 12G OC", True),
+                          ("sapphire_rx_580_nitro_8gb", 31000, "Sapphire RX 580 Nitro+ 8GB", False),
+                          ("powercolor_rx_580_red_dragon_8gb", 29500, "PowerColor RX 580 Red Dragon 8GB", False),
+                          ("gigabyte_gtx_1660_super_oc_6g", 52000, "Gigabyte GTX 1660 Super OC 6G", False),
+                          ("asus_dual_rtx_3060_ti_8gb", 96000, "Asus Dual RTX 3060 Ti 8GB", False)])
+        generic = parse_listings(html, base)
+        self.assertFalse(any("sugo" in r["url"] for r in generic), "a súgólink oldaltípus nélkül sem hirdetés")
+        self.assertEqual(len(generic), 6)
 
     def test_the_newest_order_from_a_select_and_a_chosen_order_stays(self):
         from jarvis_core.feeds import chosen_sort, newest_link, parse
@@ -476,7 +503,7 @@ class AllVetted(dict):
     legtöbb teszt nem erről szól; a leírások olvasásának külön tesztje van)."""
 
     def get(self, key, default=None):
-        return super().get(key, {"at": 0.0, "issues": []})
+        return super().get(key, {"at": 0.0, "issues": [], "state": "hibátlan"})
 
 
 class InstantCase(unittest.TestCase):
@@ -539,9 +566,13 @@ class InstantTests(InstantCase):
         self.assertEqual((kind, title), ("deal", "Megéri: Palit RTX 3060 Ti Dual"),
                          "a drága Zotacról és a hibás EVGA-ról nem szól")
         self.assertIn("Hardverapró: „Palit RTX 3060 Ti Dual” 52 000 Ft, most került fel. A szokásos ára kb. 100 000 Ft", text)
-        self.assertIn("kb. 36 500 Ft haszon lehet. Állapot: működés: működik („Hibátlan”). Ellenőriztem: az adatlapja és "
-                      "az állapota alapján is megéri. Biztos befektetés: 70% haszon, a leírása szerint hibátlanul működik. "
-                      "Ugyanaz a kártya.", text, "az állapota bizonyítékkal, mennyire biztos, és a modell is megnézte")
+        self.assertIn("kb. 36 500 Ft haszon lehet. Állapot: működés: működik („Hibátlan”). Gyors eladásnál kb. "
+                      "81 000 Ft–99 000 Ft (becslés); legfeljebb 70 000 Ft-ért érdemes megvenni (minden költséggel); a "
+                      "szokásos árat te adtad meg (vagy hagytad jóvá)", text, "a becslés sávja és a legmagasabb vételár")
+        self.assertIn("Ellenőrizve: az adatlapja megnyílt, a leírása és az állapota alapján újraszámoltam, és a modell is "
+                      "átnézte. A haszon hirdetési árakból becsült, nem garancia. Alacsony kockázat: kb. 70% becsült "
+                      "haszon, a leírása szerint hibátlanul működik. Ugyanaz a kártya.", text,
+                      "az állapota bizonyítékkal, mennyire biztos, és a modell is megnézte (nem ígéret)")
         self.assertEqual([p[1] for p in self.pings], ["Ígéretes új hirdetés: EVGA RTX 3060 Ti XC",
                                                       "Ígéretes új hirdetés: Palit RTX 3060 Ti Dual"],
                          "a gyors jelzés az ellenőrzés előtt ment (a hibás EVGA-ról is: az csak az adatlapon derült ki)")
@@ -587,7 +618,38 @@ class InstantTests(InstantCase):
         self.assertTrue(deal["verified"])
         self.assertEqual([e["why"] for e in deal["basis"]["out"] if "lite_0" in e["u"]],
                          ["a leírása szerint hibás a kijelzője"])
-        self.assertEqual(sorted(len(v["issues"]) for v in self.hunter._vetted.values()), [0, 0, 1])
+        comps = {k: v for k, v in self.hunter._vetted.items() if "/lite_" in k}   # (a jelölt saját állapota is ott van)
+        self.assertEqual(sorted(len(v["issues"]) for v in comps.values()), [0, 0, 1])
+        self.assertEqual(sorted(v["state"] for v in comps.values()), ["hibás", "hibátlan", "hibátlan"])
+
+    def test_a_description_silent_about_the_condition_is_not_a_clean_comparable(self):
+        """Ha az összehasonlítók leírása az állapotról nem ír („szürke, személyes átvétel”), azok állapota ismeretlen
+        (eltárolva is), nem „ellenőrzötten hibátlan”: így a szokásos ár nem lesz biztos, és nem szól sürgősen (csak
+        egy Érdemes megnézni tipp jön, az okkal). A régi, állapot nélküli bejegyzést újra elolvassa."""
+        self.hunter._vetted = {}
+        comps = [(60000, "hardverapro"), (58000, "jofogas"), (59000, "hardverapro"), (61000, "jofogas"),
+                 (62000, "hardverapro"), (60500, "jofogas")]
+        self.hunter.book.add([{"text": f"Nintendo Switch Lite szürke {n}", "price": p, "platform": site,
+                               "url": f"https://{'hardverapro.hu/apro' if site == 'hardverapro' else 'www.jofogas.hu/b'}"
+                                      f"/lite_{n}/friss.html"} for n, (p, site) in enumerate(comps)])
+        for n in range(len(comps)):
+            self.net.pages[f"lite_{n}/friss"] = page_html("Nintendo Switch Lite, szürke. Személyes átvétel Budapesten.")
+        old = "https://hardverapro.hu/apro/lite_0/friss.html"
+        self.hunter._vetted[deals_module.listing_key(old)] = {"at": 0.0, "issues": []}   # régi, state nélküli
+        self.watch.add("Nintendo Switch Lite", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi kontroller", "2 000 Ft")])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Nintendo Switch Lite", "30 000 Ft"), ha_card(1, "Régi kontroller", "2 000 Ft")])
+        self.net.pages["_7/friss"] = page_html("Nintendo Switch Lite, hibátlanul működik, töltővel.")
+        self.watch.tick()
+        self.assertFalse(any(n[1].startswith("Megéri") for n in self.notices), [n[1] for n in self.notices])
+        read = {url.rsplit("/", 2)[1] for _at, url in self.net.asked if "/lite_" in url}
+        self.assertIn("lite_0", read, "a régi, állapot nélküli bejegyzést újra elolvasta")
+        states = {k: v.get("state") for k, v in self.hunter._vetted.items()}
+        self.assertTrue(states and set(states.values()) == {conditions_module.UNKNOWN}, states)
+        self.assertEqual(self.hunter.state()["deals"], [], "nem lett belőle ellenőrzött találat")
 
     def test_how_soon_it_notices_and_the_pace(self):
         """A kártyán lévő feltöltési időből („ma 14:07”) méri, mennyivel a feltöltés után vette észre az új hirdetést (a
@@ -689,6 +751,90 @@ class InstantTests(InstantCase):
             self.watch.poll(keyword, "hardverapro")
         self.assertEqual(self.watch.state()["alerts"][1]["covered"], [])
 
+    def test_a_shared_list_with_a_narrower_price_filter_loses_nothing(self):
+        """Reprodukált hiba: a közös lista (legfeljebb 50 000 Ft) a drágább hirdetést nem méri fel, de korábban a
+        keresőszavas figyelő (RTX 3080, bármennyi) látottjai közé tette, így senki sem mérte fel. Most csak azt adja át,
+        amit maga felmér: a 120 000 Ft-os RTX 3080-at a keresőszavas figyelő méri fel (és szól róla)."""
+        self.hunter.add_search("RTX 3080", ["hardverapro"], reference=200000)
+        self.hunter.set_enabled(True)
+        self.hunter.set_fast_alert(False)
+        old = [ha_card(1, "Régi kártya", "20 000 Ft")]
+        self.net.pages["hardver/index.html"] = (200, ha_page(old))
+        self.results(old)
+        feed = self.watch.add("https://hardverapro.hu/aprok/hardver/index.html", max_price=50000)["alerts"][0]
+        keyword = self.watch.add("RTX 3080", ["hardverapro"])["alerts"][1]
+        self.watch.set_enabled(True)
+        self.watch.poll(feed, "hardverapro")
+        self.watch.poll(keyword, "hardverapro")
+        self.later()
+        card = ha_card(80, "MSI RTX 3080 Ventus 10G", "120 000 Ft")
+        self.net.pages["hardver/index.html"] = (200, ha_page([card] + old))
+        self.results([card] + old)
+        self.net.pages["_80/friss"] = page_html("MSI RTX 3080 Ventus, hibátlanul működik, dobozában.")
+        self.watch.poll(feed, "hardverapro")
+        self.assertEqual(self.notices, [], "a közös lista nem méri fel (drágább a szűrőjénél)")
+        entry = self.watch._data["seen"][keyword["id"]].get(deals_module.listing_key(
+            card_url(80, "MSI RTX 3080 Ventus 10G")))
+        self.assertIsNone(entry, "és nem is jelöli a keresőszavas figyelő látottjai közé")
+        self.watch.poll(keyword, "hardverapro")
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: MSI RTX 3080 Ventus 10G"])
+        entry = self.watch._data["seen"][keyword["id"]][deals_module.listing_key(card_url(80, "MSI RTX 3080 Ventus 10G"))]
+        self.assertEqual(entry[2], instant_module.SEEN_DONE)
+
+    def test_a_listing_waiting_for_the_shared_list_is_not_lost(self):
+        """Amit a közös lista felmér (a saját szálán, később), az a keresőszavas figyelőnél „felmérésre vár” (nem méri
+        fel még egyszer); ha a közös lista felmérése elmarad (elfelejti, mert túl sokáig várt), a keresőszavas figyelő
+        következő letöltése újként méri fel; ha felmérte, a keresőszavasnál is felmért lesz."""
+        old = [ha_card(1, "Régi kártya", "20 000 Ft")]
+        self.net.pages["hardver/index.html"] = (200, ha_page(old))
+        self.results(old)
+        feed = self.watch.add("https://hardverapro.hu/aprok/hardver/index.html")["alerts"][0]
+        keyword = self.watch.add("RTX 3060 Ti", ["hardverapro"])["alerts"][1]
+        self.watch.set_enabled(True)
+        self.watch.poll(feed, "hardverapro")
+        self.watch.poll(keyword, "hardverapro")
+        self.watch._worker = mock.Mock(is_alive=lambda: True)    # a felmérés a saját szálán: a sorba kerül
+        self.later()
+        card = ha_card(70, "Palit RTX 3060 Ti Dual", "99 000 Ft")
+        self.net.pages["hardver/index.html"] = (200, ha_page([card] + old))
+        self.results([card] + old)
+        self.watch.poll(feed, "hardverapro")
+        ident = deals_module.listing_key(card_url(70, "Palit RTX 3060 Ti Dual"))
+        entry = self.watch._data["seen"][keyword["id"]][ident]
+        self.assertEqual((entry[2], entry[3]), (instant_module.SEEN_QUEUED, feed["id"]), "a közös lista méri fel")
+        self.watch.poll(keyword, "hardverapro")
+        self.assertEqual(self.watch._jobs.qsize(), 1, "nem kerül kétszer a sorba")
+        alert, site, rows = self.watch._jobs.get_nowait()
+        self.watch._forget([(feed["id"], site, rows[0], self.clock.now, ())])   # túl sokáig várt: elfelejti
+        self.assertNotIn(ident, self.watch._data["seen"][keyword["id"]])
+        self.watch.poll(keyword, "hardverapro")
+        [(alert, _site, rows)] = [self.watch._jobs.get_nowait()]
+        self.assertEqual((alert["id"], [r["url"] for r in rows]), (keyword["id"], [card_url(70, "Palit RTX 3060 Ti Dual")]))
+        self.watch._worker = None
+        self.watch._report(alert, "hardverapro", rows)
+        self.assertEqual(self.watch._data["seen"][keyword["id"]][ident][2], instant_module.SEEN_DONE)
+
+    def test_a_paused_or_stale_shared_list_does_not_slow_the_keyword_alert(self):
+        """A lefedett keresőszavas figyelő csak addig néz ritkábban, amíg a közös lista tényleg fut: ha szünetelteted,
+        vagy rég nem töltött le (pl. tilt az oldal), a keresőszavas figyelő újra a saját ütemében néz."""
+        feed = self.watch.add("https://hardverapro.hu/aprok/hardver/index.html")["alerts"][0]
+        keyword = self.watch.add("RTX 3060 Ti", ["hardverapro"])["alerts"][1]
+        self.watch.set_enabled(True)
+        with self.watch._lock:
+            stored = self.watch._data["alerts"]
+            stored[0].update(baseline=["hardverapro"], last={"hardverapro": self.clock.now})
+            stored[1]["cover"] = {"hardverapro": [8.0, 0.0]}
+        self.assertTrue(self.watch._covered(self.watch._data["alerts"][1], "hardverapro"))
+        self.watch.pause(feed["id"], True)
+        self.assertFalse(self.watch._covered(self.watch._data["alerts"][1], "hardverapro"), "a közös lista szünetel")
+        self.watch.pause(feed["id"], False)
+        self.assertTrue(self.watch._covered(self.watch._data["alerts"][1], "hardverapro"))
+        self.clock.now += instant_module.COVER_STALE + 1
+        self.assertFalse(self.watch._covered(self.watch._data["alerts"][1], "hardverapro"), "rég nem töltött le")
+        self.assertLess(self.watch._interval(self.watch._data["alerts"][1], "hardverapro", self.clock.now),
+                        instant_module.COVERED_EVERY * 60 * 0.85)
+        self.assertEqual(keyword["query"], "RTX 3060 Ti")
+
     def test_a_slightly_expensive_new_listing_is_a_haggle_tip(self):
         """Ami most kicsit drága, de egy kis alkuval (legfeljebb 15%) megérne, arról egy rövid pittyenés jön („Alkuval
         megérheti”), a javasolt ajánlattal; az oldalát nem tölti le (ez neked szóló tipp)."""
@@ -728,6 +874,37 @@ class InstantTests(InstantCase):
         [deal] = self.hunter.state()["deals"]
         self.assertEqual((deal["verified"], deal.get("model_pending")), (True, None), "a köteg után megnézte")
         self.assertEqual(len([c for c in self.hunter.llm.calls if "Keresett termék" in c[1]["content"]]), 1)
+        [hit] = self.watch.state()["hits"]
+        self.assertEqual((hit["verified"], hit["model_pending"], hit["cheap"]), (True, False, True),
+                         "a friss hirdetések közt is ellenőrzöttként látszik")
+
+    def test_a_listing_rejected_afterwards_is_shown_as_rejected_everywhere(self):
+        """Gyors riasztás után a modell utólag nemet mond (csak a doboza): a találatban, az azonnali figyelő tárolt friss
+        hirdetésében és a felületen is „utólag mégsem jó” lesz (nem marad „Megéri”), és a korábbi csengető értesítéshez
+        egyszer jön egy helyesbítés (corrects: a telefon leállítja a csengetést); egy újabb utóellenőrzés nem szól újra."""
+        self.hunter.add_search("RTX 3060 Ti", ["hardverapro"], reference=100000)
+        self.hunter.set_enabled(True)
+        self.hunter.llm.ok = False
+        self.watch.add("RTX 3060 Ti", ["hardverapro"])
+        self.watch.set_enabled(True)
+        self.results(HA_CARDS[:2])
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(7, "Palit RTX 3060 Ti Dual", "52 000 Ft")] + HA_CARDS[:2])
+        self.net.pages["_7/friss"] = page_html("Palit RTX 3060 Ti Dual, működik, dobozában.")
+        self.watch.tick()
+        [ring, fix] = self.notices
+        self.assertEqual((ring[1], fix[1]), ("Megéri: Palit RTX 3060 Ti Dual", "Mégsem: Palit RTX 3060 Ti Dual"))
+        [deal] = self.hunter.state()["deals"]
+        self.assertEqual((fix[3]["corrects"], ring[3]["deal"]), (deal["id"], deal["id"]))
+        self.assertNotIn("urgent", fix[3], "a helyesbítés nem riaszt")
+        self.assertIn("a modell szerint nem ez: Csak a doboza", deal["model_no"])
+        [hit] = self.watch.state()["hits"]
+        self.assertEqual((hit["cheap"], hit["model_no"], hit["verified"], hit["model_pending"]),
+                         (False, deal["model_no"], False, False))
+        self.notices.clear()
+        self.hunter._followup_apply(deal["id"], {"ok": False, "deal": dict(deal), "tries": 1}, self.notify)
+        self.assertEqual(self.notices, [], "a helyesbítés egyszer jön")
 
     def test_the_sellers_other_listings_can_make_a_better_buy(self):
         """Egy jó találat után megnézi az eladó többi hirdetését (a hirdetés oldalán lévő „további hirdetései” linkről, a
@@ -870,7 +1047,9 @@ class InstantTests(InstantCase):
         [from_price] = [why for title, why in out.items() if title.startswith("Sony WH-1000XM4 fejhallgatók 50 000 Ft-tól")]
         self.assertEqual(from_price, "„-tól” ár: nem egy meghatározott darab ára")
         self.assertEqual({e["t"]: e["why"] for e in original["basis"]["out"]}["Sony WH-1000XM4 fekete"],
-                         "kilógó ár (kimaradt a szokásos árból)", "A szokásos árából a kilógóan olcsó B kimaradt")
+                         "olcsó, a leírása szerint ugyanilyen és hibátlan, de friss hirdetés (hamar elkelhet, nem a "
+                         "piaci ár): a szokásos árba nem számít; ha megéri, jelöltként külön ellenőrzöm",
+                         "A szokásos árából a kilógóan olcsó B kimaradt, az okkal (friss: nem viszi lejjebb A árát)")
         self.assertEqual((spawned["band"][0] <= 70000 <= spawned["band"][1], spawned["resale"], spawned["costs"]),
                          (True, round(min(spawned["median"] * 0.9, spawned["low"])), 1500))
         self.assertEqual(spawned["profit"], spawned["resale"] - spawned["price"] - spawned["costs"],
@@ -938,7 +1117,7 @@ class InstantTests(InstantCase):
         self.results([ha_card(1, "Régi kártya", "1 000 Ft")], "videokartya/index")
         self.watch.tick()
         self.later()
-        self.results([ha_card(40, "Videókártya eladó", "100 000 Ft"), ha_card(1, "Régi kártya", "1 000 Ft")],
+        self.results([ha_card(40, "Videókártya eladó, 16GB", "100 000 Ft"), ha_card(1, "Régi kártya", "1 000 Ft")],
                      "videokartya/index")
         self.hunter.llm.explore = [{"n": 1, "query": "RTX 5060 Ti 16GB", "buy": True}]
         self.net.pages["_40/friss"] = page_html("RTX 5060 Ti 16GB, hibátlan.")
@@ -950,7 +1129,7 @@ class InstantTests(InstantCase):
         self.net.pages["_56/friss"] = page_html("Gigabyte RTX 5060 Ti Gaming OC, 8 GB GDDR7 memória.")
         self.net.pages["_57/friss"] = page_html("Gigabyte RTX 5060 Ti Gaming OC, 16 GB.")
         self.watch.tick()
-        self.assertEqual([n[1] for n in self.notices], ["Megéri: Videókártya eladó",
+        self.assertEqual([n[1] for n in self.notices], ["Megéri: Videókártya eladó, 16GB",
                                                         "Érdemes megnézni: Gigabyte RTX 5060 Ti Gaming OC"],
                          "a leírásából 16 GB-osnak bizonyult kártya maga is olcsó: saját maga nélkül még nem biztos az "
                          "ára, ezért tipp")
@@ -966,6 +1145,35 @@ class InstantTests(InstantCase):
         self.assertEqual(out[("Gigabyte RTX 5060 Ti Gaming OC", 110000)],
                          "a címből nem derül ki, melyik változat (kapacitás)")
         self.assertEqual(out[("RTX 5060 Ti 8GB", 110000)], "más változat (8GB)")
+
+    def test_the_model_cannot_invent_a_capacity(self):
+        """A modell a hirdetés kártyáját látja (itt csak „Videókártya eladó”): ha a nevébe egy méretet ír, ami a
+        hirdetésben nincs („RTX 5060 Ti 16GB”), az kimarad (specs.grounded). Így a kártya nem a drágább 16 GB-os
+        változathoz mérve látszik olcsónak; mivel nem tudni, melyik változat, nem szól róla sürgősen."""
+        self.hunter.book.add([{"text": f"RTX 5060 Ti 16GB {n}", "price": 140000 + n * 1000, "platform": site,
+                               "url": f"https://{'www.jofogas.hu/v' if site == 'jofogas' else 'hardverapro.hu/apro'}"
+                                      f"/rtx16_{n}/friss.html"}
+                              for n, site in enumerate(("jofogas", "hardverapro") * 3)])
+        self.hunter.book.add([{"text": f"RTX 5060 Ti 8GB {n}", "price": 105000 + n * 1000, "platform": site,
+                               "url": f"https://{'www.jofogas.hu/v' if site == 'jofogas' else 'hardverapro.hu/apro'}"
+                                      f"/rtx8_{n}/friss.html"}
+                              for n, site in enumerate(("jofogas", "hardverapro") * 3)])
+        self.watch.add("https://hardverapro.hu/aprok/hardver/videokartya/index.html")
+        self.watch.set_enabled(True)
+        self.results([ha_card(1, "Régi kártya", "1 000 Ft")], "videokartya/index")
+        self.watch.tick()
+        self.later()
+        self.results([ha_card(40, "Videókártya eladó", "100 000 Ft"), ha_card(1, "Régi kártya", "1 000 Ft")],
+                     "videokartya/index")
+        self.hunter.llm.explore = [{"n": 1, "query": "RTX 5060 Ti 16GB", "buy": True}]
+        self.net.pages["_40/friss"] = page_html("Videókártya, hibátlan.")
+        self.watch.tick()
+        self.assertFalse(any(n[1].startswith("Megéri") for n in self.notices), [n[1] for n in self.notices])
+        named = [s for k in self.hunter.book.keys() for s in self.hunter.book.samples(k) if "_40/" in s["url"]]
+        self.assertEqual([self.hunter.book.key(s["t"]) for s in named][:1], [None])
+        self.assertIn("5060 rtx ti", [k for k in self.hunter.book.keys() if any("_40/" in s["url"]
+                                                                             for s in self.hunter.book.samples(k))],
+                      "a modell nevéből a méret kimaradt: a kapacitás nélküli termékhez került")
 
     def test_candidates_beyond_the_round_are_kept_for_later(self):
         """Az ár-ellenőrzésre váró jelöltekből egy körben EXPLORE_PICKS (3) kerül sorra; a többi nem vész el (eddig a

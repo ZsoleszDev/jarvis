@@ -380,6 +380,13 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertEqual(self.post("/api/work/deals", {"action": "cost_add", "part": "töltő", "amount": ""})[0], 400)
         status, data = self.post("/api/work/deals", {"action": "cost_remove", "id": data["costs"][0]["id"]})
         self.assertEqual((status, data["costs"]), (200, []))
+        # az eladás költségei (Eladási költségek): az üres „nincs megadva”, a 0 megadott nulla
+        self.assertEqual(data["fees"], {"packaging": None, "sell_pct": None, "sell_fixed": None, "reserve_pct": None})
+        status, data = self.post("/api/work/deals", {"action": "fees", "fees": {"packaging": "500", "sell_pct": "5,5",
+                                                                                "sell_fixed": "0", "reserve_pct": ""}})
+        self.assertEqual((status, data["fees"]), (200, {"packaging": 500, "sell_pct": 5.5, "sell_fixed": 0,
+                                                        "reserve_pct": None}))
+        self.assertEqual(self.post("/api/work/deals", {"action": "fees", "fees": {"sell_pct": "sok"}})[0], 400)
         for stored in alerts:
             status, data = self.post("/api/work/deals", {"action": "instant_remove", "id": stored["id"]})
         self.assertEqual((status, data["instant"]["alerts"]), (200, []))
@@ -1007,8 +1014,8 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertTrue(page.locator("text=Legutóbbi találatok").is_visible())
         titles = [t.strip() for t in page.locator("#w-deals details.fold > summary").all_inner_texts()]
         self.assertEqual([t.split(" (")[0] for t in titles],
-                         ["Beállítások", "Pótlás és javítás", "Keresések", "Csomagbontás", "Azonnali figyelő",
-                          "Böngészés", "Figyelt oldalak", "Mennyit ér?", "Napló"])
+                         ["Beállítások", "Pótlás és javítás", "Eladási költségek", "Keresések", "Csomagbontás",
+                          "Azonnali figyelő", "Böngészés", "Figyelt oldalak", "Mennyit ér?", "Napló"])
         self.assertEqual(page.locator("#w-deals details.fold[open]").count(), 0)
         for hidden in ("#d-maxbuy", "#d-query", "#dl-query"):
             self.assertTrue(page.locator(hidden).is_hidden(), hidden)
@@ -1017,6 +1024,23 @@ class WorkBrowserTests(unittest.TestCase):
         page.click("#job-sales")
         page.click("#job-deals")
         page.wait_for_selector("#d-query", state="visible")
+
+    def test_selling_costs_from_the_window(self):
+        """Az Eladási költségek blokk: a fejlécen látszik, hány nincs megadva; a mezők kitöltése és a Mentés után a
+        beállítás megmarad (az üres mező „nincs megadva”, a 0 megadott nulla), és a fejléc is frissül."""
+        page, deals = self.page, self.h.app.work.deals
+        page.click("#job-deals")
+        page.wait_for_selector("#d-run-toggle")
+        page.click('summary:has-text("Eladási költségek")')
+        self.assertIn("(4 nincs megadva)", page.inner_text('details[data-fold="fees"] > summary'))
+        page.fill("#d-fee-packaging", "500")
+        page.fill("#d-fee-sell_pct", "5")
+        page.fill("#d-fee-reserve_pct", "0")
+        page.click('#d-fees button[type="submit"]')
+        page.wait_for_selector('details[data-fold="fees"] > summary:has-text("1 nincs megadva")')
+        self.assertEqual(deals.state()["fees"], {"packaging": 500, "sell_pct": 5.0, "sell_fixed": None,
+                                                 "reserve_pct": 0.0})
+        self.assertEqual(page.input_value("#d-fee-packaging"), "500", "a mentett érték a mezőben marad")
 
     def test_start_button_limits_and_instant_watch_on_a_phone(self):
         """Az Automata kereskedés fülön egy gomb: Indítás (minden elindul), utána Leállítás; a vételi limit; az azonnali
@@ -1031,7 +1055,13 @@ class WorkBrowserTests(unittest.TestCase):
                 {"id": "h1", "alert": "a", "alert_name": "Videókártyák", "at": time.time() - 120, "site": "Hardverapró",
                  "platform": "hardverapro", "text": "Palit RTX 3060 Ti Dual Budapest", "title": "Palit RTX 3060 Ti",
                  "price": 52000, "url": "https://hardverapro.hu/apro/palit/friss.html", "cheap": True,
-                 "reference": 100000, "profit": 36500, "deal": "q1"}]
+                 "reference": 100000, "profit": 36500, "deal": "q1"},
+                # utólag elutasítva (DealHunter._followup_apply → InstantWatch._deal_changed): nem „Megéri”
+                {"id": "h2", "alert": "a", "alert_name": "Videókártyák", "at": time.time() - 300, "site": "Hardverapró",
+                 "platform": "hardverapro", "text": "Zotac RTX 3070 Twin", "title": "Zotac RTX 3070 Twin",
+                 "price": 61000, "url": "https://hardverapro.hu/apro/zotac/friss.html", "cheap": False,
+                 "reference": 120000, "profit": 45000, "deal": "q2",
+                 "model_no": "a modell szerint nem ez: Csak a doboza."}]
         page = self.page
         page.set_viewport_size({"width": 390, "height": 844})
         page.click("#job-deals")
@@ -1078,6 +1108,9 @@ class WorkBrowserTests(unittest.TestCase):
         hits = page.inner_text("details:has-text('Friss hirdetések')")
         self.assertIn("Palit RTX 3060 Ti", hits)
         self.assertIn("2 perce", hits)
+        rejected = page.inner_text('details:has-text("Friss hirdetések") li:has-text("Zotac RTX 3070 Twin")')
+        self.assertIn("Utólag mégsem jó: a modell szerint nem ez: Csak a doboza.", rejected)
+        self.assertNotIn("Megéri", rejected, "az utólag elutasított nem marad „Megéri”")
         page.click('details:has-text("Friss hirdetések") [data-deal-buy="q1"]')
         page.wait_for_selector("#d-paid")
         self.assertEqual(page.input_value("#d-paid"), "52000")
@@ -1121,6 +1154,11 @@ class WorkBrowserTests(unittest.TestCase):
                          "safety": {"level": "biztos", "why": [], "good": ["61% haszon", "gyorsan kel el"]},
                          "quick": True, "note": "Ugyanaz a kártya.", "explore": "azonnali figyelő: Videókártyák",
                          "band": [92000, 106000], "resale": 85000, "costs": 1500, "verified": True,
+                         "identity": "videókártya: típus rtx 3060 ti (a címből: „RTX 3060 Ti”)",
+                         "resale_range": [76500, 93500], "profit_range": [23000, 40000], "max_buy": 70000,
+                         "reliability": {"level": "közepes", "why": ["a hasonlók állapota a leírásuk szerint nagyrészt "
+                                                                     "nem ismert"], "good": ["12 hasonló ár", "2 oldalról"]},
+                         "fees_unset": ["csomagolás", "tartalék"], "sale_mode": "ahogy van",
                          "warnings": ["az eladónak kevés az értékelése"],
                          "condition": {"display": {"state": "ismeretlen", "evidence": ""},
                                        "battery": {"state": "ismeretlen", "evidence": ""},
@@ -1129,7 +1167,8 @@ class WorkBrowserTests(unittest.TestCase):
                                        "warranty": {"state": "ismeretlen", "evidence": ""}, "missing": [], "issues": []},
                          "condition_text": "működés: működik („Hibátlanul működik”); tartozékok: teljes („minden tartozékával”)",
                          "basis": {"used": [{"t": "MSI RTX 3060 Ti Ventus", "p": 98000, "s": "Jófogás",
-                                             "u": "https://www.jofogas.hu/1234567.htm", "src": "most"},
+                                             "u": "https://www.jofogas.hu/1234567.htm", "src": "most",
+                                             "approx": "más gyártó (msi, ez palit)"},
                                             {"t": "RTX 3060 Ti", "p": 101000, "s": "Hardverapró", "u": "", "src": "árbázis",
                                              "read": True}],
                                    "out": [{"t": "RTX 3060 Ti 16GB", "p": 140000, "s": "Hardverapró", "u": "",
@@ -1156,12 +1195,22 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector("#deal-dialog[open]", timeout=15000)
         self.assertEqual(page.inner_text("#deal-title"), "Palit RTX 3060 Ti Dual")
         body = page.inner_text("#deal-body")
-        for part in ("52 000 Ft", "Most ennyiért mennek", "kb. 100 000 Ft (12 hasonló alapján, Hardverapró és Jófogás)",
-                     "Ennyit kereshetsz vele", "kb. 31 500 Ft (ha kb. 85 000 Ft-ért eladod", "Ugyanaz a kártya.", "3 perce",
-                     "Elkelt hasonlók", "kb. 88 000 Ft (4 db alapján)", "Biztos befektetés: 61% haszon; gyorsan kel el",
-                     "Kínálati ársáv", "92 000 Ft – 106 000 Ft", "Óvatos eladási ár", "Költség", "posta kb. 1 500 Ft",
+        for part in ("52 000 Ft", "Hirdetési ár (medián)", "kb. 100 000 Ft (12 hasonló alapján, Hardverapró és Jófogás)",
+                     "(kínálati ár: ennyiért hirdetik, nem ennyiért kel el)",
+                     "Változat", "videókártya: típus rtx 3060 ti (a címből: „RTX 3060 Ti”)",
+                     "Becsült haszon", "kb. 31 500 Ft (23 000 Ft – 40 000 Ft) (ha kb. 85 000 Ft-ért eladod", "Ugyanaz a kártya.",
+                     "3 perce", "Eltűnt (talán elkelt) hasonlók", "kb. 88 000 Ft (4 db alapján)",
+                     "(ennyiért hirdették; nem tudni, mennyiért keltek el)",
+                     "Alacsony kockázat: 61% haszon; gyorsan kel el", "Kínálati ársáv", "92 000 Ft – 106 000 Ft",
+                     "Gyors eladási becslés", "kb. 85 000 Ft (76 500 Ft – 93 500 Ft)", "Hogyan adnád el", "ahogy van",
+                     "Költség", "posta kb. 1 500 Ft", "Nincs megadva", "csomagolás, tartalék (0 Ft-tal számoltam",
+                     "Legfeljebb ennyiért vedd meg", "70 000 Ft (ennyiért még meglenne a beállított haszon, minden költséggel)",
+                     "A becslés megbízhatósága", "közepes (12 hasonló ár, 2 oldalról)",
+                     "a hasonlók állapota a leírásuk szerint nagyrészt nem ismert",
                      "Mihez mértem? 2 hirdetés · 1 kizárva", "Állapot", "működés: működik („Hibátlanul működik”)",
-                     "Ellenőrizve", "igen: az adatlapja, az állapota és az újraszámolt haszon alapján"):
+                     "Nem derül ki", "kijelző, akkumulátor, garancia (az ismeretlen nem hibátlan)",
+                     "Ellenőrizve", "igen: az adatlapja megnyílt, a leírása és az állapota alapján újraszámoltam, és a "
+                                    "modell is átnézte (a haszon becslés, nem garancia)"):
             self.assertIn(part, body)
         seller = page.inner_text("details.seller")   # az eladó többi hirdetése (nyitva: együtt jobban megéri)
         for part in ("Az eladó többi hirdetése: még 1 darab megérheti", "Apple AirPods Pro 2 fehér: 30 000 Ft",
@@ -1173,6 +1222,7 @@ class WorkBrowserTests(unittest.TestCase):
         page.click("details.basis:not(.seller) > summary")   # mihez mérte: a beszámítottak és a kizártak az okkal
         basis = page.inner_text("details.basis:not(.seller)")
         for part in ("MSI RTX 3060 Ti Ventus: 98 000 Ft", "Jófogás · most találtam", "korábban láttam · a leírásából",
+                     "közelítő: más gyártó (msi, ez palit)",
                      "Kizártam (ezek nem számítottak bele):", "RTX 3060 Ti 16GB: 140 000 Ft", "más változat (16GB)"):
             self.assertIn(part, basis)
         self.assertEqual(page.get_attribute('details.basis:not(.seller) a', "href"), "https://www.jofogas.hu/1234567.htm")
@@ -1198,7 +1248,7 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertIn("Palit RTX 3060 Ti Dual\nÁra: 52 000 Ft (Hardverapró)\n", asked)
         # a kockázatok, a modell megjegyzése, az állapot a bizonyítékkal, és az összehasonlítók linkjei is benne vannak
         for part in ("Várható haszon kb. 31 500 Ft.", "Állapot a leírás szerint:\n- működés: működik („Hibátlanul működik”)",
-                     "- nem derül ki: kijelző, akkumulátor, garancia", "Az én értékelésem: Biztos befektetés.",
+                     "- nem derül ki: kijelző, akkumulátor, garancia", "Az én értékelésem: Alacsony kockázat.",
                      "Kockázatok:\n- az eladónak kevés az értékelése", "A modell megjegyzése: Ugyanaz a kártya.",
                      "Ezekhez mértem:\n- MSI RTX 3060 Ti Ventus: 98 000 Ft (Jófogás) https://www.jofogas.hu/1234567.htm"):
             self.assertIn(part, asked)

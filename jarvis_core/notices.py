@@ -51,12 +51,19 @@ class NoticeBoard:
         os.replace(tmp, self.path)
 
     def add(self, kind: str, title: str, text: str, **extra: Any) -> dict[str, Any]:
+        """Egy értesítés. corrects (egy találat azonosítója): ez a korábbi, arról a találatról szóló (csengető)
+        értesítés helyesbítése: azok olvasottak lesznek, és áthúzva látszanak (superseded: a helyesbítés címe); a telefon
+        a csengetést is leállítja."""
         notice = {"id": secrets.token_hex(5), "at": time.time(), "kind": kind if kind in KINDS else "info",
                   "title": str(title)[:120], "text": str(text)[:1500], "read": False}
         notice.update({k: v for k, v in extra.items() if v not in (None, "", [])})
         if notice.get("quiet"):
             notice["read"] = True         # nem fontos: a listában megvan, de nem jelez (és nem megy a telefonra)
         with self._lock:
+            if notice.get("corrects"):
+                for old in self._items:
+                    if old.get("deal") == notice["corrects"] and not old.get("superseded"):
+                        old.update(superseded=notice["title"], read=True)
             self._items.append(notice)
             del self._items[:-self.limit]
             try:

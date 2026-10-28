@@ -53,9 +53,10 @@ class HaggleTests(HaggleCase):
         """Tíz napja fent van, és csak kb. 12%-kal drágább annál, ami még megéri: megnyitja (fent van-e, fix áras-e),
         egy rövid modellkérdés után szól, de nem riasztással: a címe „Alku:”, és a találat ablakában az ajánlat."""
         [candidate] = self.hunter.haggle_candidates()
-        # a szokásos ár 99 500 Ft: óvatosan 89 550-ért adhatod el, a posta (1 500) nélkül 88 050; hogy a haszon a vételár
-        # legalább 10%-a legyen (különben kockázatos), legfeljebb 80 045-öt érdemes ajánlani
-        self.assertEqual((candidate["url"], candidate["days"], candidate["offer"], candidate["cut"]), (OLD, 10, 80000, 0.16))
+        # a szokásos ár (a hirdetés saját ára nélkül: önmagához nem mérhető) 100 000 Ft: óvatosan 90 000-ért adhatod el,
+        # a posta (1 500) nélkül 88 500; hogy a haszon a vételár legalább 10%-a legyen (különben kockázatos), legfeljebb
+        # 80 454-et érdemes ajánlani
+        self.assertEqual((candidate["url"], candidate["days"], candidate["offer"], candidate["cut"]), (OLD, 10, 80400, 0.15))
         self.hunter.set_enabled(True)
         self.assertTrue(self.hunter.available(), "az árbázis átnézése esedékes")
         self.assertEqual(self.hunter.run(notify=self.notify), "1 alkuképes hirdetés.")
@@ -64,17 +65,17 @@ class HaggleTests(HaggleCase):
         [(kind, title, text, extra)] = self.notices
         self.assertEqual((kind, title), ("haggle", "Alku: ASUS RTX 3060 Ti Dual eladó"))
         self.assertIn("95 000 Ft (10 napja fent; a hirdetésben: sürgős, költözés miatt)", text)
-        self.assertIn("Ha 80 000 Ft-ért odaadja (16%-kal kevesebb), kb. 8 050 Ft a haszon.", text)
+        self.assertIn("Ha 80 400 Ft-ért odaadja (15%-kal kevesebb), kb. 8 100 Ft a haszon.", text)
         self.assertNotIn("urgent", extra, "nem riaszt, mint egy megérő találat")
         self.assertNotIn("deal", extra, "a telefon nem a megérő hirdetés riasztását indítja")
         self.assertEqual(extra["actions"][0]["action"], "deal")
         [deal] = self.hunter.state()["deals"]
-        self.assertEqual((deal["id"], deal["haggle"]["offer"], deal["title"]), (extra["haggle"], 80000,
+        self.assertEqual((deal["id"], deal["haggle"]["offer"], deal["title"]), (extra["haggle"], 80400,
                                                                                 "ASUS RTX 3060 Ti Dual eladó"))
         self.assertEqual(deal["haggle"]["flex"], ["sürgős", "költözés miatt"])
-        self.assertEqual((deal["profit"], deal["safety"]["level"]), (8050, "jó"))
+        self.assertEqual((deal["profit"], deal["safety"]["level"]), (8100, "jó"))
         self.assertTrue(any(e["text"].startswith("Alkuképes: „ASUS RTX 3060 Ti Dual eladó” 95 000 Ft (Hardverapró), 10 "
-                                                 "napja fent: ajánlj 80 000 Ft-ot")
+                                                 "napja fent: ajánlj 80 400 Ft-ot")
                             for e in self.hunter.journal.entries()))
         self.notices.clear()
         self.assertFalse(self.hunter.available(), f"{HAGGLE_EVERY} percig nem nézi át újra")
@@ -129,6 +130,96 @@ class HaggleTests(HaggleCase):
     def _today(self) -> str:
         from jarvis_core.journal import day_of
         return day_of(self.clock.now)
+
+
+LITE = "https://hardverapro.hu/apro/nintendo_switch_lite_szurke/900500.html"
+
+
+class HaggleCostTests(HunterCase):
+    """Az alku ugyanazokon az ellenőrzéseken megy át, mint a többi jelölt (_reprice): az ajánlott összegre, az állapot
+    szerinti teljes költséggel. A Switch Lite szokásos ára 59 500 Ft (óvatosan 53 550-ért adható el): a javasolt
+    ajánlat 47 000 Ft, ami hibátlan állapotban kb. 5 050 Ft haszon."""
+
+    def setUp(self):
+        super().setUp()
+        self.hunter.book.add([{"text": "Nintendo Switch Lite szürke", "price": 55000, "platform": "hardverapro", "url": LITE}])
+        self.clock.now += 10 * DAY
+        comps = ((58000, "hardverapro"), (59000, "jofogas"), (59500, "hardverapro"), (60000, "jofogas"),
+                 (61000, "hardverapro"))
+        self.hunter.book.add([{"text": "Nintendo Switch Lite szürke", "price": 55000, "platform": "hardverapro", "url": LITE}]
+                             + [{"text": f"Nintendo Switch Lite {color}", "price": p, "platform": site,
+                                 "url": f"https://{'hardverapro.hu/apro' if site == 'hardverapro' else 'www.jofogas.hu/b'}"
+                                        f"/lite_{n}/90060{n}.html"}
+                                for n, ((p, site), color) in enumerate(zip(comps, ("kék", "türkiz", "korall", "sárga",
+                                                                                   "fekete")))])
+        self.page("Nintendo Switch Lite. A kijelzője repedt (világosabb folt is van rajta), töltő nélkül adom. "
+                  "Egyébként működik. Eladó: Ancsa (8 értékelés)")
+        self.hunter.set_enabled(True)
+
+    def page(self, text: str) -> None:
+        self.browser.pages[LITE] = {"title": "Nintendo Switch Lite szürke - HardverApró", "text": text}
+
+    def haggles(self) -> list[tuple]:
+        return [n for n in self.notices if n[0] == "haggle"]
+
+    def test_the_offer_is_counted_with_the_repair_and_the_missing_charger(self):
+        """Reprodukált hiba: 47 000 Ft-os ajánlatnál +5 050 Ft hasznot jelzett, pedig felismerte a repedt kijelzőt és a
+        hiányzó töltőt; a megadott 15 000 Ft javítás és 3 000 Ft töltő kimaradt. Ezekkel −12 950 Ft: nem ajánl alkut
+        (egy kisebb ajánlat is 25%-nál nagyobb engedmény lenne), és a naplóban ott a teljes számolás."""
+        [candidate] = self.hunter.haggle_candidates()
+        self.assertEqual((candidate["offer"], candidate["median"]), (47000, 59500))
+        self.hunter.add_cost("kijelző", "Switch Lite", 15000)
+        self.hunter.add_cost("töltő", "", 3000)
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(self.haggles(), [], "nem ajánl alkut")
+        self.assertEqual(self.hunter.state()["deals"], [])
+        [line] = [e["text"] for e in self.hunter.journal.entries() if e["text"].startswith("Alkuval sem éri meg")]
+        self.assertIn("47 000 Ft-ért a teljes költséggel (levonva: posta 1 500 Ft, kijelző javítása 15 000 Ft, töltő "
+                      "pótlása 3 000 Ft) kb. -12 950 Ft lenne a haszon", line)
+
+    def test_a_smaller_offer_when_it_still_pays_with_the_costs(self):
+        """Ha csak a töltő hiányzik (3 000 Ft), egy kisebb ajánlat még megéri: azt javasolja, a haszon a teljes
+        költséggel számolva (és az értesítésben is látszik, mit vont le)."""
+        self.page("Nintendo Switch Lite. Hibátlanul működik, a kijelzője ép, töltő nélkül adom. Eladó: Ancsa (8 értékelés)")
+        self.hunter.add_cost("töltő", "", 3000)
+        self.hunter.run(notify=self.notify)
+        [(_kind, _title, text, _extra)] = self.haggles()
+        [deal] = self.hunter.state()["deals"]
+        self.assertEqual(deal["haggle"]["offer"], 44000)
+        self.assertEqual(deal["profit"], 53550 - 44000 - 1500 - 3000)
+        self.assertEqual([c["what"] for c in deal["cost_parts"]], ["posta", "töltő pótlása"])
+        self.assertIn("Ha 44 000 Ft-ért odaadja (20%-kal kevesebb), kb. 5 050 Ft a haszon (a posta mellett levonva: "
+                      "töltő pótlása kb. 3 000 Ft).", text)
+
+    def test_the_selling_costs_count_in_the_offer_too(self):
+        """Az eladás megadott költségei (itt 1 000 Ft csomagolás) az alkunál is levonódnak, mint a többi jelöltnél: a
+        javasolt ajánlat ennyivel kisebb, a haszon minden költséggel számolva, és az értesítésben is látszik."""
+        self.page("Nintendo Switch Lite. Hibátlanul működik, a kijelzője ép, töltő nélkül adom. Eladó: Ancsa (8 értékelés)")
+        self.hunter.add_cost("töltő", "", 3000)
+        self.hunter.set_fees({"packaging": "1000", "sell_pct": "0", "sell_fixed": "0", "reserve_pct": "0"})
+        self.hunter.run(notify=self.notify)
+        [(_kind, _title, text, _extra)] = self.haggles()
+        [deal] = self.hunter.state()["deals"]
+        offer = deal["haggle"]["offer"]
+        self.assertLess(offer, 44000, "kisebb ajánlat, mint csomagolás nélkül")
+        self.assertEqual(deal["profit"], 53550 - offer - 1500 - 3000 - 1000)
+        self.assertEqual([c["what"] for c in deal["cost_parts"]], ["posta", "töltő pótlása", "csomagolás"])
+        self.assertIn("töltő pótlása kb. 3 000 Ft, csomagolás kb. 1 000 Ft", text)
+        self.assertNotIn("fees_unset", deal, "minden eladási költség meg van adva (a 0 is)")
+        self.assertLessEqual(offer, deal["max_buy"])
+
+    def test_an_unknown_repair_cost_is_uncertain_not_zero(self):
+        """Ha a kijelző javításának költségét nem adtad meg (és nincs hasonló hibájú összehasonlító), az alku
+        bizonytalan: nem jön alku-értesítés pozitív haszonnal, hanem az Érdemes megnézni listába kerül, az okkal (a
+        hiányzó költség nem nulla)."""
+        self.hunter.add_cost("töltő", "", 3000)
+        self.hunter.run(notify=self.notify)
+        self.assertEqual(self.haggles(), [])
+        self.assertEqual(self.hunter.state()["deals"], [])
+        [tip] = self.hunter.state()["tips"]
+        self.assertTrue(tip["unverified"])
+        self.assertIn("alkuval, de a leírása szerint hibás a kijelzője, és nincs hozzá hasonló hibájú összehasonlító "
+                      "vagy megadott javítási költség", tip["why"])
 
 
 if __name__ == "__main__":

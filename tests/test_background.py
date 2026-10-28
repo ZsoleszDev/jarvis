@@ -301,6 +301,21 @@ class NoticeTests(unittest.TestCase):
             self.assertEqual(board.unread_count(), 1, "csak a fontos jelez")
             self.assertEqual([n.get("quiet") for n in published], [True, None])
 
+    def test_a_correction_supersedes_the_earlier_deal_notice(self):
+        """Egy találat utólagos helyesbítése (corrects: a találat): a korábbi, arról szóló (csengető) értesítés
+        olvasott lesz, és a helyesbítés címével áthúzva látszik; más találat értesítése marad."""
+        with tempfile.TemporaryDirectory() as tmp:
+            published = []
+            board = NoticeBoard(Path(tmp) / "e.json", publish=published.append)
+            board.add("deal", "Megéri: Palit RTX 3060 Ti", "52 000 Ft", deal="d1", urgent=True)
+            board.add("deal", "Megéri: ASUS RTX 3070", "90 000 Ft", deal="d2", urgent=True)
+            board.add("deal", "Mégsem: Palit RTX 3060 Ti", "Utólag a modell is megnézte: csak a doboza.", corrects="d1")
+            notices = {n["title"]: n for n in NoticeBoard(Path(tmp) / "e.json").list()}
+            self.assertEqual((notices["Megéri: Palit RTX 3060 Ti"]["superseded"], notices["Megéri: Palit RTX 3060 Ti"]["read"]),
+                             ("Mégsem: Palit RTX 3060 Ti", True))
+            self.assertNotIn("superseded", notices["Megéri: ASUS RTX 3070"])
+            self.assertEqual(published[-1]["corrects"], "d1", "a telefon is megkapja (leállítja a csengetést)")
+
     def test_sold_notice_keeps_its_item_and_actions(self):
         with tempfile.TemporaryDirectory() as tmp:
             board = NoticeBoard(Path(tmp) / "e.json")

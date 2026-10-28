@@ -75,6 +75,7 @@ public class NotifyService extends Service {
     private final Handler timers = new Handler(Looper.getMainLooper());
     private final Map<Integer, Notification.Builder> deals = new HashMap<>();    // értesítés → a csendes változata
     private final Map<Integer, Integer> rounds = new HashMap<>();
+    private final Map<String, Integer> dealIds = new HashMap<>();   // találat → a riasztó értesítése (a helyesbítéshez)
 
     /** Elindítja (ha párosítva van, és kérted a háttérértesítéseket), különben leállítja. */
     static void start(Context context, Prefs prefs) {
@@ -371,6 +372,7 @@ public class NotifyService extends Service {
     private void dealAlert(int id, JSONObject notice) {
         NotificationManager manager = getSystemService(NotificationManager.class);
         deals.put(id, dealBuilder(CHANNEL_DEAL_QUIET, id, notice));
+        dealIds.put(notice.optString("deal"), id);
         rounds.put(id, 1);
         Notification loud = dealBuilder(CHANNEL_DEAL, id, notice).build();
         loud.flags |= Notification.FLAG_INSISTENT;      // amíg nem állítjuk le, újra és újra rezeg és csenget
@@ -422,6 +424,22 @@ public class NotifyService extends Service {
     private void forget(int id) {
         deals.remove(id);
         rounds.remove(id);
+        dealIds.values().removeIf(value -> value == id);
+    }
+
+    /**
+     * Egy korábbi (csengető) értesítés helyesbítése (notice.corrects: a találat, pl. utólag mégsem jó): a riasztás
+     * leáll, a régi értesítés eltűnik, és egyszer, csengetés nélkül megjön a helyesbítés. Fő szálon fut.
+     */
+    private void correct(JSONObject notice) {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        Integer old = dealIds.remove(notice.optString("corrects"));
+        if (old != null) {
+            manager.cancel(old);
+            forget(old);
+        }
+        int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
+        show(this, CHANNEL_NEWS, id, notice.optString("title", "Mégsem"), notice.optString("text"));
     }
 
     private void handle(JSONObject event) {
@@ -453,6 +471,10 @@ public class NotifyService extends Service {
             manager.notify(CONFIRM_BASE + id, notification);
         } else if ("confirm_done".equals(type)) {
             manager.cancel(CONFIRM_BASE + event.optInt("id"));
+        } else if ("notification".equals(type) && event.optJSONObject("notice") != null
+                && !event.optJSONObject("notice").optString("corrects").isEmpty()) {
+            JSONObject notice = event.optJSONObject("notice");
+            timers.post(() -> correct(notice));                // utólag mégsem jó: a csengetés leáll
         } else if ("notification".equals(type) && event.optJSONObject("notice") != null
                 && !event.optJSONObject("notice").optString("deal").isEmpty()) {
             JSONObject notice = event.optJSONObject("notice");

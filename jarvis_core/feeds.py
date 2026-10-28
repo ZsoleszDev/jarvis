@@ -295,6 +295,22 @@ _PROMO_TEXT = re.compile(r"^(kiemelt( hirdetés(ek)?| ajánlat(ok)?)?|kiemelés|
                          r"promoted|featured)$", re.IGNORECASE)
 
 
+# Súgó- vagy kiemelés-ajánló link egy kártyán („Kerülj te is előre!”, „Előresorolt”, egy …/sugo/… cím): a kártya
+# linkjének nem választható (a title-je gyakran hosszabb a hirdetés címénél), de a kiemelés jele marad (_promoted).
+_HELP_TEXT = re.compile(r"\b(kerulj te is elore|emeld ki|tudj(?:on)? meg tobbet|hogyan (?:sorolhat|emelhet)\w*)\b")
+# (egy egész útvonal-szakasz: a hirdetés címéből lett szakasz, pl. „/apro/kiemelt_kartya_3/”, nem ilyen)
+_HELP_HREF = re.compile(r"/(?:sugo|help|gyik|faq|altalanos|info|kiemeles|kiemelesek|eloresorolas|szolgaltatas|"
+                        r"szolgaltatasok)(?:\.\w+)?(?:/|$)", re.IGNORECASE)
+
+
+def _help_link(href: str, label: str, listing: re.Pattern[str] | None = None) -> bool:
+    """Súgó- vagy kiemelés-ajánló link-e. Ami az oldal hirdetéscímére illik (listing), azt csak a szövege
+    („Kerülj te is előre!”) teheti azzá."""
+    if _HELP_TEXT.search(fold(label)):
+        return True
+    return not (listing is not None and listing.search(href)) and bool(_HELP_HREF.search(urllib.parse.urlsplit(href).path))
+
+
 def _promo_mark(node: Node) -> bool:
     return bool(_PROMO_CLASS.search(f"{node.attrs.get('class', '')} {node.attrs.get('id', '')}"))
 
@@ -365,8 +381,11 @@ def parse_listings(html: str, base_url: str, platform: str = "") -> list[dict[st
 
 
 def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[dict[str, Any]]:
-    """A parse_listings a már feldolgozott oldalból (így a következő oldal linkje is ugyanebből jön)."""
+    """A parse_listings a már feldolgozott oldalból (így a következő oldal linkje is ugyanebből jön). Egy kártya linkje
+    a szerkezete szerint: ha az oldalnak ismert a hirdetéscíme (LISTING_URL), az ilyen link; egy súgó- vagy
+    kiemelés-link (_HELP_LINK: „Kerülj te is előre!”, a hosszú title-je ellenére) soha."""
     cards: dict[int, dict[str, Any]] = {}
+    pattern = LISTING_URL.get(platform)
     for anchor in tree.anchors:
         href = urllib.parse.urljoin(base_url, anchor.attrs.get("href", ""))
         if not href.startswith(("http://", "https://")):
@@ -396,6 +415,10 @@ def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[d
         label = clean(anchor.attrs.get("title") or anchor.attrs.get("aria-label") or anchor.text())
         score = (-5 if PROFILE_RE.search(href) else 0) + (2 if anchor.attrs.get("title") else 0) + \
             min(len(label), 120) / 60
+        if pattern is not None and pattern.search(href):
+            score += 10                          # a kártya hirdetéslinkje (az oldal hirdetéscíme szerint)
+        if _help_link(href, f"{label} {clean(anchor.text())}", pattern):
+            score -= 20                          # súgó vagy kiemelés-ajánló: nem a hirdetés
         known = cards.get(id(found))
         if known is None or score > known["score"]:
             cards[id(found)] = {"node": found, "href": href, "score": score, "label": label}
@@ -433,10 +456,12 @@ def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[d
             entry["auction"] = True
         if _promoted(card["node"], counts, len(leaves)):
             entry["promoted"] = True              # fizetett kiemelés: a figyelő a többi után nézi
+        seller = _card_seller(card["node"], base_url)
+        if seller:
+            entry["seller"] = seller              # az eladó (az árbázisban egy eladó sok hirdetése nem sok független ár)
         out.append(entry)
         if len(out) >= MAX_ROWS:
             break
-    pattern = LISTING_URL.get(platform)
     if pattern is not None and any(pattern.search(e["url"]) for e in out):
         out = [e for e in out if pattern.search(e["url"])]
     promoted = sum(1 for e in out if e.get("promoted"))
@@ -447,6 +472,23 @@ def listings_of(tree: _TreeBuilder, base_url: str, platform: str = "") -> list[d
         for entry in out:
             entry.pop("promoted", None)
     return out or _ld_listings(tree.ld_json, base_url)
+
+
+_SELLER_HREF = re.compile(r"/tag/[^/]+\.html|/(?:member|members|user|users|profil|profile|seller|felhasznalo)/",
+                          re.IGNORECASE)
+
+
+def _card_seller(card: Node, base_url: str) -> str:
+    """A kártyán az eladó neve (a profiljára mutató link szövege, pl. a Hardveraprón a /tag/…html), vagy „”."""
+    stack: list[Node] = [card]
+    while stack:
+        node = stack.pop()
+        if node.tag == "a" and _SELLER_HREF.search(urllib.parse.urljoin(base_url, node.attrs.get("href", ""))):
+            name = clean(node.text())
+            if 1 < len(name) <= 40:
+                return name
+        stack.extend(child for child in reversed(node.children) if isinstance(child, Node))
+    return ""
 
 
 _PRICE_CLASS = re.compile(r"price", re.IGNORECASE)

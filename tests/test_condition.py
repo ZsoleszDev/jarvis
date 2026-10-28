@@ -33,6 +33,53 @@ class FromTextTests(unittest.TestCase):
         self.assertEqual(conditions.issues(cond), [])
         self.assertEqual(conditions.describe(cond), "", "csak az ismertek")
         self.assertIn("garancia: ismeretlen", conditions.describe(cond, known_only=False))
+        self.assertEqual(conditions.clean_evidence(cond), "", "az állapotáról nem ír: nem bizonyítottan hibátlan")
+        self.assertEqual(conditions.clean_evidence(conditions.from_text("Eladó RTX 3060, dobozában.")), "")
+        self.assertEqual(conditions.clean_evidence(conditions.from_text("Hibátlanul működik, dobozában.")),
+                         "Hibátlanul működik")
+
+    def test_spots_pressure_marks_and_burn_in_on_the_display(self):
+        """A kijelző foltja (világosabb folt), nyomáshibája, beégése is hiba; a nyomáshiba és a beégés magában is a
+        kijelzőé. A kijelzővédő fólia hibája nem a kijelzőé."""
+        for text, evidence in (("Világosabb folt a kijelzőn, egyébként működik.", "Világosabb folt a kijelzőn"),
+                               ("Nyomáshiba a kijelző alján, de működik.", "Nyomáshiba a kijelző"),
+                               ("Pár nyomáshiba látszik rajta.", "nyomáshiba"),
+                               ("Beégés van a kijelzőn.", "Beégés van a kijelzőn"),
+                               ("A kijelzőn egy sárga folt van.", "kijelzőn egy sárga folt")):
+            cond = conditions.from_text(text)
+            self.assertEqual((cond["display"]["state"], cond["display"]["evidence"]), ("hibás", evidence), text)
+            self.assertEqual(conditions.issues(cond), ["kijelző"], text)
+        self.assertEqual(conditions.from_text("A kijelzővédő fólia hibás, a kijelző ép.")["display"]["state"], "ép")
+
+    def test_a_denied_defect_is_no_defect(self):
+        """A tagadott hiba nem hiba („nincs folt a kijelzőn”, „a kijelzőn nincs folt”, „nem repedt”, „se karc, se folt”,
+        „nyomáshiba nincs”), hanem a jó állapot bizonyítéka; a „de” után jövő viszont új állítás."""
+        for text, evidence in (("Nincs folt a kijelzőn, hibátlan.", "Nincs folt a kijelzőn"),
+                               ("A kijelzőn nincs folt, karc sincs.", "kijelzőn nincs folt"),
+                               ("Nem repedt a kijelző.", "Nem repedt a kijelző"),
+                               ("Se karc, se folt nincs a kijelzőn.", "se folt nincs a kijelzőn"),
+                               ("Nyomáshiba nincs.", "Nyomáshiba"),
+                               ("Foltmentes kijelző, hibátlan.", "Foltmentes kijelző")):
+            cond = conditions.from_text(text)
+            self.assertEqual((cond["display"]["state"], cond["display"]["evidence"]), ("ép", evidence), text)
+            self.assertEqual(conditions.issues(cond), [], text)
+        cond = conditions.from_text("Nincs karc, de folt van a kijelzőn.")
+        self.assertEqual(cond["display"]["state"], "hibás", "a „de” után a folt állítás")
+        self.assertEqual(conditions.from_text("A kijelző nem hibátlan.")["display"]["state"], conditions.UNKNOWN)
+
+    def test_a_missing_charger_and_its_denial(self):
+        """„Töltő nélkül”, „nincs hozzá töltő”, „a töltője nincs meg”: hiányzik; „a töltő nem hiányzik”: megvan."""
+        for text in ("Töltő nélkül adom.", "Nincs hozzá töltő.", "Töltője nincs meg.", "Töltő nem tartozék."):
+            cond = conditions.from_text(text)
+            self.assertEqual((cond["accessories"]["state"], cond["missing"]), ("hiányos", ["töltő"]), text)
+            self.assertEqual(conditions.issues(cond), ["töltő"], text)
+        cond = conditions.from_text("A töltő nem hiányzik, megvan.")
+        self.assertEqual((cond["accessories"]["state"], cond["missing"], cond["present"]),
+                         (conditions.UNKNOWN, [], ["töltő"]))
+        cond = conditions.from_text("Nincs töltő, működik.")
+        self.assertEqual((cond["missing"], cond["function"]["state"]), (["töltő"], "működik"),
+                         "a tagadás az előző tagmondatban marad")
+        self.assertEqual(conditions.from_text("Nem tudom, működik-e.")["function"]["state"], conditions.UNKNOWN)
 
     def test_a_missing_box_alone_is_no_issue(self):
         cond = conditions.from_text("Doboz nélkül, a töltője megvan, hibátlan állapotú.")

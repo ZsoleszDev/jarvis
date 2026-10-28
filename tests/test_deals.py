@@ -28,6 +28,7 @@ from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, 
                                newest_first, offer_price, parse_auction, profit_floor, safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
 from jarvis_core.pricebook import PriceBook, pace, product_key, sized, unusable, usable, wearable  # noqa: E402
+from jarvis_core import pricebook as pricebook_module  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
 from jarvis_core.selling import PLATFORMS, listing_key  # noqa: E402
 
@@ -198,7 +199,8 @@ class HunterCase(unittest.TestCase):
     def vetted(self, hunter: DealHunter, rows: list[dict], issues: tuple = ()) -> None:
         """Ezeknek az összehasonlítóknak a leírását már elolvasta (allapotok.json): hibátlanok, vagy issues."""
         for row in rows:
-            hunter._vetted[listing_key(row["url"])] = {"at": self.clock.now, "issues": list(issues)}
+            hunter._vetted[listing_key(row["url"])] = {"at": self.clock.now, "issues": list(issues),
+                                                       "state": "hibás" if issues else "hibátlan"}
 
     @staticmethod
     def page_checked(deal: dict) -> dict:
@@ -879,7 +881,13 @@ class ExploreTests(HunterCase):
         rtx = notice["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"]
         # az oldal szokásos árú RTX-e is az árbázisba került: 8 szorosan együtt lévő ár egy oldalról már biztos
         self.assertIn("Máshol kb. 99 000 Ft-ért adják (8 hasonló hirdetés alapján, Hardverapró), a "
-                      "várható haszon kb. 17 600 Ft. Figyelt oldal: Hardverapró: videokartya.", rtx)
+                      "várható haszon kb. 17 600 Ft.", rtx)
+        # a becslés: a gyors eladás sávja, a javasolt legmagasabb vételár (minden költséggel), a megbízhatóság, és hogy az
+        # eladás költségei nincsenek megadva (nem csendben nulla)
+        self.assertIn("legfeljebb 82 600 Ft-ért érdemes megvenni (minden költséggel); a becslés megbízhatósága magas; "
+                      "nincs megadva: csomagolás, eladási díj, egyéb eladási költség, tartalék (0 Ft-tal számoltam).", rtx)
+        self.assertIn("Változat: videókártya: típus rtx 3060 ti (a címből: „RTX 3060 Ti”)", rtx)
+        self.assertIn("Figyelt oldal: Hardverapró: videokartya.", rtx)
         sony = notice["Olcsó: Eladó zajszűrős Sony fejhallgató, alig használt"]
         self.assertIn("Máshol kb. 70 000 Ft-ért adják (10 hasonló hirdetés alapján, Jófogás és Vinted), a várható haszon "
                       "kb. 31 500 Ft.", sony)
@@ -1207,8 +1215,9 @@ class ExploreTests(HunterCase):
         szórnak az árak."""
         base = {"price": 50000, "profit": 15000, "similar": 12, "sites": ["Hardverapró", "Jófogás"], "verified": True}
         safe = assess(base)
-        self.assertEqual((safe["level"], safe["good"]), ("biztos", ["30% haszon", "12 hasonló, 2 oldalon"]))
-        self.assertEqual(safety_text(safe), "Biztos befektetés: 30% haszon, 12 hasonló, 2 oldalon.")
+        self.assertEqual((safe["level"], safe["good"]), ("biztos", ["kb. 30% becsült haszon", "12 hasonló, 2 oldalon"]))
+        self.assertEqual(safety_text(safe), "Alacsony kockázat: kb. 30% becsült haszon, 12 hasonló, 2 oldalon.",
+                         "nem ígéret: a haszon becsült")
         self.assertEqual(assess({**base, "profit": 7000})["level"], "jó", "14%: jó, de nem biztos")
         thin = assess({**base, "profit": 4000})
         self.assertEqual((thin["level"], thin["why"]), ("kockázatos", ["kicsi a haszon a befektetett pénzhez képest (8%)"]))
@@ -1219,7 +1228,8 @@ class ExploreTests(HunterCase):
                          ("jó", ["lassan kel el (a hasonlók sokáig fent maradnak)"]))
         self.assertEqual(assess({**base, "spread": 0.6})["level"], "jó", "nagyon szórnak az árak")
         self.assertIn("gyorsan kel el", assess({**base, "pace": "gyors"})["good"])
-        self.assertIn("4 elkelt hasonló alapján is", assess({**base, "sold": {"n": 4, "median": 60000}})["good"])
+        self.assertIn("4 eltűnt (talán elkelt) hasonló alapján is",
+                      assess({**base, "sold": {"n": 4, "median": 60000}})["good"])
         self.assertEqual(assess({"price": 9000, "profit": 40000, "auction": True, "max_bid": 30000, "verified": True})["level"],
                          "biztos", "a licit mostani árán nem számol haszonrátát")
         self.assertEqual(assess({**base, "verified": False})["level"], "jó", "ellenőrizetlen: a magas haszon magában kevés")
@@ -1483,9 +1493,10 @@ class PriceBookTests(unittest.TestCase):
         reference = book.reference(book.key("RTX 3060 Ti")[0])
         self.assertEqual(([e["p"] for e in reference["basis"]["used"]][:2], reference["basis"]["out"]),
                          ([95000, 96000], [{"t": "RTX 3060 Ti olcsón", "p": 30000, "s": "hardverapro",
-                                            "u": "https://x.hu/30", "src": "árbázis",
-                                            "why": "kilógó ár (kimaradt a szokásos árból)"}]),
-                         "mihez mérte, és mi maradt ki (a címével)")
+                                            "u": "https://x.hu/30", "src": "árbázis", "seen": int(self.clock.now),
+                                            "why": "kilógó ár (kimaradt a szokásos árból)", "outlier": "olcsó",
+                                            "up": 0.0}]),
+                         "mihez mérte, és mi maradt ki (a címével; a kilógóan olcsó: mióta van fent)")
 
     def test_the_title_gives_the_key_and_the_search_word(self):
         """A böngésző nélkül olvasott kártya szövegében a város, a dátum és az eladó neve is ott van („eladó31”): a
@@ -1536,11 +1547,20 @@ class PriceBookTests(unittest.TestCase):
                     {"p": 30000, "url": "https://hardverapro.hu/apro/a0.html", "site": "hardverapro", "at": now,
                      "last": now - 10}]}}
         (root / "arbazis.json").write_text(json.dumps({"keys": keys}), encoding="utf-8")
+        # egy régi árbázisban a „4G” még nem számított méretnek: a 4 GB-os RX 580 a kapacitás nélküliek közé került
+        keys["580 rx"] = {"name": "rx 580", "samples": [
+            {"p": 30000 + n * 500, "url": f"https://hardverapro.hu/apro/c{n}.html", "site": "hardverapro", "at": now,
+             "last": now, "t": "Sapphire RX 580 Nitro+"} for n in range(3)] + [
+            {"p": 21000, "url": "https://hardverapro.hu/apro/c9.html", "site": "hardverapro", "at": now, "last": now,
+             "t": "Sapphire RX580 4G Nitro"}]}
+        (root / "arbazis.json").write_text(json.dumps({"keys": keys}), encoding="utf-8")
         book = PriceBook(root, clock=self.clock)
         self.assertEqual(len(book.samples("10400f i5")), 6)
         self.assertEqual(book.reference("10400f i5")["n"], 6)
+        self.assertEqual([s["p"] for s in book.samples("4gb 580 rx")], [21000], "a saját címe szerinti változatához")
+        self.assertEqual(sorted(s["p"] for s in book.samples("580 rx")), [30000, 30500, 31000])
         book.save()
-        self.assertEqual(json.loads((root / "arbazis.json").read_text(encoding="utf-8"))["kv"], 2)
+        self.assertEqual(json.loads((root / "arbazis.json").read_text(encoding="utf-8"))["kv"], pricebook_module.KEY_VERSION)
 
     def test_a_single_capacity_only_for_known_models(self):
         """A kapacitás nélküli címek csak az ismerten egyetlen kapacitással gyártott típusnál (a GTX 1080 mind 8 GB-os)
@@ -2169,9 +2189,11 @@ class ConditionDealTests(HunterCase):
         self.assertEqual((tip["hold"], tip["issues"], tip["unverified"]), ("állapot", ["kijelző", "töltő"], True))
         self.assertIn("kijelző: hibás („kijelzője repedt”)", tip["condition_text"])
         self.assertIn("tartozékok: hiányzik: töltő („töltő nélkül”)", tip["condition_text"])
-        # az összehasonlítók közül a szokásos árhoz legközelebbi hármat olvasta el, eltárolva (újraindítás után is)
+        # az összehasonlítók közül a szokásos árhoz legközelebbi hármat olvasta el, eltárolva (újraindítás után is);
+        # és a jelölt saját állapotát is (az adatlapjáról: egy későbbi összehasonlításnál ő is összehasonlító)
         vetted = DealHunter(Path(self.tmp.name), PLATFORMS, lambda: self.browser, self.llm, clock=self.clock)._vetted
-        self.assertEqual(len(vetted), 3)
+        self.assertEqual(len([k for k in vetted if k != listing_key(LITE_CHEAP["url"])]), 3)
+        self.assertEqual(vetted[listing_key(LITE_CHEAP["url"])]["state"], "hibás")
         self.assertEqual(vetted[listing_key(LITE[0]["url"])]["issues"], ["kijelző"])
         looked = list(self.browser.looked)
         hunter.run(notify=self.notify, force=True)
@@ -2188,7 +2210,8 @@ class ConditionDealTests(HunterCase):
         [(_kind, title, text, extra)] = self.notices
         self.assertEqual(title, "Olcsó: Nintendo Switch Lite")
         self.assertTrue(extra["urgent"])
-        self.assertIn("Ellenőriztem: az adatlapja és az állapota alapján újraszámolva is megéri.", text)
+        self.assertIn("Ellenőrizve: az adatlapja megnyílt, a leírása és az állapota alapján újraszámoltam, és a modell "
+                      "is átnézte. A haszon hirdetési árakból becsült, nem garancia.", text)
         self.assertIn("Levonva: kijelző javítása kb. 15 000 Ft, töltő pótlása kb. 3 000 Ft.", text)
         [deal] = hunter.state()["deals"]
         self.assertTrue(deal["verified"])

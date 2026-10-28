@@ -144,6 +144,22 @@
   leveszi a találatok közül. A jelölt adatlapja a letöltő sorában elsőbbséget kap (SiteFetcher urgent; a szünet marad).
   Előmelegítés ráérő időben (DealHunter.warm, InstantWatch._warm): a gyakori termékek összehasonlítóinak leírása,
   csendes órában a kevés árúak árkeresése; a mai számokban „Ráérő időben”.
+- Megbízhatóbb „megéri” (egy átnézés hibái és kérései alapján): az alku az ajánlott áron a teljes költséggel számol
+  (a reprodukált +5 050 Ft helyett −12 950 Ft), hiányzó javítási költségnél bizonytalan; videókártyán a „4G” 4 GB VRAM,
+  telefonon a hálózat; memóriánál a kiszerelés, a DDR-generáció, a SO-DIMM és az ECC/REG külön; a Switch-változatok és a
+  konzolcsomagok külön; termékadatok kategóriánként forrással és idézettel (specs.py), összehasonlítási osztályok
+  (pontos, közelítő, kizárt, bizonytalan); független árak (egy hirdetés egyszer, egy eladótól legfeljebb 2, a vizsgált
+  hirdetés máshol fent lévő példánya nem mérce); a kilógóan olcsó hasonló megmagyarázva (a napok óta fent lévő, hibátlan
+  versenytárs lejjebb viszi a gyors eladási becslést); darabár, részletár, üres doboz, zárolt telefon kimarad; csomagnál
+  a darabár vagy „-tól” ár nem csomagár; az állapotfelismerés tagadásai („nincs folt”), „világosabb folt”, „nyomáshiba”,
+  „töltő nélkül”, és az állapotról hallgató leírás ismeretlen; a közös friss lista letöltve / vár / kiértékelve
+  állapottal (más árszűrőnél sem vész el hirdetés, a szünetelő vagy elavult lista nem lassít); az utólag elutasított
+  találat mindenhol frissül, és az értesítést egyszer helyesbíti (Android: a csengés leáll); a Hardverapró-kártyán a
+  súgólink nem előzi meg a hirdetés linkjét. Árbecslés: a hirdetési ár mediánjától külön gyors eladási becslés sávval,
+  megbízhatóság (független árak, oldalak, frissesség, szórás, változat, ellenőrzött állapot), eladási költségek
+  (csomagolás, eladási díj, egyéb, tartalék; a meg nem adott látszik), javasolt legmagasabb vételár, az eladás módja
+  (ahogy van, hasonló hibájúként, javítva); „Alacsony kockázat” a „Biztos befektetés” helyett, „eltűnt (talán
+  elkelt)”, az „Ellenőrizve” pontos jelentése.
 
 ## Élesben kipróbálandó
 - Azonnali figyelő: a feltöltési idő a valódi kártyákon (instant._POSTED_RE: „ma 14:07”, „tegnap 23:50”; a Jófogáson
@@ -225,6 +241,19 @@
 - Az ármező felismerése („price” osztályú elem a kártyán) a valódi Hardverapró- és Jófogás-kártyákon.
 - Alku: hány ajánlatot fogadnak el; a HAGGLE_DAYS (7 nap), a HAGGLE_MAX (25%) és a 10%-os minimum haszon hangolása.
   Az árbázis régi (kapacitás nélküli) kulcsai vegyesek maradnak, amíg ki nem öregednek (45 nap).
+- A Hardverapró-kártya a valódi oldalon: hogy a kiemelt kártyán a „Kerülj te is előre!” súgólink tényleg a mentett
+  minta szerinti helyen és alakban van-e (tests/data/hardverapro_eloresorolt.html, feeds._HELP_TEXT, _HELP_HREF, a
+  böngészős LISTINGS_JS), és hogy az eladó linkje `/tag/…html` alakú-e (feeds._SELLER_HREF). A Jófogás-kártyán az eladó
+  neve nincs kiolvasva: ott az egy eladótól legfeljebb 2 ár szabály nem hat (csak az egy hirdetés egyszer).
+- A termékadatok (specs.py) és az összehasonlítási osztályok valódi hirdetéscímeken: a típus- és gyártószavak listái
+  (_GPU_MAKERS, _RAM_MAKERS, _SSD_MODELS, _SSD_IFACE_BY_MODEL) bővítendők; egy túl szigorú „bizonytalan” (pl. a kivitel
+  nem derül ki) kevesebb összehasonlítót hagy, egy túl laza „közelítő” túl sokat.
+- A gyors eladási becslés sávja (deals.SALE_MARGIN: ±5/10/20%), a megbízhatóság pontozása (deals.reliability) és az
+  olcsó versenytárs szabálya (CHEAP_STAYED 1 nap, középár) becslés, valódi eladásokon nincs hangolva.
+- Az eladási költségek alapból nincsenek megadva (Eladási költségek): amíg nem adod meg őket, minden találatnál és
+  értesítésben ott áll, hogy 0 Ft-tal számolt.
+- Az Android-alkalmazás helyesbítő értesítése (NotifyService.correct: a csengő riasztás leállítása) a GitHub Actionsön
+  lefordul, de telefonon nincs kipróbálva.
 
 ## Kisebb javítások (ismertek, nem sürgősek)
 ### Begyakorolt lépések (replay.py)
@@ -289,8 +318,9 @@
 ### Nyugodt szívvel (biztonsági értékelés, elkelt árak, fotók)
 - A határok (`deals.SAFE_ROI`, `RISKY_ROI`, `WIDE_SPREAD`, `SLOW_OK_ROI`) becslések, valódi eredményekkel nincsenek
   hangolva; a Vételeim tényleges hasznából később tanulhatna.
-- Az elkelt ár az újranézéskor eltűnt hirdetésekből jön: a törölt (nem eladott) hirdetés is eltűnik, és körönként csak
-  két hirdetést néz újra, ezért lassan gyűlik.
+- Az „eltűnt (talán elkelt)” ár az újranézéskor eltűnt hirdetésekből jön: a törölt (nem eladott) hirdetés is eltűnik,
+  és hogy mennyiért kelt el, nem tudjuk (a hirdetési ár kínálati ár); körönként csak két hirdetést néz újra, ezért
+  lassan gyűlik.
 - A hirdetés fotóit az og:image és a fő tartalom képei adják; a valódi Hardverapró-, Jófogás- és Vinted-oldalakon nincs
   kipróbálva, hogy melyik kép jön (lehet, hogy a Vinteden a képek csak bejelentkezve tölthetők le).
 

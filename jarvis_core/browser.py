@@ -676,6 +676,10 @@ LISTINGS_JS = r"""
   };
   const SKIP = 'header, nav, footer, [role=banner], [role=navigation], [role=contentinfo]';
   const PROFILE = /\/(member|members|user|users|profil|profile|seller|felhasznalo)(\/|$|\?)/i;
+  const LISTING_HREF = /\/apro\/[^/]+\/|_\d+\.htm/;
+  const HELP_TEXT = /\b(kerulj te is elore|emeld ki|tudj(?:on)? meg tobbet|hogyan (?:sorolhat|emelhet)\w*)\b/;
+  const HELP_HREF = /\/(?:sugo|help|gyik|faq|altalanos|info|kiemeles|kiemelesek|eloresorolas|szolgaltatas|szolgaltatasok)(?:\.\w+)?(?:\/|$)/i;
+  const fold = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const cards = new Map();
   for (const a of document.querySelectorAll('a[href]')) {
     if (a.closest(SKIP)) continue;
@@ -690,8 +694,13 @@ LISTINGS_JS = r"""
     }
     if (!found) continue;
     const label = clean(a.getAttribute('title') || a.getAttribute('aria-label') || a.innerText);
+    // mint a feeds.py-ban: a hirdetéscím (Hardverapró, Jófogás) előnyt kap, egy súgó- vagy kiemelés-ajánló link
+    // („Kerülj te is előre!”, …/sugo/…) soha nem a kártya linkje, akármilyen hosszú a title-je
+    const listing = LISTING_HREF.test(href);
+    const help = HELP_TEXT.test(fold(label + ' ' + clean(a.innerText))) ||
+                 (!listing && HELP_HREF.test(new URL(href).pathname));
     const score = (PROFILE.test(href) ? -5 : 0) + (a.getAttribute('title') ? 2 : 0) +
-                  Math.min(label.length, 120) / 60;
+                  Math.min(label.length, 120) / 60 + (listing ? 10 : 0) - (help ? 20 : 0);
     const known = cards.get(found);
     if (!known || score > known.score) cards.set(found, {node: found, href, score, label});
   }

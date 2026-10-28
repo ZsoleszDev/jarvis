@@ -838,6 +838,9 @@ class _Handler(BaseHTTPRequestHandler):
                                                                      body.get("amount"))})
             if action == "cost_remove":
                 return self._json(200, {"ok": True, **deals.remove_cost(str(body.get("id") or ""))})
+            if action == "fees":        # az eladás költségei (csomagolás, eladási díj, egyéb, tartalék; üres: nincs megadva)
+                fees = body.get("fees") if isinstance(body.get("fees"), dict) else {}
+                return self._json(200, {"ok": True, **deals.set_fees(fees)})
             if action == "haggle":      # alkuképes hirdetések: be/ki, az ajánlat szövege
                 return self._json(200, {"ok": True, **deals.set_haggle(body.get("on"), body.get("message"))})
             if action == "bundles":     # csomagbontás: be/ki, legalább mennyi haszonnal szóljon
