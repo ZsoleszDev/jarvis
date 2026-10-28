@@ -1,4 +1,4 @@
-# TODO – Adás/Vétel
+# TODO – Adás
 
 ## Kész (ezen az ágon, összefésülve, tesztelve)
 - Vinted-feltöltés és -levétel modell nélkül; gyorsabb oldalnézet, `browser_choose`, `browser_do`.

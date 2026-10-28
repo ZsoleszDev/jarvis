@@ -263,7 +263,7 @@ class ApiTests(unittest.TestCase):
         h = self.h
         status, data, _ = h.request("GET", "/api/v1/jobs")
         self.assertEqual({j["key"] for j in data["jobs"]},
-                         {"watches", "stale", "todos", "listings", "messages", "deals"})
+                         {"watches", "stale", "todos", "listings", "refresh", "messages", "deals"})
         todos = next(j for j in data["jobs"] if j["key"] == "todos")
         self.assertEqual((todos["title"], todos["note"]),
                          ("Teendőim emlékeztető", "Este 19:00-kor szól, ha van elvégezetlen teendő"))

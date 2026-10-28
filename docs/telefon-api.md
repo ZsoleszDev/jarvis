@@ -100,7 +100,7 @@ válaszol; ilyenkor érdemes nagyobb `wait`-et adni (pl. 60). A `/pause` készen
 csak a `/resume` (vagy a `resume: true`) hozza vissza. Készenlétben a modell nélküli háttérmunka (figyelők, régóta
 fent lévő hirdetések) fut, szünetben semmi.
 
-### Munka menü: Adás/Vétel
+### Munka menü: Adás
 
 | Módszer | Útvonal | Törzs | Megjegyzés |
 |---|---|---|---|

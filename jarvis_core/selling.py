@@ -1,4 +1,4 @@
-"""Adás/Vétel: eladásra szánt tárgyak, hirdetési oldalak, és a hirdetés adatai a leírásodból.
+"""Adás: eladásra szánt tárgyak, hirdetési oldalak, és a hirdetés adatai a leírásodból.
 
 A menet: kiválasztod, hova kerüljön (Vinted, Jófogás, Vatera, Hardverapró), feltöltöd a
 fotókat, és leírod egy-két mondatban, mit adsz el („Zara L-es fekete póló, egyszer hordott,
@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import photos as photocheck
+from . import refresh as refreshing
 from .feeds import FeedError, newest_first
 from .textutil import fold, only_hu_amount
 
@@ -249,6 +250,14 @@ class Item:
     sell_fee: int | None = None           # eladási díj (jutalék, kiemelés)
     trade_note: str = ""              # megjegyzés (csomagszám, az eladó, egy hiba)
     reminded: float = 0.0             # mikor szólt utoljára, hogy régóta fent van és nem kelt el
+    # A második képsor: az automatikus frissítés (refresh.py) felrakásonként váltogatja a két képsort, így az újra
+    # feltöltött hirdetés újnak is látszik (a fotói a tárgy mappájában, az alapéi mellett).
+    photos_alt: list[str] = field(default_factory=list)
+    # Az automatikus frissítés (refresh.py): on, days (hány naponta), hour (hány óra körül), next (mikortól esedékes),
+    # last (mikor sikerült utoljára), set (melyik képsorral van fent: 0 az alap, 1 a második), count, since (mióta van
+    # fent először: a frissítés nem nullázza), note (az utolsó eredmény), fails (egymás utáni sikertelen), repost
+    # (ahonnan levette, de az újrafeltöltés még hátravan)
+    refresh: dict[str, Any] = field(default_factory=dict)
     busy: str = ""                    # épp min dolgozik a Jarvis (nem mentjük)
 
     def __post_init__(self) -> None:
@@ -309,7 +318,17 @@ class Item:
         data["research_stale"] = bool(self.research.get("at")) and not research_fresh(self)
         data["drift"] = self.drift()
         data.update(self.photo_report())
+        # az automatikus frissítés a felületnek: mikor legközelebb (szövegesen), és melyik képsorral van fent
+        state = self.refresh
+        data["refresh_next"] = (refreshing.when_text(float(state["next"]), time.time())
+                                if state.get("on") and state.get("next") else "")
+        data["refresh_last"] = (time.strftime("%Y.%m.%d. %H:%M", time.localtime(float(state["last"])))
+                                if state.get("last") else "")
         return data
+
+    def live_photos(self) -> list[str]:
+        """Amelyik képsorral most kerül fel (az automatikus frissítés váltogatja): a második, ha az van soron és van."""
+        return self.photos_alt if self.refresh.get("set") == 1 and self.photos_alt else self.photos
 
     def photo_report(self) -> dict[str, Any]:
         """A fotók jelzései (homályos, sötét, majdnem ugyanaz, egy másik tárgy fotója), a javasolt borító, ha az
@@ -318,11 +337,15 @@ class Item:
         return photocheck.report(self.photos, self.photo_checks, elsewhere)
 
     def online_since(self) -> float | None:
-        """Mióta van fent (a legkorábban felkerült oldalon, ahol most is fent van); None, ha sehol."""
+        """Mióta van fent (a legkorábban felkerült oldalon, ahol most is fent van); None, ha sehol. Az automatikus
+        frissítés (levétel és újrafeltöltés) ezt nem nullázza: a tárgy azóta vár vevőre (refresh.since)."""
         posted = [float(e.get("posted_at") or e.get("at") or 0) for e in self.platforms.values()
                   if e.get("status") == POSTED]
         posted = [at for at in posted if at > 0]
-        return min(posted) if posted else None
+        if not posted:
+            return None
+        since = float(self.refresh.get("since") or 0) if isinstance(self.refresh, dict) else 0.0
+        return min(min(posted), since) if since > 0 else min(posted)
 
     def stored(self) -> dict[str, Any]:
         data = asdict(self)
@@ -337,9 +360,13 @@ class Item:
             values["prompt"] = str(data["notes"])
         values["busy"] = ""
         values["photos"] = [p for p in values.get("photos") or [] if isinstance(p, str) and PHOTO_RE.match(p)]
+        values["photos_alt"] = [p for p in values.get("photos_alt") or [] if isinstance(p, str) and PHOTO_RE.match(p)
+                                and p not in values["photos"]]
+        values["refresh"] = values.get("refresh") if isinstance(values.get("refresh"), dict) else {}
         checks = values.get("photo_checks")    # a régebbi tárgyaknál nincs: a háttérben elkészül
+        names = set(values["photos"]) | set(values["photos_alt"])
         values["photo_checks"] = ({name: check for name, check in checks.items()
-                                   if name in values["photos"] and isinstance(check, dict)}
+                                   if name in names and isinstance(check, dict)}
                                   if isinstance(checks, dict) else {})
         return cls(**values)
 
@@ -473,7 +500,8 @@ class ItemStore:
                 continue
             item.id = folder.name
             item.photos = [p for p in item.photos if (folder / p).is_file()]
-            item.photo_checks = {k: v for k, v in item.photo_checks.items() if k in item.photos}
+            item.photos_alt = [p for p in item.photos_alt if (folder / p).is_file()]
+            item.photo_checks = {k: v for k, v in item.photo_checks.items() if k in item.photos or k in item.photos_alt}
             self._items[item.id] = item
             self._refresh_footer(item)
 
@@ -756,6 +784,135 @@ class ItemStore:
             item.reminded = time.time() if when is None else float(when)
             return self._changed(item)
 
+    # --- automatikus frissítés (refresh.py) ----------------------------------------------------------
+
+    def set_refresh(self, item_id: str, on: Any = None, days: Any = None, hour: Any = None,
+                    now: float | None = None) -> Item:
+        """Az automatikus frissítés beállítása: be/ki, hány naponta, hány óra körül. Bekapcsoláskor, és ha a napok
+        vagy az óra változik, kiszámolja, mikor legközelebb (refresh.next_time): az utolsó frissítéstől (vagy a
+        felkerüléstől) számolva. Ha egy újrafeltöltés még hátravan, az nem tolódik."""
+        now = time.time() if now is None else now
+        with self._lock:
+            item = self.get(item_id)
+            state = dict(item.refresh)
+            try:
+                if days not in (None, ""):
+                    state["days"] = refreshing.clamp_days(days)
+                if hour not in (None, ""):
+                    state["hour"] = refreshing.clamp_hour(hour)
+            except ValueError as exc:
+                raise ItemError(str(exc)) from None
+            state.setdefault("days", refreshing.DEFAULT_DAYS)
+            state.setdefault("hour", refreshing.DEFAULT_HOUR)
+            if on is not None:
+                state["on"] = bool(on)
+                if state["on"]:
+                    state["fails"] = 0
+            if state.get("on") and (on or days not in (None, "") or hour not in (None, "") or not state.get("next")):
+                base = float(state.get("last") or item.online_since() or now)
+                state["next"] = refreshing.next_time(base, state["days"], state["hour"], now)
+                if state.get("repost"):
+                    state["next"] = min(state["next"], now + refreshing.REPOST_RETRY)
+            item.refresh = state
+            return self._changed(item)
+
+    def refresh_due(self, now: float | None = None) -> list[Item]:
+        """A most esedékes frissítések (a legrégebben esedékes elöl): be van kapcsolva, nem kelt el, és fent van egy
+        frissíthető oldalon, vagy az újrafeltöltése hátravan."""
+        now = time.time() if now is None else now
+        with self._lock:
+            out = [item for item in self._items.values()
+                   if item.refresh.get("on") and not item.sold and float(item.refresh.get("next") or 0) <= now
+                   and (item.refresh.get("repost") or any(
+                       refreshing.method(key) and entry.get("status") == POSTED
+                       for key, entry in item.platforms.items()))]
+        return sorted(out, key=lambda item: float(item.refresh.get("next") or 0))
+
+    def refresh_begin(self, item_id: str, relist: list[str]) -> Item:
+        """Egy frissítés eleje (a levétel előtt): mióta van fent (a frissítés ezt nem nullázza), és ahonnan leveszi
+        (azokat újra fel kell tenni: repost; ha a levétel nem sikerül, a hívó törli: refresh_reposted)."""
+        with self._lock:
+            item = self.get(item_id)
+            state = dict(item.refresh)
+            since = item.online_since()
+            if since and not state.get("since"):
+                state["since"] = since
+            if relist:
+                state["repost"] = sorted(set(state.get("repost") or []) | set(relist))
+            item.refresh = state
+            return self._changed(item)
+
+    def refresh_next_set(self, item_id: str) -> int:
+        """A levétel után, az újrafeltöltés előtt: melyik képsorral kerül fel újra (ha van második, a mostanival
+        ellentétes, különben az alap). Elmenti (Item.live_photos ezt adja a feltöltésnek), és visszaadja (0 vagy 1)."""
+        with self._lock:
+            item = self.get(item_id)
+            state = dict(item.refresh)
+            state["set"] = (1 - int(state.get("set") or 0)) if item.photos_alt else 0
+            item.refresh = state
+            self._changed(item)
+            return state["set"]
+
+    def refresh_reposted(self, item_id: str, platform: str) -> Item:
+        """Az újrafeltöltés megvan ezen az oldalon (nincs több teendő vele)."""
+        with self._lock:
+            item = self.get(item_id)
+            state = dict(item.refresh)
+            state["repost"] = [key for key in state.get("repost") or [] if key != platform]
+            if not state["repost"]:
+                state.pop("repost")
+            item.refresh = state
+            return self._changed(item)
+
+    def refresh_end(self, item_id: str, ok: bool, note: str, now: float | None = None) -> Item:
+        """Egy frissítés vége: az eredménye, és a következő időpont. Sikerkor a mostanitól számolva a beállított nap és
+        óra szerint; ha az újrafeltöltés maradt el, REPOST_RETRY múlva; más hibánál holnap ugyanekkor. MAX_FAILS
+        sikertelen próbálkozás után egymás után kikapcsolja (a hívó szól róla)."""
+        now = time.time() if now is None else now
+        with self._lock:
+            item = self.get(item_id)
+            state = dict(item.refresh)
+            days = int(state.get("days") or refreshing.DEFAULT_DAYS)
+            hour = int(state.get("hour") if state.get("hour") is not None else refreshing.DEFAULT_HOUR)
+            state["note"] = note[:300]
+            state["tried"] = now
+            if ok:
+                state.update(last=now, fails=0, count=int(state.get("count") or 0) + 1)
+                state["next"] = refreshing.next_time(now, days, hour, now)
+            else:
+                state["fails"] = int(state.get("fails") or 0) + 1
+                state["next"] = now + refreshing.REPOST_RETRY if state.get("repost") else \
+                    refreshing.next_time(now, 1, hour, now)
+                if state["fails"] >= refreshing.MAX_FAILS:
+                    state["on"] = False
+            item.refresh = state
+            return self._changed(item)
+
+    def adopt_live_price(self, item_id: str, platform: str, price: Any) -> int | None:
+        """A hirdetés oldalán látott ár (a háttérellenőrzés vagy a frissítés olvasta el): ha ott kézzel átírtad (más,
+        mint amivel feltöltöttük), és itt azóta nem írtad át, átveszi: ez lesz a tárgy ára (és ezen az oldalon a
+        feltöltéskori ár; a többi oldal régi árát a drift jelzi). Visszaadja a régi árat, ha átvette; különben None."""
+        try:
+            price = int(price)
+        except (TypeError, ValueError):
+            return None
+        if not 0 < price < 100_000_000:
+            return None
+        with self._lock:
+            item = self.get(item_id)
+            entry = item.platforms.get(platform)
+            if entry is None or entry.get("status") != POSTED or entry.get("posted_price") is None:
+                return None
+            posted = int(entry["posted_price"])
+            if posted == price or (item.price is not None and item.price != posted):
+                return None        # nem változott, vagy itt is átírtad (az a tiéd, nem írjuk felül)
+            old = item.price
+            item.price = price
+            entry["posted_price"] = price
+            item.edited = sorted(set(item.edited) | {"price"})   # te írtad át (ott): Jarvis nem írja felül
+            self._changed(item)
+            return old if old is not None else posted
+
     def delete(self, item_id: str) -> None:
         """A tárgy a _torolt mappába kerül (onnan kézzel visszahozható)."""
         with self._lock:
@@ -778,39 +935,48 @@ class ItemStore:
         if not PHOTO_RE.match(name or ""):
             raise ItemError("Nincs ilyen fotó.")
         item = self.get(item_id)
-        if name not in item.photos:
+        if name not in item.photos and name not in item.photos_alt:
             raise ItemError("Nincs ilyen fotó.")
         folder = self.folder(item_id)
         return folder / "thumbs" / name if thumb else folder / name
 
-    def photo_paths(self, item_id: str) -> list[Path]:
+    def photo_paths(self, item_id: str, alt: bool = False) -> list[Path]:
+        """A tárgy fotói (a borítókép az első); alt: a második képsoré (lásd photos_alt)."""
         item = self.get(item_id)
         folder = self.folder(item_id)
-        return [folder / name for name in item.photos]
+        return [folder / name for name in (item.photos_alt if alt else item.photos)]
 
-    def add_photo(self, item_id: str, data: bytes) -> Item:
+    def add_photo(self, item_id: str, data: bytes, alt: bool = False) -> Item:
+        """Egy fotó a tárgyhoz; alt: a második képsorhoz (az automatikus frissítés váltogatja)."""
         full, thumb = process_photo(data)   # a lassabb rész zár nélkül
         check = self._measure(full)
         with self._lock:
             item = self.get(item_id)
-            if len(item.photos) >= self.max_photos:
-                raise ItemError(f"Egy tárgyhoz legfeljebb {self.max_photos} fotó tartozhat.")
+            photos = item.photos_alt if alt else item.photos
+            if len(photos) >= self.max_photos:
+                raise ItemError(f"Egy képsorban legfeljebb {self.max_photos} fotó lehet." if alt else
+                                f"Egy tárgyhoz legfeljebb {self.max_photos} fotó tartozhat.")
             folder = self.folder(item_id)
             (folder / "thumbs").mkdir(parents=True, exist_ok=True)
-            numbers = [int(p[:2]) for p in item.photos] or [0]
+            numbers = [int(p[:2]) for p in item.photos + item.photos_alt] or [0]
+            if max(numbers) >= 99:
+                raise ItemError("Ehhez a tárgyhoz már nem fér több fotó; törölj párat.")
             name = f"{max(numbers) + 1:02d}.jpg"
             (folder / name).write_bytes(full)
             (folder / "thumbs" / name).write_bytes(thumb)
-            item.photos.append(name)
+            photos.append(name)
             if check is not None:
                 item.photo_checks = {**item.photo_checks, name: check}   # új szótár: a felület közben olvashatja
-            return self._relinked(item)
+            return self._changed(item) if alt else self._relinked(item)
 
     def remove_photo(self, item_id: str, name: str) -> Item:
         with self._lock:
             path = self.photo_file(item_id, name)
             item = self.get(item_id)
-            item.photos.remove(name)
+            if name in item.photos_alt:
+                item.photos_alt.remove(name)
+            else:
+                item.photos.remove(name)
             item.photo_checks = {k: v for k, v in item.photo_checks.items() if k != name}
             for file in (path, path.parent / "thumbs" / name):
                 try:

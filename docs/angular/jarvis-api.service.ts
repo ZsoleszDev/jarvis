@@ -287,7 +287,7 @@ export class JarvisApiService {
     });
   }
 
-  // --- Munka: Adás/Vétel ---
+  // --- Munka: Adás ---
 
   work(): Observable<WorkOverview> { return this.get<WorkOverview>('/work'); }
 

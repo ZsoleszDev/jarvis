@@ -1,4 +1,4 @@
-"""Az Adás/Vétel felületének tesztjei: valódi helyi szerver, valódi (láthatatlan) Chromium, hamis
+"""Az Adás felületének tesztjei: valódi helyi szerver, valódi (láthatatlan) Chromium, hamis
 modell, és a hirdetési oldalak helyett helyi tesztoldalak. A biztonsági tesztekhez nem kell böngésző.
 
 Futtatás:  python -m unittest discover -s tests -v
@@ -492,6 +492,28 @@ class WorkSecurityTests(unittest.TestCase):
         status, data = request(self.port, "POST", path, self.ok, image)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(data)["item"]["photos"], ["01.jpg"])
+        # a második képsorba (az automatikus frissítés váltogatja)
+        status, data = request(self.port, "POST", path + "?set=alt", self.ok, image)
+        self.assertEqual(status, 200)
+        self.assertEqual((json.loads(data)["item"]["photos"], json.loads(data)["item"]["photos_alt"]),
+                         (["01.jpg"], ["02.jpg"]))
+        status, data = request(self.port, "GET", f"/api/work/photo/{item.id}/02.jpg?t={self.h.server.token}",
+                               {"Host": f"127.0.0.1:{self.port}"})
+        self.assertEqual(status, 200)
+
+    def test_refresh_settings(self):
+        item = self.h.store.create(targets=["vinted"], prompt="kabát")
+        status, data = self.post("/api/work/refresh", {"id": item.id, "on": True, "days": "10", "hour": "20"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual({k: data["item"]["refresh"][k] for k in ("on", "days", "hour")},
+                         {"on": True, "days": 10, "hour": 20})
+        self.assertRegex(data["item"]["refresh_next"], r" 20 óra körül$")
+        self.assertEqual(self.post("/api/work/refresh", {"id": item.id, "days": "0"})[0], 400)
+        self.assertEqual(self.post("/api/work/refresh", {"id": item.id, "hour": "25"})[0], 400)
+        status, data = self.post("/api/work/refresh", {"id": item.id, "on": False})
+        self.assertEqual((status, data["item"]["refresh"]["on"], data["item"]["refresh_next"]), (200, False, ""))
+        self.assertEqual(self.post("/api/work/action", {"action": "refresh", "ids": []})[0], 400, "melyik tárgy?")
+        self.h.store.delete(item.id)
 
     def test_new_and_update_validate(self):
         status, data = self.post("/api/work/new", {"targets": ["vinted", "ebay"], "prompt": "póló"})
@@ -565,7 +587,7 @@ class WorkSecurityTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")
 class WorkBrowserTests(unittest.TestCase):
-    """Az Adás/Vétel a valódi felületen, egy láthatatlan Chromiumban."""
+    """Az Adás a valódi felületen, egy láthatatlan Chromiumban."""
 
     @classmethod
     def setUpClass(cls):
@@ -1599,6 +1621,36 @@ class WorkBrowserTests(unittest.TestCase):
         self.page.wait_for_selector(".detail .photo:nth-child(2) img")
         self.page.click('.detail .photo:nth-child(2) [data-action="cover"]')
         self.wait_for(lambda: self.h.store.get(item.id).photos == ["02.jpg", "01.jpg"])
+
+    def test_refresh_block_on_the_listing_page(self):
+        """A Frissítés blokk: be, hány naponta, hány óra körül (azonnal mentve), a második képsor feltöltése és
+        törlése; az első képsor csak látszik (a Fotóknál szerkeszthető)."""
+        item = self.h.ready_item()
+        self.h.store.mark(item.id, "vinted", "feltöltve", url="http://127.0.0.1:9/items/1-polo")
+        self.page.wait_for_selector(f'.card[data-id="{item.id}"]')
+        self.open_item(item.id)
+        self.page.wait_for_selector("#h-refresh")
+        self.assertIn("a Vinteden leveszem és újra feltöltöm", self.page.inner_text("section.refresh"))
+        self.page.check("#r-on")
+        self.wait_for(lambda: self.h.store.get(item.id).refresh.get("on") is True)
+        self.page.select_option("#r-days", "14")
+        self.wait_for(lambda: self.h.store.get(item.id).refresh.get("days") == 14)
+        self.page.select_option("#r-hour", "21")
+        self.wait_for(lambda: self.h.store.get(item.id).refresh.get("hour") == 21)
+        self.page.wait_for_selector('#r-status:has-text("21 óra körül")')
+        self.assertEqual(self.page.locator("section.refresh .photos.mini img").count(), 1, "az alap képsor")
+        with self.page.expect_file_chooser() as chooser:
+            self.page.click('[data-action="pickalt"]')
+        chooser.value.set_files(str(self.h.photo))
+        self.wait_for(lambda: self.h.store.get(item.id).photos_alt == ["02.jpg"])
+        self.assertEqual(self.h.store.get(item.id).photos, ["01.jpg"], "az alap képsor nem változott")
+        self.page.wait_for_selector('section.refresh [data-name="02.jpg"]')
+        self.page.click('section.refresh [data-name="02.jpg"]')
+        self.page.click("#ask-yes")
+        self.wait_for(lambda: self.h.store.get(item.id).photos_alt == [])
+        self.page.uncheck("#r-on")
+        self.wait_for(lambda: self.h.store.get(item.id).refresh.get("on") is False)
+        self.assertEqual(self.page.inner_text("#job-sales"), "Adás")
 
     def test_dropped_photos_go_to_the_new_listing(self):
         b64 = base64.b64encode(jpeg()).decode()

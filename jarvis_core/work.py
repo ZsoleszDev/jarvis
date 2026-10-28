@@ -1,4 +1,4 @@
-"""A Munka menü. Az első munka az Adás/Vétel: Jarvis itt az eladásra szánt holmikon dolgozik.
+"""A Munka menü. Az első munka az Adás: Jarvis itt az eladásra szánt holmikon dolgozik.
 
 Egy eladás menete (a JarvisApp az ágens-szálon futtatja, lásd app.run_work):
   1. a leírásodból egy modellhívással kiolvassa a hirdetés adatait (ListingExtractor; ugyanabból a
@@ -29,7 +29,8 @@ from .assistant import KEEP_ABOVE
 from .browser import BrowserError
 from .config import Config, data_path, resolve_path
 from .dossier import Dossiers
-from .listings import CHECK_WORDS, GONE, SOLD, ListingChecker
+from . import refresh as refreshing
+from .listings import BLOCKED, CHECK_WORDS, GONE, SOLD, ListingChecker, classify
 from .llm import OllamaError
 from .deals import DealHunter
 from .feeds import FAST_SITES, SiteFetcher
@@ -63,6 +64,15 @@ _DELIST_OK_RE = re.compile(r"\b(torol|torl|delete|remove|eltavolit|inaktiv|lezar
 _PAY_RE = re.compile(r"(fizet|vasarl|megrendel|checkout|penztar|buy|purchase|pay|utal|kiemel|elore ?sorol|"
                      r"elorehoz|elofizet)")
 DELIST_SCOPE_SECONDS = 15 * 60
+# Automatikus frissítés közben (amit a bekapcsolásával jóváhagytál) a közzététel gombjaira sem kérdez.
+_PUBLISH_OK_RE = re.compile(r"\b(feltolt|upload|kozzetesz|kozzetetel|hirdetes feladas|meghirdet|list item|list it|"
+                            r"publish|post)")
+REFRESH_SCOPE_SECONDS = 30 * 60
+# Az UP után: ha az oldal szerint ma már nincs több ingyenes UP (naponta 8 jár), nem sikerült.
+_UP_LIMIT_RE = re.compile(r"(\bup\w* elfogyott|elfogyott\w* (az )?(ingyenes )?up|nincs (tobb|mar) (ingyenes )?up\b|"
+                          r"elerted a napi|napi (up )?limit)")
+# Az oldal szövege egy kattintás után (a letapogatás számai érvényben maradnak).
+LISTING_TEXT_JS = "() => ({text: (document.body && document.body.innerText || '').slice(0, 4000)})"
 FIELD_NAMES = {"product": "mi ez", "title": "cím", "description": "leírás", "category": "kategória",
                "brand": "márka", "size": "méret", "condition": "állapot", "color": "szín",
                "material": "anyag", "price": "ár", "location": "átvétel helye", "shipping": "szállítás"}
@@ -266,6 +276,9 @@ class WorkDesk:
         self.replay_preview: list[str] = []
         # Jóváhagyott levétel: (tárgy, oldal, meddig); addig a törlés gombjaira nem kérdez újra.
         self.delisting: tuple[str, str, float] | None = None
+        # Automatikus frissítés (refresh.py): (tárgy, oldal, meddig). A bekapcsolásával jóváhagytad, hogy ezt a tárgyat
+        # ezen az oldalon levegye és újra feltöltse: a törlés és a közzététel gombjaira nem kérdez (fizetősre soha).
+        self.refreshing: tuple[str, str, float] | None = None
         if self.browser_ready:
             browser = toolbox.browser
             browser.on_action = self._on_browser_action
@@ -991,16 +1004,33 @@ class WorkDesk:
             return False
         return (scope_item, scope_key) == (item_id, key)
 
+    def begin_refresh(self, item_id: str, key: str) -> None:
+        """Egy automatikus frissítés (levétel és újrafeltöltés) kezdete: ennek a tárgynak ezen az oldalon a törlés és
+        a közzététel gombjaira nem kérdez (a frissítés bekapcsolásával jóváhagytad)."""
+        self.refreshing = (item_id, key, time.time() + REFRESH_SCOPE_SECONDS)
+
+    def end_refresh(self) -> None:
+        self.refreshing = None
+
     def _preapproved(self, label: str, url: str) -> bool:
-        """Levétel közben: a törlés és a megerősítés gombja előre jóvá van hagyva (fizetős soha)."""
+        """Levétel közben: a törlés és a megerősítés gombja előre jóvá van hagyva; automatikus frissítés közben a
+        közzététel gombja is, de csak annál a tárgynál és azon az oldalon, amit épp frissít (fizetős soha)."""
+        folded = fold(label or "")
+        if _PAY_RE.search(folded):
+            return False
+        if self.refreshing is not None and self.current is not None:
+            scope_item, scope_key, until = self.refreshing
+            if time.time() <= until and self.current == (scope_item, scope_key) and self._on_site(scope_key, url) \
+                    and (_DELIST_OK_RE.search(folded) or _PUBLISH_OK_RE.search(folded)):
+                return True
         if self.delisting is None or not self._delist_scope(*self.delisting[:2]):
             return False
-        site = self.platforms.get(self.delisting[1])
+        return self._on_site(self.delisting[1], url) and bool(_DELIST_OK_RE.search(folded))
+
+    def _on_site(self, key: str, url: str) -> bool:
+        site = self.platforms.get(key)
         host = urllib.parse.urlsplit(url or "").hostname or ""
-        if site is None or not any(host == d or host.endswith("." + d) for d in site.domains):
-            return False
-        folded = fold(label or "")
-        return bool(_DELIST_OK_RE.search(folded)) and not _PAY_RE.search(folded)
+        return site is not None and any(host == d or host.endswith("." + d) for d in site.domains)
 
     def delist_request(self, item: Item, key: str) -> str:
         """A modell első üzenete egy levételhez: az item_delist első lépését (a hirdetés megnyitása) a Jarvis maga
@@ -1008,8 +1038,10 @@ class WorkDesk:
         már megpróbálta, ezeket nem kezdi újra. ToolError, ha nem lehet (pl. nincs fent)."""
         site = self.platforms[key]
         opened = self.open_delist(self._item(item.id), key, auto=False)
+        why = ("mert utána újra feltöltöm (automatikus frissítés: így újra a friss hirdetések között lesz)"
+               if self.refreshing is not None and self.refreshing[:2] == (item.id, key) else "mert eladtuk")
         return (f"Vedd le a(z) „{item.name}” hirdetést (azonosító: {item.id}) a(z) {site.name} oldalról "
-                f"(platform: {key}), mert eladtuk. A levételt a felhasználó már jóváhagyta. Az item_delist lépést már "
+                f"(platform: {key}), {why}. A levételt a felhasználó már jóváhagyta. Az item_delist lépést már "
                 "elvégeztem (ne használd újra), az eredménye lent. A végén jelöld meg az item_mark eszközzel "
                 f"(status: nincs fent).\n\n{opened}")
 
@@ -1031,6 +1063,40 @@ class WorkDesk:
         if item.platforms.get(key, {}).get("status") == POSTED:
             self.store.mark(item_id, key, POSTED, note=note[:300])
         return False
+
+    # --- automatikus frissítés: a Hardverapró ingyenes UP gombja (refresh.py) ---------------------------------
+
+    def bump(self, item_id: str, key: str) -> tuple[bool, str]:
+        """A hirdetés előre hozása az oldal ingyenes gombjával (a Hardveraprón „UP”, naponta 8 jár), modell nélkül:
+        megnyitja a hirdetést (ha elkelt, eltűnt, vagy be kell lépni, nem nyúl hozzá), megkeresi a gombot
+        (refresh.up_button: a fizetős előresorolást soha), és rákattint. (sikerült-e, mi történt)."""
+        item = self.store.get(item_id)
+        entry = item.platforms.get(key) or {}
+        url = str(entry.get("url") or "")
+        if not url:
+            return False, "nem tudom a hirdetés címét (a kártyán a Megnyitás gombbal ellenőrizd)"
+        browser = self.toolbox.browser
+        previous = browser.auto
+        browser.auto = True
+        try:
+            page = browser.look_listing(url)
+            state, detail = classify(page, url, str(entry.get("posted_title") or item.title), key)
+            if state == BLOCKED:
+                return False, detail
+            if state in (SOLD, GONE):
+                return False, f"nem hoztam előre: {CHECK_WORDS[state]} ({detail})"
+            button = refreshing.up_button(browser.scan())
+            if button is None:
+                return False, "nem találtam az ingyenes UP gombot a hirdetés oldalán (be vagy jelentkezve?)"
+            browser.click(button["id"])
+            after = browser.page_data(LISTING_TEXT_JS)
+            if _UP_LIMIT_RE.search(fold(str(after.get("text") or ""))):
+                return False, "ma már nincs ingyenes UP (naponta 8 jár); holnap újra megpróbálom"
+            return True, "előre hoztam az ingyenes UP gombbal"
+        except BrowserError as exc:
+            return False, f"nem sikerült ({str(exc).strip().splitlines()[0][:160]})"
+        finally:
+            browser.auto = previous
 
     # --- régóta fent lévő hirdetések (háttérmunka) ----------------------------------------------------------
 
@@ -1072,17 +1138,20 @@ class WorkDesk:
         if key == "vinted":
             lines.append(f"Csomagméret: {self.settings.get('parcel_size') or 'kicsi'}")
         site = self.platforms.get(key)
-        if site is not None and len(item.photos) > site.max_photos:
+        photos = item.live_photos()
+        if site is not None and len(photos) > site.max_photos:
             lines.append(f"Fotók: {site.max_photos} db (a(z) {site.name} legfeljebb ennyit vesz fel, ezért "
-                         f"{len(item.photos)} helyett az első {site.max_photos}; a browser_upload_photos tölti fel "
+                         f"{len(photos)} helyett az első {site.max_photos}; a browser_upload_photos tölti fel "
                          "őket)")
         else:
-            lines.append(f"Fotók: {len(item.photos)} db (a browser_upload_photos tölti fel őket)")
+            lines.append(f"Fotók: {len(photos)} db (a browser_upload_photos tölti fel őket)")
         return "\n".join(lines)
 
     def photos_for(self, item: Item, key: str = "") -> list[str]:
-        """A tárgy fotói ehhez az oldalhoz: legfeljebb annyi, amennyit az oldal felvesz (a borítókép az első)."""
-        paths = [str(p) for p in self.store.photo_paths(item.id)]
+        """A tárgy fotói ehhez az oldalhoz: legfeljebb annyi, amennyit az oldal felvesz (a borítókép az első); az
+        automatikus frissítés után a soron lévő képsoré (Item.live_photos)."""
+        alt = item.live_photos() is item.photos_alt and bool(item.photos_alt)
+        paths = [str(p) for p in self.store.photo_paths(item.id, alt=alt)]
         site = self.platforms.get(key)
         return paths[:site.max_photos] if site is not None else paths
 
@@ -1210,7 +1279,7 @@ class WorkDesk:
         items = [i for i in self.store.all() if not status or i.status == status]
         if not items:
             return ("Nincs ilyen állapotú tárgy." if status else
-                    "Még nincs tárgy. A felhasználó az Adás/Vétel fülön adhat hozzá (oldalak, fotók, leírás).")
+                    "Még nincs tárgy. A felhasználó az Adás fülön adhat hozzá (oldalak, fotók, leírás).")
         return "\n".join([f"{len(items)} tárgy:"] + [self._line(i) for i in items])
 
     def tool_get(self, item: str) -> str:

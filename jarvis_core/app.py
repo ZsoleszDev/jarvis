@@ -30,7 +30,9 @@ from .llm import FULL_GPU, Cancelled, OllamaClient, OllamaError, gpu_share, is_r
 from .notices import NoticeBoard
 from .ollama_log import (CACHE_SETTING, CHECKPOINT_SETTING, PARALLEL_SETTING, ServerLog, explain, find_cause,
                          pagefile_tip, server_parallel, set_user_setting, user_setting)
+from . import refresh as refreshing
 from .browser import BrowserError
+from .listings import BLOCKED, CHECK_WORDS, GONE, SOLD, adopt_price, classify
 from .scheduler import Hooks, Job, Scheduler, standby_ok, within_hours
 from .selling import NOT_POSTED, POSTED, ItemError, format_price, parse_price, price_verdict
 from .textutil import fold
@@ -41,8 +43,10 @@ from .work import (DELISTED_NOTE, PRICE_CHOICES, WORK_ONLY_TOOLS, WorkDesk, inte
                    mmss)
 
 MODES = ("chat", "work")
-# Az Adás/Vétel feladatai, amik egy tárgyon dolgoznak (a kártyán látszik, hogy épp mi történik)
-BUSY_ACTIONS = {"sell", "reply", "price", "post", "research", "delist", "sold", "approve", "upload"}
+# Az Adás feladatai, amik egy tárgyon dolgoznak (a kártyán látszik, hogy épp mi történik)
+BUSY_ACTIONS = {"sell", "reply", "price", "post", "research", "delist", "sold", "approve", "upload", "refresh"}
+# Az automatikus frissítés (refresh.py) ennyi percenként nézi, esedékes-e valamelyik hirdetés (és csak ha ráér).
+REFRESH_EVERY = 10.0
 # A felhasználó kérései (a háttérmunka és a belső lépések nem ilyenek): ezek szakítják meg a háttérmunkát.
 INTERACTIVE = {"text", "work", "creative"}
 # Az eladás előkészítése (a fotók átnézése, az adatok, a visszakérdezés, az ár) böngésző nélkül megy: ezek a saját
@@ -480,6 +484,13 @@ class JarvisApp:
                                         lambda: 24 * 60.0 if int(self.cfg.scheduler.listing_checks) > 0 else 0,
                                         self._listings_job, available=lambda: bool(checker.due()),
                                         needs_models=False, needs_browser=True))
+        if self.work is not None and self.work.browser_ready:
+            # Automatikus frissítés (refresh.py): a beállított óra után, amikor a Jarvis ráér és a böngésző szabad, egy
+            # esedékes hirdetés (a Vinteden levétel és újrafeltöltés, a Hardveraprón az ingyenes UP).
+            store = self.work.store
+            self.scheduler.register(Job("refresh", "Hirdetések frissítése", lambda: REFRESH_EVERY,
+                                        self._refresh_job, available=lambda: bool(store.refresh_due()),
+                                        needs_browser=True, note=self._refresh_note))
         messages = self.work.messages if self.work is not None else None
         if messages is not None and messages.platforms and messages.browser is not None:
             # A vevői üzenetek olvasása: modell nélkül, csak olvasva, de a böngésző kell hozzá (készenlétben nem fut).
@@ -971,7 +982,7 @@ class JarvisApp:
         self._submit(("reset", self._mode(mode)))
 
     def submit_work(self, action: str, ids: list[str] | None = None, platform: str = "", **extra: Any) -> None:
-        """Az Adás/Vétel gombjai (eladás, válasz, árdöntés, újra, bejelentkezés): az ágens-szálon futnak, az eladás
+        """Az Adás gombjai (eladás, válasz, árdöntés, újra, bejelentkezés): az ágens-szálon futnak, az eladás
         előkészítése (PREP_ACTIONS) a saját szálán."""
         ids = [str(i) for i in ids or []]
         payload = {"action": action, "ids": ids, "platform": platform, **extra}
@@ -1453,7 +1464,7 @@ class JarvisApp:
         self.answer(text, via=via, mode=mode)
 
     def run_work(self, payload: dict[str, Any], browser: bool = True) -> None:
-        """Az Adás/Vétel feladatai az ágens-szálon: eladás, válasz, árdöntés, újra, árkutatás, belépés.
+        """Az Adás feladatai az ágens-szálon: eladás, válasz, árdöntés, újra, árkutatás, belépés.
         browser=False: az eladás-előkészítő szálon (PREP_ACTIONS): a böngészős részt (árkutatás egy böngészős oldalon,
         feltöltés) nem itt csinálja, hanem az ágens-szálra adja (_handoffs, _prep_loop)."""
         if self.work is None or self.work_assistant is None:
@@ -1495,6 +1506,8 @@ class JarvisApp:
                                item=item_id)
                 elif action == "research":
                     self._research(item_id)
+                elif action == "refresh":      # Most frissítsd (a tárgy lapjáról)
+                    self._refresh(item_id, self._tell, now=True)
                 elif action == "login":
                     self._login(str(payload.get("platform") or ""))
                 elif action == "delist":
@@ -1987,6 +2000,121 @@ class JarvisApp:
         names = ", ".join(self.work.platforms[k].name for k in others)
         text = f"{item.name}: megjelöltem, hogy elkelt. Még fent van itt: {names}."
         self.ui.notice(text)
+
+    # --- automatikus frissítés (refresh.py) -----------------------------------------------------------------
+
+    def _refresh_job(self, ctx: Any) -> str:
+        """Ráérő időben (az ütemező háttérmunkája, a böngésző szabad): az esedékes frissítések közül egy, a
+        legrégebben esedékes; a többi a következő körben (emberi tempó)."""
+        assert self.work is not None
+        due = self.work.store.refresh_due()
+        if not due:
+            return "Nincs esedékes frissítés."
+        ctx.check()
+        return self._refresh(due[0].id, ctx.notify)
+
+    def _refresh_note(self) -> str:
+        """Az Automatikus munkák ablakának: hány hirdetésnél van bekapcsolva, és melyik jön legközelebb."""
+        assert self.work is not None
+        on = [item for item in self.work.store.all() if item.refresh.get("on") and not item.sold]
+        if not on:
+            return "Egy hirdetésnél sincs bekapcsolva (a hirdetés lapján, a Frissítés blokkban kapcsolható be)"
+        first = min(on, key=lambda item: float(item.refresh.get("next") or 0))
+        when = refreshing.when_text(float(first.refresh.get("next") or time.time()), time.time())
+        return f"{len(on)} hirdetésnél bekapcsolva; legközelebb: {first.name}, {when}"
+
+    def _refresh(self, item_id: str, notify: Callable[..., None], now: bool = False) -> str:
+        """Egy tárgy automatikus frissítése: a Vinteden levétel és újrafeltöltés a soron lévő képsorral (előtte a
+        hirdetés oldaláról átveszi az ott kézzel átírt árat, és ha elkeltnek vagy eltűntnek látszik, nem tölti fel
+        újra), a Hardveraprón az ingyenes UP. Ha egy korábbi levétel után az újrafeltöltés elmaradt, most azt pótolja.
+        `now`: a Most frissítsd gombra (akkor is, ha ki van kapcsolva). Visszaadja az eredményt (a naplónak)."""
+        assert self.work is not None
+        work, store = self.work, self.work.store
+        item = store.get(item_id)
+        if item.sold:
+            return f"{item.name}: eladottnak van jelölve, nem frissítem."
+        pending = [key for key in item.refresh.get("repost") or [] if key in work.platforms]
+        keys = list(dict.fromkeys(pending + [key for key in work.posted_on(item) if refreshing.method(key)]))
+        if not keys:
+            text = (f"{item.name}: nincs fent olyan oldalon, ahol frissíteni tudok (a Vinteden levétel és "
+                    "újrafeltöltés, a Hardveraprón az ingyenes UP).")
+            if now:
+                self.ui.notice(text)
+            return text
+        results: list[str] = []
+        ok_all = True
+        for key in keys:
+            site = work.platforms[key]
+            store.set_busy(item_id, f"Frissítés: {site.name}…")
+            try:
+                if key in pending:
+                    ok, note = self._repost(item_id, key)
+                elif refreshing.method(key) == "relist":
+                    ok, note = self._relist(item_id, key)
+                else:
+                    ok, note = work.bump(item_id, key)
+            finally:
+                work.end_refresh()
+            results.append(f"{site.name}: {note}")
+            ok_all = ok_all and ok
+        state = store.refresh_end(item_id, ok_all, "; ".join(results))
+        text = f"{item.name}: " + "; ".join(results) + "."
+        if state.refresh.get("on") and state.refresh.get("next"):
+            text += f" Legközelebb {refreshing.when_text(float(state.refresh['next']), time.time())}."
+        elif not ok_all and item.refresh.get("on"):
+            text += (f" {refreshing.MAX_FAILS}-szor egymás után nem sikerült, ezért kikapcsoltam az automatikus "
+                     "frissítését; a tárgy lapján látod, miért.")
+        if now:      # a Most frissítsd gombra: a naplóba is (a háttérmunkáé a notify-jal, lásd notify_event)
+            self.ui.notice(text)
+        notify("post", f"Frissítés: {item.name}", text, item=item_id, quiet=ok_all)
+        return text
+
+    def _relist(self, item_id: str, key: str) -> tuple[bool, str]:
+        """Levétel és újrafeltöltés egy oldalon (a frissítés bekapcsolásával jóváhagytad: a törlés és a közzététel
+        gombjaira nem kérdez). (sikerült-e, mi történt)."""
+        assert self.work is not None
+        work, store = self.work, self.work.store
+        item = store.get(item_id)
+        entry = item.platforms.get(key) or {}
+        url = str(entry.get("url") or "")
+        adopted = ""
+        if url:    # előbb elolvassa: elkelt? eltűnt? átírtad ott az árát?
+            try:
+                page = self.toolbox.browser.look_listing(url)
+            except BrowserError as exc:
+                return False, f"nem nyílt meg a hirdetés ({str(exc).strip().splitlines()[0][:120]})"
+            state, detail = classify(page, url, str(entry.get("posted_title") or item.title), key)
+            if state == BLOCKED:
+                return False, detail
+            if state in (SOLD, GONE):
+                store.set_check(item_id, key, state, time.time(), detail)
+                return False, f"nem töltöm fel újra: {CHECK_WORDS[state]} ({detail})"
+            adopted = adopt_price(store, item_id, key, page)
+        store.refresh_begin(item_id, [key])
+        work.begin_refresh(item_id, key)
+        if not self._delist_one(item_id, key):
+            store.refresh_reposted(item_id, key)       # fent maradt: nincs mit újra feltölteni
+            return False, "a levétel nem sikerült, a hirdetés fent maradt"
+        photo_set = store.refresh_next_set(item_id)
+        ok, note = self._repost(item_id, key, photo_set)
+        if adopted:
+            note = f"{note} (az árat a hirdetésből vettem át: {format_price(store.get(item_id).price)})"
+        return ok, note
+
+    def _repost(self, item_id: str, key: str, photo_set: int | None = None) -> tuple[bool, str]:
+        """Az újrafeltöltés (a levétel után, vagy egy korábban elmaradt pótlása), a soron lévő képsorral."""
+        assert self.work is not None
+        work, store = self.work, self.work.store
+        work.begin_refresh(item_id, key)
+        if photo_set is None:
+            photo_set = int(store.get(item_id).refresh.get("set") or 0)
+        ok = self._post_one(item_id, key)
+        if ok:
+            store.refresh_reposted(item_id, key)
+            which = "a 2. képsorral" if photo_set == 1 else "az alap képsorral"
+            return True, f"levettem és újra feltöltöttem ({which})"
+        return False, ("levettem, de az újrafeltöltés nem sikerült; "
+                       f"{int(refreshing.REPOST_RETRY // 60)} perc múlva újra megpróbálom (addig nincs fent)")
 
     def _delist(self, item_id: str, keys: list[str] | None = None, confirmed: bool = False) -> None:
         """Leveszi a hirdetést a megadott oldalakról (alapból mindenhonnan, ahol fent van)."""

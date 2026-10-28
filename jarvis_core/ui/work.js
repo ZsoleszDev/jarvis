@@ -1,5 +1,5 @@
 "use strict";
-// Munka → Adás/Vétel: kipipálod, hova kerüljön, hozzáadod a fotókat, leírod, mit adsz el, és Jarvis
+// Munka → Adás: kipipálod, hova kerüljön, hozzáadod a fotókat, leírod, mit adsz el, és Jarvis
 // megcsinálja. Ha valami hiányzik, a kártyán (és a naplóban) visszakérdez. Minden változás a
 // Jarvisnál történik; ez az oldal csak megjeleníti és kéri (Jarvis.* az app.js-ből).
 (() => {
@@ -160,13 +160,13 @@
     return result.ok;
   }
 
-  async function upload(id, files) {
+  async function upload(id, files, alt = false) {
     files = files.filter((f) => /^image\//.test(f.type) || /\.(jpe?g|png|webp|heic|heif)$/i.test(f.name));
     for (let i = 0; i < files.length; i++) {
-      uploading.set(id, `Fotók feltöltése ${i + 1}/${files.length}…`);
+      uploading.set(id, `${alt ? "A 2. képsor fotói" : "Fotók feltöltése"} ${i + 1}/${files.length}…`);
       render();
       try {
-        const response = await fetch(`/api/work/items/${id}/photo`, {
+        const response = await fetch(`/api/work/items/${id}/photo${alt ? "?set=alt" : ""}`, {
           method: "POST",
           headers: { "Content-Type": "application/octet-stream", "X-Jarvis-Token": token },
           body: files[i],
@@ -1987,6 +1987,56 @@
     </div>`;
   }
 
+  // Automatikus frissítés (refresh.py): pár naponta újra a friss hirdetések közé kerül. A Vinteden levétel és
+  // újrafeltöltés (felrakásonként a másik képsorral), a Hardveraprón az ingyenes UP; a Jófogáson a szabályzata miatt nem.
+  const REFRESH_HOW = { vinted: "a Vinteden leveszem és újra feltöltöm (a kedvelései és megtekintései ezzel elvesznek)",
+    hardverapro: "a Hardveraprón az ingyenes UP gombbal előre hozom" };
+  const REFRESH_NOT = { jofogas: "a Jófogáson nem: a szabályzata szerint törlés után 14 napig nem adható fel újra",
+    vatera: "a Vaterán nem" };
+  const REFRESH_DAYS = [1, 2, 3, 4, 5, 6, 7, 10, 14, 21, 30];
+
+  function refreshBlock(item) {
+    const r = item.refresh || {};
+    const days = r.days || 7;
+    const hour = r.hour ?? 19;
+    const how = item.targets.map((k) => REFRESH_HOW[k] || REFRESH_NOT[k]).filter(Boolean);
+    const can = item.targets.some((k) => REFRESH_HOW[k]);
+    const live = item.targets.some((k) => REFRESH_HOW[k] && siteState(item, k) === POSTED) || (r.repost || []).length;
+    const alt = item.photos_alt || [];
+    const repost = (r.repost || []).map((k) => (platforms.find((p) => p.key === k) || { name: k }).name);
+    const status = [
+      r.on && item.refresh_next ? `Legközelebb ${item.refresh_next} (amikor épp szabad a böngésző).` : "",
+      repost.length ? `Az újrafeltöltés még hátravan: ${repost.join(", ")}.` : "",
+      item.refresh_last ? `Utoljára: ${item.refresh_last}.` : "",
+      r.note ? r.note + "." : "",
+      !r.on && (r.fails || 0) >= 3 ? "Kikapcsoltam, mert többször egymás után nem sikerült." : "",
+    ].filter(Boolean).join(" ");
+    const options = [...new Set([...REFRESH_DAYS, days])].sort((a, b) => a - b);
+    return `<section aria-labelledby="h-refresh" class="refresh">
+        <h3 id="h-refresh">Frissítés</h3>
+        <p class="muted">Pár naponta újra a friss hirdetések közé teszem, mert azokat nézik a legtöbben${how.length ? ": " + esc(how.join("; ")) : ""}.</p>
+        ${can ? `<div class="row">
+          <label class="check"><input type="checkbox" id="r-on" data-refresh${r.on ? " checked" : ""}> Automatikusan</label>
+          <label>Hány naponta <select id="r-days" data-refresh>${options.map((d) => `<option value="${d}"${d === days ? " selected" : ""}>${d === 1 ? "naponta" : d + " naponta"}</option>`).join("")}</select></label>
+          <label>Hány óra körül <select id="r-hour" data-refresh>${[...Array(24).keys()].map((h) => `<option value="${h}"${h === hour ? " selected" : ""}>${h} óra</option>`).join("")}</select></label>
+          ${browserOn && live ? '<button type="button" class="small" data-action="refreshnow" title="Most rögtön, nem várja meg az időpontot">Most frissítsd</button>' : ""}
+        </div>
+        ${status ? `<p class="muted" id="r-status">${esc(status)}</p>` : ""}
+        <p class="muted">A Vinteden felrakásonként váltom a két képsort, így az újra feltöltött hirdetés újnak is látszik
+          (más szögből, más háttér előtt készült fotók a legjobbak; a túl gyakori, egyforma képes újrafeltöltést a Vinted
+          kiszűrheti, hetente-kéthetente a biztonságos).</p>
+        <h4>1. képsor (az alap)${r.set === 1 && alt.length ? "" : " · most ez van fent"}</h4>
+        <div class="photos mini">${item.photos.map((name, i) => `<div class="photo"><img src="${photoUrl(item.id, esc(name), true)}" alt="Az alap ${i + 1}. fotója"></div>`).join("") || '<p class="muted">Még nincs fotó (fent, a Fotóknál adhatsz hozzá).</p>'}</div>
+        <h4>2. képsor${r.set === 1 && alt.length ? " · most ez van fent" : ""}</h4>
+        <div class="photos">
+          ${alt.map((name, i) => `<div class="photo${i === 0 ? " first" : ""}"><img src="${photoUrl(item.id, esc(name), true)}" alt="A 2. képsor ${i + 1}. fotója">
+            ${i === 0 ? '<span class="tag">borító</span>' : ""}
+            <div class="tools"><span></span><button type="button" data-action="removephoto" data-name="${esc(name)}" aria-label="A 2. képsor ${i + 1}. fotójának törlése">✕</button></div></div>`).join("")}
+          ${alt.length < maxPhotos ? '<button type="button" class="addphoto" data-action="pickalt">+ Fotó<br>a 2. képsorba</button>' : ""}
+        </div>` : ""}
+      </section>`;
+  }
+
   function renderDetail(item) {
     const busy = uploading.get(item.id) || item.busy;
     $("w-detail").innerHTML = `
@@ -2016,6 +2066,7 @@
         </div>
         ${photoNote(item)}
       </section>
+      ${refreshBlock(item)}
       <section aria-labelledby="h-listing">
         <h3 id="h-listing">A hirdetés</h3>
         <p class="muted">A leírásod: ${esc(item.prompt) || "–"}</p>
@@ -2406,6 +2457,10 @@
     const name = button.dataset.action;
     if (name === "back") { driftNotes.delete(item.id); openId = null; render(); }
     else if (name === "pickphotos") { pickFor = item.id; $("w-file").click(); }
+    else if (name === "pickalt") { pickFor = "alt:" + item.id; $("w-file").click(); }
+    else if (name === "refreshnow") {
+      if (await action("refresh", item.id)) J.toast("Rendben: amint szabad a böngésző, frissítem.");
+    }
     else if (name === "sell") {
       if (await acknowledge(item.targets)) action("sell", item.id);
     }
@@ -2444,7 +2499,15 @@
     if (!item) return;
     if (el.dataset.target) changeTargets(item, el.dataset.target, el.checked);
     else if (el.dataset.field) update(item.id, { [el.dataset.field]: el.value });
+    else if (el.dataset.refresh !== undefined) saveRefresh(item);
   });
+
+  async function saveRefresh(item) {
+    const result = await J.postJson("/api/work/refresh", { id: item.id, on: $("r-on").checked,
+                                                           days: $("r-days").value, hour: $("r-hour").value });
+    if (remember(result, "Nem sikerült menteni.") && result.item.refresh.on && result.item.refresh_next)
+      J.toast(`Rendben: legközelebb ${result.item.refresh_next} frissítem.`);
+  }
 
   // A fájlválasztó a lapon kívül van, így akkor sem vész el, ha közben frissül a lap.
   $("w-file").addEventListener("change", () => {
@@ -2454,6 +2517,7 @@
     pickFor = null;
     if (!files.length) return;
     if (target === "compose") addComposePhotos(files);
+    else if (target && target.startsWith("alt:") && items.has(target.slice(4))) upload(target.slice(4), files, true);
     else if (target && items.has(target)) upload(target, files);
   });
 
