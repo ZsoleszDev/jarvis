@@ -2609,7 +2609,9 @@ class DealHunter:
             failed = "tiltás vagy ellenőrzés miatt egy ideig nem kérdezem"
         if game is not None and game.no_browser:   # a gyors sor a böngészőhöz nem nyúl: az ok a naplóba
             raise BrowserError(failed or "böngésző nélkül most nem olvasható")
-        return self.browser().extract_listings(url)
+        browser = self.browser()               # (a Vinteden a be nem jelentkezett olvasóprofilban: read_listings)
+        read = getattr(browser, "read_listings", None)
+        return read(url) if callable(read) else browser.extract_listings(url)
 
     def _platform_of(self, url: str) -> str:
         host = (urllib.parse.urlsplit(url).hostname or "").removeprefix("www.")
@@ -2630,7 +2632,9 @@ class DealHunter:
                     raise _Later(str(exc)) from None
         if game is not None and game.no_browser:
             raise BrowserError("böngésző nélkül most nem olvasható (a gyors sor a böngészőhöz nem nyúl)")
-        return self.browser().look(url)
+        browser = self.browser()               # (a Vinteden a be nem jelentkezett olvasóprofilban: read_page)
+        read = getattr(browser, "read_page", None)
+        return read(url) if callable(read) else browser.look(url)
 
     def _step_search(self, game: _Round, search: dict[str, Any], sites: list[str], status: str) -> None:
         """Egy keresés: a találati oldalak, majd a szokásos árhoz mért jelöltek, vagy (ha még nincs) a felmérés."""

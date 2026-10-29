@@ -44,6 +44,11 @@ _CHALLENGE_RE = re.compile(
     r"are you a robot|captcha|cf-chl|egy pillanat|ellenőrizzük, hogy|nem vagy robot|access denied",
     re.IGNORECASE)
 CHALLENGE_WAIT = 12.0      # ennyit vár, hogy a köztes oldal magától továbbengedjen
+# Olvasóprofil (cfg.reader): ezeken az oldalakon a modell nélküli olvasás (read_listings, read_page: a böngészés, a
+# keresés, egy hirdetés átnézése) egy külön, soha be nem jelentkezett profilban megy, a saját ablakában; így a gyakori
+# olvasást a robotvédelem (a Vinteden a DataDome) nem a fiókodhoz köti. A bejelentkezést kívánó munka (feltöltés,
+# levétel, üzenetek, ajánlat) a fő profilban marad.
+READER_HOSTS = ("vinted.hu",)
 # Egy captcha, amit tényleg meg kell oldani: látható, kattintható méretű captcha-keret. Sok oldal (a Vinted is)
 # láthatatlan reCAPTCHA-t vagy robotvédelmi keretet tölt be minden oldalon (rejtve, 0 vagy kis méretben, a sarokban
 # lévő jelvényben); az nem kér semmit, ezért az nem számít.
@@ -1549,6 +1554,12 @@ class BrowserController:
         self.read_max_chars = read_max_chars
         self._pw: Any = None
         self._context: Any = None
+        # Az olvasóprofil (cfg.reader, READER_HOSTS): a külön, be nem jelentkezett profil ablaka és lapja; _reader_last:
+        # a legutóbbi olvasás ott volt (a challenged azt a lapot nézi).
+        self._reader_context: Any = None
+        self._reader_page: Any = None
+        self._reader_last = False
+        self.reader_hosts: tuple[str, ...] = READER_HOSTS
         self.page: Any = None
         self.engine = ""
         self.elements: dict[int, dict[str, Any]] = {}
@@ -1599,19 +1610,7 @@ class BrowserController:
         # A profil (sütik, bejelentkezések) az adatmappában van, így a frissítések után is megmarad.
         profile = data_path(self.cfg.profile_dir, "browser_profile")
         profile.mkdir(parents=True, exist_ok=True)
-        options: dict[str, Any] = {
-            "headless": bool(self.cfg.headless),
-            "viewport": {"width": int(self.cfg.width), "height": int(self.cfg.height)},
-            "locale": "hu-HU",
-            "args": ["--disable-blink-features=AutomationControlled"],
-            "ignore_default_args": ["--enable-automation"],
-        }
-        attempts: list[dict[str, Any]] = []
-        if self.cfg.executable_path:
-            attempts.append({"executable_path": str(resolve_path(self.cfg.executable_path))})
-        elif self.cfg.channel:
-            attempts.append({"channel": self.cfg.channel})
-        attempts.append({})  # tartalék: a Playwright saját Chromiuma
+        options, attempts = self._launch_options()
         self._starts += 1
         self._pw = sync_playwright().start()
         last_error: Exception | None = None
@@ -1645,8 +1644,90 @@ class BrowserController:
         pages = self._context.pages
         self.page = pages[0] if pages else self._context.new_page()
 
+    def _launch_options(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """A böngésző indításának beállításai, és a sorban kipróbálandó böngészők (a beállított, aztán a Chromium)."""
+        options: dict[str, Any] = {
+            "headless": bool(self.cfg.headless),
+            "viewport": {"width": int(self.cfg.width), "height": int(self.cfg.height)},
+            "locale": "hu-HU",
+            "args": ["--disable-blink-features=AutomationControlled"],
+            "ignore_default_args": ["--enable-automation"],
+        }
+        attempts: list[dict[str, Any]] = []
+        if self.cfg.executable_path:
+            attempts.append({"executable_path": str(resolve_path(self.cfg.executable_path))})
+        elif self.cfg.channel:
+            attempts.append({"channel": self.cfg.channel})
+        attempts.append({})  # tartalék: a Playwright saját Chromiuma
+        return options, attempts
+
+    def _reads_apart(self, url: str) -> bool:
+        """Ezt a címet az olvasóprofil olvassa-e (cfg.reader, READER_HOSTS)."""
+        if not getattr(self.cfg, "reader", True):
+            return False
+        host = (urllib.parse.urlsplit(url).hostname or "").lower().removeprefix("www.")
+        return any(host == h or host.endswith("." + h) for h in self.reader_hosts)
+
+    def _reader(self) -> Any:
+        """Az olvasóprofil lapja (a saját ablakában; ha még nem fut, vagy bezárták, elindítja). A fő böngészővel
+        együtt indul és áll le (ugyanaz a Playwright), a profilja külön mappában (cfg.reader_profile_dir)."""
+        if self._reader_context is not None:
+            try:
+                if self._reader_page is None or self._reader_page.is_closed():
+                    pages = [p for p in self._reader_context.pages if not p.is_closed()]
+                    self._reader_page = pages[-1] if pages else self._reader_context.new_page()
+                self._watch_network(self._reader_page)
+                return self._reader_page
+            except Exception:  # noqa: BLE001 - bezárt ablak: újraindítja
+                self._close_reader()
+        self._ensure()                         # (a Playwright a fő böngészővel indul)
+        profile = data_path(getattr(self.cfg, "reader_profile_dir", ""), "browser_profile_olvaso")
+        profile.mkdir(parents=True, exist_ok=True)
+        options, attempts = self._launch_options()
+        last_error: Exception | None = None
+        for extra in attempts:
+            try:
+                self._reader_context = self._pw.chromium.launch_persistent_context(str(profile), **options, **extra)
+                break
+            except Exception as exc:  # noqa: BLE001 - a következőt próbálja
+                last_error = exc
+        if self._reader_context is None:
+            raise BrowserError(f"Az olvasó böngészőablak nem indult: {_short(last_error)}") from last_error
+        try:
+            self._reader_context.add_init_script(script=QUIET_INIT_JS)
+        except Exception:  # noqa: BLE001
+            pass
+        pages = self._reader_context.pages
+        self._reader_page = pages[0] if pages else self._reader_context.new_page()
+        self._watch_network(self._reader_page)
+        return self._reader_page
+
+    def _close_reader(self) -> None:
+        if self._reader_context is not None:
+            try:
+                self._reader_context.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._reader_context = self._reader_page = None
+        self._reader_last = False
+
+    def _read_goto(self, url: str, timeout: int = 30000) -> Any:
+        """Az olvasóprofil lapján nyitja meg a címet (egyszer újraindítja, ha közben bezárták)."""
+        for attempt in range(2):
+            page = self._reader()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                self._reader_last = True
+                return page
+            except Exception as exc:  # noqa: BLE001
+                if attempt or not is_closed_error(exc):
+                    raise BrowserError(f"Nem sikerült megnyitni: {url} ({_short(exc)})") from None
+                self._close_reader()
+        raise BrowserError(f"Nem sikerült megnyitni: {url}")
+
     def _ensure(self) -> Any:
         """Visszaadja az aktív lapot; ha a felhasználó bezárta az ablakot, újraindítja."""
+        self._reader_last = False              # (a captcha-jelzés innentől a fő lapé: challenged)
         if self._context is not None:
             try:
                 if self.page is None or self.page.is_closed():
@@ -1664,6 +1745,10 @@ class BrowserController:
         """Bezárja a böngészőt. `driver_gone`: a Playwright-meghajtó már elhalt; ilyenkor a böngészőhöz nem
         szólunk (a válaszát örökre várnánk), csak a Playwrightot állítjuk le."""
         context = None if driver_gone else self._context
+        if driver_gone:
+            self._reader_context = self._reader_page = None
+        else:
+            self._close_reader()
         for obj, method in ((context, "close"), (self._pw, "stop")):
             if obj is not None:
                 try:
@@ -2031,8 +2116,9 @@ class BrowserController:
             raise BrowserError(f"Nem sikerült a kattintás ({_short(exc)}).") from None
 
     def challenged(self) -> bool:
-        """Robot-ellenőrzést (captcha) vagy robotvédelmi köztes oldalt mutat-e az aktív lap."""
-        page = self._ensure()
+        """Robot-ellenőrzést (captcha) vagy robotvédelmi köztes oldalt mutat-e az aktív lap (ha a legutóbbi lépés az
+        olvasóprofilban olvasott, annak a lapja)."""
+        page = self._reader_page if self._reader_last and self._reader_page is not None else self._ensure()
         try:
             if page.evaluate(f"() => {CAPTCHA_FRAME_JS}"):
                 return True
@@ -3149,6 +3235,45 @@ class BrowserController:
         except Exception as exc:  # noqa: BLE001
             raise BrowserError(f"Nem tudom beolvasni a találatokat ({_short(exc)}).") from None
         return [entry for entry in found or [] if isinstance(entry, dict) and entry.get("price")]
+
+    @_restarts_after_crash
+    def read_listings(self, url: str) -> list[dict[str, Any]]:
+        """Mint az extract_listings, de az olvasóprofilban, ha a cím ilyen oldalé (_reads_apart: a Vinted)."""
+        try:
+            url = web.normalize_url(url, allow_local=self.allow_local)
+        except web.WebError as exc:
+            raise BrowserError(str(exc)) from None
+        if not self._reads_apart(url):
+            return self.extract_listings(url)
+        page = self._read_goto(url)
+        self._settle(page, max_wait=8.0)
+        self._glance(page)
+        self.pace.read()
+        try:
+            found = page.evaluate(LISTINGS_JS)
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(f"Nem tudom beolvasni a találatokat ({_short(exc)}).") from None
+        return [entry for entry in found or [] if isinstance(entry, dict) and entry.get("price")]
+
+    @_restarts_after_crash
+    def read_page(self, url: str, script: str = "") -> dict[str, Any]:
+        """Mint a look, de az olvasóprofilban, ha a cím ilyen oldalé (_reads_apart: a Vinted)."""
+        script = script or LISTING_PAGE_JS
+        try:
+            url = web.normalize_url(url, allow_local=self.allow_local)
+        except web.WebError as exc:
+            raise BrowserError(str(exc)) from None
+        if not self._reads_apart(url):
+            return self.look(url, script)
+        page = self._read_goto(url)
+        self._settle(page, max_wait=8.0)
+        deadline = time.monotonic() + CHALLENGE_WAIT
+        while self._challenge(page, unsure=False) and time.monotonic() < deadline:
+            page.wait_for_timeout(1000)
+            self._settle(page, max_wait=3.0)
+        self._glance(page)
+        self.pace.read()
+        return self._page_data(page, script)
 
     def look_listing(self, url: str) -> dict[str, Any]:
         """Egy hirdetés oldala a háttérellenőrzéshez (listings.py), csak olvasva (lásd look)."""

@@ -171,7 +171,13 @@
   árbázis átrendeződik, a nem a termékhez tartozó árak kimaradnak. `python -m jarvis_core.audit`: a mentett találatok
   és az árbázis a mostani szabályokkal, csak olvasva.
 
+- Olvasóprofil (browser.READER_HOSTS, `[browser] reader`): a Vinteden a modell nélküli olvasás (böngészés, keresés,
+  árkutatás, hirdetés átnézése) egy külön, be nem jelentkezett profilban, a saját ablakában; a fiókos munka a
+  fő profilban.
+
 ## Élesben kipróbálandó
+- Olvasóprofil: kér-e a Vinted robot-ellenőrzést a be nem jelentkezett ablakban (sütiablak az első
+  betöltéskor: elfogadja-e a böngészés), és a két ablak nem zavar-e (Windowson a tálcán kettő látszik).
 - Pontos árazás a valódi címeken: a cikkszám-minták (parts._FORM_SIGNS, _GENERATION_SIGNS) a gyakori gyártóknál
   kiegészítendők (pl. ADATA, Patriot, TeamGroup, Lexar cikkszámai); a „laptop” szó a gép címében (parts.machine) nem
   téveszt-e meg; az alkatrész-szavak (parts.PART_STEMS) és a fejszó-szabály (head: puszta alak, „nélkül”, „-val/-vel”,
