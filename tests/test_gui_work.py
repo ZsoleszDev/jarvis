@@ -1652,7 +1652,8 @@ class WorkBrowserTests(unittest.TestCase):
         self.wait_for(lambda: self.h.store.get(item.id).refresh.get("on") is False)
         self.assertEqual(self.page.inner_text("#job-sales"), "Adás")
 
-    def test_dropped_photos_go_to_the_new_listing(self):
+    def drop_photo(self):
+        """Egy fotó behúzása a munkaterületre (mintha az Intézőből húznád ide)."""
         b64 = base64.b64encode(jpeg()).decode()
         self.page.evaluate("""(b64) => {
             const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -1662,10 +1663,169 @@ class WorkBrowserTests(unittest.TestCase):
             area.dispatchEvent(new DragEvent("dragenter", { dataTransfer: dt, bubbles: true }));
             area.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
         }""", b64)
+
+    def open_from_notice(self, item_id):
+        """Egy értesítés „A tárgy” gombja (vagy a telefon értesítése): a lap a gépelés közepén is átvált."""
+        self.page.evaluate("""(id) => window.dispatchEvent(new CustomEvent("jarvis-notice-action",
+            { detail: { action: "item", item: id } }))""", item_id)
+
+    def test_dropped_photos_go_to_the_new_listing(self):
+        self.drop_photo()
         self.page.wait_for_selector("#w-new-photos .photo img")
         self.assertEqual(self.h.store.all(), [], "csak a Mehet gombbal jön létre a hirdetés")
         self.page.click('#w-new-photos [data-unpick="0"]')
         self.page.wait_for_selector("#w-new-photos .photo", state="detached")
+
+    def test_dropped_photos_go_only_to_the_page_you_see(self):
+        """A behúzott fotó csak a látható hirdetés lapjára kerül: ha közben a Böngészés fülre váltottál, a háttérben
+        nyitva maradt tárgyhoz nem (és az új hirdetés rejtett űrlapjába sem)."""
+        item = self.h.ready_item()
+        page = self.page
+        page.wait_for_selector(f'.card[data-id="{item.id}"]')
+        self.open_item(item.id)
+        page.click("#job-deals")
+        page.wait_for_selector("#w-deals", state="visible")
+        self.drop_photo()
+        page.wait_for_selector('.toast:has-text("Az Adás fülön")')
+        page.click("#job-sales")
+        page.wait_for_selector("#f-title")
+        self.assertEqual((self.h.store.get(item.id).photos, page.locator("#w-new-photos .photo").count()),
+                         (["01.jpg"], 0), "egyikhez sem került")
+        self.drop_photo()
+        self.wait_for(lambda: self.h.store.get(item.id).photos == ["01.jpg", "02.jpg"])
+
+    def test_each_listing_page_shows_only_its_own_fields(self):
+        """Egyik tárgy lapjáról a másikéra lépve a mezőkben a másik tárgy saját adatai vannak (nem marad bent az
+        előző címe, leírása, ára), és amit ott átírsz, csak abba a tárgyba kerül. Ugyanazon a lapon a félbehagyott
+        gépelés túléli az újrarajzolást, a nem érintett mezőben viszont a friss adat látszik (amit közben Jarvis írt
+        át); ha a lap a gépelés közepén vált át (értesítésre), a beírt szöveg a saját tárgyába mentődik."""
+        store, page = self.h.store, self.page
+        pants = self.h.ready_item(title="Nameless férfi ünneplőnadrág", description="Egyszer hordott, sötétkék.",
+                                  price=5000, brand="Nameless", color="sötétkék")
+        ram = self.h.ready_item(("hardverapro",), title="Corsair Vengeance 16GB DDR4", price=12000, brand="Corsair",
+                                description="Hibátlan, dobozában.", size="", color="")
+        names = ("title", "description", "price", "brand", "size", "color")
+
+        def shown(item):
+            page.wait_for_selector(f'.detail h2:has-text("{item.title}")')
+            return {name: page.input_value(f"#f-{name}") for name in names}
+
+        def own(item):
+            stored = store.get(item.id)
+            return {name: str(getattr(stored, name) or "") for name in names}
+
+        before = own(pants)
+        page.wait_for_selector(f'.card[data-id="{ram.id}"]')
+        self.open_item(pants.id)
+        self.assertEqual(shown(pants), before)
+        page.click('[data-action="back"]')
+        self.open_item(ram.id)
+        self.assertEqual(shown(ram), own(ram), "a nadrág címe, leírása, ára nem marad bent")
+        self.open_from_notice(pants.id)
+        self.assertEqual(shown(pants), before, "a lapról közvetlenül a másikéra")
+        page.click('[data-action="back"]')
+        self.open_item(ram.id)
+        page.fill("#f-price", "11500")
+        page.press("#f-price", "Tab")
+        self.wait_for(lambda: store.get(ram.id).price == 11500)
+        self.assertEqual(own(pants), before, "a nadrág nem változott")
+        # félbehagyott gépelés: a lap újrarajzolása (Jarvis dolgozik rajta) nem veszi el
+        typed = "Hibátlan, dobozában. Csak kipróbálva."
+        page.fill("#f-description", typed)
+        store.set_busy(ram.id, "Gondolkodom…")
+        page.wait_for_selector('.detail .busy:has-text("Gondolkodom")')
+        self.assertEqual(page.input_value("#f-description"), typed)
+        # amihez nem nyúltál, abban a friss adat látszik (pl. Jarvis átírta), nem a lap régi tartalma
+        store.update(ram.id, title="Corsair Vengeance LPX 16GB DDR4")
+        page.wait_for_function("() => document.getElementById('f-title').value === 'Corsair Vengeance LPX 16GB DDR4'")
+        self.assertEqual(page.input_value("#f-description"), typed)
+        self.assertEqual(page.evaluate("document.activeElement.id"), "f-description", "a gépelés helyén marad")
+        # gépelés közben értesítésre átvált a lap: a szöveg a saját tárgyába kerül, a másik lapján a sajátja látszik
+        self.open_from_notice(pants.id)
+        self.assertEqual(shown(pants), before)
+        self.wait_for(lambda: store.get(ram.id).description == typed)
+        self.assertEqual(own(pants), before)
+
+    def test_typing_on_the_trading_tab_survives_new_finds(self):
+        """Automata kereskedés: új találatra a lap újrarajzolódik, de amit beírtál, nem vész el: az eladónak szóló
+        üzenet gépelés közben, és a Megvettem vételára akkor sem, ha közben máshová bököttél (különben a hirdetés
+        árával mentené el)."""
+        deals = self.h.app.work.deals
+        self.h.app.work.instant.allowed = lambda: False
+
+        def find(n, text, price):
+            deals._remember({"id": f"t{n}", "url": f"https://hardverapro.hu/apro/{n}/friss.html", "text": text,
+                             "site": "Hardverapró", "price": price, "median": 100000, "margin": 100000 - price,
+                             "at": time.time()})
+            self.h.ui.work_deals()
+
+        find(1, "RTX 3060 Ti", 55000)
+        page = self.page
+        page.click("#job-deals")
+        page.click('[data-deal-buy="t1"]')
+        self.assertEqual(page.input_value("#d-paid"), "55000")
+        page.fill("#d-paid", "47000")
+        page.fill("#d-ship", "1500")
+        page.evaluate("document.activeElement.blur()")          # máshová bökve (a telefonon a billentyűzet eltűnik)
+        find(2, "RTX 3070", 70000)
+        page.wait_for_selector('[data-deal-buy="t2"]')
+        self.assertEqual((page.input_value("#d-paid"), page.input_value("#d-ship")), ("47000", "1500"))
+        page.click('summary:has-text("Beállítások")')
+        page.fill("#d-message", "Szia! Megvan még?")
+        find(3, "RTX 3080", 90000)
+        time.sleep(1)
+        self.assertEqual(page.input_value("#d-message"), "Szia! Megvan még?", "gépelés közben nem rajzolja újra")
+        self.assertEqual(page.evaluate("document.activeElement.id"), "d-message")
+        page.click('[data-deal-paid="t1"]')
+        self.wait_for(lambda: [(i.bought_price, i.bought_shipping) for i in self.h.store.all()] == [(47000, 1500)])
+
+    def test_review_dialog_saves_only_what_you_changed(self):
+        """A Nézd át ablak csak azt menti, amit benne átírtál: ami közben máshol (pl. a telefonon) változott, azt nem
+        írja vissza a megnyitáskori értékre."""
+        store, page = self.h.store, self.page
+        item = store.create(targets=["vinted"], pro=True, title="Nike Air Max 90", price=12500, size="42",
+                            description="Alig hordott.")
+        store.set_pending(item.id, {"kind": "review", "question": "Nézd át"})
+        page.click(f'[data-review="{item.id}"]')
+        page.wait_for_selector("#review-dialog[open]")
+        store.update(item.id, user=True, price=11900)        # közben a telefonon átírtad az árat
+        page.fill("#r-description", "Alig hordott, dobozában.")
+        page.select_option("#r-condition", "Nagyon jó")
+        page.click("#review-save")
+        page.wait_for_selector('.toast:has-text("Mentve")')
+        stored = store.get(item.id)
+        self.assertEqual((stored.description, stored.condition, stored.price, stored.size),
+                         ("Alig hordott, dobozában.", "Nagyon jó", 11900, "42"))
+
+    def test_ledger_details_save_only_what_you_changed(self):
+        """Az Elemzés fül Részletek űrlapja csak az átírt mezőket menti (ami közben máshol változott, marad), és a
+        lap újrarajzolása nem veszi el, amit már beírtál, de még nem mentettél."""
+        store, page = self.h.store, self.page
+        gpu = store.create(title="RTX 3060 Ti Gaming OC", bought_price=55000, target_price=90000,
+                           bought_from="Hardverapró", trade_note="Foxpost 123")
+        page.click("#job-ledger")
+        page.click(f'.lcard .row [data-lopen="{gpu.id}"]')
+        page.fill("#l-bought_extra", "2000")                  # gépelés közben a lap nem frissül alatta…
+        store.update(gpu.id, user=True, trade_note="Foxpost 123, átvéve")   # …közben a telefonon átírtad
+        time.sleep(0.8)
+        self.assertEqual(page.input_value("#l-trade_note"), "Foxpost 123")
+        page.click('[data-lsave] button[type="submit"]')
+        page.wait_for_selector('.toast:has-text("Mentve")')
+        self.wait_for(lambda: store.get(gpu.id).bought_extra == 2000)
+        self.assertEqual(store.get(gpu.id).trade_note, "Foxpost 123, átvéve", "a régi megjegyzést nem írta vissza")
+        # máshová bökve (telefonon) a lap frissülhet: a beírt, még nem mentett szám marad, a többi mező friss
+        page.click(f'.lcard .row [data-lopen="{gpu.id}"]')
+        page.fill("#l-bought_shipping", "1500")
+        page.evaluate("document.activeElement.blur()")
+        store.update(gpu.id, user=True, target_price=95000)
+        page.wait_for_selector('.lcard:has-text("+38 000 Ft")')   # 95 000 − 55 000 − 2 000 (a posta még nincs mentve)
+        self.assertEqual((page.input_value("#l-bought_shipping"), page.input_value("#l-target_price"),
+                          page.input_value("#l-trade_note")), ("1500", "95000", "Foxpost 123, átvéve"))
+        page.click('[data-lsave] button[type="submit"]')
+        self.wait_for(lambda: store.get(gpu.id).bought_shipping == 1500)
+        stored = store.get(gpu.id)
+        self.assertEqual((stored.bought_extra, stored.trade_note, stored.target_price, stored.bought_price),
+                         (2000, "Foxpost 123, átvéve", 95000, 55000))
 
     def test_work_chat_and_mode_memory(self):
         self.h.fake.chat_script = [reply("Még nincs tárgyad.")]

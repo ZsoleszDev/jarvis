@@ -625,7 +625,8 @@
       const result = await J.postJson("/api/creative/update", { id: story.id, fields: fieldsFor(el.dataset.field, value) });
       delete el.dataset.dirty;
       if (!result.ok) { J.toast(result.error || "Nem sikerült menteni."); return; }
-      applyStory(result.story);
+      // ha közben másik történetet nyitottál meg, a válasz ne váltson vissza erre
+      if (story && result.story.id === story.id) applyStory(result.story);
       if (el.dataset.field === "language") J.toast(value === "hu" ? "Mostantól magyarul írok." : "From now on I write in English.");
       return;
     }
