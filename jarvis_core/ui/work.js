@@ -1265,6 +1265,10 @@
       ${section("browse", "Böngészés", `
         <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-bsite" value="${esc(s.key)}" ${(b.sites || []).includes(s.key) ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>
         <div class="row"><button type="button" class="small" id="d-bsave">Oldalak mentése</button></div>
+        ${(b.glance_sites || []).some((k) => (b.sites || []).includes(k)) ? `<div class="row"><label>A Vinted legújabb hirdetései:
+          <select id="d-bglance">${(b.glance_choices || [0, 10, 15, 20, 30, 60]).map((m) => `<option value="${m}"${m === (b.glance ?? 20) ? " selected" : ""}>${m ? `${m} percenként egy oldal${m === 20 ? " (alapból)" : ""}` : "kétóránként, hosszabb munkamenetben"}</option>`).join("")}</select></label></div>
+        <p><small class="muted">Ahogy egy ember frissíti: egy oldal a legújabbakkal, a többi oldal munkája közé ékelve. Sűrűbben
+          hamarabb látom az újat, de a Vinted robot-ellenőrzése is hamarabb jöhet (akkor aznap már nem nézem).</small></p>` : ""}
         <details class="setup" data-fold="lanes"${openSections.has("lanes") ? " open" : ""}><summary>Indulóoldalak, és mit hoztak eddig</summary>
           <p><small class="muted">Alapból egész kategóriákat nézek, a legújabb hirdetésekkel elöl: mindent, ami újonnan felkerül.
             Bármelyiket kikapcsolhatod, és felvehetsz sajátot (egy oldal címét vagy egy keresőszót).</small></p>
@@ -1372,6 +1376,9 @@
     for (const b of box.querySelectorAll("[data-lane-remove]")) b.addEventListener("click", () =>
       dealAction({ action: "lane_remove", id: b.dataset.laneRemove }));
     $("d-blearn").addEventListener("change", (e) => dealAction({ action: "browse", learn: e.target.checked }));
+    if ($("d-bglance")) $("d-bglance").addEventListener("change", async (e) => {
+      if (await dealAction({ action: "browse", glance: Number(e.target.value) })) J.toast("Mentve.");
+    });
     $("d-jday").addEventListener("change", async (e) => {
       journalDay = e.target.value;
       journalEntries = null;

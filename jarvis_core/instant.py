@@ -373,8 +373,9 @@ class InstantWatch:
                              if any(host == d or host.endswith("." + d) for d in p.domains)), None)
             if platform is None:
                 names = " vagy a ".join(p.name for p in self.platforms.values())
-                raise InstantError(f"Azonnal csak a {names} találati oldalát tudom figyelni (a Vinted maga is szól az "
-                                   "újakról).")
+                raise InstantError(f"Azonnal csak a {names} találati oldalát tudom figyelni. A Vintedet a böngészés "
+                                   "nézi (a legújabbakat alapból 20 percenként): egy Vinted-oldalt a Böngészésnél "
+                                   "vehetsz fel indulóoldalnak.")
             parts = urllib.parse.urlsplit(target)
             segments = [seg for seg in parts.path.split("/") if seg and not seg.startswith("index")
                         and not seg.endswith((".php", ".html"))]

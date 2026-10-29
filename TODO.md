@@ -170,12 +170,19 @@
   az ismeretlen kivitelű memóriát az olcsóbbhoz méri (vagy ha azt nem ismeri, csak tipp). KEY_VERSION 5: a régi
   árbázis átrendeződik, a nem a termékhez tartozó árak kimaradnak. `python -m jarvis_core.audit`: a mentett találatok
   és az árbázis a mostani szabályokkal, csak olvasva.
-
+- A Vinted friss listája (deals.GLANCE_*): a kétóránkénti Vinted-munkamenet (10 oldal 20 perc alatt, utána két óra
+  szünet) helyett alapból 20 percenként (±20%) egy oldal a legújabbakból, a többi oldal munkája közé ékelve, ahogy egy
+  ember frissíti; óránként kb. ugyanannyi kérés, de egy új hirdetés legfeljebb kb. 20 perc múlva kiderül (eddig akár
+  2,5 óra). Több Vinted-indulóoldal felváltva; a fülön állítható (10–60 perc, vagy a régi mód); a naplóba óránként egy
+  sor; robot-ellenőrzésnél aznap leáll.
 - Olvasóprofil (browser.READER_HOSTS, `[browser] reader`): a Vinteden a modell nélküli olvasás (böngészés, keresés,
   árkutatás, hirdetés átnézése) egy külön, be nem jelentkezett profilban, a saját ablakában; a fiókos munka a
   fő profilban.
 
 ## Élesben kipróbálandó
+- A Vinted friss listája: kér-e a Vinted robot-ellenőrzést a 20 perces ütemnél (a napló „robot-ellenőrzést kért”
+  sora), és hány új hirdetés jön egy pillantásra (a Napló óránkénti sora: ha az Elektronika első oldala 20 perc alatt
+  betelik, a sűrűbb ütem vagy a második oldal kellene). A pillantás az olvasóprofilban megy (nem a fiókban).
 - Olvasóprofil: kér-e a Vinted robot-ellenőrzést a be nem jelentkezett ablakban (sütiablak az első
   betöltéskor: elfogadja-e a böngészés), és a két ablak nem zavar-e (Windowson a tálcán kettő látszik).
 - Pontos árazás a valódi címeken: a cikkszám-minták (parts._FORM_SIGNS, _GENERATION_SIGNS) a gyakori gyártóknál

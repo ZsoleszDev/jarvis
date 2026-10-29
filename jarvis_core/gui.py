@@ -878,8 +878,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **deals.lane_switch(str(body.get("id") or ""), bool(body.get("on")))})
             if action == "lane_remove":  # egy saját vagy tanult indulóoldal törlése
                 return self._json(200, {"ok": True, **deals.lane_remove(str(body.get("id") or ""))})
-            if action == "browse":      # böngészés napközben: be/ki, oldalak, legkisebb haszon, öntanulás
-                state = deals.set_browse(body.get("on"), body.get("sites"), body.get("min_profit"), body.get("learn"))
+            if action == "browse":      # böngészés napközben: be/ki, oldalak, legkisebb haszon, öntanulás, friss lista
+                state = deals.set_browse(body.get("on"), body.get("sites"), body.get("min_profit"), body.get("learn"),
+                                         body.get("glance"))
                 # bekapcsoláskor rögtön kezd (nem várja meg az ütemező csendes perceit)
                 if body.get("on") and app is not None and app.scheduler is not None and "deals" in app.scheduler.jobs \
                         and deals.available():

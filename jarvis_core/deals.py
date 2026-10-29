@@ -33,9 +33,10 @@ mi van benne; a darabárak az árbázisból vagy a gyors oldalak mostani hirdet�
 becsléséből, óvatosan). Ha darabonként eladva (a posta és a csomagolás nélkül) jóval többet ér, szól róla; a Megvettem
 után a darabjai külön eladandó tárgyak lesznek, a vételár az értékük arányában szétosztva.
 
-Gyorsaság: a találatokat a legújabb elöl nézi. Keresésenként megadható, milyen sűrűn nézze (30 perc – 6 óra); a Vintedet
-legfeljebb kétóránként (robot-ellenőrzés). Az egész egy kapcsolóval be- és kikapcsolható (a Munka menü Automata
-kereskedés fülén); alapból ki van kapcsolva.
+Gyorsaság: a találatokat a legújabb elöl nézi. Keresésenként megadható, milyen sűrűn nézze (30 perc – 6 óra); a
+Vinteden egy keresés legfeljebb kétóránként fut (robot-ellenőrzés), a böngészés viszont a Vinted legújabb hirdetéseit
+alapból 20 percenként megnézi, egy oldalt, ahogy egy ember frissíti (friss lista: GLANCE_DEFAULT). Az egész egy
+kapcsolóval be- és kikapcsolható (a Munka menü Automata kereskedés fülén); alapból ki van kapcsolva.
 """
 from __future__ import annotations
 
@@ -335,7 +336,8 @@ DEFAULT_DAY = (7, 23)      # a gép általában ekkor megy (óra): a licitekről
 # BROWSE_WORK percig nézelődik (két oldalbetöltés között STEP_PAUSE másodperc), aztán egy rövid SWITCH_PAUSE után a
 # következő oldalra vált (BROWSE_ORDER). Csak az az oldal pihen, amelyiken épp dolgozott: legalább BROWSE_REST percig
 # (±30%), a Vinted SITE_GAP percig; a Jarvis maga csak akkor áll meg, ha minden bejelölt oldal pihen. Egy munkamenetben
-# legfeljebb BROWSE_PAGES oldalt tölt be. Ha egy oldal robot-ellenőrzést kér, aznap már nem nézi.
+# legfeljebb BROWSE_PAGES oldalt tölt be. Ha egy oldal robot-ellenőrzést kér, aznap már nem nézi. (A Vinteden alapból
+# nem munkamenetek, hanem a friss lista pillantásai: GLANCE_DEFAULT.)
 BROWSE_WORK = 20
 BROWSE_REST = 10
 DEFAULT_STEP = (15, 50)
@@ -344,6 +346,19 @@ SWITCH_PAUSE = (20, 60)
 BROWSE_PAGES = {"vinted": 10}
 BROWSE_MAX_PAGES = 30
 SITE_GAP = {"vinted": 120}
+# Friss lista (pillantás): a Vinteden úgy, ahogy egy ember, aki napközben 20 percenként frissíti a legújabbakat. Az
+# indulóoldalát (a legújabb elöl) GLANCE_DEFAULT percenként (±20%, GLANCE_JITTER) egyszer tölti be, a többi oldal
+# munkamenetei közé ékelve (mint egy másik fülön), és OPEN_CHANCE eséllyel megnyit egy hirdetést is. Ez váltja a
+# kétóránkénti munkamenetet (BROWSE_PAGES oldal kb. 20 perc alatt, utána SITE_GAP perc szünet): óránként nem több kérés,
+# csak egyenletesen elosztva, és egy új hirdetés legfeljebb kb. ennyi perc múlva kiderül (eddig akár 2,5 óra). Több
+# Vinted-indulóoldalnál felváltva (a legrégebben nézett jön), így a kérések száma ugyanannyi marad. A felületen
+# állítható (GLANCE_CHOICES); 0: a régi, kétóránkénti munkamenetek. A pillantásokról óránként egy naplóbejegyzés
+# (GLANCE_LOG perc), nem mindegyikről külön.
+GLANCE_SITES = ("vinted",)
+GLANCE_CHOICES = (0, 10, 15, 20, 30, 60)
+GLANCE_DEFAULT = 20
+GLANCE_JITTER = (0.8, 1.2)
+GLANCE_LOG = 60
 OPEN_CHANCE = 0.35         # egy találati oldal után ekkora eséllyel megnyit egy hirdetést (a Vinted kezdőoldalán mindig)
 # A modellre váró ismeretlenek: EXPLORE_ROWS-onként egy hívás; a munkamenet végén csak legalább MIN_FLUSH (vagy egy
 # licit) miatt tölti be a modellt, a maradék a következő munkamenetre vár (legfeljebb MAX_PENDING).
@@ -503,6 +518,27 @@ BUNDLE_SCHEMA: dict[str, Any] = {
         "suspicious": {"type": "boolean"}, "reason": {"type": "string"}},
     "required": ["bundle", "lines", "suspicious", "reason"],
 }
+
+
+def _glance_minutes(value: Any) -> int:
+    """A friss lista gyakorisága percben (GLANCE_CHOICES; ami nem ezek közül való, vagy hiányzik: GLANCE_DEFAULT)."""
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return GLANCE_DEFAULT
+    return minutes if minutes in GLANCE_CHOICES else GLANCE_DEFAULT
+
+
+def _glance_text(name: str, log: dict[str, Any], end: float) -> str:
+    """A friss lista egy órája a naplóba: „09:02–10:01 Vinted, a legújabbak: 3 pillantás, 288 hirdetés (61 új)”."""
+    clock = lambda t: time.strftime("%H:%M", time.localtime(t))  # noqa: E731
+    text = (f"{clock(float(log.get('start') or end))}–{clock(end)} {name}, a legújabbak: {int(log.get('looks') or 0)} "
+            f"pillantás, {int(log.get('rows') or 0)} hirdetés ({int(log.get('fresh') or 0)} új)")
+    problems = log.get("problems") or {}
+    if problems:
+        text += "; akadály: " + "; ".join(f"{reason} ({n}×)" for reason, n in
+                                          sorted(problems.items(), key=lambda kv: -kv[1])[:3])
+    return text + "."
 
 
 class DealError(ItemError):
@@ -1455,13 +1491,16 @@ class DealHunter:
                            "sites": [s for s in browse.get("sites") or BROWSE_ORDER if s in BROWSE_ORDER],
                            "min_profit": int(browse.get("min_profit") or WATCH_PROFIT),
                            # öntanulás: a gyorsan kelő termékekből magától is felvesz indulóoldalt (alapból be)
-                           "learn": browse.get("learn") is not False},
+                           "learn": browse.get("learn") is not False,
+                           # a Vinted friss listája: hány percenként nézi meg a legújabbakat (0: a régi munkamenetek)
+                           "glance": _glance_minutes(browse.get("glance"))},
                 # indulóoldal → mit hozott, és a tanultak meg a sajátjaid címe; a kikapcsolt („disabled”), a törölt
                 # tanult („removed”: nem tanulja újra)
                 "lanes": dicts("lanes"),
                 "session": data.get("session") if isinstance(data.get("session"), dict) else {},
                 "fast_session": data.get("fast_session") if isinstance(data.get("fast_session"), dict) else {},
-                "sites_state": {"ended": {}, "rest": {}, "blocked": {}, "learned": "",
+                # (glance: oldalanként a friss lista következő és legutóbbi pillantása, és a naplóba gyűjtött óra)
+                "sites_state": {"ended": {}, "rest": {}, "blocked": {}, "learned": "", "glance": {},
                                 **(data.get("sites_state") if isinstance(data.get("sites_state"), dict) else {})},
                 "feedback": dicts("feedback"),    # termék → elrejtve / megvetted (öntanulás)
                 # csomagbontás: be/ki, a legkisebb haszon, a csomagkeresések, és a felmérésre váró csomagok (inbox)
@@ -1575,7 +1614,8 @@ class DealHunter:
                     "browser": self.browser is not None, "sale_ratio": SALE_RATIO, "shipping": SHIPPING,
                     "day": list(self._data["day"]), "book": self.book.stats(),
                     "browse": {**json.loads(json.dumps(self._data["browse"])),
-                               "status": self._browse_status(self.clock())},
+                               "status": self._browse_status(self.clock()), "glance_choices": list(GLANCE_CHOICES),
+                               "glance_sites": [k for k in GLANCE_SITES if k in self.platforms]},
                     "lanes": self._lane_list(), "lane_presets": list(LANE_PRESETS),
                     "journal": self.journal.entries(), "journal_days": self.journal.days(),
                     "bundles": self._bundle_state(),
@@ -1708,7 +1748,7 @@ class DealHunter:
                 platform = watch.get("platform") or "vatera"
                 if platform in self.platforms and self._due(watch, platform, now):
                     return True
-            if self._bundles_due(now) or self._browse_due(now) or self._auctions_due(now):
+            if self._bundles_due(now) or self._browse_due(now) or self._auctions_due(now) or self._glance_due(now):
                 return True
         return self._haggle_pending(now)
 
@@ -1747,11 +1787,35 @@ class DealHunter:
         with self._lock:
             return self._browse_status(self.clock()) if self._data["enabled"] else ""
 
-    def set_browse(self, on: Any = None, sites: Any = None, min_profit: Any = None, learn: Any = None) -> dict[str, Any]:
-        """Böngészés napközben: be/ki, melyik oldalakon, legalább mennyi haszonnal szóljon, és felvehet-e magától
-        indulóoldalt a gyorsan kelő termékekből (öntanulás)."""
+    def set_browse(self, on: Any = None, sites: Any = None, min_profit: Any = None, learn: Any = None,
+                   glance: Any = None) -> dict[str, Any]:
+        """Böngészés napközben: be/ki, melyik oldalakon, legalább mennyi haszonnal szóljon, felvehet-e magától
+        indulóoldalt a gyorsan kelő termékekből (öntanulás), és hány percenként nézze meg a Vinted legújabb hirdetéseit
+        (glance, GLANCE_CHOICES; 0: a régi, kétóránkénti munkamenetek)."""
         profit = self._amount(min_profit, "A legkisebb haszon") if min_profit not in (None, "") else None
+        minutes = None
+        if glance not in (None, ""):
+            try:
+                minutes = int(glance)
+            except (TypeError, ValueError):
+                minutes = -1
+            if minutes not in GLANCE_CHOICES:
+                raise DealError("A Vinted friss listáját " + ", ".join(str(m) for m in GLANCE_CHOICES if m) +
+                                " percenként nézhetem (vagy 0: kétóránként, hosszabb munkamenetekben).")
         with self._lock:
+            if minutes is not None and minutes != self._data["browse"]["glance"]:
+                self._data["browse"]["glance"] = minutes
+                now = self.clock()
+                for mark in self._data["sites_state"]["glance"].values():
+                    # az új gyakoriság rögtön érvényes: a következő pillantás a legutóbbihoz mérve
+                    if isinstance(mark, dict) and minutes:
+                        mark["next"] = float(mark.get("at") or now) + minutes * 60
+                session = self._data[SESSION_KEYS[LANE_BROWSER]]
+                if minutes and session.get("phase") == "work" and session.get("site") in GLANCE_SITES:
+                    self._data[SESSION_KEYS[LANE_BROWSER]] = {}   # a régi Vinted-munkamenet helyett a friss lista
+                self._save()
+            else:
+                minutes = None                 # (nem változott: nem kerül a naplóba)
             browse = self._data["browse"]
             if on is not None:
                 browse["on"] = bool(on)
@@ -1772,6 +1836,9 @@ class DealHunter:
         if learn is not None:
             self.journal.add("Az öntanulás be van kapcsolva: a gyorsan kelő termékekből magam is veszek fel indulóoldalt."
                              if learn else "Kikapcsoltad az öntanulást: új indulóoldalt csak te veszel fel.")
+        if minutes is not None:
+            self.journal.add(f"A Vinted legújabb hirdetéseit ezentúl {minutes} percenként nézem meg (egy oldal)."
+                             if minutes else "A Vintedet ezentúl kétóránként nézem, hosszabb munkamenetekben.")
         return self.state()
 
     def lane_add(self, target: str, site: str = "") -> dict[str, Any]:
@@ -2508,9 +2575,13 @@ class DealHunter:
                 bundle_searches.append(bundle_search)
                 game.work.append(partial(self._step_bundle_search, game, bundle_search, sites))
         browse = False
+        with self._lock:                      # a Vinted friss listája: ha esedékes, ebben a körben elöl
+            glance = self._glance_due(now)
+        if glance:
+            game.work.appendleft(partial(self._step_glance, game, running, glance))
         if game.done:
             game.work.append(partial(self._step_revisit, game))
-        else:                                 # „Keresés most” is: ha nincs keresés, a böngészés lép
+        elif not glance:                      # „Keresés most” is: ha nincs keresés, a böngészés lép
             with self._lock:
                 browse = self._browse_due(now)
             if browse:
@@ -2551,6 +2622,10 @@ class DealHunter:
             self._release_carry(game)
         if browse:
             return self._after_browse(game)
+        if glance:
+            looked = self._glance_done(game, glance)
+            if not game.done:
+                return looked
         extra = [n for n in game.notes if n] + game.errors
         if not game.done and (game.bundled or game.haggles):
             parts = [f"{game.bundled} csomag felmérve, " + (f"{game.found} megéri" if game.found else "egyik sem éri meg")
@@ -5575,7 +5650,7 @@ class DealHunter:
     def _rotation(self, lane: str = LANE_BROWSER) -> list[str]:
         """A sor bejelölt oldalai sorban (BROWSE_ORDER), a legutóbbi utánitól kezdve."""
         order = [k for k in BROWSE_ORDER if k in self._data["browse"]["sites"] and k in self.platforms and self._lanes(k)
-                 and self._lane_of(k) == lane]
+                 and self._lane_of(k) == lane and not self._glancing(k)]   # (a friss listás oldal pillantásokban megy)
         last = self._session(lane).get("site")
         start = order.index(last) + 1 if last in order else 0
         return order[start:] + order[:start]
@@ -5626,12 +5701,14 @@ class DealHunter:
         """Egy mondat a böngészés mostani állapotáról (a felületnek); ha két sor fut, mindkettőé."""
         if not self._data["browse"]["on"]:
             return ""
-        if not self.parallel:
-            return self._lane_status(now, LANE_BROWSER)
-        parts = [self._lane_status(now, lane) for lane in (LANE_FAST, LANE_BROWSER)
+        lanes = (LANE_FAST, LANE_BROWSER) if self.parallel else (LANE_BROWSER,)
+        if not self._day_ok(now) and not any(self._session(lane).get("phase") == "work" for lane in lanes):
+            start, end = self._data["day"]
+            return f"Napközben böngészik ({start}–{end} óra); most nem dolgozik."
+        parts = [self._lane_status(now, lane) for lane in lanes
                  if self._rotation(lane) or self._session(lane).get("phase") == "work"]
-        parts = [part for n, part in enumerate(parts) if part and part not in parts[:n]]
-        return " ".join(parts) or "Most egyik oldal sem esedékes."
+        parts = [part for n, part in enumerate(parts) if part and part not in parts[:n]] + [self._glance_status(now)]
+        return " ".join(part for part in parts if part) or "Most egyik oldal sem esedékes."
 
     def _lane_status(self, now: float, lane: str) -> str:
         session, start, end = self._session(lane), *self._data["day"]
@@ -5658,6 +5735,7 @@ class DealHunter:
             if session.get("phase") == "work" and (now >= float(session.get("until") or 0) or not self._day_ok(now)
                                                    or int(session.get("pages") or 0) >= self._budget(session["site"])
                                                    or session["site"] not in self._data["browse"]["sites"]
+                                                   or self._glancing(session["site"])
                                                    or self._lane_of(session["site"]) != lane
                                                    or not self._lanes(session["site"])):
                 self._close_session(game)
@@ -5850,6 +5928,140 @@ class DealHunter:
             return self._finish_session(game) or "Böngészés: pihenő."
         notes = [n for n in game.notes if n] + game.errors
         return "Böngészés: " + ("; ".join(notes[:3]) if notes else "nincs mit nézni") + "."
+
+    # --- friss lista: a Vinted legújabb hirdetései pillantásokban (GLANCE_DEFAULT percenként egy oldal) ---
+
+    def _glancing(self, site: str) -> bool:
+        """Ezt az oldalt a friss lista pillantásai nézik-e a munkamenetek helyett (GLANCE_SITES, és nincs kikapcsolva)."""
+        return site in GLANCE_SITES and int(self._data["browse"].get("glance") or 0) > 0
+
+    def _glance_mark(self, site: str) -> dict[str, Any]:
+        """Az oldal friss listájának állapota: next (a következő pillantás), at (a legutóbbi), log (a naplóba gyűjtött
+        óra: start, last, looks, rows, fresh, problems)."""
+        marks = self._data["sites_state"].setdefault("glance", {})
+        mark = marks.get(site)
+        if not isinstance(mark, dict):
+            mark = marks[site] = {}
+        return mark
+
+    def _glance_due(self, now: float) -> str | None:
+        """Melyik oldal friss listája esedékes most (a zár a hívónál): a böngészés be van kapcsolva, az oldal be van
+        jelölve, van indulóoldala, napközben van, ma nem kért robot-ellenőrzést, és letelt az ideje. None, ha egyik sem."""
+        if not (self._data["enabled"] and self._data["browse"]["on"]) or self.browser is None or not self._day_ok(now):
+            return None
+        state = self._data["sites_state"]
+        for site in GLANCE_SITES:
+            if not self._glancing(site) or site not in self._data["browse"]["sites"] or site not in self.platforms \
+                    or state["blocked"].get(site) == day_of(now) or not self._lanes(site):
+                continue
+            if now >= float(self._glance_mark(site).get("next") or 0):
+                return site
+        return None
+
+    def _glance_status(self, now: float) -> str:
+        """A friss lista egy mondatban (a felületnek): mikor nézte utoljára, és mikor jön a következő."""
+        clock = lambda t: time.strftime("%H:%M", time.localtime(t))  # noqa: E731
+        out = []
+        for site in GLANCE_SITES:
+            if not self._glancing(site) or site not in self._data["browse"]["sites"] or site not in self.platforms \
+                    or not self._lanes(site):
+                continue
+            name, mark = self.platforms[site].name, self._glance_mark(site)
+            if self._data["sites_state"]["blocked"].get(site) == day_of(now):
+                out.append(f"{name}: ma robot-ellenőrzést kért, holnap folytatom.")
+                continue
+            last, upcoming = float(mark.get("at") or 0), float(mark.get("next") or 0)
+            soon = "hamarosan" if upcoming - now <= 90 else f"legközelebb kb. {clock(upcoming)}"
+            out.append(f"{name}: a legújabbakat {clock(last)}-kor néztem, {soon}." if last else
+                       f"{name}: a legújabbakat {soon} nézem meg.")
+        return " ".join(out)
+
+    def _step_glance(self, game: _Round, running: list[dict[str, Any]], site: str) -> None:
+        """Egy pillantás a friss listára: az oldal egyik indulóoldala (a legrégebben nézett; a Vinteden alapból az
+        Elektronika, a legújabb elöl) egyszer, ugyanúgy átnézve, mint a böngészésben (_triage: a jelöltek rögtön, az
+        ismeretlenek a modellnek kötegben), és OPEN_CHANCE eséllyel egy hirdetés is, ahogy egy ember. A következő
+        pillantás a gyakoriság szerint (±20%) jön. A böngészés munkamenetébe nem számít; a naplóba óránként egy
+        bejegyzés kerül (_glance_done)."""
+        now = self.clock()
+        name = self.platforms[site].name
+        with self._lock:
+            lanes = self._lanes(site)
+            if not lanes:
+                return
+            stats = self._data["lanes"]
+            lane = min(lanes, key=lambda item: float((stats.get(item["id"]) or {}).get("glanced") or 0))
+            minutes = int(self._data["browse"].get("glance") or GLANCE_DEFAULT)
+            mark = self._glance_mark(site)
+            mark.update(at=now, next=now + minutes * 60 * self.rng.uniform(*GLANCE_JITTER))
+            stats.setdefault(lane["id"], {})["glanced"] = now
+            # (új: amit még nem látott; a modellre váró ismeretlen sem új a következő pillantásnál)
+            seen = set(self._data["seen"]) | {listing_key(r["url"]) for r in self._queue(LANE_BROWSER)}
+            log = mark.setdefault("log", {})
+            earlier, at = "", now
+            if log.get("start") and now - float(log.get("last") or 0) > 2 * GLANCE_LOG * 60:
+                earlier, at = _glance_text(name, log, float(log["last"])), float(log["last"])
+                log.clear()                    # (egy hosszabb szünet után, pl. reggel, új óra kezdődik)
+            if not log.get("start"):
+                log.update(start=now, looks=0, rows=0, fresh=0, problems={})
+            self._save()
+        if earlier:
+            self.journal.add(earlier, at=at)  # az előző (este félbemaradt) óra
+        game.check()
+        source = self._browse_source()
+        rows = self._page_rows(game, lane["url"], site, source, extra={"lane": lane["id"], "lane_name": lane["name"]})
+        self._lane_count(lane["id"], "pages")
+        if not game.captcha:
+            unknown = self._triage(game, source, rows or [], running)
+            if rows and self.rng.random() < OPEN_CHANCE:
+                self._open_random(game, source, rows, unknown)
+            pending = self._queue(LANE_BROWSER)
+            known = {r["url"] for r in pending}
+            self._set_queue(LANE_BROWSER, (pending + [r for r in unknown if r["url"] not in known])[-MAX_PENDING:])
+            if len(self._queue(LANE_BROWSER)) >= (TURBO_ROWS if self.turbo else EXPLORE_ROWS) and game.lane is not None:
+                self._flush(game)              # (Turbóban minden pillantás után)
+        if game.captcha:
+            self._glance_blocked(game, site)
+        fresh = [row for row in rows or [] if listing_key(row["url"]) not in seen]
+        with self._lock:
+            self._lane_count(lane["id"], "rows", len(rows or []))
+            log.update(last=now, looks=int(log.get("looks") or 0) + 1, rows=int(log.get("rows") or 0) + len(rows or []),
+                       fresh=int(log.get("fresh") or 0) + len(fresh))
+            problems = log.setdefault("problems", {})
+            for error in game.errors:          # mi akadályozta (a naplóba)
+                reason = error.split(": ", 1)[-1].rstrip(".")[:100]
+                if reason in problems or len(problems) < 4:
+                    problems[reason] = int(problems.get(reason) or 0) + 1
+            self._save()
+        game.notes.append(f"{lane['name']}: {len(rows or [])} hirdetés, {len(fresh)} új")
+
+    def _glance_blocked(self, game: _Round, site: str) -> None:
+        """Robot-ellenőrzés a friss listán: ma ezt az oldalt már nem nézi (nem próbálja megkerülni), és egyszer szól."""
+        now = self.clock()
+        name = self.platforms[site].name if site in self.platforms else site
+        with self._lock:
+            self._data["sites_state"]["blocked"][site] = day_of(now)
+            self._save()
+        self.journal.add(f"{name}: robot-ellenőrzést kért, ma már nem nézem (nem próbálom megkerülni).")
+        game.notify("deal", f"{name}: robot-ellenőrzés",
+                    f"A {name} robot-ellenőrzést kért, amikor a legújabb hirdetéseit néztem. Ma már nem nézem; ha "
+                    "szeretnéd, oldd meg a böngészőablakomban, és holnap folytatom.", actions=[DEALS_ACTION], quiet=True)
+
+    def _glance_done(self, game: _Round, site: str) -> str:
+        """A pillantás köre után: ha letelt az óra (GLANCE_LOG), egy naplóbejegyzés róla (hány pillantás, hány
+        hirdetés, ebből hány új; a jó találatok a saját bejegyzésükben). Visszaadja a rövid eredményt."""
+        now = self.clock()
+        name = self.platforms[site].name if site in self.platforms else site
+        text = ""
+        with self._lock:
+            log = self._glance_mark(site).setdefault("log", {})
+            if log.get("start") and now - float(log["start"]) >= GLANCE_LOG * 60 - 90:
+                text = _glance_text(name, log, now)
+                log.clear()
+                self._save()
+        if text:
+            self.journal.add(text)
+        notes = [n for n in game.notes if n] + game.errors
+        return f"{name}, a legújabbak: " + ("; ".join(notes[:3]) if notes else "nincs mit nézni") + "."
 
     def run_fast(self, check: Callable[[], None] = lambda: None, notify: Callable[..., None] = lambda *a, **k: None,
                  model_ok: Callable[[], bool] = lambda: True) -> str:
