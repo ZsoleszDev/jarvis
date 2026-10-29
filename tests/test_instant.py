@@ -2110,7 +2110,7 @@ class TwoLaneTests(InstantCase):
         self.assertTrue(any("hardverapro.hu/aprok/hardver" in url for _t, url in self.net.asked))
         status = self.hunter.state()["browse"]["status"]
         self.assertIn("Most: Hardverapró", status)
-        self.assertIn("Most: Vinted", status)
+        self.assertRegex(status, r"Vinted: a legújabbakat \d\d:\d\d-kor néztem", "a Vinteden a friss lista (pillantás)")
         self.assertEqual(self.hunter.run_fast(), "", "a gyors sor is tart szünetet két oldal között")
 
     def test_the_fast_lane_names_its_own_unknowns(self):
