@@ -1784,6 +1784,26 @@ class WorkBrowserTests(unittest.TestCase):
         page.click('[data-deal-paid="t1"]')
         self.wait_for(lambda: [(i.bought_price, i.bought_shipping) for i in self.h.store.all()] == [(47000, 1500)])
 
+    def test_a_vinted_find_shows_its_title_and_likes(self):
+        """Egy Vinted-találat a címével (a webcímből, selling.vinted_titles) és a kedvelései számával látszik: a
+        listában és a találat ablakában is."""
+        self.h.app.work.instant.allowed = lambda: False
+        self.h.app.work.deals._remember({
+            "id": "v1", "url": "https://www.vinted.hu/items/4123456789-palit-rtx-3060-ti-dual", "site": "Vinted",
+            "platform": "vinted", "title": "NVIDIA palit rtx 3060 ti dual",
+            "text": "NVIDIA palit rtx 3060 ti dual | 8 NVIDIA Kiváló 60000 Ft 63280 Ft a következővel:",
+            "price": 60000, "median": 100000, "margin": 40000, "likes": 8, "at": time.time()})
+        page = self.page
+        page.click("#job-deals")
+        card = 'li:has([data-deal-open="v1"])'
+        page.wait_for_selector(card)
+        self.assertEqual(page.inner_text(f'{card} a[href*="/items/"]'), "NVIDIA palit rtx 3060 ti dual",
+                         "a cím, nem a kártya szövege")
+        self.assertIn("8 kedvelés a Vinteden", page.inner_text(card))
+        page.click('[data-deal-open="v1"]')
+        page.wait_for_selector("#deal-dialog[open]")
+        self.assertIn("8 (ha sok, másnak is feltűnt)", page.inner_text("#deal-body"))
+
     def test_review_dialog_saves_only_what_you_changed(self):
         """A Nézd át ablak csak azt menti, amit benne átírtál: ami közben máshol (pl. a telefonon) változott, azt nem
         írja vissza a megnyitáskori értékre."""

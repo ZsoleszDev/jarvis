@@ -1445,8 +1445,11 @@ PAGES = {
 <body><header><a href="/akcio">Ma minden 990 Ft</a></header><main><div class="grid">
 <div class="item"><a href="/member/77">Eladó: Kata</a>
   <a href="/items/1-zara-blezer" title="Zara blézer, márka: Zara, méret: M, 4 500 Ft"><img alt=""></a>
+  <button type="button" data-testid="product-item-id-1--favourite" aria-label="Hozzáadás a kedvencekhez"><svg></svg>
+    <span>8</span></button>
   <div>Zara</div><div>M · Nagyon jó</div><div>4 500 Ft</div></div>
-<div class="item"><a href="/items/2-hm-blezer"><span>H&amp;M blézer</span></a><p>S</p><p>2&nbsp;000 Ft</p></div>
+<div class="item"><a href="/items/2-hm-blezer"><span>H&amp;M blézer</span></a><p>S</p><p>2&nbsp;000 Ft</p>
+  <button type="button" aria-label="Kedvencekhez">♥</button></div>
 <div class="item"><a href="/items/3-zara-kabat">Zara kabát</a><span>12 990 Ft</span></div>
 <div class="item"><a href="/items/4-nincs-ar">Ár nélküli</a></div>
 <div class="item"><a href="/items/5-levis-farmer">Levi's farmer</a><s>9 000 Ft</s> <b>6 500 Ft</b></div>
@@ -1595,6 +1598,8 @@ class BrowserWorkTests(unittest.TestCase):
         self.assertNotIn("9 000", found[3]["text"], "a modell sem látja a régi árat")
         self.assertEqual([bool(r.get("auction")) for r in found], [False] * 6 + [True],
                          "csak a villámár nélküli licites kártya jelzett")
+        self.assertEqual([r.get("likes") for r in found[:3]], [8, None, None],
+                         "a kedvelések száma (a Vinted-kártyán a szív mellett); a szám nélküli szív nem számít")
 
     def test_promoted_listings(self):
         """A fizetett kiemelések (a kiemeltek blokkja, egy „Kiemelt” címke, egy kiemelés-osztály) jelölve jönnek."""

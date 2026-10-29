@@ -1629,6 +1629,58 @@ _LISTING_IDS = (("vinted", re.compile(r"/items/(\d{5,})")),
                 ("vatera", re.compile(r"[-_](\d{5,})\.html?$")))
 
 
+# A Vinted találati oldalán a kártyán nincs cím (2026 októberében egy élő oldalon: a kedvelések száma, a márka, az
+# állapot és az ár, pl. „8 NVIDIA Kiváló 105000 Ft 110530 Ft a következővel:”), a hirdetés webcímében viszont benne van
+# (…/items/4123456789-palit-rtx-3060-ti-dual). Ha a kártya linkjének leírásában ott a pontos cím („Palit RTX 3060 Ti
+# Dual, márka: Palit, …”), az az erősebb.
+_VINTED_ITEM_RE = re.compile(r"^/items/\d+-([^/]+?)/?$")
+_VINTED_LABEL_RE = re.compile(r"^([^|]{3,160}?),\s*(?:márka|marka|brand|marque|marke|marca)\s*:", re.IGNORECASE)
+CARD_BRAND_WORDS = 3   # a Vinted-kártya fejléce (a márka) legfeljebb ennyi szó: a webcímből vett cím elé kerül
+
+
+def vinted_slug_title(url: str) -> str:
+    """A Vinted-hirdetés címe a webcíméből (…/items/123-palit-rtx-3060-ti-dual → „palit rtx 3060 ti dual”); más oldal
+    hirdetésénél, vagy ha a webcímben nincs értelmes cím (csak szám), „”."""
+    parts = urllib.parse.urlsplit(url or "")
+    if "vinted" not in (parts.hostname or "").split("."):
+        return ""
+    found = _VINTED_ITEM_RE.match(urllib.parse.unquote(parts.path))
+    if not found:
+        return ""
+    title = " ".join(word for word in found.group(1).split("-") if word)
+    return title if len(title) >= 3 and re.search(r"[^\W\d_]", title) else ""
+
+
+def vinted_titles(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Egy találati oldal hirdetései (browser.LISTINGS_JS), a Vinteden a hirdetés címével. Ott a kártyán csak a márka
+    látszik (a böngésző azt veszi címnek, a kártya fejlécéből), így az árbázis nem ismerte fel a terméket, és a modell
+    sem tudta, mi ez. A cím a kártya linkjének leírásából („…, márka: …”), különben a webcímből jön; a márka (ha nincs
+    benne) elé kerül, a kártyán álló valódi (hosszabb) cím marad. A kártya szövege elé is odakerül: a találatok
+    listája, az értesítés és a modell ezt látja. Más oldal hirdetése változatlan."""
+    out = []
+    for row in rows:
+        slug = vinted_slug_title(str(row.get("url") or ""))
+        if not slug:
+            out.append(row)
+            continue
+        text = " ".join(str(row.get("text") or "").split())
+        card = " ".join(str(row.get("title") or "").split())
+        label = _VINTED_LABEL_RE.match(text)
+        if label:
+            title = label.group(1).strip()
+        elif not card or set(fold(card).split()) <= set(fold(slug).split()):
+            title = slug
+        elif len(card.split()) <= CARD_BRAND_WORDS:
+            title = f"{card} {slug}"
+        else:
+            title = card                       # a kártyán valódi cím van
+        row = {**row, "title": title}
+        if fold(title) not in fold(text):
+            row["text"] = f"{title} | {text}" if text else title
+        out.append(row)
+    return out
+
+
 def listing_key(url: str) -> str:
     """Egy hirdetés azonosítója a webcíméből: a gép és a hirdetés száma (az oldal webcímformája szerint, _LISTING_IDS),
     különben az útvonal (a Hardveraprón mindig az). Így a saját hirdetésed más paraméterekkel vagy más címmel (slug)
@@ -1771,7 +1823,7 @@ class PriceResearcher:
             raise NeedsBrowser()
         controller = self.browser()            # (a Vinteden a be nem jelentkezett olvasóprofilban: read_listings)
         read = getattr(controller, "read_listings", None)
-        return read(url) if callable(read) else controller.extract_listings(url)
+        return vinted_titles(read(url) if callable(read) else controller.extract_listings(url))
 
     def query_for(self, item: Item) -> str:
         if item.search_query:

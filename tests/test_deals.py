@@ -23,7 +23,7 @@ from test_web_browser import HAS_CHROMIUM  # noqa: E402
 from jarvis_core import condition as conditions  # noqa: E402
 from jarvis_core import deals as deals_module  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
-from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, assess, careful_low,  # noqa: E402
+from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, assess, buy_fee, careful_low,  # noqa: E402
                                expected_profit, explore_top, highest_ok, last_chance, left_text, market, matches_query,
                                newest_first, offer_price, parse_auction, profit_floor, safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
@@ -662,19 +662,26 @@ class DealTests(HunterCase):
         self.assertEqual(self.hunter.run(notify=self.notify), "1 keresés: 1 olcsó hirdetés.")
         [(_kind, title, text, extra)] = self.notices
         self.assertEqual(title, "Olcsó: MSI RTX 3060 Ti Ventus")
-        # a vevővédelmi díjjal (300 + 5%) együtt legfeljebb 70 000: 66 300 + 3 615; a haszon 90 000 − 66 300 − 1 500 − 3 615
-        self.assertIn("Ha 66 300 Ft-ért megkapod (ajánlattétel), kb. 18 585 Ft a haszon. Ajánlatot tegyek? Csak a "
+        # a Vinted díjával (280 + 5%) együtt legfeljebb 70 000: 66 400 + 3 600; a haszon 90 000 − 66 400 − 1 500 − 3 600
+        self.assertIn("Ha 66 400 Ft-ért megkapod (ajánlattétel), kb. 18 500 Ft a haszon. Ajánlatot tegyek? Csak a "
                       "jóváhagyásod után küldöm el.", text)
-        self.assertIn("Levonva: vevővédelmi díj kb. 3 615 Ft.", text)
+        self.assertIn("Levonva: vevővédelmi díj kb. 3 600 Ft.", text)
         [deal] = self.hunter.state()["deals"]
-        self.assertEqual((deal["offer"], deal["profit"], deal["costs"]), (66300, 18585, 1500 + 3615))
-        self.assertEqual(extra["actions"][0], {"action": "offer", "deal": deal["id"], "label": "Ajánlatot teszek (66 300 Ft)"})
+        self.assertEqual((deal["offer"], deal["profit"], deal["costs"]), (66400, 18500, 1500 + 3600))
+        self.assertEqual(extra["actions"][0], {"action": "offer", "deal": deal["id"], "label": "Ajánlatot teszek (66 400 Ft)"})
         other = self.make("jofogas")
         other.add_search("RTX 3060 Ti", ["jofogas"], reference=100000)
         other.set_enabled(True)
         self.notices.clear()
         other.run(notify=self.notify)
         self.assertEqual(self.notices, [], "ajánlatot csak a Vinteden lehet tenni")
+
+    def test_the_vinted_fee_matches_the_live_cards(self):
+        """A Vinted díja (az ár 5%-a + 280 Ft): egy élő vinted.hu-s találati oldal öt kártyáján a díjjal növelt ár
+        pontosan ennyi volt (2026. október). Máshol nincs vevői díj."""
+        for price, total in ((105000, 110530), (111004, 116834), (122313, 128709), (143401, 150851), (2531, 2938)):
+            self.assertEqual(price + buy_fee("vinted", price), total, price)
+        self.assertEqual(buy_fee("hardverapro", 50000), 0)
 
     def test_the_highest_price_that_still_pays_and_the_offer(self):
         plain, profit = {"discount": 30}, {"discount": 30, "min_profit": 5000}
@@ -689,8 +696,8 @@ class DealTests(HunterCase):
                 self.assertTrue(self.hunter._cheap(search, top, reference), (search, reference))
                 self.assertFalse(self.hunter._cheap(search, top + 1, reference), (search, reference))
         self.assertEqual(offer_price(plain, 80000, 100000), 70000)
-        self.assertEqual(offer_price(plain, 80000, 100000, "vinted"), 66300, "a Vinteden a vevővédelmi díjjal együtt")
-        self.assertEqual(highest_ok(plain, 100000, "vinted"), 66381)
+        self.assertEqual(offer_price(plain, 80000, 100000, "vinted"), 66400, "a Vinteden a díjjal együtt")
+        self.assertEqual(highest_ok(plain, 100000, "vinted"), 66400)
         self.assertIsNone(offer_price(plain, 95000, 100000), "26% engedmény: nem fogadná el")
         self.assertIsNone(offer_price(plain, 70000, 100000), "így is megéri: nem kell ajánlat")
 
@@ -1335,7 +1342,7 @@ class ExploreTests(HunterCase):
         self.hunter.set_enabled(True)
         self.hunter.run(notify=self.notify)
         deals = {d["price"]: d for d in self.hunter.state()["deals"]}
-        self.assertEqual(deals[45000]["offer"], 36300, "a vevővédelmi díjjal együtt legfeljebb 38 500")
+        self.assertEqual(deals[45000]["offer"], 36400, "a Vinted díjával együtt legfeljebb 38 500")
         self.assertIn("Ajánlatot tegyek?", [t for _k, _t, t, _e in self.notices if "45 000" in t][0])
         self.assertNotIn(25000, deals, "a gyakran hamisított márka feltűnően olcsón gyanús: nem szól róla")
         self.assertIn("ezt a márkát gyakran hamisítják", " ".join(e["text"] for e in self.hunter.journal.entries()))
@@ -1405,7 +1412,7 @@ class SellerTests(HunterCase):
                                                                                "www.vinted.hu"),
                 listing(8, "Retró kütyü X100", 3000, "www.vinted.hu")]
         summary = self.hunter.seller_bundle(deal, rows)
-        fee = lambda amount: round(300 + 0.05 * amount)  # noqa: E731
+        fee = lambda amount: round(280 + 0.05 * amount)  # noqa: E731
         self.assertEqual([(i["t"], i["pick"], i.get("why", "")) for i in summary["items"]],
                          [("Apple AirPods Pro 2 fehér", True, ""),
                           ("Apple AirPods Pro 2 doboz nélkül", False, "külön nem éri meg")])
@@ -1418,7 +1425,7 @@ class SellerTests(HunterCase):
                          (True, 2, 20, 81000))
         self.assertEqual(self.hunter.get("d1")["seller"]["profit"], summary["profit"], "a találatba is beírja")
         text = self.hunter.seller_text(deal, summary)
-        self.assertIn("a Vinted vevővédelmi díja kb. 4 800 Ft a végösszegre egyszer", text)
+        self.assertIn("a Vinted vevővédelmi díja kb. 4 780 Ft a végösszegre egyszer", text)
         self.assertIn("Közös vételre ajánlj kb. 81 000 Ft-ot (csomagajánlat).", text)
         self.assertIsNone(self.hunter.seller_bundle(deal, rows[:1]), "nincs más hirdetése")
 

@@ -760,6 +760,30 @@ LISTINGS_JS = r"""
     }
     return false;
   };
+  // a kedvelések száma (a Vinted kártyáján a szív mellett): egy kedvenc-gomb vagy -jelzés (a data-testid, az
+  // aria-label, a title vagy az osztály szerint), aminek a szövege csak egy szám; a szám nélküli szív nem számít
+  const LIKE_HINT = /(favou?rite|kedvenc|\blikes?\b|heart)/i;
+  // a kártya egésze: ha a kártya maga a link (az ár a link leírásában van, mint a Vinteden), a legnagyobb őse, amiben
+  // csak ez az egy hirdetés van (a szív a link mellett van, nem benne)
+  const leafNodes = leaves.map((card) => card.node);
+  const scopeOf = (node) => {
+    let scope = node;
+    for (let el = node.parentElement, depth = 0; el && el !== document.body && depth < 4;
+         el = el.parentElement, depth++) {
+      if (leafNodes.some((other) => other !== node && el.contains(other))) break;
+      scope = el;
+    }
+    return scope;
+  };
+  const likesOf = (node) => {
+    for (const el of scopeOf(node).querySelectorAll('*')) {
+      const hint = ['data-testid', 'aria-label', 'title', 'class'].map((a) => el.getAttribute(a) || '').join(' ');
+      if (!LIKE_HINT.test(hint)) continue;
+      const n = clean(el.innerText).match(/^(\d{1,5})$/);
+      if (n) return parseInt(n[1], 10);
+    }
+    return null;
+  };
   const out = [];
   const seen = new Set();
   for (const card of leaves) {
@@ -781,6 +805,8 @@ LISTINGS_JS = r"""
     if (title.length > 3 && title.length <= 160 && !PRICE.test(title)) entry.title = title;
     if (!fixed && AUCTION.test(text)) entry.auction = true;
     if (promoted(card.node)) entry.promoted = true;
+    const likes = likesOf(card.node);
+    if (likes !== null) entry.likes = likes;
     out.push(entry);
     if (out.length >= 120) break;           // egy találati oldal összes hirdetése (a Hardverapró 100-at mutat)
   }

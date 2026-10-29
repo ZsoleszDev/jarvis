@@ -178,8 +178,22 @@
 - Olvasóprofil (browser.READER_HOSTS, `[browser] reader`): a Vinteden a modell nélküli olvasás (böngészés, keresés,
   árkutatás, hirdetés átnézése) egy külön, be nem jelentkezett profilban, a saját ablakában; a fiókos munka a
   fő profilban.
+- Vinted-kártyák címe (selling.vinted_titles): egy élő vinted.hu-s találati oldalon (2026. október) a kártyán nincs
+  cím, csak a kedvelések száma, a márka, az állapot és az ár („8 NVIDIA Kiváló 105000 Ft 110530 Ft a következővel:”),
+  így a böngésző a márkát vette címnek, az árbázis nem ismerte fel a terméket, és a modell sem tudta, mi ez (a friss
+  lista hirdetései szinte mind a modellre váró sorba kerültek, ami 60-nál levágódik). A cím most a kártya linkjének
+  leírásából („…, márka: …”), különben a webcímből jön (…/items/123-palit-rtx-3060-ti-dual), a kártya márkája elé
+  kerül, és a kártya szövege elé is (a lista, az értesítés és a modell is ezt látja); a keresésekben, a böngészésben,
+  az eladó oldalán és a saját tárgyak árkutatásában is. Az értesítés és a napló a találatot a címével nevezi meg
+  (deal_name), nem a kártya szövegével. A kedvelések száma (LISTINGS_JS: kedvenc-gomb vagy -jelzés számmal, a link
+  melletti kártyarészben is) a találatnál és az ablakában látszik; LIKES_HOT (3) fölött az értesítés jelzi, hogy siess.
+  A Vinted díja ugyanezeken a kártyákon mérve 280 Ft + 5% (VINTED_FEE_FIXED; eddig 300 Ft-tal számolt).
 
 ## Élesben kipróbálandó
+- Vinted-kártyák a valódi oldalon: hogy a böngésző a kedvelések számát megtalálja-e (LISTINGS_JS LIKE_HINT:
+  data-testid, aria-label, title vagy osztály „favourite”, „kedvenc”, „like”, „heart”); ha a találatoknál soha nem
+  látszik kedvelés, a valódi kártya HTML-je kell. A webcímből vett cím kisbetűs, és a „+” jel kimarad belőle (az
+  „S21+” S21-nek látszik: alulbecsül, nem téved felfelé).
 - A Vinted friss listája: kér-e a Vinted robot-ellenőrzést a 20 perces ütemnél (a napló „robot-ellenőrzést kért”
   sora), és hány új hirdetés jön egy pillantásra (a Napló óránkénti sora: ha az Elektronika első oldala 20 perc alatt
   betelik, a sűrűbb ütem vagy a második oldal kellene). A pillantás az olvasóprofilban megy (nem a fiókban).
@@ -223,8 +237,8 @@
 - Ruha felismerése (pricebook._WEAR_RE) valódi címeken: ha egy nem ruha kiesik (pl. egy márkanév más termék nevében),
   vagy egy ruha átjut, a listát kell szűkíteni vagy bővíteni (a napló „ruha, cipő” sorából látszik).
 - Az eladó többi hirdetésének linkje (feeds.SELLER_TEXT_RE, SELLER_HREF_RE, a böngészőben a LISTING_PAGE_JS) a valódi
-  Hardverapró-, Jófogás-, Vinted- és Vatera-oldalakon; a Vinted vevővédelmi díja (VINTED_FEE_FIXED 300 Ft,
-  VINTED_FEE_RATE 5%) a valódi díjszabás szerint hangolandó, és a 10 perc/hirdetés munkaidő is.
+  Hardverapró-, Jófogás-, Vinted- és Vatera-oldalakon, és a 10 perc/hirdetés munkaidő hangolása (a Vinted díja,
+  280 Ft + 5%, élő kártyákon mérve).
 - A leírások elolvasása a bizonytalan változatnál (DETAIL_READS 2) a kéréskeretből megy: ha sok kör üresen fut, vagy a
   napló szerint sokszor „a leírásából sem derül ki”, csökkentendő.
 - Turbó élesben: mennyivel több modellhívás (és mennyi melegedés), és hogy egy feltöltés tényleg csak pár másodpercet
@@ -246,7 +260,7 @@
 - Az Android-módosítások (értesítés gombja → Eladva ablak) itt nem fordultak le: a GitHub Actions fordítását meg kell nézni.
 - A fotóküszöbök valódi telefonos fotókon (főleg: világos tárgy fehér háttér előtt, gyenge fény).
 - Automata kereskedés a valódi oldalakon: a kategóriaoldalak (Vinted catalog, Jófogás, Hardverapró, Vatera „hamarosan lejár”) hirdetéskártyáinak kiolvasása, a Vatera-kártyák hátralévő ideje, a Vinted ajánlattétel-ablaka, az újranézett hirdetés „elkelt / eltűnt” felismerése.
-- A böngészés a valódi oldalakon: a Vinted kezdőoldalának kártyái (a kártyán sokszor csak a márka és a méret látszik), a Jófogás és a Vatera keresőjének rendezése (a legújabb elöl-e), a Hardverapró-kategóriák címe (2026 októberében ellenőrizve).
+- A böngészés a valódi oldalakon: a Vinted kezdőoldalának kártyái (a kártyán nincs cím: a webcímből jön, lásd fent), a Jófogás és a Vatera keresőjének rendezése (a legújabb elöl-e), a Hardverapró-kategóriák címe (2026 októberében ellenőrizve).
 - Az egy memóriamérettel gyártott videókártyák listája (pricebook._SINGLE_CAPACITY) az ismert asztali kártyákat
   tartalmazza; új típusnál bővíteni kell (csak adatlap alapján, ahol tényleg egy méret van). A RAM/tárhely felismerése a
   mellette álló szóból jön (RAM, DDR, GDDR, SSD, NVMe, tárhely); a szokatlan írásmódokat a naplóból kell pótolni.

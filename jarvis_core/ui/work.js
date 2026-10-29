@@ -927,6 +927,7 @@
     if (d.reliability) rows.push(["A becslés megbízhatósága", reliabilityLine(d.reliability)]);
     if (d.sold) rows.push(["Eltűnt (talán elkelt) hasonlók", `kb. ${esc(price(d.sold.median))} (${esc(d.sold.n)} db alapján) <small class="muted">(ennyiért hirdették; nem tudni, mennyiért keltek el)</small>`]);
     if (d.speed) rows.push(["Eladási sebesség", esc(d.speed)]);
+    if (d.likes) rows.push(["Kedvelések", `${esc(d.likes)} (ha sok, másnak is feltűnt)`]);
     if (d.safety) rows.push(["Kockázat", safetyLine(d.safety)]);
     return `<p class="muted">Megtaláltam: ${esc(ago(d.at))}${d.explore ? ` · ${esc(d.explore)}` : ""}</p>
       <dl class="facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
@@ -1085,7 +1086,7 @@
     const bundleCard = (d) => `<small class="muted">${esc(d.site)} · csomag · <b>${esc(price(d.price))}</b>, darabonként eladva kb. ${esc(price(d.bundle.value))}
         (${esc(d.bundle.listings)} hirdetés) · várható haszon kb. <b>${esc(price(d.profit))}</b>${d.explore ? " · " + esc(d.explore) : ""}</small>
         <details class="setup"><summary>Mi van benne (${d.bundle.lines.length} tétel)</summary>${bundleLines(d)}</details>`;
-    const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.haggle ? d.title || d.text : d.text)}</a>
+    const found = deals.deals.map((d) => `<li><span><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.title || d.text)}</a>
         ${d.bundle ? bundleCard(d) : d.haggle ? haggleCard(d) : `<small class="muted">${esc(d.site)}${d.auction ? " (licit)" : ""} · <b>${esc(price(d.price))}</b>${d.drop ? ` (leárazta: ${esc(price(d.drop))})` : ""},
         ${d.auction ? "máshol" : "szokásos ár"} ${esc(price(d.median))}${d.auction ? ` · ${esc(leftText(d))} · legfeljebb <b>${esc(price(d.max_bid))}</b>-ig érdemes licitálni`
           : d.offer ? ` · ajánlattal (${esc(price(d.offer))}) kb. <b>${esc(price(d.profit))}</b> haszon`
@@ -1093,6 +1094,7 @@
         ${d.calibration ? " · a felmérés közben" : ""}${d.explore ? " · " + esc(d.explore) : ""}${d.note ? " · " + esc(d.note) : ""}</small>`}
         ${d.seller && d.seller.worth ? `<small><b class="tag">+${esc(d.seller.picked)} az eladótól</b> együtt kb. <b>${esc(price(d.seller.profit))}</b> haszon (Részletek)</small>` : ""}
         ${d.speed ? `<small class="muted">Eladási sebesség: ${esc(d.speed)}</small>` : ""}
+        ${d.likes ? `<small class="muted">${esc(d.likes)} kedvelés${d.platform === "vinted" ? " a Vinteden" : ""}</small>` : ""}
         ${d.safety ? `<small class="${d.safety.level === "kockázatos" ? "warn" : "muted"}">${safetyLine(d.safety)}</small>` : ""}
         ${d.model_no ? `<small class="warn">Utólag mégsem jó: ${esc(d.model_no)}</small>`
           : d.unchecked && !d.verified ? `<small class="warn">A modell még nem nézte meg${d.model_pending ? " (amint lehet, megnézi)" : ""}</small>` : ""}
