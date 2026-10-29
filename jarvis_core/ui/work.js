@@ -148,11 +148,40 @@
     return false;
   }
 
+  // Átírtad-e a mezőt a megjelenése óta (a böngésző az egysoros mezőből a sortörést kiveszi: az még nem átírás).
+  const typedValue = (el) => el.value !== (el.tagName === "TEXTAREA" ? el.defaultValue : el.defaultValue.replace(/[\r\n]/g, ""));
+
   const update = async (id, fields) => {
     const result = await J.postJson("/api/work/update", { id, fields });
-    if (result.ok) driftNotes.set(id, result.drift_note || "");
+    if (result.ok) {
+      driftNotes.set(id, result.drift_note || "");
+      settle(id, fields);
+    }
     if (!remember(result, "Nem sikerült menteni.")) load();
   };
+
+  // A tárgy lapjának egy mezője, amikor kilépsz belőle (change). Amíg a mentés tart, a mezőben a beírt érték marad
+  // (az újrarajzolás sem veszi el); ha sikerült, már a Jarvisnál tárolt érték látszik (pl. „15 000” helyett 15000).
+  // Ha nem sikerült, a beírt érték bent marad, hogy javíthasd.
+  const saving = new Map();               // data-keep -> a mentés alatt álló érték
+  async function saveField(id, el) {
+    const key = el.dataset.keep;
+    const value = el.value;
+    if (key) saving.set(key, value);
+    try {
+      await update(id, { [el.dataset.field]: value });
+    } finally {
+      if (key && saving.get(key) === value) saving.delete(key);
+    }
+  }
+  function settle(id, fields) {
+    const box = $("w-detail");
+    if (box.dataset.item !== id) return;
+    for (const [name, value] of Object.entries(fields)) {
+      const el = box.querySelector(`[data-field="${CSS.escape(name)}"][data-keep]`);
+      if (el && el.value === String(value)) el.defaultValue = el.value;
+    }
+  }
 
   async function action(name, id, extra = {}) {
     const result = await J.postJson("/api/work/action", { action: name, ids: id ? [id] : [], ...extra });
@@ -375,12 +404,17 @@
     $("review-msg").textContent = "";
     if (!$("review-dialog").open) $("review-dialog").showModal();
   }
+  // Csak amit az ablakban átírtál (a megnyitáskori értékhez képest): ami közben máshol (pl. a telefonon) változott,
+  // azt nem írja vissza a régire.
+  const changedHere = (el) => (el.tagName === "SELECT"
+    ? el.value !== ([...el.options].find((o) => o.defaultSelected) || el.options[0] || { value: "" }).value
+    : typedValue(el));
   async function saveReview() {
     const item = items.get(reviewOpen);
     if (!item) return false;
     const fields = {};
     for (const el of $("review-fields").querySelectorAll("[data-rfield]")) {
-      if (String(el.value) !== String(item[el.dataset.rfield] ?? "")) fields[el.dataset.rfield] = el.value;
+      if (changedHere(el)) fields[el.dataset.rfield] = el.value;
     }
     if (!Object.keys(fields).length) return true;
     const result = await J.postJson("/api/work/update", { id: item.id, fields });
@@ -456,25 +490,56 @@
     }, 30);
   }
 
-  // Újrarajzoláskor ne vesszen el, amit épp gépelsz (pl. egy válasz a kártyán).
+  // Újrarajzoláskor ne vesszen el, amit épp gépelsz (pl. egy válasz a kártyán). Csak az marad meg, amit a legutóbbi
+  // rajzolás óta átírtál (és még nincs elmentve); a többi mezőben a friss adat látszik (pl. amit közben Jarvis írt át,
+  // vagy a telefonon írtál át). A kulcsok a tárgyhoz kötöttek (data-keep="f-<tárgy>-title"), így egy tárgy mezőjébe
+  // sosem kerülhet egy másikéból.
   function keepTyping(box, draw) {
-    const typed = new Map([...box.querySelectorAll("[data-keep]")].map((el) => [el.dataset.keep, el.value]));
+    const typed = new Map([...box.querySelectorAll("[data-keep]")].filter(typedValue)
+      .map((el) => [el.dataset.keep, el.value]));
     const active = document.activeElement;
     const focus = active && box.contains(active) && active.dataset.keep
       ? { key: active.dataset.keep, start: active.selectionStart, end: active.selectionEnd } : null;
     const scroll = area.scrollTop;
     draw();
     for (const el of box.querySelectorAll("[data-keep]")) {
-      if (typed.has(el.dataset.keep) && typed.get(el.dataset.keep)) el.value = typed.get(el.dataset.keep);
+      if (typed.has(el.dataset.keep)) el.value = typed.get(el.dataset.keep);
     }
     if (focus) {
-      const el = box.querySelector(`[data-keep="${focus.key}"]`);
+      const el = box.querySelector(`[data-keep="${CSS.escape(focus.key)}"]`);
       if (el) {
         el.focus();
         try { el.setSelectionRange(focus.start, focus.end); } catch { /* select */ }
       }
     }
     area.scrollTop = scroll;
+  }
+
+  // Egy tárgy lapja mindig a tárgy saját adataival nyílik meg. Amíg ugyanaz a tárgy látszik, az újrarajzolás megtartja
+  // a félbehagyott gépelést; ha a lap másik tárgyra vált vagy bezárul, előbb elmenti (a saját tárgyába), amit a
+  // mezőibe beírtál, de még nem mentődött (pl. gépelés közben egy értesítésre bököttél), aztán kiürül. A lap tudja,
+  // kié (data-item): a mezői, gombjai mindig ahhoz a tárgyhoz tartoznak, akkor is, ha közben máshová léptél.
+  const detailItem = () => ($("w-detail").hidden ? null : $("w-detail").dataset.item || null);
+  function showDetail(item) {
+    const box = $("w-detail");
+    const same = !box.hidden && box.dataset.item === item.id;
+    if (!same) leaveDetail();
+    box.hidden = false;
+    if (same) keepTyping(box, () => renderDetail(item));
+    else renderDetail(item);
+  }
+  function leaveDetail() {
+    const box = $("w-detail");
+    const id = box.dataset.item;
+    box.hidden = true;
+    if (!id) return;
+    const unsaved = {};
+    for (const el of box.querySelectorAll("[data-field][data-keep]")) {
+      if (typedValue(el) && saving.get(el.dataset.keep) !== el.value) unsaved[el.dataset.field] = el.value;
+    }
+    box.innerHTML = "";
+    delete box.dataset.item;
+    if (Object.keys(unsaved).length && items.has(id)) update(id, unsaved);
   }
 
   // Telefonon az „Új hirdetés” űrlap összecsukva kezdődik (ha van már tárgy), hogy a lista látsszon; a címére bökve nyílik.
@@ -578,7 +643,7 @@
   // Egy keresés állapota: a szokásos ár (jóváhagyva, javaslat, kevés hasonló, felmérés a következő körben).
   function searchState(s) {
     const refForm = editingRef === s.id
-      ? `<span class="row"><input id="d-ref" type="number" min="1" value="${esc(s.reference || (s.proposal && s.proposal.price) || "")}"
+      ? `<span class="row"><input id="d-ref" data-keep="ref-${esc(s.id)}" type="number" min="1" value="${esc(s.reference || (s.proposal && s.proposal.price) || "")}"
            style="width: 7em" aria-label="Szokásos ár (Ft)"> Ft <button type="button" class="small primary" data-ref-save="${esc(s.id)}">Mentés</button></span>`
       : "";
     if (s.status === "fut") {
@@ -1005,14 +1070,14 @@
     // Megvettem: a vételár (alapból a hirdetés ára), a posta, és hogy postán jön-e (akkor „úton” az Elemzés fülön)
     const buyButton = (d) => d.bought ? cancelButton(d.bought, d.text)
       : buying === d.id ? `<span class="row buyform">
-          <label>Vételár <input id="d-paid" type="number" inputmode="numeric" min="1" value="${esc(d.haggle ? d.haggle.offer : d.price)}" aria-label="Vételár (Ft)"></label>
-          <label>Posta <input id="d-ship" type="number" inputmode="numeric" min="0" placeholder="0" aria-label="Posta (Ft)"></label>
+          <label>Vételár <input id="d-paid" data-keep="paid-${esc(d.id)}" type="number" inputmode="numeric" min="1" value="${esc(d.haggle ? d.haggle.offer : d.price)}" aria-label="Vételár (Ft)"></label>
+          <label>Posta <input id="d-ship" data-keep="ship-${esc(d.id)}" type="number" inputmode="numeric" min="0" placeholder="0" aria-label="Posta (Ft)"></label>
           <label class="check"><input id="d-transit" type="checkbox" checked> postán jön</label>
           <button type="button" class="small primary" data-deal-paid="${esc(d.id)}">Mentés</button></span>`
       : `<button type="button" class="small" data-deal-buy="${esc(d.id)}">Megvettem</button>`;
     const offerBox = (d) => d.offer_sent ? `<small>Ajánlat elküldve: <b>${esc(price(d.offer_sent.price))}</b> – ha az eladó
           elfogadja, a Vinted értesít.</small>`
-      : d.offer ? `<span class="row"><input id="d-offer-${esc(d.id)}" type="number" min="1" value="${esc(d.offer)}" style="width: 6em"
+      : d.offer ? `<span class="row"><input id="d-offer-${esc(d.id)}" data-keep="offer-${esc(d.id)}" type="number" min="1" value="${esc(d.offer)}" style="width: 6em"
           aria-label="Ajánlat (Ft)"> Ft <button type="button" class="small primary" data-offer="${esc(d.id)}">Ajánlatot teszek</button></span>` : "";
     const haggleCard = (d) => `<small class="muted">${esc(d.site)} · <b class="tag">alku</b> · kért ár ${esc(price(d.price))},
         ajánlj <b>${esc(price(d.haggle.offer))}</b>-ot (${esc(Math.round(d.haggle.cut * 100))}%-kal kevesebb) · ${d.haggle.days >= 1 ? `${esc(d.haggle.days)} napja fent` : "friss"}${d.haggle.cuts ? " · már leárazta" : ""}
@@ -1074,6 +1139,7 @@
     const dayOptions = (deals.journal_days || []).map((d) => `<option value="${esc(d)}"${d === journalDay ? " selected" : ""}>${esc(d)}</option>`).join("");
     const edit = deals.searches.find((s) => s.id === editingSearch);
     const v = (key, fallback = "") => esc(edit && edit[key] != null ? edit[key] : fallback);
+    const searchKey = `search-${edit ? esc(edit.id) : "new"}`;   // a data-keep kulcsok: melyik keresés űrlapja
     const checked = (key) => !edit || (edit.sites || []).includes(key) ? "checked" : "";
     const alertCount = ((deals.instant || {}).alerts || []).length;
     const bd = deals.bundles || { on: false, min_profit: 8000, searches: [], waiting: 0, presets: [] };
@@ -1110,9 +1176,9 @@
       ${section("settings", "Beállítások", `
         <div class="fields limits">
           <div class="field"><label for="d-maxbuy">Max. vételár (Ft)</label>
-            <input id="d-maxbuy" type="number" inputmode="numeric" min="0" placeholder="bármennyi" value="${esc(deals.max_buy ?? "")}"></div>
+            <input id="d-maxbuy" data-keep="d-maxbuy" type="number" inputmode="numeric" min="0" placeholder="bármennyi" value="${esc(deals.max_buy ?? "")}"></div>
           <div class="field"><label for="d-minprofit">Min. haszon (Ft)</label>
-            <input id="d-minprofit" type="number" inputmode="numeric" min="0" value="${esc(b.min_profit)}"></div>
+            <input id="d-minprofit" data-keep="d-minprofit" type="number" inputmode="numeric" min="0" value="${esc(b.min_profit)}"></div>
         </div>
         <label class="check"><input id="d-safeonly" type="checkbox" ${deals.safe_only !== false ? "checked" : ""}>
           Csak a nyugodt szívvel megvehetőkről szólj</label>
@@ -1122,10 +1188,10 @@
         <label class="check"><input id="d-haggle" type="checkbox" ${(deals.haggle || {}).on !== false ? "checked" : ""}>
           Alkuképes hirdetések is (régóta fent lévő vagy friss, kicsit drága)</label>
         <label class="field-label" for="d-haggle-message">Ajánlat az eladónak ({ár} = a javasolt összeg)</label>
-        <textarea id="d-haggle-message" rows="3">${esc((deals.haggle || {}).message || "")}</textarea>
+        <textarea id="d-haggle-message" data-keep="d-haggle-message" rows="3">${esc((deals.haggle || {}).message || "")}</textarea>
         <div class="row"><button type="button" class="small" id="d-haggle-save">Mentés</button></div>
         <label class="field-label" for="d-message">Üzenet az eladónak</label>
-        <textarea id="d-message" rows="3">${esc(deals.message || "")}</textarea>
+        <textarea id="d-message" data-keep="d-message" rows="3">${esc(deals.message || "")}</textarea>
         <div class="row"><button type="button" class="small" id="d-message-save">Mentés</button></div>`)}
       ${section("costs", `Pótlás és javítás (${(deals.costs || []).length})`, `
         <p><small class="muted">Ha egy jelöltnek a leírása szerint hiányzik a töltője, vagy hibás a kijelzője, ennyit vonok le a
@@ -1148,12 +1214,12 @@
           az nincs megadva: 0 Ft-tal számolom, de a találatnál látszik, hogy nincs benne; a 0 megadott nulla.</small></p>
         <form id="d-fees" class="compose" autocomplete="off">
           <div class="row">
-            <label>Csomagolás <input id="d-fee-packaging" type="number" inputmode="numeric" min="0" style="width: 6em" value="${feeValue("packaging")}"> Ft</label>
-            <label>Eladási díj <input id="d-fee-sell_pct" type="number" inputmode="decimal" min="0" step="0.1" style="width: 5em" value="${feeValue("sell_pct")}"> %</label>
+            <label>Csomagolás <input id="d-fee-packaging" data-keep="d-fee-packaging" type="number" inputmode="numeric" min="0" style="width: 6em" value="${feeValue("packaging")}"> Ft</label>
+            <label>Eladási díj <input id="d-fee-sell_pct" data-keep="d-fee-sell_pct" type="number" inputmode="decimal" min="0" step="0.1" style="width: 5em" value="${feeValue("sell_pct")}"> %</label>
           </div>
           <div class="row">
-            <label>Egyéb eladási költség <input id="d-fee-sell_fixed" type="number" inputmode="numeric" min="0" style="width: 6em" value="${feeValue("sell_fixed")}"> Ft</label>
-            <label>Tartalék <input id="d-fee-reserve_pct" type="number" inputmode="decimal" min="0" step="0.1" style="width: 5em" value="${feeValue("reserve_pct")}"> %</label>
+            <label>Egyéb eladási költség <input id="d-fee-sell_fixed" data-keep="d-fee-sell_fixed" type="number" inputmode="numeric" min="0" style="width: 6em" value="${feeValue("sell_fixed")}"> Ft</label>
+            <label>Tartalék <input id="d-fee-reserve_pct" data-keep="d-fee-reserve_pct" type="number" inputmode="decimal" min="0" step="0.1" style="width: 5em" value="${feeValue("reserve_pct")}"> %</label>
           </div>
           <div class="row"><button type="submit" class="small">Mentés</button></div>
         </form>`)}
@@ -1161,18 +1227,18 @@
         <ul class="dealist">${searches || '<li class="muted">Még nincs keresés.</li>'}</ul>
         <form id="d-add" class="compose" autocomplete="off">
           ${edit ? `<p><b>Szerkesztés: ${esc(edit.query)}</b></p>` : ""}
-          <input id="d-query" placeholder="Mit keressek? Pl. RTX 3060 Ti, PS5 kontroller" value="${v("query")}">
+          <input id="d-query" data-keep="${searchKey}-query" placeholder="Mit keressek? Pl. RTX 3060 Ti, PS5 kontroller" value="${v("query")}">
           <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-site" value="${esc(s.key)}" ${checked(s.key)}> ${esc(s.name)}</label>`).join("")}</div>
           <div class="row">
-            <label>Legalább <input id="d-discount" type="number" min="10" max="80" value="${v("discount", 30)}" style="width: 4em">%-kal olcsóbb,</label>
-            <label>vagy legalább <input id="d-profit" type="number" min="0" placeholder="–" value="${v("min_profit")}" style="width: 6em"> Ft haszon</label>
+            <label>Legalább <input id="d-discount" data-keep="${searchKey}-discount" type="number" min="10" max="80" value="${v("discount", 30)}" style="width: 4em">%-kal olcsóbb,</label>
+            <label>vagy legalább <input id="d-profit" data-keep="${searchKey}-profit" type="number" min="0" placeholder="–" value="${v("min_profit")}" style="width: 6em"> Ft haszon</label>
           </div>
           <div class="row">
-            <label>Ár: legalább <input id="d-min" type="number" min="0" placeholder="0" value="${v("min_price")}" style="width: 6em"> Ft</label>
-            <label>legfeljebb <input id="d-max" type="number" min="0" placeholder="bármennyi" value="${v("max_price")}" style="width: 7em"> Ft</label>
+            <label>Ár: legalább <input id="d-min" data-keep="${searchKey}-min" type="number" min="0" placeholder="0" value="${v("min_price")}" style="width: 6em"> Ft</label>
+            <label>legfeljebb <input id="d-max" data-keep="${searchKey}-max" type="number" min="0" placeholder="bármennyi" value="${v("max_price")}" style="width: 7em"> Ft</label>
           </div>
-          <label class="field-label">Kizáró szavak <input id="d-exclude" placeholder="pl. tok, töltő, játék, doboz" value="${esc(edit ? (edit.exclude || []).join(", ") : "")}"></label>
-          ${edit ? "" : `<label class="field-label">Szokásos ár, ha tudod <input id="d-ref-new" type="number" min="1" placeholder="üresen felmérem" style="width: 9em"> Ft</label>`}
+          <label class="field-label">Kizáró szavak <input id="d-exclude" data-keep="${searchKey}-exclude" placeholder="pl. tok, töltő, játék, doboz" value="${esc(edit ? (edit.exclude || []).join(", ") : "")}"></label>
+          ${edit ? "" : `<label class="field-label">Szokásos ár, ha tudod <input id="d-ref-new" data-keep="${searchKey}-ref" type="number" min="1" placeholder="üresen felmérem" style="width: 9em"> Ft</label>`}
           <div class="row">
             <label>Nézze <select id="d-every">${[30, 60, 180, 360].map((m) => `<option value="${m}"${m === Number(v("every", 180)) ? " selected" : ""}>${every(m)}</option>`).join("")}</select></label>
           </div>
@@ -1181,7 +1247,7 @@
         </form>`)}
       ${section("bundles", `Csomagbontás (${bd.on ? "be" : "ki"})`, `
         <label class="check"><input id="db-on" type="checkbox" ${bd.on ? "checked" : ""}> Csomagok felmérése darabonként</label>
-        <div class="row"><label>Legalább <input id="db-profit" type="number" inputmode="numeric" min="0" value="${esc(bd.min_profit)}" style="width: 6em"> Ft haszon</label>
+        <div class="row"><label>Legalább <input id="db-profit" data-keep="db-profit" type="number" inputmode="numeric" min="0" value="${esc(bd.min_profit)}" style="width: 6em"> Ft haszon</label>
           <button type="button" class="small" id="db-save">Mentés</button></div>
         ${bd.on && bd.waiting ? `<p><small>${esc(bd.waiting)} csomag vár felmérésre.</small></p>` : ""}
         <ul class="dealist">${bundleSearches || '<li class="muted">Még nincs csomagkeresés.</li>'}</ul>
@@ -1529,9 +1595,12 @@
       ${ledgerOpen === r.id ? ledgerForm(r) : ""}</article>`;
   }
 
+  // Egy tárgy részletei. A data-keep kulcsok a tárgyhoz kötöttek: az újrarajzolás csak a saját, még nem mentett
+  // gépelését tartja meg (keepTyping), és a Mentés is csak az átírt mezőket küldi.
   function ledgerForm(r) {
+    const keep = (name) => `data-keep="l-${esc(r.id)}-${name}"`;
     const num = (name, label, value, hint = "") => `<div class="field"><label for="l-${name}">${label}</label>
-      <input id="l-${name}" data-lfield="${name}" type="number" inputmode="numeric" min="0" value="${esc(value ?? "")}" placeholder="${esc(hint)}"></div>`;
+      <input id="l-${name}" data-lfield="${name}" ${keep(name)} type="number" inputmode="numeric" min="0" value="${esc(value ?? "")}" placeholder="${esc(hint)}"></div>`;
     const sold = r.stage === "eladva";
     const sites = (ledger.sites || []).map((s) => `<option value="${esc(s)}">`).join("");
     if (r.own) {      // a saját holmid: csak az eladás adatai (ha mégis vetted valamennyiért, a tárgy lapján add meg)
@@ -1539,11 +1608,11 @@
       <div class="fields">
         ${num("sold_price", "Eladási ár (Ft)", r.sold_price)}
         <div class="field"><label for="l-sold_at">Mikor kelt el</label>
-          <input id="l-sold_at" data-lfield="sold_at" data-day="${esc(dayInput(r.sold_at))}" type="date" value="${esc(dayInput(r.sold_at))}"></div>
+          <input id="l-sold_at" data-lfield="sold_at" ${keep("sold_at")} data-day="${esc(dayInput(r.sold_at))}" type="date" value="${esc(dayInput(r.sold_at))}"></div>
         ${num("sell_shipping", "Posta az eladáskor (Ft)", r.sell_shipping, "ha te fizeted")}
         ${num("sell_fee", "Eladási díj (Ft)", r.sell_fee, "jutalék, kiemelés")}
         <div class="field wide"><label for="l-trade_note">Megjegyzés</label>
-          <textarea id="l-trade_note" data-lfield="trade_note" rows="2" placeholder="pl. a vevő neve, a csomagszám">${esc(r.trade_note)}</textarea></div>
+          <textarea id="l-trade_note" data-lfield="trade_note" ${keep("trade_note")} rows="2" placeholder="pl. a vevő neve, a csomagszám">${esc(r.trade_note)}</textarea></div>
       </div>
       <div class="row"><button type="submit" class="primary small">Mentés</button>
         <button type="button" class="small" data-lclose>Mégse</button></div>
@@ -1555,18 +1624,18 @@
         ${num("bought_shipping", "Posta a vételkor (Ft)", r.bought_shipping, "0")}
         ${num("bought_extra", "Egyéb költség (Ft)", r.bought_extra, "javítás, tisztítás…")}
         <div class="field"><label for="l-bought_from">Honnan</label>
-          <input id="l-bought_from" data-lfield="bought_from" list="l-sites" value="${esc(r.bought_from)}" placeholder="pl. Hardverapró"></div>
+          <input id="l-bought_from" data-lfield="bought_from" ${keep("bought_from")} list="l-sites" value="${esc(r.bought_from)}" placeholder="pl. Hardverapró"></div>
         <div class="field"><label for="l-bought_at">Mikor vetted</label>
-          <input id="l-bought_at" data-lfield="bought_at" data-day="${esc(dayInput(r.bought_at))}" type="date" value="${esc(dayInput(r.bought_at))}"></div>
+          <input id="l-bought_at" data-lfield="bought_at" ${keep("bought_at")} data-day="${esc(dayInput(r.bought_at))}" type="date" value="${esc(dayInput(r.bought_at))}"></div>
         ${num("market_price", "Szokásos ára (Ft)", r.market_price, r.market_now ? String(r.market_now.price) : "")}
         ${num("target_price", "Mennyiért adnád tovább (Ft)", r.target_price, r.price ? String(r.price) : "")}
         ${num("sell_shipping", "Posta az eladáskor (Ft)", r.sell_shipping, "ha te fizeted")}
         ${num("sell_fee", "Eladási díj (Ft)", r.sell_fee, "jutalék, kiemelés")}
         ${sold ? num("sold_price", "Eladási ár (Ft)", r.sold_price) : ""}
         ${sold ? `<div class="field"><label for="l-sold_at">Mikor kelt el</label>
-          <input id="l-sold_at" data-lfield="sold_at" data-day="${esc(dayInput(r.sold_at))}" type="date" value="${esc(dayInput(r.sold_at))}"></div>` : ""}
+          <input id="l-sold_at" data-lfield="sold_at" ${keep("sold_at")} data-day="${esc(dayInput(r.sold_at))}" type="date" value="${esc(dayInput(r.sold_at))}"></div>` : ""}
         <div class="field wide"><label for="l-trade_note">Megjegyzés</label>
-          <textarea id="l-trade_note" data-lfield="trade_note" rows="2" placeholder="pl. csomagszám, az eladó neve, egy apró hiba">${esc(r.trade_note)}</textarea></div>
+          <textarea id="l-trade_note" data-lfield="trade_note" ${keep("trade_note")} rows="2" placeholder="pl. csomagszám, az eladó neve, egy apró hiba">${esc(r.trade_note)}</textarea></div>
       </div>
       <datalist id="l-sites">${sites}</datalist>
       ${sold ? "" : `<label class="check"><input type="checkbox" data-lfield="in_transit" ${r.in_transit ? "checked" : ""}> Még úton van (postán jön)</label>`}
@@ -1616,7 +1685,7 @@
         <small class="muted">${M.remaining ? `${esc(price(M.remaining))} maradt` : "elfogyott"}</small></div>
         <span class="mbar"><i style="width: ${used}%"${used >= 100 ? ' class="loss"' : ""}></i></span></div>` : "";
     const num = (id, label, value, min) => `<div class="field"><label for="${id}">${label}</label>
-      <input id="${id}" type="number" inputmode="numeric" min="${min}" placeholder="nincs" value="${esc(value ?? "")}"></div>`;
+      <input id="${id}" data-keep="${id}" type="number" inputmode="numeric" min="${min}" placeholder="nincs" value="${esc(value ?? "")}"></div>`;
     return `${bar}${(M.warnings || []).map((w) => `<p class="warn">${esc(w)}</p>`).join("")}
       <details class="setup"><summary>Keret és figyelmeztetés</summary>
         <div class="fields">
@@ -1663,12 +1732,12 @@
         <button type="button" class="small${ledgerAdding ? "" : " primary"}" id="l-add-toggle">${ledgerAdding ? "Mégse" : "+ Új vétel"}</button>
       </div>
       ${ledgerAdding ? `<form id="l-add" class="compose" autocomplete="off">
-        <input id="la-name" placeholder="Mit vettél? Pl. RTX 3060 Ti, Nike Air Max 90">
+        <input id="la-name" data-keep="la-name" placeholder="Mit vettél? Pl. RTX 3060 Ti, Nike Air Max 90">
         <div class="fields">
-          <div class="field"><label for="la-price">Vételár (Ft)</label><input id="la-price" type="number" inputmode="numeric" min="0"></div>
-          <div class="field"><label for="la-ship">Posta (Ft)</label><input id="la-ship" type="number" inputmode="numeric" min="0" placeholder="0"></div>
-          <div class="field"><label for="la-from">Honnan</label><input id="la-from" list="la-sites" placeholder="pl. Jófogás, bolhapiac"></div>
-          <div class="field"><label for="la-target">Mennyiért adnád tovább (Ft)</label><input id="la-target" type="number" inputmode="numeric" min="0"></div>
+          <div class="field"><label for="la-price">Vételár (Ft)</label><input id="la-price" data-keep="la-price" type="number" inputmode="numeric" min="0"></div>
+          <div class="field"><label for="la-ship">Posta (Ft)</label><input id="la-ship" data-keep="la-ship" type="number" inputmode="numeric" min="0" placeholder="0"></div>
+          <div class="field"><label for="la-from">Honnan</label><input id="la-from" data-keep="la-from" list="la-sites" placeholder="pl. Jófogás, bolhapiac"></div>
+          <div class="field"><label for="la-target">Mennyiért adnád tovább (Ft)</label><input id="la-target" data-keep="la-target" type="number" inputmode="numeric" min="0"></div>
         </div>
         <datalist id="la-sites">${sites}</datalist>
         <label class="check"><input id="la-transit" type="checkbox"> Még úton van (postán jön)</label>
@@ -1714,16 +1783,20 @@
     for (const b of box.querySelectorAll("[data-cancel-bought]")) b.addEventListener("click", () => cancelBought(b.dataset.cancelBought, b.dataset.name));
     for (const form of box.querySelectorAll("[data-lsave]")) form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      // csak amit átírtál: ami közben máshol (pl. a telefonon) változott, azt nem írja vissza a régire
       const fields = {};
       for (const input of form.querySelectorAll("[data-lfield]")) {
         const name = input.dataset.lfield;
-        if (input.type === "checkbox") fields[name] = input.checked;
-        else if (input.type === "date") {
+        if (input.type === "checkbox") {
+          if (input.checked !== input.defaultChecked) fields[name] = input.checked;
+        } else if (input.type === "date") {
           // csak ha átírtad a napot (különben a napon belüli időpont maradna el)
           if (input.value !== input.dataset.day) fields[name] = input.value ? new Date(`${input.value}T12:00:00`).getTime() / 1000 : 0;
-        } else fields[name] = input.value;
+        } else if (typedValue(input)) fields[name] = input.value;
       }
-      if (!form.dataset.own && !String(fields.bought_price || "").trim()) { J.toast("A vételár kell (különben kikerül az Elemzésből)."); return; }
+      const bought = form.querySelector('[data-lfield="bought_price"]');
+      if (bought && !bought.value.trim()) { J.toast("A vételár kell (különben kikerül az Elemzésből)."); return; }
+      if (!Object.keys(fields).length) { ledgerOpen = null; renderLedger(); return; }    // nem írtál át semmit
       if (await ledgerAction({ action: "update", id: form.dataset.lsave, fields })) { ledgerOpen = null; renderLedger(); J.toast("Mentve."); }
     });
   }
@@ -1734,13 +1807,21 @@
     $("w-ledger").hidden = job !== "ledger";
     $("w-filters").hidden = job !== "sales";
     if (job === "deals") {
-      $("w-msgs").hidden = $("w-list-view").hidden = $("w-detail").hidden = true;
-      if (!$("w-deals").contains(document.activeElement) || !document.activeElement.matches("input")) renderDeals();
+      $("w-msgs").hidden = $("w-list-view").hidden = true;
+      leaveDetail();
+      // gépelés közben nem rajzolja újra (egy üzenet szövegében sem); máskor igen, de a beírt, még nem mentett érték marad
+      if (!$("w-deals").contains(document.activeElement) || !document.activeElement.matches("input, textarea, select")) {
+        keepTyping($("w-deals"), renderDeals);
+      }
       return;
     }
     if (job === "ledger") {
-      $("w-msgs").hidden = $("w-list-view").hidden = $("w-detail").hidden = true;
-      if (!$("w-ledger").contains(document.activeElement) || !document.activeElement.matches("input, textarea, select")) renderLedger();
+      $("w-msgs").hidden = $("w-list-view").hidden = true;
+      leaveDetail();
+      // gépelés közben nem rajzolja újra; máskor igen, de a beírt, még nem mentett érték marad
+      if (!$("w-ledger").contains(document.activeElement) || !document.activeElement.matches("input, textarea, select")) {
+        keepTyping($("w-ledger"), renderLedger);
+      }
       return;
     }
     renderFilters();
@@ -1748,18 +1829,17 @@
     if (filter === "msgs") {
       openId = null;
       $("w-list-view").hidden = true;
-      $("w-detail").hidden = true;
+      leaveDetail();
       if (convOpen && !convs.has(convOpen)) convOpen = null;
       keepTyping($("w-msgs"), renderMessages);
       return;
     }
     if (openId && items.has(openId)) {
       $("w-list-view").hidden = true;
-      $("w-detail").hidden = false;
-      keepTyping($("w-detail"), () => renderDetail(items.get(openId)));
+      showDetail(items.get(openId));
     } else {
       openId = null;
-      $("w-detail").hidden = true;
+      leaveDetail();
       $("w-list-view").hidden = false;
       keepTyping($("w-list"), renderList);
     }
@@ -1866,9 +1946,10 @@
       </div></div>`;
   }
 
-  function field(name, label, value, extra = "") {
+  // A tárgy lapjának egy mezője; a data-keep kulcsa a tárgyhoz kötött (keepTyping).
+  function field(item, name, label, value, extra = "") {
     return `<div class="field"><label for="f-${name}">${label}</label>` +
-           `<input id="f-${name}" data-field="${name}" data-keep="f-${name}" value="${esc(value)}" ${extra}></div>`;
+           `<input id="f-${name}" data-field="${name}" data-keep="f-${esc(item.id)}-${name}" value="${esc(value)}" ${extra}></div>`;
   }
 
   function conditionField(value) {
@@ -2039,6 +2120,7 @@
 
   function renderDetail(item) {
     const busy = uploading.get(item.id) || item.busy;
+    $("w-detail").dataset.item = item.id;
     $("w-detail").innerHTML = `
       <header>
         <button type="button" class="quiet small" data-action="back">← Hirdetéseim</button>
@@ -2072,26 +2154,26 @@
         <p class="muted">A leírásod: ${esc(item.prompt) || "–"}</p>
         <div class="fields">
           <div class="field wide"><label for="f-title">Cím</label>
-            <input id="f-title" data-field="title" data-keep="f-title" value="${esc(item.title)}" maxlength="100"></div>
+            <input id="f-title" data-field="title" data-keep="f-${esc(item.id)}-title" value="${esc(item.title)}" maxlength="100"></div>
           <div class="field wide"><label for="f-description">Leírás</label>
-            <textarea id="f-description" data-field="description" data-keep="f-description" rows="4">${esc(item.description)}</textarea></div>
-          ${field("price", "Ár (Ft)", item.price ?? "", 'inputmode="numeric"')}
-          ${messagesOn ? field("min_price", "Alkunál legalább (Ft)", item.min_price ?? "",
+            <textarea id="f-description" data-field="description" data-keep="f-${esc(item.id)}-description" rows="4">${esc(item.description)}</textarea></div>
+          ${field(item, "price", "Ár (Ft)", item.price ?? "", 'inputmode="numeric"')}
+          ${messagesOn ? field(item, "min_price", "Alkunál legalább (Ft)", item.min_price ?? "",
             `inputmode="numeric" placeholder="${esc(price(item.price) || "az ár")}"`) : ""}
-          ${field("bought_price", "Vételár (Ft)", item.bought_price ?? "", 'inputmode="numeric" placeholder="ha vetted"')}
-          ${item.sold ? field("sold_price", "Eladási ár (Ft)", item.sold_price ?? "", 'inputmode="numeric"') : ""}
+          ${field(item, "bought_price", "Vételár (Ft)", item.bought_price ?? "", 'inputmode="numeric" placeholder="ha vetted"')}
+          ${item.sold ? field(item, "sold_price", "Eladási ár (Ft)", item.sold_price ?? "", 'inputmode="numeric"') : ""}
           ${item.sold && item.bought_price != null && item.sold_price != null
             ? `<div class="field"><label>Haszon</label><b>${esc(signed(item.sold_price - (item.sell_shipping || 0) - (item.sell_fee || 0)
                 - item.bought_price - (item.bought_shipping || 0) - (item.bought_extra || 0)))}</b></div>` : ""}
           ${item.bought_price != null ? `<div class="field"><label>Vétel részletei</label>
             <button type="button" class="small" data-action="ledger">Elemzés fül</button></div>` : ""}
           ${conditionField(item.condition)}
-          ${field("brand", "Márka", item.brand)}
-          ${field("size", "Méret", item.size)}
-          ${field("color", "Szín", item.color)}
-          ${field("category", "Kategória", item.category)}
-          ${field("location", "Átvétel helye", item.location, `placeholder="${esc(settings.city || "az Alapadatokból")}"`)}
-          ${field("shipping", "Szállítás", item.shipping, `placeholder="${esc(settings.shipping || "az Alapadatokból")}"`)}
+          ${field(item, "brand", "Márka", item.brand)}
+          ${field(item, "size", "Méret", item.size)}
+          ${field(item, "color", "Szín", item.color)}
+          ${field(item, "category", "Kategória", item.category)}
+          ${field(item, "location", "Átvétel helye", item.location, `placeholder="${esc(settings.city || "az Alapadatokból")}"`)}
+          ${field(item, "shipping", "Szállítás", item.shipping, `placeholder="${esc(settings.shipping || "az Alapadatokból")}"`)}
         </div>
         ${(item.drift || []).length && driftNotes.get(item.id)
           ? `<p class="drift-note" role="status">${esc(driftNotes.get(item.id))}</p>` : ""}
@@ -2149,7 +2231,7 @@
         ${conv.minimum ? `<p class="muted">Alkunál legalább ${esc(price(conv.minimum))}: ennél kevesebbet a vázlat nem fogad el
           (a tárgy lapján átírhatod).</p>` : ""}
         ${conv.draft_note ? `<p class="pnote">${esc(conv.draft_note)}</p>` : ""}
-        <textarea id="m-draft" data-keep="draft-${esc(conv.id)}-${conv.draft_at || 0}" rows="4" aria-label="Válasz a vevőnek"
+        <textarea id="m-draft" data-draft-for="${esc(conv.id)}" data-keep="draft-${esc(conv.id)}-${conv.draft_at || 0}" rows="4" aria-label="Válasz a vevőnek"
           placeholder="Írd ide a választ, vagy kérj vázlatot">${esc(conv.draft)}</textarea>
         <div class="row">
           <button type="button" data-msg="draft"${fromBuyer ? "" : " disabled"}>Válaszvázlat</button>
@@ -2407,8 +2489,9 @@
   });
   // a kézzel átírt vázlat megmarad (a telefonon is ez látszik)
   $("w-msgs").addEventListener("change", async (event) => {
-    if (event.target.id !== "m-draft" || !convOpen) return;
-    const result = await J.postJson("/api/work/messages/save", { id: convOpen, draft: event.target.value });
+    const id = event.target.id === "m-draft" && event.target.dataset.draftFor;   // a vázlat a saját beszélgetéséé
+    if (!id) return;
+    const result = await J.postJson("/api/work/messages/save", { id, draft: event.target.value });
     if (result.ok) convs.set(result.conversation.id, result.conversation);
   });
 
@@ -2446,7 +2529,7 @@
   $("w-detail").addEventListener("submit", onReply);
 
   $("w-detail").addEventListener("click", async (event) => {
-    const item = items.get(openId);
+    const item = items.get($("w-detail").dataset.item);    // a lap tárgya (a gomb is az övé)
     if (!item) return;
     if (event.target.closest("[data-cancel]") || event.target.closest("[data-price]") || event.target.closest("[data-review]")) {
       onCardsClick(event);
@@ -2495,16 +2578,17 @@
 
   $("w-detail").addEventListener("change", (event) => {
     const el = event.target;
-    const item = items.get(openId);
+    const item = items.get($("w-detail").dataset.item);    // a lap tárgya: a mező is az övé
     if (!item) return;
     if (el.dataset.target) changeTargets(item, el.dataset.target, el.checked);
-    else if (el.dataset.field) update(item.id, { [el.dataset.field]: el.value });
+    else if (el.dataset.field) saveField(item.id, el);
     else if (el.dataset.refresh !== undefined) saveRefresh(item);
   });
 
   async function saveRefresh(item) {
-    const result = await J.postJson("/api/work/refresh", { id: item.id, on: $("r-on").checked,
-                                                           days: $("r-days").value, hour: $("r-hour").value });
+    const box = $("w-detail");
+    const result = await J.postJson("/api/work/refresh", { id: item.id, on: box.querySelector("#r-on").checked,
+      days: box.querySelector("#r-days").value, hour: box.querySelector("#r-hour").value });
     if (remember(result, "Nem sikerült menteni.") && result.item.refresh.on && result.item.refresh_next)
       J.toast(`Rendben: legközelebb ${result.item.refresh_next} frissítem.`);
   }
@@ -2546,8 +2630,10 @@
     depth = 0;
     area.classList.remove("dragging");
     const files = [...event.dataTransfer.files];
-    if (openId) upload(openId, files);
-    else addComposePhotos(files);
+    const shown = detailItem();         // csak a látható lap tárgyához (nem a háttérben nyitva maradthoz)
+    if (shown && items.has(shown)) upload(shown, files);
+    else if (!$("w-list-view").hidden) addComposePhotos(files);
+    else J.toast("Az Adás fülön húzd a fotót egy hirdetés lapjára, vagy az új hirdetéshez.");
   });
   // máshová ejtve a kép ne nyíljon meg az ablakban a Jarvis helyett
   window.addEventListener("dragover", (event) => { if (hasFiles(event)) event.preventDefault(); });
