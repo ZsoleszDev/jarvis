@@ -78,6 +78,11 @@ executable_path = ""
 # Üresen a projektmappán kívül van (%LOCALAPPDATA%\Jarvis\browser_profile), így egy új verzió
 # kicsomagolása után is megmarad.
 profile_dir = ""
+# Olvasóprofil: a Vinteden a böngészés, a keresés és a hirdetések olvasása egy külön, soha be nem jelentkezett
+# profilban (második ablak) megy, így a gyakori olvasás nem a fiókodhoz kötődik; a feltöltés, az üzenetek és az
+# ajánlattétel a bejelentkezett profilban. Ebbe a profilba ne jelentkezz be. false = minden egy profilban (a régi mód).
+reader = true
+reader_profile_dir = ""
 width = 1280
 height = 800
 # Egy oldalnézetben legfeljebb ennyi kezelhető elem (link, gomb, mező)

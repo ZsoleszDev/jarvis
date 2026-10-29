@@ -73,6 +73,10 @@ class BrowserCfg:
     channel: str = "msedge"
     executable_path: str = ""
     profile_dir: str = ""      # üres = az adatmappában (lásd data_dir), így a bejelentkezések megmaradnak
+    # Olvasóprofil: a böngészés, a keresés és a hirdetések olvasása ezeken az oldalakon (a Vinteden) egy külön, soha
+    # be nem jelentkezett profilban megy (browser.READER_HOSTS); a feltöltés, az üzenetek, az ajánlat a bejelentkezettben.
+    reader: bool = True
+    reader_profile_dir: str = ""   # üres = az adatmappában (browser_profile_olvaso)
     width: int = 1280
     height: int = 800
     max_elements: int = 60
