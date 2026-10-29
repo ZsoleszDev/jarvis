@@ -1769,7 +1769,9 @@ class PriceResearcher:
                     raise NeedsBrowser() from None
         elif not browser:
             raise NeedsBrowser()
-        return self.browser().extract_listings(url)
+        controller = self.browser()            # (a Vinteden a be nem jelentkezett olvasóprofilban: read_listings)
+        read = getattr(controller, "read_listings", None)
+        return read(url) if callable(read) else controller.extract_listings(url)
 
     def query_for(self, item: Item) -> str:
         if item.search_query:
