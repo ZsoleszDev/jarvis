@@ -1702,7 +1702,8 @@ class BrowseTests(HunterCase):
 
     def test_sessions_rests_and_the_journal(self):
         self.assertFalse(self.hunter.available(), "a böngészés még nincs bekapcsolva")
-        self.hunter.set_browse(on=True, sites=["hardverapro", "vinted"])
+        # (a munkamenetek a Vinteden is: a friss lista kikapcsolva, lásd GlanceTests)
+        self.hunter.set_browse(on=True, sites=["hardverapro", "vinted"], glance=0)
         self.assertEqual(self.hunter.every_minutes(), 1.0)
         self.assertTrue(self.hunter.available())
         text = self.hunter.run(notify=self.notify)
@@ -1769,7 +1770,7 @@ class BrowseTests(HunterCase):
         a munkamenet végén a maradékot is; a weboldalaktól nem kér többet. Megmarad a következő indításra is;
         kikapcsolva a régi kötegelés jön vissza."""
         self.assertFalse(self.hunter.state()["turbo"], "alapból ki van kapcsolva")
-        self.hunter.set_browse(on=True, sites=["hardverapro", "vinted"])
+        self.hunter.set_browse(on=True, sites=["hardverapro", "vinted"], glance=0)   # (Vinted-munkamenet)
         self.hunter.run(notify=self.notify)
         self.assertEqual((self.explored(), len(self.hunter._pending)), ([], 2), "Turbó nélkül a kötegre vár")
         self.assertTrue(self.hunter.set_turbo(True)["turbo"])
@@ -1836,9 +1837,10 @@ class BrowseTests(HunterCase):
         self.clock.now += 14 * 60
         self.assertTrue(self.hunter.available())
 
-    def test_vinted_at_most_every_two_hours(self):
+    def test_vinted_at_most_every_two_hours_without_the_fresh_list(self):
+        """A friss lista nélkül (glance=0, a régi mód) a Vinteden munkamenetek, és két óra pihenő közöttük."""
         self.browser.by_url = [("vinted.hu", [])]
-        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.set_browse(on=True, sites=["vinted"], glance=0)
         self.hunter.run(notify=self.notify)
         self.clock.now += 26 * 60
         self.hunter.run(notify=self.notify)             # a munkamenet vége

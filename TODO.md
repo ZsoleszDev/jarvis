@@ -170,8 +170,17 @@
   az ismeretlen kivitelű memóriát az olcsóbbhoz méri (vagy ha azt nem ismeri, csak tipp). KEY_VERSION 5: a régi
   árbázis átrendeződik, a nem a termékhez tartozó árak kimaradnak. `python -m jarvis_core.audit`: a mentett találatok
   és az árbázis a mostani szabályokkal, csak olvasva.
+- A Vinted friss listája (deals.GLANCE_*): a kétóránkénti Vinted-munkamenet (10 oldal 20 perc alatt, utána két óra
+  szünet) helyett alapból 20 percenként (±20%) egy oldal a legújabbakból, a többi oldal munkája közé ékelve, ahogy egy
+  ember frissíti; óránként kb. ugyanannyi kérés, de egy új hirdetés legfeljebb kb. 20 perc múlva kiderül (eddig akár
+  2,5 óra). Több Vinted-indulóoldal felváltva; a fülön állítható (10–60 perc, vagy a régi mód); a naplóba óránként egy
+  sor; robot-ellenőrzésnél aznap leáll.
 
 ## Élesben kipróbálandó
+- A Vinted friss listája: kér-e a Vinted robot-ellenőrzést a 20 perces ütemnél (a napló „robot-ellenőrzést kért”
+  sora), és hány új hirdetés jön egy pillantásra (a Napló óránkénti sora: ha az Elektronika első oldala 20 perc alatt
+  betelik, a sűrűbb ütem vagy a második oldal kellene). Kijelentkezett, külön böngészőprofilból kevesebb lenne a
+  fiók kockázata (a pillantás nem igényel bejelentkezést).
 - Pontos árazás a valódi címeken: a cikkszám-minták (parts._FORM_SIGNS, _GENERATION_SIGNS) a gyakori gyártóknál
   kiegészítendők (pl. ADATA, Patriot, TeamGroup, Lexar cikkszámai); a „laptop” szó a gép címében (parts.machine) nem
   téveszt-e meg; az alkatrész-szavak (parts.PART_STEMS) és a fejszó-szabály (head: puszta alak, „nélkül”, „-val/-vel”,
