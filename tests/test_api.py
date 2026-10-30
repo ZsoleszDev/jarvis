@@ -98,7 +98,10 @@ class Harness:
             time.sleep(0.03)
 
     def idle(self) -> None:
-        self.wait(lambda: not self.app.busy)
+        """Amíg az ágens-szál dolgozik, és amíg az eladás-előkészítő szál (PREP_ACTIONS: pl. az árdöntés) a kérésén
+        vagy a sorában van: az app.busy csak az előbbit látja, így az árdöntés két lépése (az ár, aztán a kérdés
+        törlése) közé eshetett az ellenőrzés."""
+        self.wait(lambda: not self.app.busy and not self.app.prepping and self.app._prep_requests.empty())
 
 
 class ApiTests(unittest.TestCase):

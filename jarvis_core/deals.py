@@ -70,7 +70,8 @@ from .pricebook import (SOLD_MIN, TITLE_KEEP, PriceBook, _words, basis_entry, fa
                         sizes_of, speed_text, unusable, usable, wearable)
 from .replay import norm_text
 from .selling import (_PARTS_RE, _SALE_RE, _STOPWORDS, _SWAP_RE, _WANTED_RE, ON_SITE, Item, ItemError, Platform, _shared,
-                      _tokens, format_price, listing_key, parse_price, prefilter, price_stats, round_price, vision_jpeg)
+                      _tokens, format_price, listing_key, parse_price, prefilter, price_stats, round_price, vinted_titles,
+                      vision_jpeg)
 from .textutil import fold
 from .vinted import BUTTON_KINDS, consent_button, elem_key, logged_out, new_elements
 from .web import UNTRUSTED_NOTE
@@ -252,8 +253,14 @@ CARRY_TTL = 3600
 SELLER_ROWS = 30
 SELLER_GAIN = 2000
 LISTING_MINUTES = 10
-VINTED_FEE_FIXED = 300
+# A Vinted díja (2026 októberétől „Vinted-díj”, előtte vevővédelmi díj) a vételár 5%-a + 280 Ft, kerekítve: egy élő
+# vinted.hu-s találati oldal öt kártyáján (105 000 → 110 530, 111 004 → 116 834, 122 313 → 128 709, 143 401 →
+# 150 851, 2 531 → 2 938 Ft, 2026. október) mind pontosan ennyi volt (a régi becslés 300 Ft + 5% volt).
+VINTED_FEE_FIXED = 280
 VINTED_FEE_RATE = 0.05
+# A Vinted-kártyán a kedvelések száma (browser.LISTINGS_JS): ha egy jelöltnek már legalább ennyi van, másnak is
+# feltűnt; az értesítés jelzi, hogy siess.
+LIKES_HOT = 3
 BUNDLE_OFFER_CUT = 0.1
 SURE_ALONE = 10
 # Egy oldalról kevesebb ár is elég, ha szorosan együtt vannak: legalább SURE_TIGHT, és a középső felük (alsó és felső
@@ -792,6 +799,12 @@ def sale_range(sale: int, median: int, level: str) -> list[int]:
 def buy_fee(platform: str, price: int) -> int:
     """A vevő díja a vételnél: a Vinteden a vevővédelmi díj (kb. VINTED_FEE_FIXED + az ár VINTED_FEE_RATE-je), máshol 0."""
     return int(round(VINTED_FEE_FIXED + VINTED_FEE_RATE * price)) if platform == "vinted" else 0
+
+
+def deal_name(deal: dict[str, Any]) -> str:
+    """Egy találat neve az értesítésben és a naplóban: a hirdetés címe, ha tudjuk (a kártya szövegében a város, az idő
+    és az eladó is ott van, a Vinteden a kedvelések száma és a díjjal növelt ár is), különben a kártya szövege."""
+    return " ".join(str(deal.get("title") or deal.get("text") or "").split())
 
 
 def before_fee(platform: str, top: int) -> int:
@@ -2686,7 +2699,8 @@ class DealHunter:
             raise BrowserError(failed or "böngésző nélkül most nem olvasható")
         browser = self.browser()               # (a Vinteden a be nem jelentkezett olvasóprofilban: read_listings)
         read = getattr(browser, "read_listings", None)
-        return read(url) if callable(read) else browser.extract_listings(url)
+        # a Vinted kártyáján nincs cím, csak a márka: a hirdetés címe a webcíméből (selling.vinted_titles)
+        return vinted_titles(read(url) if callable(read) else browser.extract_listings(url))
 
     def _platform_of(self, url: str) -> str:
         host = (urllib.parse.urlsplit(url).hostname or "").removeprefix("www.")
@@ -2753,9 +2767,11 @@ class DealHunter:
             warn = f" Eladási sebesség: {deal['speed']}.{warn}"
         if deal.get("safety"):
             warn = f" {safety_text(deal['safety'])}{warn}"
+        if int(deal.get("likes") or 0) >= LIKES_HOT:   # a Vinted-kártyán látszik: másnak is feltűnt
+            warn = f" Már {deal['likes']} kedvelése van: másnak is feltűnt, siess.{warn}"
         origin = (f"Böngészés közben ({deal['explore']})." if deal.get("lane") else
                   f"Figyelt oldal: {deal['explore']}." if deal.get("explore") else f"Keresés: „{search['query']}”.")
-        title = f"„{deal['text'][:80]}”"
+        title = f"„{deal_name(deal)[:80]}”"
         if deal.get("auction"):
             bids = f", {deal['bids']} licit" if deal.get("bids") is not None else ""
             now = "legutóbb" if deal.get("followed") else "most"     # (a licitlistáról: amikor utoljára láttam)
@@ -2811,7 +2827,8 @@ class DealHunter:
             found = [{"site": site.name, "platform": key, "text": str(entry.get("text") or "")[:180],
                       "price": int(entry["price"]), "url": str(entry.get("url") or ""),
                       **({"title": str(entry["title"])[:160]} if entry.get("title") else {}),
-                      **({"seller": str(entry["seller"])[:40]} if entry.get("seller") else {})}
+                      **({"seller": str(entry["seller"])[:40]} if entry.get("seller") else {}),
+                      **({"likes": int(entry["likes"])} if entry.get("likes") else {})}
                      for entry in listings[:MAX_PER_SITE] if not entry.get("auction")]   # a licit nem eladási ár
             self.book.add(found)
             if track:
@@ -3156,7 +3173,7 @@ class DealHunter:
             return finish()
         self._mark(deal)
         if self._muted(deal.get("product_key"), self.clock()):
-            game.notes.append(f"„{deal['text'][:40]}”: az ilyet elrejtetted, nem szóltam")
+            game.notes.append(f"„{deal_name(deal)[:40]}”: az ilyet elrejtetted, nem szóltam")
             self.tally("muted", [deal])
             return finish()
         if state == "ellenőrizetlen":
@@ -3173,7 +3190,7 @@ class DealHunter:
         game.found += 1
         self.tally("found", [deal])
         self._lane_count(deal.get("lane"), "deals")
-        hit = (f"„{deal['text'][:60]}” {format_price(deal['price'])} ({deal['site']}"
+        hit = (f"„{deal_name(deal)[:60]}” {format_price(deal['price'])} ({deal['site']}"
                + (f", licit, legfeljebb {format_price(deal['max_bid'])}" if deal.get("auction") else
                   f", kb. {format_price(deal['profit'])} haszon") + ")")
         game.hits.append(hit)
@@ -3183,7 +3200,7 @@ class DealHunter:
         if deal.get("offer"):
             actions.insert(0, {"action": "offer", "deal": deal["id"],
                                "label": f"Ajánlatot teszek ({format_price(deal['offer'])})"})
-        title = f"Licit: {deal['text'][:60]}" if deal.get("auction") else f"Olcsó: {deal['text'][:60]}"
+        title = f"Licit: {deal_name(deal)[:60]}" if deal.get("auction") else f"Olcsó: {deal_name(deal)[:60]}"
         game.notify("deal", title, self._deal_text(search, deal), url=deal["url"], actions=actions, deal=deal["id"],
                     urgent=True)
         if fast and deal.get("model_pending") and game.lane is not None and game.checks > 0:
@@ -3253,7 +3270,8 @@ class DealHunter:
             row = {"site": site.name, "platform": platform, "text": str(entry.get("text") or "")[:180],
                    "price": int(entry["price"]), "url": str(entry["url"]),
                    **({"title": str(entry["title"])[:160]} if entry.get("title") else {}),
-                   **({"promoted": True} if entry.get("promoted") else {}), **(extra or {})}
+                   **({"promoted": True} if entry.get("promoted") else {}),
+                   **({"likes": int(entry["likes"])} if entry.get("likes") else {}), **(extra or {})}
             if entry.get("auction"):
                 info = parse_auction(row["text"])
                 row.update(auction=True, **info)
@@ -5414,7 +5432,8 @@ class DealHunter:
         site = self.platforms[platform].name
         rows = [{"site": site, "platform": platform, "text": str(entry.get("text") or "")[:180],
                  "price": int(entry["price"]), "url": str(entry.get("url") or ""),
-                 **({"title": str(entry["title"])[:160]} if entry.get("title") else {})}
+                 **({"title": str(entry["title"])[:160]} if entry.get("title") else {}),
+                 **({"likes": int(entry["likes"])} if entry.get("likes") else {})}
                 for entry in listings[:MAX_PER_SITE] if entry.get("url") and not entry.get("auction")]
         self.book.add(rows)
         summary = self.seller_bundle(deal, rows)
@@ -6208,7 +6227,7 @@ class DealHunter:
         browser = self.browser()
         previous = getattr(browser, "auto", False)
         browser.auto = True                    # modell nélküli lépéssor: emberi tempó, gondolkodási szünetekkel
-        self.offering = (f"Ajánlat a Vinteden: {format_price(offer)} – „{deal['text'][:80]}” (most "
+        self.offering = (f"Ajánlat a Vinteden: {format_price(offer)} – „{deal_name(deal)[:80]}” (most "
                          f"{format_price(deal['price'])}). Ha az eladó elfogadja, a Vinted szól, és ennyiért megveheted; "
                          "fizetni magától nem fogok.")
         try:
@@ -7308,6 +7327,6 @@ class DealHunter:
         if not self._remember(deal):          # közben egy kör már megtalálta: nem szól róla még egyszer
             return
         self.tally("found", [deal])
-        self.journal.add(f"Jó találat (azonnali figyelő): „{deal['text'][:60]}” {format_price(deal['price'])} "
+        self.journal.add(f"Jó találat (azonnali figyelő): „{deal_name(deal)[:60]}” {format_price(deal['price'])} "
                          f"({deal['site']}, kb. {format_price(deal['profit'])} haszon) – {source}")
         found(deal)

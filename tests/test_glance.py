@@ -18,6 +18,7 @@ from test_deals import NORMAL, PAGE, HunterCase, listing  # noqa: E402
 
 from jarvis_core.deals import GLANCE_DEFAULT, DealError  # noqa: E402
 from jarvis_core.journal import day_of  # noqa: E402
+from jarvis_core.selling import vinted_slug_title, vinted_titles  # noqa: E402
 
 ELECTRONICS = "https://www.vinted.hu/catalog?catalog[]=2994&order=newest_first"
 
@@ -95,6 +96,26 @@ class GlanceTests(HunterCase):
         self.assertIn("https://www.vinted.hu/apro/100041.html", self.browser.looked, "az adatlapját is megnézte")
         self.assertEqual([t for _k, t, _x, _e in self.notices], ["Olcsó: Gigabyte RTX 3060 Ti Gaming OC"])
 
+    def test_a_vinted_card_without_a_title_is_known_from_its_web_address(self):
+        """A Vinted kártyáján nincs cím, csak a kedvelések száma, a márka, az állapot és az ár (mint egy élő oldalon,
+        2026. október). A címet a hirdetés webcíméből veszi, így az olcsó videókártya modell nélkül kiderül (eddig
+        a modellre váró sorba került volna, „NVIDIA” néven); az értesítés a címével szól, és jelzi, hogy már sokan
+        kedvelték."""
+        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.run(notify=self.notify)
+        card = {"text": "8 NVIDIA Kiváló 60000 Ft 63280 Ft a következővel:", "title": "NVIDIA", "price": 60000,
+                "likes": 8, "url": "https://www.vinted.hu/items/4123456789-gigabyte-rtx-3060-ti-gaming-oc"}
+        self.browser.by_url = [("vinted.hu", [card])]
+        self.follow(25)
+        self.assertIn(card["url"], self.browser.looked, "az adatlapját megnézte")
+        [(_kind, title, text, _extra)] = self.notices
+        self.assertEqual(title, "Olcsó: NVIDIA gigabyte rtx 3060 ti gaming oc")
+        self.assertIn("Már 8 kedvelése van: másnak is feltűnt, siess.", text)
+        [deal] = self.hunter.state()["deals"]
+        self.assertEqual((deal["title"], deal["likes"]), ("NVIDIA gigabyte rtx 3060 ti gaming oc", 8))
+        self.assertTrue(deal["text"].startswith("NVIDIA gigabyte rtx 3060 ti gaming oc | 8 NVIDIA Kiváló"))
+        self.assertNotIn(card["url"], [r["url"] for r in self.hunter._pending], "nem a modellre váró sorba")
+
     def test_several_vinted_pages_take_turns(self):
         """Több Vinted-indulóoldal felváltva (a legrégebben nézett jön), így a kérések száma ugyanannyi marad."""
         self.hunter.set_browse(on=True, sites=["vinted"])
@@ -158,6 +179,44 @@ class GlanceTests(HunterCase):
         self.hunter.run(notify=self.notify)
         evening = [e["text"] for e in self.hunter.journal.entries(day_of(at(15, 21)))]
         self.assertTrue(re.match(r"^21:30–21:\d\d Vinted, a legújabbak: 2 pillantás", evening[0]), evening)
+
+
+class VintedCardTitleTests(unittest.TestCase):
+    """A Vinted-kártya címe (selling.vinted_titles): a kártyán csak a márka van, a cím a webcímből vagy a kártya
+    linkjének leírásából jön; más oldal hirdetése változatlan."""
+
+    def test_the_title_from_the_web_address(self):
+        self.assertEqual(vinted_slug_title("https://www.vinted.hu/items/4123456789-palit-rtx-3060-ti-dual"),
+                         "palit rtx 3060 ti dual")
+        self.assertEqual(vinted_slug_title("https://www.vinted.hu/items/4123456789-iphone-13-128gb?referrer=catalog"),
+                         "iphone 13 128gb", "a paraméterek nem számítanak")
+        self.assertEqual(vinted_slug_title("https://www.vinted.de/items/987654321-nike-air-max-90/"), "nike air max 90")
+        self.assertEqual(vinted_slug_title("https://www.vinted.hu/items/4123456789-ny%C3%A1ri-ruha"), "nyári ruha")
+        for url in ("https://www.vinted.hu/items/4123456789", "https://www.vinted.hu/items/4123456789-12",
+                    "https://www.vinted.hu/catalog?search_text=rtx", "https://www.vinted.hu/member/5-anna",
+                    "https://hardverapro.hu/items/123-rtx-3060.html", "http://127.0.0.1:8000/items/1-zara-blezer"):
+            self.assertEqual(vinted_slug_title(url), "", url)
+
+    def test_the_card_title(self):
+        url = "https://www.vinted.hu/items/4123456789-palit-rtx-3060-ti-dual"
+        brand = vinted_titles([{"text": "9 Palit Kiváló 143401 Ft 150851 Ft a következővel:", "title": "Palit",
+                                "price": 143401, "url": url}])[0]
+        self.assertEqual(brand["title"], "palit rtx 3060 ti dual", "a márka benne van a webcímben")
+        self.assertEqual(brand["text"], "palit rtx 3060 ti dual | 9 Palit Kiváló 143401 Ft 150851 Ft a következővel:")
+        other = vinted_titles([{"text": "8 NVIDIA Kiváló 105000 Ft", "title": "NVIDIA", "price": 105000, "url": url}])[0]
+        self.assertEqual(other["title"], "NVIDIA palit rtx 3060 ti dual", "a kártya márkája elé")
+        bare = vinted_titles([{"text": "Kiváló 105000 Ft", "price": 105000, "url": url}])[0]
+        self.assertEqual(bare["title"], "palit rtx 3060 ti dual")
+        real = vinted_titles([{"text": "Palit GeForce RTX 3060 Ti Dual OC 8GB 105000 Ft",
+                               "title": "Palit GeForce RTX 3060 Ti Dual OC 8GB", "price": 105000, "url": url}])[0]
+        self.assertEqual(real["title"], "Palit GeForce RTX 3060 Ti Dual OC 8GB", "a kártyán álló valódi cím marad")
+        self.assertEqual(real["text"], "Palit GeForce RTX 3060 Ti Dual OC 8GB 105000 Ft")
+        label = vinted_titles([{"text": "Palit RTX 3060 Ti Dual, márka: Palit, állapot: Kiváló, 105 000 Ft | 8 Palit "
+                                        "Kiváló 105 000 Ft", "title": "Palit", "price": 105000, "url": url}])[0]
+        self.assertEqual(label["title"], "Palit RTX 3060 Ti Dual", "a link leírásában a pontos alakja")
+        row = {"text": "RTX 3060 Ti Budapest", "title": "RTX 3060 Ti", "price": 95000,
+               "url": "https://hardverapro.hu/apro/rtx_3060_ti/friss.html"}
+        self.assertEqual(vinted_titles([row]), [row], "más oldal hirdetése változatlan")
 
 
 if __name__ == "__main__":
