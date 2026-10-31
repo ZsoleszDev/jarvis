@@ -55,6 +55,8 @@ DEAL_FIELDS = ("query", "sites", "max_price", "min_price", "discount", "min_prof
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
             "size", "condition", "color", "gender", "material", "price", "min_price", "location", "shipping", "bought_price",
             "sold_price", *LEDGER_FIELDS}
+# Az Új vétel mezői, amik egy ismert hirdetés (a Megvettem útja) adatait felülírják.
+BUY_EXTRA = ("bought_extra", "bought_from", "target_price", "trade_note")
 ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold", "approve", "refresh"}
 IS_WINDOWS = sys.platform == "win32"
 # Az élő események életjele (mp): a gépen nyitott ablaknál sűrű (így pár másodpercen belül kiderül, ha bezárták); a
@@ -907,6 +909,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, **deals.remove_search(str(body.get("id") or ""))})
             if action == "dismiss":
                 return self._json(200, {"ok": True, **deals.dismiss(str(body.get("id") or ""))})
+            if action == "restore":     # Visszahozom: egy elrejtett találat vissza a listába (pl. mégis válaszolt)
+                return self._json(200, {"ok": True, **deals.restore(str(body.get("id") or ""))})
+            if action == "contact":     # Írtam neki: folyamatban (várod az eladó válaszát); on=False: mégsem
+                return self._json(200, {"ok": True, **deals.contact(str(body.get("id") or ""),
+                                                                    body.get("on") is not False)})
             if action == "bought":      # Megvettem: eladási tárgy lesz belőle, a vételárral (Elemzés fül)
                 return self._bought(str(body.get("id") or ""), body)
             if action == "run":
@@ -924,8 +931,20 @@ class _Handler(BaseHTTPRequestHandler):
     def _bought(self, deal_id: str, body: dict[str, Any]) -> None:
         """Megvettem: a találatból eladási tárgy lesz (egy csomagból a darabjai), a vételárral az Elemzés fülre.
         Egy találatból egyszer (deals.buy, zár alatt): a dupla kattintás vagy egy újraküldött kérés a meglévő
-        tárgyat kapja vissza, nem könyvel még egy vásárlást."""
+        tárgyat kapja vissza, nem könyvel még egy vásárlást. Az elrejtett találatnál is (visszakerül a listába)."""
         work = self._work()
+        items, fresh = self._buy(work, deal_id, body)
+        reply: dict[str, Any] = {"ok": True, **work.deals.state(), "item": items[0],
+                                 "profit": profit_report(work.store.all())}
+        if len(items) > 1:
+            reply["items"] = items
+        if not fresh:
+            reply["again"] = True    # már megvetted: ugyanaz a tárgy, nem könyvelt újra
+        return self._json(200, reply)
+
+    def _buy(self, work: Any, deal_id: str, body: dict[str, Any]) -> tuple[list[str], bool]:
+        """A Megvettem könyvelése (a találatok gombja és az Elemzés fül Új vétele egy ismert hirdetés linkjével): a
+        tárgyak azonosítói, és hogy most készültek-e (deals.buy). Ha most, a havi keretet is megnézi."""
 
         def exists(item_id: str) -> bool:
             try:
@@ -943,23 +962,21 @@ class _Handler(BaseHTTPRequestHandler):
             name = str(deal.get("title") or deal["text"])
             query = ((deal.get("query") if not deal.get("explore") else "") or work.deals.book.query(name)
                      or str(deal.get("query") or ""))
-            item = work.store.create(prompt=f"{name}, {deal['median']} Ft", source=deal["url"], search_query=query,
-                                     bought_price=body.get("price") or deal["price"], bought_at=time.time(),
-                                     bought_shipping=body.get("shipping"), bought_from=str(deal.get("site") or ""),
-                                     in_transit=bool(body.get("in_transit", True)), market_price=median,
-                                     target_price=round_price(median * SALE_RATIO) if median else None)
-            return [item.id]
+            fields = dict(prompt=f"{name}, {deal['median']} Ft", source=deal["url"], search_query=query,
+                          bought_price=body.get("price") or deal["price"], bought_at=time.time(),
+                          bought_shipping=body.get("shipping"), bought_from=str(deal.get("site") or ""),
+                          in_transit=bool(body.get("in_transit", True)), market_price=median,
+                          target_price=round_price(median * SALE_RATIO) if median else None)
+            # amit az Új vételnél megadtál (honnan, mennyiért adnád tovább, egyéb költség, megjegyzés), az erősebb;
+            # egy lépésben, hogy egy hibás mezőnél ne jöjjön létre félig kitöltött tárgy
+            extra = body.get("extra") if isinstance(body.get("extra"), dict) else {}
+            fields.update({k: v for k, v in extra.items() if k in BUY_EXTRA and v not in (None, "")})
+            return [work.store.create(**fields).id]
 
         items, fresh = work.deals.buy(deal_id, exists, create)
         if fresh:
             self._money_check(work)
-        reply: dict[str, Any] = {"ok": True, **work.deals.state(), "item": items[0],
-                                 "profit": profit_report(work.store.all())}
-        if len(items) > 1:
-            reply["items"] = items
-        if not fresh:
-            reply["again"] = True    # már megvetted: ugyanaz a tárgy, nem könyvelt újra
-        return self._json(200, reply)
+        return items, fresh
 
     @staticmethod
     def _bundle_items(work: Any, deal: dict[str, Any], body: dict[str, Any]) -> list[str]:
@@ -982,7 +999,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _ledger(work: Any) -> dict[str, Any]:
         return {"ok": True, **profit_report(work.store.all(), book=work.deals.book),
                 "sites": [p.name for p in work.platforms.values()], "shipping": SHIPPING,
-                "money": work.deals.money_status(), "todos": work.todos.all()}
+                "money": work.deals.money_status(), "todos": work.todos.all(),
+                # folyamatban: írtál az eladónak (vagy ajánlatot tettél), de még nem vetted meg
+                "pending": work.deals.pending()}
 
     def _money_check(self, work: Any) -> None:
         """Vétel után (és a keret átírása után): ha a havi keret fogy, vagy túl sok tárgy vár eladásra, szól."""
@@ -1007,12 +1026,34 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, self._ledger(work))
         if action == "add":
             name = " ".join(str(body.get("name") or "").split())[:100]
-            if not name:
-                return self._json(400, {"ok": False, "error": "Írd be, mit vettél."})
+            url = str(body.get("url") or "").strip()
+            if url and (not re.match(r"https?://[^\s/]+", url) or len(url) > 300):
+                return self._json(400, {"ok": False, "error": "A link egy hirdetés webcíme legyen (https://…)."})
+            # egy hirdetés, amiről a Jarvis szólt (az elrejtettek közül is): a Megvettem útja, a találat adataival
+            deal = work.deals.find_listing(url) if url else None
+            if not name and deal is None:
+                return self._json(400, {"ok": False, "error": "Írd be, mit vettél." if not url else
+                                        "Ezt a hirdetést nem ismerem: írd be, mit vettél."})
             if body.get("price") in (None, ""):
                 return self._json(400, {"ok": False, "error": "Mennyiért vetted?"})
             values = {k: body.get(k) for k in ("bought_shipping", "bought_extra", "bought_from", "target_price",
                                                 "trade_note") if body.get(k) not in (None, "")}
+            if deal is not None:
+                # (egy csomag darabjainál a vételár, a posta és a tervezett ár a darabokra szétosztva: ott ezek
+                # nem számítanak)
+                extra = {k: v for k, v in values.items() if k != "bought_shipping"}
+                items, fresh = self._buy(work, deal["id"], {"price": body.get("price"),
+                                                            "shipping": body.get("bought_shipping"),
+                                                            "in_transit": bool(body.get("in_transit")),
+                                                            "extra": extra})
+                self.gui.ui.work_deals()    # a találatok listája is frissül (megvettként, az elrejtettek közül is)
+                return self._json(200, {**self._ledger(work), "item": items[0], "deal": deal["id"],
+                                        **({"items": items} if len(items) > 1 else {}),
+                                        **({} if fresh else {"again": True})})
+            if url:                 # ismeretlen hirdetés: a link a tárgyra, és ha nem írtad be, honnan, az oldal neve
+                values["source"] = url
+                if "bought_from" not in values and work.deals.platform_name(url):
+                    values["bought_from"] = work.deals.platform_name(url)
             item = work.store.create(prompt=name, bought_price=body.get("price"), bought_at=time.time(),
                                      in_transit=bool(body.get("in_transit")), **values)
             self._money_check(work)

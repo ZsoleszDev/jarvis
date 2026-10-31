@@ -482,6 +482,80 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertEqual(self.post("/api/work/ledger", {"action": "nincs"})[0], 400)
         self.h.store.delete(item.id)
 
+    def test_a_hidden_deal_bought_later_is_added_from_its_link(self):
+        """Az eladó napokig nem válaszolt (elrejtetted), aztán mégis, és megvetted: az Elemzés › Új vétel a hirdetés
+        linkjéből a találat adataival veszi fel (a Megvettem útja, egyszer), a találat megvettként visszakerül. Az
+        ismeretlen linkből a megadott névvel, az oldal nevével; a hibás link és a hibás mező semmit nem könyvel."""
+        deals = self.h.app.work.deals
+        url = "https://hardverapro.hu/apro/elrejtett_rtx/friss.html"
+        deals._remember({"id": "dh", "url": url, "text": "RTX 3060 Ti", "title": "Gigabyte RTX 3060 Ti",
+                         "site": "Hardverapró", "platform": "hardverapro", "price": 55000, "median": 100000,
+                         "margin": 45000, "query": "RTX 3060 Ti", "at": time.time()})
+        status, data = self.post("/api/work/deals", {"action": "dismiss", "id": "dh"})
+        self.assertIn("dh", [h["id"] for h in data["hidden"]])
+        self.assertNotIn("dh", [d["id"] for d in data["deals"]])
+        before = len(self.h.store.all())
+        status, data = self.post("/api/work/ledger", {"action": "add", "url": url + "?ref=1", "price": "50 000",
+                                                      "target_price": "hát"})
+        self.assertEqual((status, len(self.h.store.all())), (400, before), "a hibás mezőnél semmi nem könyvelődik")
+        self.assertFalse(deals.get("dh").get("bought"))
+        status, data = self.post("/api/work/ledger", {"action": "add", "url": url + "?ref=1", "price": "50 000",
+                                                      "bought_shipping": "1500", "target_price": "95000",
+                                                      "trade_note": "Foxpost", "in_transit": True})
+        self.assertEqual((status, data["deal"]), (200, "dh"), data)
+        item = self.h.store.get(data["item"])
+        self.assertEqual((item.prompt, item.source, item.search_query, item.bought_from, item.market_price),
+                         ("Gigabyte RTX 3060 Ti, 100000 Ft", url, "RTX 3060 Ti", "Hardverapró", 100000),
+                         "a találat adataival")
+        self.assertEqual((item.bought_price, item.bought_shipping, item.target_price, item.trade_note, item.in_transit),
+                         (50000, 1500, 95000, "Foxpost", True), "amit megadtál, az erősebb")
+        self.assertEqual(next(r for r in data["rows"] if r["id"] == item.id)["stage"], "úton")
+        state = deals.state()
+        self.assertEqual(next(d for d in state["deals"] if d["id"] == "dh")["bought"], item.id,
+                         "megvettként vissza a találatok közé")
+        self.assertNotIn("dh", [h["id"] for h in state["hidden"]])
+        status, data = self.post("/api/work/ledger", {"action": "add", "url": url, "price": "50 000"})
+        self.assertEqual((status, data["item"], data.get("again")), (200, item.id, True), "egyszer könyvel")
+        # ismeretlen hirdetés: a név kell, a link és az oldal a tárgyra kerül
+        other = "https://www.jofogas.hu/budapest/ps5-kontroller_987654.htm"
+        status, data = self.post("/api/work/ledger", {"action": "add", "url": other, "price": "9000"})
+        self.assertEqual((status, data["error"]), (400, "Ezt a hirdetést nem ismerem: írd be, mit vettél."))
+        status, data = self.post("/api/work/ledger", {"action": "add", "url": other, "name": "PS5 kontroller",
+                                                      "price": "9000"})
+        manual = self.h.store.get(data["item"])
+        # (az oldal nevét a webcíméből: a tesztben a hirdetési oldalak helyiek, lásd PendingTests a valódiakkal)
+        self.assertEqual((manual.prompt, manual.source, manual.bought_from),
+                         ("PS5 kontroller", other, deals.platform_name(other)))
+        self.assertEqual(self.post("/api/work/ledger", {"action": "add", "url": "javascript:alert(1)",
+                                                        "name": "x", "price": "1"})[0], 400)
+        # a Megvettem gomb kérésében nem lehet a tárgy más mezőit átírni
+        deals._remember({"id": "dx", "url": "https://hardverapro.hu/apro/extra/friss.html", "text": "Makita",
+                         "site": "Hardverapró", "price": 20000, "median": 40000, "at": time.time()})
+        status, data = self.post("/api/work/deals", {"action": "bought", "id": "dx",
+                                                     "extra": {"targets": ["vinted"], "trade_note": "ok"}})
+        bought = self.h.store.get(data["item"])
+        self.assertEqual((bought.targets, bought.trade_note), ([], "ok"))
+        for gone in (item, manual, bought):
+            self.h.store.delete(gone.id)
+
+    def test_contacted_deals_show_on_the_ledger(self):
+        """Írtam neki: a találat folyamatban (az Elemzés fülön is), visszavonható; a Visszahozom egy elrejtettet hoz
+        vissza."""
+        deals = self.h.app.work.deals
+        deals._remember({"id": "dc", "url": "https://hardverapro.hu/apro/irtam/friss.html", "text": "Bosch GSR 18V",
+                         "site": "Hardverapró", "price": 20000, "median": 40000, "at": time.time()})
+        status, data = self.post("/api/work/deals", {"action": "contact", "id": "dc"})
+        self.assertGreater(next(d for d in data["deals"] if d["id"] == "dc")["contacted"], 0)
+        status, data = request(self.port, "GET", f"/api/work/ledger?t={self.h.server.token}", self.ok)
+        self.assertEqual([(p["id"], p["days"]) for p in json.loads(data)["pending"]], [("dc", 0)])
+        status, data = self.post("/api/work/deals", {"action": "contact", "id": "dc", "on": False})
+        self.assertNotIn("contacted", next(d for d in data["deals"] if d["id"] == "dc"))
+        self.post("/api/work/deals", {"action": "dismiss", "id": "dc"})
+        status, data = self.post("/api/work/deals", {"action": "restore", "id": "dc"})
+        self.assertEqual((status, [d["id"] for d in data["deals"] if d["id"] == "dc"]), (200, ["dc"]))
+        self.assertEqual(self.post("/api/work/deals", {"action": "restore", "id": "nincs"})[0], 400)
+        self.post("/api/work/deals", {"action": "dismiss", "id": "dc"})
+
     def test_upload_needs_token_and_same_origin(self):
         item = self.h.store.create(targets=["vinted"])
         path = f"/api/work/items/{item.id}/photo"
@@ -980,6 +1054,81 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector(row, state="detached")
         self.wait_for(lambda: deals.state()["deals"] == [])
         self.assertEqual([i.name for i in store.all()], ["Nike Air Max 90"])
+
+    def test_in_progress_and_hidden_deals_on_a_phone(self):
+        """Írtam neki: a találat folyamatban (a kártyáján és az Elemzés fülön, a napokkal); onnan a Megvettem a
+        vételárral felveszi, a „Nem lett belőle semmi” elrejti. Az elrejtett találat az Elrejtett találatok között
+        megvan: visszahozható, vagy rögtön megvehető. Telefonméretben, vízszintes görgetés nélkül."""
+        deals, store = self.h.app.work.deals, self.h.store
+        now = time.time()
+        for deal_id, name, number in (("dp", "Bosch GSR 18V", 1), ("dq", "Makita DHP482", 2),
+                                      ("dh", "Sony WH-1000XM4", 3)):
+            deals._remember({"id": deal_id, "url": f"https://hardverapro.hu/apro/folyamat{number}/friss.html",
+                             "text": name, "site": "Hardverapró", "platform": "hardverapro", "price": 20000,
+                             "median": 40000, "profit": 12000, "at": now - number})
+        deals.dismiss("dh")
+        page = self.page
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.click("#job-deals")
+        row = lambda deal_id: f'.dealist li:has([data-deal-open="{deal_id}"])'  # noqa: E731
+        page.click(f'{row("dp")} [data-deal-contact]')
+        page.wait_for_selector('.toast:has-text("Folyamatban")')
+        page.wait_for_selector(f'{row("dp")} .tag:has-text("folyamatban")')
+        self.assertIn("ma írtál az eladónak", page.inner_text(row("dp")))
+        self.assertEqual(page.get_attribute(f'{row("dp")} [data-deal-contact]', "aria-pressed"), "true")
+        deals.contact("dq")
+        with deals._lock:                    # négy napja írtál neki
+            next(d for d in deals._data["deals"] if d["id"] == "dq")["contacted"] = now - 4 * 86400
+        # az elrejtett: Megvettem az Elrejtett találatok közül
+        self.assertNotIn("Sony WH-1000XM4", page.inner_text(".dealist.wide"))
+        page.click('details[data-fold="hidden"] summary')
+        hidden = 'details[data-fold="hidden"]'
+        self.assertIn("Elrejtett találatok (1)", page.inner_text(f"{hidden} summary"))
+        self.assertIn("Elrejtve ma", page.inner_text(hidden))
+        page.click(f'{hidden} [data-deal-buy="dh"]')
+        page.fill("#d-paid", "18000")
+        page.uncheck("#d-transit")
+        page.click('[data-deal-paid="dh"]')
+        page.wait_for_selector('.toast:has-text("Felvettem")')
+        [sony] = [i for i in store.all() if i.source.endswith("folyamat3/friss.html")]
+        self.assertEqual((sony.bought_price, sony.in_transit, sony.market_price), (18000, False, 40000))
+        self.assertEqual(deals.get("dh")["bought"], sony.id)
+        self.assertNotIn("dismissed", deals.get("dh"))
+        # az Elemzés fülön a folyamatban lévők, a legrégebben írt elöl
+        page.click("#job-ledger")
+        page.wait_for_selector("#l-pending .todo")
+        cards = page.locator("#l-pending .todo")
+        self.assertEqual(cards.count(), 2)
+        self.assertIn("Makita DHP482", cards.nth(0).inner_text())
+        self.assertIn("4 napja írtál neki", cards.nth(0).inner_text())
+        self.assertIn("4 napja vársz a válaszára", cards.nth(0).inner_text())
+        self.assertIn("Bosch GSR 18V", cards.nth(1).inner_text())
+        self.assertIn("Válaszra vár", cards.nth(1).inner_text())
+        page.click('[data-lp-buy="dp"]')
+        page.fill("#lp-paid", "19000")
+        page.fill("#lp-ship", "1200")
+        page.click('[data-lp-save="dp"]')
+        page.wait_for_selector('.toast:has-text("Felvettem")')
+        page.wait_for_selector('.lcard:has-text("Bosch GSR 18V")')
+        [bosch] = [i for i in store.all() if i.source.endswith("folyamat1/friss.html")]
+        self.assertEqual((bosch.bought_price, bosch.bought_shipping, bosch.in_transit), (19000, 1200, True))
+        self.assertIn("Úton", page.inner_text('.lcard:has-text("Bosch GSR 18V")'))
+        self.assertEqual(page.locator("#l-pending .todo").count(), 1)
+        page.click('[data-lp-drop="dq"]')
+        page.wait_for_selector('.toast:has-text("Elrejtettem")')
+        page.wait_for_selector("#l-pending", state="detached")
+        self.assertTrue(deals.get("dq").get("dismissed"))
+        wide = page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        self.assertFalse(wide, "telefonon nincs vízszintes görgetés")
+        # visszahozom
+        page.click("#job-deals")
+        page.wait_for_selector(f'{hidden} [data-deal-restore="dq"]')
+        page.click(f'{hidden} [data-deal-restore="dq"]')
+        page.wait_for_selector('.toast:has-text("Visszahoztam")')
+        page.wait_for_selector('.dealist.wide > li:has([data-deal-open="dq"])')
+        self.assertFalse(deals.get("dq").get("dismissed"))
+        wide = page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        self.assertFalse(wide, "telefonon nincs vízszintes görgetés")
 
     def test_the_start_screen_tiles(self):
         """A Beszélgetés elején csempék: a kereskedés indítása (és leállítása), egy új tárgy (a Munka menü űrlapjára

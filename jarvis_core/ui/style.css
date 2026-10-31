@@ -776,8 +776,10 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
 .runstate { display: grid; gap: 2px; font-size: 14.5px; }
 .runstate small { color: var(--ash); font-size: 13px; }
 .deals .limits { max-width: 520px; }
-.deals .buyform label { display: inline-flex; gap: 6px; align-items: baseline; font-size: 13px; color: var(--ash); }
-.deals .buyform input[type="number"] { width: 6.5em; }
+.deals .buyform label, .ledger .buyform label { display: inline-flex; gap: 6px; align-items: baseline; font-size: 13px;
+                                                 color: var(--ash); }
+.deals .buyform input[type="number"], .ledger .buyform input[type="number"] { width: 6.5em; }
+.ledger .buyform { flex-wrap: wrap; gap: 8px 12px; }
 
 /* --- Elemzés: összesítő csempék, a megvett és eladott tárgyak kártyái, havonta ------------------------------ */
 .ledger { gap: 14px; }
@@ -812,6 +814,9 @@ input[type="range"]:focus-visible { outline: 2px solid var(--white); outline-off
 .todo { display: grid; gap: 6px; padding: 10px 12px 12px; border: 1px solid var(--silver); border-radius: 8px;
         background: var(--graphite); }
 .todo.done { border-color: var(--rule); opacity: 0.75; }
+/* Folyamatban (Elemzés): írtál az eladónak, és várod a válaszát */
+.todo.pending { border-color: var(--rule); }
+.todo .title { overflow-wrap: anywhere; }
 .tcode { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
 .tcode small, .tplace small { font-size: 11.5px; color: var(--ash); }
 .tcode b { font: 600 24px/1.2 ui-monospace, "Consolas", monospace; letter-spacing: 0.06em; color: var(--white);
