@@ -35,7 +35,8 @@ után a darabjai külön eladandó tárgyak lesznek, a vételár az értékük a
 
 Gyorsaság: a találatokat a legújabb elöl nézi. Keresésenként megadható, milyen sűrűn nézze (30 perc – 6 óra); a
 Vinteden egy keresés legfeljebb kétóránként fut (robot-ellenőrzés), a böngészés viszont a Vinted legújabb hirdetéseit
-alapból 20 percenként megnézi, egy oldalt, ahogy egy ember frissíti (friss lista: GLANCE_DEFAULT). Az egész egy
+alapból 20 percenként megnézi, egy oldalt, ahogy egy ember frissíti (friss lista: GLANCE_DEFAULT; csúcsidőben és ha egy
+oldalnyi új jött, sűrűbben, csendes órában ritkábban: _glance_interval). Az egész egy
 kapcsolóval be- és kikapcsolható (a Munka menü Automata kereskedés fülén); alapból ki van kapcsolva.
 """
 from __future__ import annotations
@@ -70,8 +71,8 @@ from .pricebook import (SOLD_MIN, TITLE_KEEP, PriceBook, _words, basis_entry, fa
                         sizes_of, speed_text, unusable, usable, wearable)
 from .replay import norm_text
 from .selling import (_PARTS_RE, _SALE_RE, _STOPWORDS, _SWAP_RE, _WANTED_RE, ON_SITE, Item, ItemError, Platform, _shared,
-                      _tokens, format_price, listing_key, parse_price, prefilter, price_stats, round_price, vinted_titles,
-                      vision_jpeg)
+                      _tokens, format_price, listing_key, parse_price, prefilter, price_stats, reserved, round_price,
+                      vinted_titles, vision_jpeg)
 from .textutil import fold
 from .vinted import BUTTON_KINDS, consent_button, elem_key, logged_out, new_elements
 from .web import UNTRUSTED_NOTE
@@ -366,6 +367,21 @@ GLANCE_CHOICES = (0, 10, 15, 20, 30, 60)
 GLANCE_DEFAULT = 20
 GLANCE_JITTER = (0.8, 1.2)
 GLANCE_LOG = 60
+# A friss lista tempója igazodik (_glance_interval): a beállított gyakoriság az alap, de a napszak szerint (a pillantások
+# tanult üteme: óránként hány új hirdetés jön percenként, a régebbiek GLANCE_DECAY súllyal) csúcsidőben (az átlag
+# GLANCE_PEAK-szerese fölött) feleannyi időnként néz, csendes órában (GLANCE_QUIET-szerese alatt) kétszer annyi
+# időnként; ehhez legalább GLANCE_RHYTHM_MIN perc megfigyelés és GLANCE_RHYTHM_FRESH új hirdetés kell. Ha egy
+# pillantáson a hirdetések legalább GLANCE_FULL része új volt (legalább GLANCE_FULL_MIN hirdetésből: két pillantás között
+# több jött, mint amennyi egy oldalon elfér, lemaradhatott valami), a következő hamarabb jön (GLANCE_BURST-szörös idő
+# múlva). Sűrűbben GLANCE_MIN percnél soha (egy ember is nagyjából így frissít), ritkábban GLANCE_MAX percnél (vagy a
+# beállításnál) nem; óránként átlagosan így sem kér többet, mint a beállítás.
+GLANCE_MIN, GLANCE_MAX = 5, 60
+GLANCE_PEAK, GLANCE_QUIET = 1.5, 0.5
+GLANCE_DECAY = 0.995
+GLANCE_RHYTHM_MIN = 600
+GLANCE_RHYTHM_FRESH = 20
+GLANCE_FULL, GLANCE_FULL_MIN, GLANCE_BURST = 0.6, 10, 0.5
+GLANCE_PACE_TEXT = {0.5: "csúcsidő: sűrűbben nézem", 2.0: "csendes óra: ritkábban nézem"}
 OPEN_CHANCE = 0.35         # egy találati oldal után ekkora eséllyel megnyit egy hirdetést (a Vinted kezdőoldalán mindig)
 # A modellre váró ismeretlenek: EXPLORE_ROWS-onként egy hívás; a munkamenet végén csak legalább MIN_FLUSH (vagy egy
 # licit) miatt tölti be a modellt, a maradék a következő munkamenetre vár (legfeljebb MAX_PENDING).
@@ -3301,6 +3317,9 @@ class DealHunter:
             if (key in seen and not drop) or (key in deals and not drop) or key in cancelled:
                 continue
             self.tally("new", [row])
+            if reserved(row["text"]):          # foglalt (a Hardveraprón „jegelve”): most nem vehető meg; nem jegyzi
+                self.tally("reserved", [row])  # látottnak (ha a foglalás megszűnik, újra sorra kerül)
+                continue
             # a cím dönt, ha van (a kártya szövegében a város, az idő és az eladó neve is ott van: „eladó41”)
             if not usable(row.get("title") or row["text"]):
                 lots.append(row)               # nem eladási ár (kereső, csere, csomag, alkatrész…); a csomag felmérhető
@@ -5977,8 +5996,49 @@ class DealHunter:
                 return site
         return None
 
+    def _glance_factor(self, site: str, now: float) -> float:
+        """A napszak szerint mennyiszer a beállított gyakoriság most (a zár a hívónál): 0,5 (csúcsidő: sűrűbben), 2
+        (csendes óra: ritkábban), vagy 1 (átlagos, vagy még kevés a megfigyelés). Az óra a szomszédaival együtt számít."""
+        rhythm = self._glance_mark(site).get("rhythm") or {}
+        fresh, minutes = list(rhythm.get("fresh") or []), list(rhythm.get("minutes") or [])
+        if len(fresh) != 24 or len(minutes) != 24 or sum(minutes) < GLANCE_RHYTHM_MIN \
+                or sum(fresh) < GLANCE_RHYTHM_FRESH:
+            return 1.0
+        hour = time.localtime(now).tm_hour
+        near = (((hour - 1) % 24, 1), (hour, 2), ((hour + 1) % 24, 1))
+        watched = sum(minutes[h] * w for h, w in near)
+        if watched <= 0:
+            return 1.0
+        ratio = (sum(fresh[h] * w for h, w in near) / watched) / (sum(fresh) / sum(minutes))
+        return 0.5 if ratio >= GLANCE_PEAK else 2.0 if ratio <= GLANCE_QUIET else 1.0
+
+    def _glance_interval(self, site: str, now: float, burst: bool = False) -> float:
+        """A következő pillantásig (perc, a zár a hívónál): a beállított gyakoriság a napszak szerint (_glance_factor),
+        burst: egy szinte csupa új oldal után GLANCE_BURST-szörös; GLANCE_MIN és GLANCE_MAX (vagy a beállítás) között."""
+        base = int(self._data["browse"].get("glance") or GLANCE_DEFAULT)
+        minutes = base * self._glance_factor(site, now) * (GLANCE_BURST if burst else 1.0)
+        return min(max(minutes, GLANCE_MIN), max(base, GLANCE_MAX))
+
+    def _glance_next(self, site: str, now: float, burst: bool = False) -> float:
+        """Mikor jöjjön a következő pillantás (a zár a hívónál): _glance_interval, ±20% (GLANCE_JITTER), de GLANCE_MIN
+        percnél nem hamarabb."""
+        return now + max(GLANCE_MIN * 60.0, self._glance_interval(site, now, burst) * 60 * self.rng.uniform(*GLANCE_JITTER))
+
+    @staticmethod
+    def _glance_learn(mark: dict[str, Any], now: float, fresh: int, minutes: float) -> None:
+        """A ritmushoz (a zár a hívónál): ebben az órában minutes perc alatt fresh új hirdetés jött."""
+        rhythm = mark.get("rhythm")
+        if not isinstance(rhythm, dict) or any(len(rhythm.get(key) or []) != 24 for key in ("fresh", "minutes")):
+            rhythm = mark["rhythm"] = {"fresh": [0.0] * 24, "minutes": [0.0] * 24}
+        for key in ("fresh", "minutes"):
+            rhythm[key] = [round(float(value) * GLANCE_DECAY, 3) for value in rhythm[key]]
+        hour = time.localtime(now).tm_hour
+        rhythm["fresh"][hour] = round(rhythm["fresh"][hour] + fresh, 3)
+        rhythm["minutes"][hour] = round(rhythm["minutes"][hour] + minutes, 3)
+
     def _glance_status(self, now: float) -> str:
-        """A friss lista egy mondatban (a felületnek): mikor nézte utoljára, és mikor jön a következő."""
+        """A friss lista egy mondatban (a felületnek): mikor nézte utoljára, mikor jön a következő, és ha most a
+        szokásosnál sűrűbben vagy ritkábban néz, miért."""
         clock = lambda t: time.strftime("%H:%M", time.localtime(t))  # noqa: E731
         out = []
         for site in GLANCE_SITES:
@@ -5991,8 +6051,10 @@ class DealHunter:
                 continue
             last, upcoming = float(mark.get("at") or 0), float(mark.get("next") or 0)
             soon = "hamarosan" if upcoming - now <= 90 else f"legközelebb kb. {clock(upcoming)}"
-            out.append(f"{name}: a legújabbakat {clock(last)}-kor néztem, {soon}." if last else
-                       f"{name}: a legújabbakat {soon} nézem meg.")
+            why = "sok új jött, hamarabb nézem újra" if last and float(mark.get("burst") or 0) >= last else \
+                GLANCE_PACE_TEXT.get(self._glance_factor(site, now), "")
+            out.append((f"{name}: a legújabbakat {clock(last)}-kor néztem, {soon}" if last else
+                        f"{name}: a legújabbakat {soon} nézem meg") + (f" ({why})." if why else "."))
         return " ".join(out)
 
     def _step_glance(self, game: _Round, running: list[dict[str, Any]], site: str) -> None:
@@ -6009,9 +6071,10 @@ class DealHunter:
                 return
             stats = self._data["lanes"]
             lane = min(lanes, key=lambda item: float((stats.get(item["id"]) or {}).get("glanced") or 0))
-            minutes = int(self._data["browse"].get("glance") or GLANCE_DEFAULT)
+            base = int(self._data["browse"].get("glance") or GLANCE_DEFAULT)
             mark = self._glance_mark(site)
-            mark.update(at=now, next=now + minutes * 60 * self.rng.uniform(*GLANCE_JITTER))
+            previous = float(mark.get("at") or 0)
+            mark.update(at=now, next=self._glance_next(site, now))
             stats.setdefault(lane["id"], {})["glanced"] = now
             # (új: amit még nem látott; a modellre váró ismeretlen sem új a következő pillantásnál)
             seen = set(self._data["seen"]) | {listing_key(r["url"]) for r in self._queue(LANE_BROWSER)}
@@ -6042,6 +6105,13 @@ class DealHunter:
             self._glance_blocked(game, site)
         fresh = [row for row in rows or [] if listing_key(row["url"]) not in seen]
         with self._lock:
+            gap = (now - previous) / 60 if previous else 0.0
+            if rows and not game.captcha and 0 < gap <= 3 * max(base, GLANCE_MIN):
+                self._glance_learn(mark, now, len(fresh), gap)     # (egy hosszabb szünet utáni pillantás nem mérvadó)
+            if rows and len(rows) >= GLANCE_FULL_MIN and len(fresh) >= GLANCE_FULL * len(rows) and not game.captcha:
+                # szinte csupa új: két pillantás között több jött, mint amennyi egy oldalon elfér; hamarabb újra
+                mark["burst"] = now
+                mark["next"] = min(float(mark.get("next") or now), self._glance_next(site, now, burst=True))
             self._lane_count(lane["id"], "rows", len(rows or []))
             log.update(last=now, looks=int(log.get("looks") or 0) + 1, rows=int(log.get("rows") or 0) + len(rows or []),
                        fresh=int(log.get("fresh") or 0) + len(fresh))
@@ -7000,6 +7070,22 @@ class DealHunter:
             return None
         return self._valued(price, found, found["name"], floor)
 
+    def urgency(self, row: dict[str, Any]) -> int:
+        """Milyen sürgős egy friss hirdetés felmérése (az azonnali figyelő ilyen sorrendben veszi őket, instant.LEVEL_*):
+        0, ha modell nélkül, biztos szokásos árral megérőnek látszik (quick_value: már csak az adatlapja kell, és szól);
+        1, ha modell nélkül eldől, mi lesz vele (olcsónak látszik, de az ára nem elég biztos: árkutatás; nem éri meg; a
+        modell már megnevezte; csomag; a vételi limit fölött; már szóltunk róla); 2, ha csak a modell tudja megnevezni.
+        Ugyanaz a felmérés, mint az appraise első lépése, csak nem jegyez fel semmit."""
+        with self._lock:
+            known = listing_key(row["url"]) in self._deal_keys()
+        if known or reserved(row["text"]) or not usable(row.get("title") or row["text"]) \
+                or not self._affordable(int(row["price"])):
+            return 1
+        value = self.quick_value(row)
+        if value is None:
+            return 1 if row.get("named") else 2
+        return 0 if value["cheap"] and value["sure"] else 1
+
     def _valued(self, price: int, found: dict[str, Any], name: str, floor: int) -> dict[str, Any]:
         """Egy friss hirdetés értéke egy szokásos árhoz (found: az árbázisból, vagy amennyiért máshol adják; price, p25,
         n, sites) mérve: megéri, ha legalább EXPLORE_CUT-tal olcsóbb, az óvatos eladási áron is legalább floor haszon
@@ -7020,7 +7106,8 @@ class DealHunter:
     def appraise(self, rows: list[dict[str, Any]], source: str, look: Callable[[dict[str, Any]], dict[str, Any] | None],
                  search: Callable[[str], list[dict[str, Any]]], can_ask: Callable[[], bool],
                  found: Callable[[dict[str, Any]], None], go: Callable[[], None] = lambda: None,
-                 wear: bool = False, ping: Callable[..., Any] | None = None) -> list[dict[str, Any]]:
+                 wear: bool = False, ping: Callable[..., Any] | None = None,
+                 rush: Callable[[], None] = lambda: None) -> list[dict[str, Any]]:
         """Az azonnali figyelő friss hirdetései: minél hamarabb kideríti, megéri-e megvenni, és csak a megérőkről szól
         (found, rögtön, ahogy egy kiderül). A gyorsabbtól a lassabbig:
         1. modell nélkül: egy felmért keresésed szokásos ára, vagy az árbázis a hirdetés címéből (quick_value); ha az
@@ -7038,7 +7125,9 @@ class DealHunter:
         search is jelezheti, ha elfogyott a kéréskeret): ilyenkor a még le nem zárt hirdetések mind visszajönnek. wear: a
         ruhát is felméri (a figyelő keresőszava maga ruha vagy cipő: a te kifejezett kérésed); különben ami a modell
         szerint ruha, kimarad (ruhával nem kereskedik). ping: a gyors jelzés a megérőnek látszó jelöltről, még az
-        ellenőrzése előtt (notify-szerű: kind, title, text, **mezők)."""
+        ellenőrzése előtt (notify-szerű: kind, title, text, **mezők). rush: minden lassabb lépés (árkutatás, megnevezés)
+        előtt; Deferred-del jelzi, ha közben sürgősebb hirdetés jött (ilyenkor is minden le nem zárt hirdetés visszajön,
+        a megnevezéssel együtt: a hívó a sürgősebb után folytatja)."""
         with self._lock:
             floor = int(self._data["browse"].get("min_profit") or WATCH_PROFIT)
             known = self._deal_keys()
@@ -7046,7 +7135,7 @@ class DealHunter:
         names: dict[int, str] = {}             # amit a modell már megnevezett
         try:
             return self._appraise(rows, source, look, search, can_ask, found, go, floor, known, done, names, wear,
-                                  ping)
+                                  ping, rush)
         except Deferred as exc:
             # amelyik hirdetésnél elfogyott a keret, az azokra az oldalakra vár; a többi a saját oldalára (a hirdetés
             # oldalát mindenképp meg kell nyitni), így egy másik oldal kerete nem akasztja meg (wait_for). Az árkutatás
@@ -7072,8 +7161,10 @@ class DealHunter:
                   search: Callable[[str], list[dict[str, Any]]], can_ask: Callable[[], bool],
                   found: Callable[[dict[str, Any]], None], go: Callable[[], None], floor: int, known: set[str],
                   done: set[int], names: dict[int, str], wear: bool = False,
-                  ping: Callable[..., Any] | None = None) -> list[dict[str, Any]]:
-        """Az appraise lépései; amit lezár (látottnak jegyez, felmér, a csomagbontásnak ad), azt done-ba teszi."""
+                  ping: Callable[..., Any] | None = None,
+                  rush: Callable[[], None] = lambda: None) -> list[dict[str, Any]]:
+        """Az appraise lépései; amit lezár (látottnak jegyez, felmér, a csomagbontásnak ad), azt done-ba teszi. A
+        biztos árú megérők ellenőrzése nem szakad félbe; minden lassabb lépés (árkutatás, megnevezés) előtt rush."""
         def attempt(row: dict[str, Any], call: Callable[[], None]) -> None:
             go()
             try:
@@ -7089,6 +7180,10 @@ class DealHunter:
             if listing_key(row["url"]) in known:
                 done.add(id(row))
                 continue                       # erről már szóltunk (pl. a böngészős kör)
+            if reserved(row["text"]):          # foglalt (a Hardveraprón „jegelve”): most nem vehető meg
+                self.tally("reserved", [row])
+                done.add(id(row))
+                continue
             if not usable(row.get("title") or row["text"]):     # a cím dönt, ha van (a kártyán az eladó neve is)
                 lots.append(row)               # a csomagot a csomagbontás méri fel (ha be van kapcsolva)
                 continue
@@ -7115,6 +7210,7 @@ class DealHunter:
         for row, value in sorted(settle, key=lambda entry: -int(entry[1].get("profit") or 0)):
             attempt(row, partial(self._settle, row, value, source, look, can_ask, found, go, ping=ping))
         for row, name, value in recheck[:EXPLORE_PICKS]:
+            rush()
             attempt(row, partial(self._recheck, row, name, search, floor, source, look, can_ask, found, go,
                                  known=value, ping=ping))
         later = [row for row, _name, _value in recheck[EXPLORE_PICKS:]]   # a keretbe nem fért: a következő körben
@@ -7129,6 +7225,7 @@ class DealHunter:
             rest = unknown
         elif unknown:
             go()
+            rush()
             answer = self._explore(unknown[:EXPLORE_ROWS])
             if answer is None:
                 rest = unknown                 # a modell nem válaszolt: később újra
@@ -7178,6 +7275,7 @@ class DealHunter:
         # amennyiért máshol adják (a modell szerint megérők elöl, legfeljebb EXPLORE_PICKS)
         elsewhere.sort(key=lambda entry: not entry[2])
         for row, query, _buy, value in elsewhere[:EXPLORE_PICKS]:
+            rush()
             attempt(row, partial(self._recheck, row, query, search, floor, source, look, can_ask, found, go,
                                  known=value, ping=ping))
         later += [{**row, "named": query} for row, query, _buy, _value in elsewhere[EXPLORE_PICKS:]]
@@ -7324,6 +7422,7 @@ class DealHunter:
             deal["verified"] = True
         if self._risky(deal):                  # az újraszámolt haszonnal újra felmérve
             return
+        deal["told_at"] = self.clock()         # (az időrendhez: mikor szólt)
         if not self._remember(deal):          # közben egy kör már megtalálta: nem szól róla még egyszer
             return
         self.tally("found", [deal])

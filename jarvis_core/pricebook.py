@@ -104,6 +104,8 @@ FAKE_PRONE = {"airpods", "nike", "jordan", "adidas", "northface", "moncler", "st
 # Ezek nem mondanak semmit a termékről (és két cím között eltérhetnek).
 _NOISE = {"geforce", "radeon", "nvidia", "edition", "gaming", "oc", "dual"}
 _ALIASES = ((parts.PLUS_MODEL.pattern, " plus"),   # a típusjelhez tapadó „+” a Plus változat („Galaxy S21+”)
+            # az XFX hűtőjének neve („Speedster SWFT 210”, „MERC 319”, „QICK 308”): a szám nem egy videókártya-lapka
+            (r"\b(swft|qick|merc|thicc) ?\d{3}\b", r"\1"),
             (r"\bplay ?station ?(\d)\b", r"ps\1"), (r"\bnew balance\b", "newbalance"), (r"\bdr\.? ?martens\b", "drmartens"),
             (r"\b(the )?north face\b", "northface"), (r"\bstone island\b", "stoneisland"), (r"\bray ?-?ban\b", "rayban"),
             (r"\btp ?-?link\b", "tplink"), (r"\bsteam deck\b", "steamdeck"), (r"\bjoy ?-?con\w*\b", "joycon"),
@@ -192,13 +194,14 @@ _SOCKET = re.compile(r"^(?:am[2-5]|lga\d{3,4}|fm[12]|s\d{3})$")
 # „2x”, „3 db”: több darab egy áron. A memóriakészlet („2 x 8GB”, „2x 8 GB”) egy termék (a kulcsa „2x8gb”, mint a „2x8GB”
 # írásmódé), nem több darab.
 # A csatlakozók, a ventilátorok száma sem („4x DP”, „2x HDMI”, „4 db DisplayPort”, „2x M.2”, „2x ventilátor”, „2x 8 pin”,
-# „4x 5K felbontás”): az egy termék leírása. A videókártya hűtőjének neve („Ventus 2X”, „Windforce 3X”, „MECH 2X”): _COOLER.
+# „4x 5K felbontás”): az egy termék leírása. A videókártya hűtőjének neve („Ventus 2X”, „Windforce 3X”, „MECH 2X”,
+# „Shadow 2X”): _COOLER.
 _FEATURE = (r"(?! ?(?:dp|displayport|mini ?dp|hdmi|dvi|vga|usb\w*|type ?c|thunderbolt|sata\w*|m\.? ?2|nvme|pcie?\w*|"
             r"lan|rj45|ethernet|antenn\w*|ventilator\w*|venti\w*|fan|fans|slot\w*|port\w*|kimenet\w*|bemenet\w*|"
             r"csatlakoz\w*|\d{1,2} ?(?:pin\w*|tus\w*)|[2-8]k felbontas\w*)\b)")
 _PIECES = re.compile(r"\b[2-9] ?x\b(?! ?\d{1,2} ?g(?:b|ib)?\b)" + _FEATURE + r"|\b[2-9] ?(?:db|darab)\b" + _FEATURE +
                      r"|\b[2-9] ?par\b")
-_COOLER = re.compile(r"\b(?:ventus|windforce|wf|mech)\s?[23]\s?x\b")
+_COOLER = re.compile(r"\b(?:ventus|windforce|wf|mech|shadow)\s?[23]\s?x\b")
 # Ömlesztett vagy összetett csomag („ruhacsomag”, „ömlesztve”, „gyűjtemény”, „játékok egyben”): az ár nem egy darabé.
 _HEAP = re.compile(r"\b\w+csomag\w*|\b(omlesztve|omlesztett|gyujtemeny\w*|egyben elado\w*|elado\w* egyben)\b|"
                    r"\b\w{3,}k egyben\b")
@@ -482,16 +485,25 @@ def several_products(text: str) -> bool:
     words = _words(text)
     if sum(1 for w in _model_tokens(words) if _GPU_CHIP.match(w)) >= 2 and set(words) & GPU_FAMILIES:
         return True
-    # (a tizedesvessző nem felsorolás: „4,7GHz”, „3,8 GHz”)
-    parts = {tuple(tokens) for tokens in (_model_tokens(_words(part)) for part in
-                                          re.split(r"[/+;]|(?<!\d),|,(?!\d)|\b(?:es|vagy)\b", fold(text or ""))) if tokens}
-    return len(parts) >= 2
+    # (a tizedesvessző nem felsorolás: „4,7GHz”, „3,8 GHz”; a típusnévhez tapadó „+” sem: „Nitro+”, „Galaxy S21+”)
+    folded = re.sub(parts.PLUS_MODEL.pattern, " plus", fold(text or ""))
+    found = {tuple(tokens) for tokens in (_model_tokens(_words(part)) for part in
+                                          re.split(r"[/+;]|(?<!\d),|,(?!\d)|\b(?:es|vagy)\b", folded)) if tokens}
+    # a gyártói cikkszám („/EX-GTX1060-6G/”, „DUAL-RTX3060-O12G”) ugyanaz a termék: benne van a másik rész típusjele
+    return len([part for part in found if not any(_restates(part, other) for other in found if other != part)]) >= 2
+
+
+def _restates(part: tuple[str, ...], other: tuple[str, ...]) -> bool:
+    """A felsorolás egy része csak egy másik rész típusjelét ismétli egy cikkszámban: minden szavában benne van a másik
+    rész egy legalább háromjegyű számot tartalmazó típusjele („exgtx10606g” ⊇ „1060”)."""
+    marks = [token for token in other if re.search(r"\d{3}", token)]
+    return bool(marks) and all(any(mark in token and mark != token for mark in marks) for token in part)
 
 
 # Műszaki jellemző, nem típusjel: memóriatípus (DDR4, GDDR6X), késleltetés (CL16), foglalat (AM4, LGA1700), csatoló és
-# szabvány (PCIe4, USB3, HDMI21, SATA3, WiFi6, Gen4), sávszélesség (x16).
+# szabvány (PCIe4, USB3, HDMI21, SATA3, WiFi6, Gen4), sávszélesség (x16), a memória buszszélessége (256bit).
 _SPEC = re.compile(r"^(?:(?:lp|g)?ddr\d\w*|cl\d{1,2}|am[2-5]|lga\d{3,4}|pcie\d*|usb\d\w*|hdmi\d\w*|sata\d|wifi\d\w*|"
-                   r"gen\d|x\d{1,2})$")
+                   r"gen\d|x\d{1,2}|\d{2,4}bit)$")
 # Ezek előtt a szám mennyiség, nem típusjel („3200 MHz”, „256 bit”).
 _AFTER_NUMBER = _UNIT_WORDS | {"bit", "fps", "rpm", "dpi", "mp", "mpx"}
 
@@ -738,9 +750,11 @@ def product_key(text: str, brands: set[str] | frozenset[str] = frozenset()) -> t
     if set(families) & GPU_FAMILIES and not {"laptop", "pc"} & set(picked):
         # videókártya: a lapka, a jelzője (Ti, Super, XT, XTX) és a fajtája marad, a kártyagyártó típusneve (G1, F15,
         # Ultra, Air…) és egy évszám (a garancia vége) nem
+        vega = "vega" in picked                # (a Radeon RX Vega 56 és 64 lapkája kétjegyű: a kereskedő cikkszáma nem kell)
         kept = [t for t in picked if t in FAMILIES or t in _GPU_MODIFIERS or t in TYPE_WORDS.values()
-                or (_GPU_CHIP.match(t) and not (t.isdigit() and 1990 <= int(t) <= 2039))]
-        if any(_GPU_CHIP.match(t) for t in kept):
+                or (_GPU_CHIP.match(t) and not (t.isdigit() and 1990 <= int(t) <= 2039))
+                or (vega and t in ("vega", "56", "64"))]
+        if any(_GPU_CHIP.match(t) or (vega and t in ("56", "64")) for t in kept):
             picked = kept
     if any(len(t) >= 4 and re.search(r"\d", t) and not _KIT.match(t) for t in picked):
         # a hosszú típusjel mellett az egy számjegy csak a szint („Ryzen 5 5600X” = „Ryzen 5600X”)
@@ -1058,7 +1072,7 @@ class PriceBook:
                     self._locate()[ident] = key
                 if row.get("seller"):
                     sample["v"] = str(row["seller"])[:40]
-                elif sample.get("p") and price < int(sample["p"]) * (1 - PRICE_CUT):
+                if sample.get("p") and price < int(sample["p"]) * (1 - PRICE_CUT):   # (az eladós kártyán is)
                     sample["cuts"] = int(sample.get("cuts") or 0) + 1     # leárazta (az alkuhoz: engedni szokott)
                     sample.setdefault("p0", int(sample["p"]))
                 sample.update(p=price, last=now, t=" ".join(str(row.get("title") or text).split())[:TITLE_KEEP])

@@ -1648,6 +1648,11 @@ class PriceBookTests(unittest.TestCase):
             book.add([listing(1, "RTX 5060 Ti 8GB", 99000)])
             [cut] = [s for s in book.samples("5060 8gb rtx ti") if s["url"].endswith("100001.html")]
             self.assertEqual((cut["cuts"], cut["p0"], cut["p"]), (1, 112000, 99000), "leárazta")
+            # a Hardverapró kártyáján az eladó neve is ott van: a leárazás így is számít (eddig kimaradt)
+            book.add([{**listing(2, "RTX 5060 Ti 8GB", 108000), "seller": "peti"}])
+            book.add([{**listing(2, "RTX 5060 Ti 8GB", 95000), "seller": "peti"}])
+            [cut] = [s for s in book.samples("5060 8gb rtx ti") if s["url"].endswith("100002.html")]
+            self.assertEqual((cut["cuts"], cut["p0"], cut["p"]), (1, 108000, 95000), "az eladós kártyán is leárazta")
 
     def test_a_cheap_product_needs_a_smaller_profit(self):
         """Egy 10 000 Ft-os terméknél az 5 000 Ft-os min. haszonnal legfeljebb 2 500 Ft-ért érné meg, de 4 000 Ft alatt

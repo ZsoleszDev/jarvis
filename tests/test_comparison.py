@@ -293,6 +293,27 @@ class RealTitleTests(unittest.TestCase):
         for title in ("2x RTX 3070 8GB", "2 db RTX 3070", "PS5 kontroller 2 db", "2x 4K monitor", "Samsung 4 db 8GB DDR4"):
             self.assertFalse(usable(title), title)
 
+    def test_real_hardverapro_titles_are_not_excluded_by_mistake(self):
+        """Valódi Hardverapró-címek (2026. október), amik eddig tévesen kimaradtak (így egy olcsó darabjuk sem lett
+        jelölt): az MSI „Shadow 2X” hűtőneve nem két darab; az XFX „Speedster SWFT 210”, „MERC 319” hűtőnevének száma
+        nem egy második lapka; a „Nitro+” „+”-a nem felsorolás, a „256bit” nem típusjel; a perjelek közti gyártói cikkszám
+        („/EX-GTX1060-6G/”, „TUF-RTX4070TI-O12G”) ugyanaz a kártya. A Vega 56 kulcsában nincs a kereskedő cikkszáma. A
+        valódi több termék (két lapka, processzor és alaplap) továbbra is kimarad."""
+        for title, plain in (("27% - MSI GeForce RTX 5050 SHADOW 2X OC 8GB - Beszámítás", "RTX 5050 8GB"),
+                             ("Akció Bontatlan XFX Speedster SWFT 210 RX 6650xt Akció", "RX 6650 XT"),
+                             ("XFX MERC 319 RX 6800 XT 16GB", "RX 6800 XT 16GB"),
+                             ("SAPPHIRE RX 580 NITRO+ 4GB GDDR5 256bit /Samsung/ - Frissen takarítva és pasztázva",
+                              "RX 580 4GB"),
+                             ("ASUS nvidia GTX 1060 6GB Expedition OC videókártya /EX-GTX1060-6G/", "GTX 1060 6GB"),
+                             ("Asus TUF RTX 4070 Ti 12GB (TUF-RTX4070TI-O12G-GAMING)", "RTX 4070 Ti 12GB"),
+                             ("Sapphire PULSE RX Vega 56 8GB Garanciával! VD063", "Radeon RX Vega 56 8GB")):
+            self.assertTrue(usable(title), title)
+            self.assertEqual(key(title), key(plain), title)
+        self.assertNotIn("vd063", key("Sapphire PULSE RX Vega 56 8GB Garanciával! VD063"))
+        for title in ("RTX 3060 / RTX 3070 / RTX 3080", "Ryzen 5 5600X + B550 alaplap", "2x RTX 3060 Ti",
+                      "i5-12400F / 16GB DDR4 / RTX 3060", "MSI RTX 3060 Ventus 2X 12G + RTX 3070"):
+            self.assertFalse(usable(title), title)
+
     def test_a_model_number_with_a_hungarian_suffix(self):
         """„RTX 3070-es”, „GTX 1060-as”, „iPhone 13-as”, „5600X-es”, „PS5-ös”, „S23-as”: a típusjel maga (eddig a
         hirdetés kulcs nélkül maradt, vagy egy külön kulcsra került, így nem volt mihez mérni). Az időt jelölő toldalék

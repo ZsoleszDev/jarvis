@@ -698,13 +698,17 @@
       <summary>${title}</summary><div class="fold-body">${body}</div></details>`;
   // másodperc → „45 mp”, „2,5 perc” (az azonnali figyelő ütemének és késésének kiírásához)
   const secondsText = (sec) => sec < 90 ? `${Math.round(sec)} mp` : `${(sec / 60).toFixed(1).replace(".", ",").replace(",0", "")} perc`;
+  // másodperc → „40 mp-cel”, „3 perccel”, „2 órával” (az időrendhez: mennyivel később)
+  const laterText = (sec) => sec < 90 ? `${Math.max(0, Math.round(sec))} mp-cel` : sec < 5400 ? `${Math.round(sec / 60)} perccel` : `${Math.round(sec / 3600)} órával`;
   function instantBox() {
     const I = deals.instant;
     if (!I) return "";
     const siteLine = (I.sites || []).map((s) => `${esc(s.name)}: ${s.blocked_until ? `tilt (${esc(s.reason)}), ${esc(hhmmOf(s.blocked_until))}-ig szünetel`
       : s.browser_only ? "most nem olvasható böngésző nélkül (a böngésző nézi)" : `kb. ${s.per_hour} kérés óránként (keret: ${I.hourly})${s.slow > 1.05 ? ", lassít (lassan válaszol)" : ""}${s.rhythm ? `, ${esc(s.rhythm)}` : ""}`
       + (s.every_s ? `, egy figyelő két letöltése között legalább ${esc(secondsText(s.every_s))}` : "")
-      + (s.delay ? `, észlelés a feltöltés után: kb. ${esc(secondsText(s.delay.median))} (${esc(s.delay.n)} új alapján)` : "")}`).join(" · ");
+      + (s.research && !s.blocked_until && !s.browser_only ? `, árkutatás az utóbbi órában: ${esc(s.research.used)} (legfeljebb ${esc(s.research.cap)}, hogy a letöltéseknek maradjon)` : "")
+      + (s.delay ? `, észlelés a feltöltés után: kb. ${esc(secondsText(s.delay.median))} (${esc(s.delay.n)} új alapján)` : "")
+      + (s.told ? `, jelzés az észlelés után: kb. ${esc(secondsText(s.told.median))} (${esc(s.told.n)} megérő alapján)` : "")}`).join(" · ");
     const alerts = (I.alerts || []).map((a) => {
       const sites = (a.sites || []).map((k) => (I.sites.find((s) => s.key === k) || { name: k }).name).join(", ");
       const range = a.min_price || a.max_price ? ` · ${a.min_price ? price(a.min_price) : "0"}–${a.max_price ? price(a.max_price) : "bármennyi"}` : "";
@@ -720,7 +724,7 @@
           <button type="button" class="small quiet" data-iremove="${esc(a.id)}">Törlés</button></span>`}</li>`;
     }).join("");
     const hits = (I.hits || []).slice(0, 25).map((h) => `<li><span><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.title || h.text)}</a>
-        <small class="muted">${esc(h.site)} · <b>${esc(price(h.price))}</b>${h.drop ? ` (leárazta: ${esc(price(h.drop))})` : ""} · ${esc(ago(h.at))} · ${esc(h.alert_name)}</small>
+        <small class="muted">${esc(h.site)} · <b>${esc(price(h.price))}</b>${h.drop ? ` (leárazta: ${esc(price(h.drop))})` : ""} · ${esc(ago(h.at))}${h.posted_at ? ` (${esc(laterText(h.at - h.posted_at))} a feltöltése után)` : ""} · ${esc(h.alert_name)}</small>
         ${h.reference ? `<small class="${h.cheap ? "" : "muted"}">${h.cheap ? "<b>Megéri:</b> " : ""}szokásos ár kb. ${esc(price(h.reference))}${h.profit > 0 ? ` · kb. ${esc(price(h.profit))} becsült haszon` : ""}${h.cheap && h.max_buy !== undefined && h.max_buy !== null ? ` · legfeljebb ${esc(price(h.max_buy))}-ért vedd meg` : ""}${h.reliability && h.reliability.level !== "megadott" ? ` · a becslés megbízhatósága ${esc(h.reliability.level)}` : ""}</small>` : ""}
         ${h.withdrawn ? `<small class="warn">${esc(h.withdrawn)}</small>`
           : h.model_no ? `<small class="warn">Utólag mégsem jó: ${esc(h.model_no)}</small>`
@@ -731,7 +735,9 @@
           : `<button type="button" class="small" data-deal-buy="${esc(h.deal)}">Megvettem</button>`}</span>` : ""}</li>`).join("");
     const presets = (I.presets || []).map((p) => `<button type="button" class="small" data-ipreset="${esc(p.url)}">${esc(p.name)}</button>`).join("");
     return `${I.enabled && siteLine ? `<p><small>${siteLine}</small></p>` : ""}
-      ${I.enabled && I.waiting ? `<p><small>${I.waiting} friss hirdetés vár a modellre (amíg a Jarvist használod).</small></p>` : ""}
+      ${I.enabled && I.waiting > (I.waiting_budget || 0) ? `<p><small>${I.waiting - (I.waiting_budget || 0)} friss hirdetés vár a modellre (amíg a Jarvist használod).</small></p>` : ""}
+      ${I.enabled && I.waiting_budget ? `<p><small>${esc(I.waiting_budget)} friss hirdetés vár az óránkénti kéréskeretre (az árkutatáshoz); ha felszabadul, sorra kerül.</small></p>` : ""}
+      ${I.enabled && I.queued ? `<p><small>${esc(I.queued)} friss hirdetés felmérése folyamatban (a biztos árú megérők előre kerülnek).</small></p>` : ""}
       <ul class="dealist">${alerts || '<li class="muted">Még nincs azonnali figyelő.</li>'}</ul>
       <form id="di-add" class="compose" autocomplete="off">
         <input id="di-target" placeholder="Mit figyeljek? Pl. RTX 3080, vagy egy oldal címe">
@@ -790,7 +796,7 @@
   const FUNNEL_OUT = [["not_cheap", "nem elég olcsó"], ["other", "nem a keresett termék vagy nem eladó"],
                       ["over_limit", "a vételi limit fölött"], ["unknown", "ismeretlen termék"], ["unsure", "bizonytalan ár (Érdemes megnézni)"],
                       ["unverified", "ellenőrizetlen (Érdemes megnézni)"],
-                      ["suspicious", "gyanús"], ["risky", "kockázatos"], ["gone", "elkelt"], ["defect", "hibás"],
+                      ["suspicious", "gyanús"], ["risky", "kockázatos"], ["gone", "elkelt"], ["reserved", "foglalt (jegelve)"], ["defect", "hibás"],
                       ["model_no", "a modell szerint nem az"], ["muted", "elrejtett termék"],
                       ["bundle", "csomag (a csomagbontásnak)"], ["clothing", "ruha, cipő (azzal nem kereskedem)"]];
   // ráérő időben (deals.warm): az összehasonlítók előre elolvasott leírásai és a kevés árú termékek árkeresései
@@ -928,6 +934,11 @@
     if (d.sold) rows.push(["Eltűnt (talán elkelt) hasonlók", `kb. ${esc(price(d.sold.median))} (${esc(d.sold.n)} db alapján) <small class="muted">(ennyiért hirdették; nem tudni, mennyiért keltek el)</small>`]);
     if (d.speed) rows.push(["Eladási sebesség", esc(d.speed)]);
     if (d.likes) rows.push(["Kedvelések", `${esc(d.likes)} (ha sok, másnak is feltűnt)`]);
+    const timeline = [];                     // mikor került fel (a kártya szerint), mikor vettem észre, mikor szóltam
+    if (d.posted_at) timeline.push(`felkerült ${hhmmOf(d.posted_at)}`);
+    if (d.seen_at) timeline.push(`észrevettem ${hhmmOf(d.seen_at)}${d.posted_at ? ` (${laterText(d.seen_at - d.posted_at)} utána)` : ""}`);
+    if (d.told_at) timeline.push(`szóltam ${hhmmOf(d.told_at)}${d.seen_at ? ` (${laterText(d.told_at - d.seen_at)} az észlelés után)` : ""}`);
+    if (timeline.length > 1) rows.push(["Időrend", esc(timeline.join(" · "))]);
     if (d.safety) rows.push(["Kockázat", safetyLine(d.safety)]);
     return `<p class="muted">Megtaláltam: ${esc(ago(d.at))}${d.explore ? ` · ${esc(d.explore)}` : ""}</p>
       <dl class="facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
