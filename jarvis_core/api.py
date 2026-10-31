@@ -13,6 +13,7 @@ A végpontok listája a docs/telefon-api.md-ben van.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import http.client
 import json
@@ -45,6 +46,16 @@ CODE_SECONDS = 300
 CODE_TRIES = 5
 LOG_LIMIT = 800
 LOG_SKIP = {"delta", "segment_end"}       # ezek túl sűrűk; a végleges szöveg "assistant" eseményként jön
+# Az eseményekre (GET /api/v1/events) a telefon egy kérésben legfeljebb ennyi ideig (mp) vár. Hosszú várakozás közben
+# nem megy adat, így a Tailscale elalszik (a forgalom után 45 mp-ig hárommásodpercenként „életjelet” küldene), és a
+# telefon rádiója is pihen: egy esemény ugyanígy rögtön megjön (a kérésre adott válaszként).
+EVENTS_WAIT_MAX = 900.0
+# A távoli eszköznek (telefon, laptop) a szöveges válaszok tömörítve mennek, ha kéri (Accept-Encoding: gzip), és
+# legalább GZIP_MIN bájtosak: a felület fájljai és a JSON így kb. negyedakkorák. A felület fájljai (és a manifest,
+# az ikonok) ETag-gel: ha nem változtak, a következő megnyitáskor csak egy „nem változott” (304) válasz megy.
+GZIP_MIN = 1024
+_COMPRESSIBLE = re.compile(r"^(?:text/|application/(?:json|javascript|manifest\+json|xml)|image/svg\+xml)")
+_GZIP_OK = re.compile(r"(?:^|,)\s*gzip\s*(?:;\s*q\s*=\s*(?!0(?:\.0*)?\s*(?:,|$))[\d.]+\s*)?(?:,|$)")
 EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "description", "category", "brand",
             "size", "condition", "color", "material", "price", "min_price", "location", "shipping", "bought_price",
             "sold_price", *LEDGER_FIELDS}
@@ -152,7 +163,10 @@ class EventLog:
     def __init__(self, limit: int = LOG_LIMIT):
         self._cond = threading.Condition()
         self._events: deque[tuple[int, dict[str, Any]]] = deque(maxlen=limit)
-        self._seq = 0
+        # A sorszám az indulás pillanatától (ezredmásodpercben) számol: egy újraindítás után is nagyobb, mint az előző
+        # futás bármelyik sorszáma, így a telefon az újraindítás utáni eseményeket sem hagyja ki (eddig nulláról
+        # indult, és a telefon a régi, nagyobb sorszám miatt az első lekérdezésig jött eseményeket átugorta).
+        self._seq = int(time.time() * 1000)
 
     def add(self, event: dict[str, Any]) -> None:
         # a Kreatív menü eseményei (élő írás, egész történetek) a telefonnak nem kellenek
@@ -172,6 +186,8 @@ class EventLog:
         A harmadik érték igaz, ha közben események vesztek el (túl régi az `after`)."""
         deadline = time.monotonic() + max(0.0, wait)
         with self._cond:
+            if after > self._seq:       # egy korábbi futás nagyobb sorszáma (pl. azóta visszaállt az óra): mindent kap
+                after = 0
             while True:
                 newer = [e for seq, e in self._events if seq > after]
                 remaining = deadline - time.monotonic()
@@ -241,17 +257,42 @@ class _ApiHandler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         return origin if origin and origin in self.api.cfg.allowed_origins else None
 
-    def _send(self, status: int, body: bytes, content_type: str, extra: dict[str, str] | None = None) -> None:
+    def _send(self, status: int, body: bytes, content_type: str, extra: dict[str, str] | None = None,
+              cache: bool = False) -> None:
+        """Egy válasz. cache: a tartalma csak a Jarvis új változatával változik (a felület fájljai): ETag-gel megy, és
+        ha az eszköznél már ez van (If-None-Match), csak „nem változott” (304). A szöveges választ tömörítve küldi, ha
+        az eszköz kéri (GZIP_MIN fölött). Az extra fejlécek felülírják az alapértelmezettet (pl. Cache-Control)."""
+        extra = dict(extra or {})
+        tag = ""
+        if cache and status == 200:
+            tag = '"' + hashlib.sha256(body).hexdigest()[:24] + '"'
+            if tag in [t.strip() for t in (self.headers.get("If-None-Match") or "").split(",")]:
+                self.send_response(304)
+                self.send_header("ETag", tag)
+                self.send_header("Cache-Control", extra.get("Cache-Control", "no-cache"))
+                self.end_headers()
+                return
+        packed = len(body) >= GZIP_MIN and bool(_COMPRESSIBLE.match(content_type)) \
+            and bool(_GZIP_OK.search((self.headers.get("Accept-Encoding") or "").lower()))
+        if packed:
+            body = gzip.compress(body, compresslevel=6)
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", extra.pop("Cache-Control", "no-cache" if cache else "no-store"))
         self.send_header("X-Content-Type-Options", "nosniff")
+        if tag:
+            self.send_header("ETag", tag)
+        if packed:
+            self.send_header("Content-Encoding", "gzip")
+        vary = ["Accept-Encoding"] if _COMPRESSIBLE.match(content_type) else []
         origin = self._allowed_origin()
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
-        for key, value in (extra or {}).items():
+            vary.append("Origin")
+        if vary:
+            self.send_header("Vary", ", ".join(vary))
+        for key, value in extra.items():
             self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
@@ -415,7 +456,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query, keep_blank_values=True)
         static = remote.static_file(path)
         if static is not None and method == "GET":
-            return self._send(200, static[0], static[1], {"Cache-Control": "no-cache"})
+            return self._send(200, static[0], static[1], cache=True)
         gui = self.api.gui
         if gui is None:
             raise ApiError(503, "no_window", "A Jarvis ablaka nem fut (konzolos módban nincs távoli ablak).")
@@ -461,7 +502,9 @@ class _ApiHandler(BaseHTTPRequestHandler):
         if path == "/" and kind.startswith("text/html"):
             data = remote.inject(data)
         extra = {name: value for name in FORWARD_HEADERS if (value := response.getheader(name))}
-        self._send(response.status, data, kind, extra)
+        # a felület fájljai (és maga az oldal) csak egy új változattal változnak: ETag-gel mennek
+        page = method == "GET" and (path == "/" or path.startswith("/ui/"))
+        self._send(response.status, data, kind, extra, cache=page)
 
     def _stream(self, response: Any) -> None:
         """Az élő események (Server-Sent Events) folyamatosan, ahogy jönnek."""
@@ -556,8 +599,8 @@ class _ApiHandler(BaseHTTPRequestHandler):
         self._result(request_id, _number(body.get("wait"), 0.0, 0.0, 120.0))
 
     def r_events(self, query: dict[str, list[str]]) -> None:
-        after = int(_number((query.get("after") or ["0"])[0], 0, 0, 1e12))
-        wait = _number((query.get("wait") or ["25"])[0], 25.0, 0.0, 55.0)
+        after = int(_number((query.get("after") or ["0"])[0], 0, 0, 1e15))
+        wait = _number((query.get("wait") or ["25"])[0], 25.0, 0.0, EVENTS_WAIT_MAX)
         events, last, gap = self.api.log.since(after, wait)
         self._json(200, {"ok": True, "events": events, "last": last, "gap": gap})
 

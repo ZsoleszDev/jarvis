@@ -24,8 +24,10 @@ from test_offline import FakeOllama, make_cfg, reply, tool_reply  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
 from jarvis_core import gpu  # noqa: E402
+from jarvis_core import gui as gui_module  # noqa: E402
 from jarvis_core.app import JarvisApp  # noqa: E402
 from jarvis_core.assistant import Assistant  # noqa: E402
+from jarvis_core.config import GuiCfg  # noqa: E402
 from jarvis_core.gui import EventBus, GuiServer, GuiUI  # noqa: E402
 from jarvis_core.tools import Toolbox  # noqa: E402
 
@@ -194,6 +196,32 @@ class EventBusTests(unittest.TestCase):
         types = [e["type"] for e in events]
         self.assertEqual(types, ["hello", "user", "tool", "state"])
         self.assertEqual(events[2]["status"], "done")
+
+
+class AppWindowTests(unittest.TestCase):
+    """Az alkalmazásablak alapból teljes méretben nyílik meg; a beállítással kisebb ablak is kérhető."""
+
+    def launch(self, cfg: GuiCfg, windows: bool = False) -> list[str]:
+        with mock.patch.object(gui_module, "IS_WINDOWS", windows), \
+                mock.patch.object(gui_module.subprocess, "CREATE_NO_WINDOW", 0, create=True), \
+                mock.patch.object(gui_module.shutil, "which", return_value="/usr/bin/msedge"), \
+                mock.patch.object(gui_module.subprocess, "Popen") as popen, \
+                mock.patch.object(gui_module.webbrowser, "open") as browser:
+            self.assertTrue(gui_module.open_app_window("http://127.0.0.1:8765/", cfg))
+            browser.assert_not_called()
+        return popen.call_args.args[0]
+
+    def test_the_window_opens_maximized_by_default(self):
+        args = self.launch(GuiCfg())
+        self.assertEqual(args[0], "/usr/bin/msedge")
+        self.assertIn("--app=http://127.0.0.1:8765/", args)
+        self.assertIn("--start-maximized", args)
+        self.assertIn("--start-maximized", self.launch(GuiCfg(), windows=True))
+
+    def test_a_smaller_window_can_be_asked_for(self):
+        args = self.launch(GuiCfg(maximized=False))
+        self.assertNotIn("--start-maximized", args)
+        self.assertTrue(any(a.startswith("--window-size=") for a in args))
 
 
 @unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")

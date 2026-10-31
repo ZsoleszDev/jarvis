@@ -80,6 +80,7 @@ public class MainActivity extends Activity {
     private static final int PICK_FILES = 1;
     private static final int ASK_NOTIFY = 3;
     private static final int TAKE_PHOTO = 4;
+    private static final long SLEEP_AFTER_MS = 60 * 1000;
 
     private WebView web;
     private Prefs prefs;
@@ -350,6 +351,41 @@ public class MainActivity extends Activity {
         visible = false;
         web.onPause();
         super.onPause();
+    }
+
+    /** Háttérben (SLEEP_AFTER_MS után) a felület élő csatornája bezárul, és az időzítői megállnak (sleep). */
+    private boolean asleep;
+    private final Runnable sleep = () -> {
+        web.evaluateJavascript("window.jarvisSleep && window.jarvisSleep()", null);
+        web.pauseTimers();
+        asleep = true;
+    };
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        web.removeCallbacks(sleep);
+        web.resumeTimers();                            // (a megállítás az egész folyamatra szól: mindig visszaállítjuk)
+        if (asleep) {                                  // előjött: újra él (a gép visszajátssza, ami közben történt)
+            asleep = false;
+            web.evaluateJavascript("window.jarvisWake && window.jarvisWake()", null);
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        // Ha egy ideig háttérben marad (nem csak egy fotóért vagy egy másolásért ugrottál át), a felület nem tartja
+        // nyitva a kapcsolatot: a csatorna életjele felébresztené a telefon rádióját és a Tailscale-t. Az értesítéseket
+        // közben is a háttérszolgáltatás hozza.
+        web.removeCallbacks(sleep);
+        web.postDelayed(sleep, SLEEP_AFTER_MS);
+        super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        web.removeCallbacks(sleep);                    // egy bezárt ablak ne állítsa meg a következő időzítőit
+        super.onDestroy();
     }
 
     @Override

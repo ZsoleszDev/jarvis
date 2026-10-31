@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -165,6 +166,47 @@ class ApiTests(unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - started, 0.35, "hosszú lekérdezés: vár az újakra")
         status, data, _ = h.request("POST", "/api/v1/chat", {"text": "  "})
         self.assertEqual(status, 400)
+
+    def test_events_survive_a_restart_and_wait_long_without_traffic(self):
+        """Az események sorszáma az indulás pillanatától (ezredmásodpercben) számol: egy újraindítás után is nagyobb,
+        mint az előző futás bármelyik sorszáma, így a telefon az újraindítás utáni eseményeket sem hagyja ki (eddig
+        nulláról indult, és a telefon a régi, nagyobb sorszám miatt átugrotta őket). A telefon egy kérésben akár
+        perceket is várhat (közben nem megy adat, a Tailscale és a rádió pihen); ha jön valami, rögtön megkapja."""
+        from jarvis_core.api import EVENTS_WAIT_MAX, EventLog
+        old = EventLog()
+        old.add({"type": "notification", "text": "régi"})
+        phone_saw = old.last_seq()
+        time.sleep(0.01)
+        new = EventLog()                                  # a gép újraindult
+        new.add({"type": "notification", "text": "új"})
+        events, last, _gap = new.since(phone_saw)
+        self.assertEqual([e["text"] for e in events], ["új"], "az újraindítás utáni esemény megjön")
+        self.assertGreater(last, phone_saw)
+        with mock.patch("jarvis_core.api.time.time", return_value=time.time() - 3600):
+            behind = EventLog()                           # újraindult, és közben egy órát visszaállt az óra
+        behind.add({"type": "notification", "text": "óraállítás után"})
+        events, last, gap = behind.since(last)
+        self.assertEqual([e["text"] for e in events], ["óraállítás után"], "a nagyobb régi sorszám sem nyeli el")
+        self.assertTrue(gap)
+        self.assertGreaterEqual(EVENTS_WAIT_MAX, 600, "a telefon tíz percig is várhat egy kérésben")
+        h = self.h
+        _status, data, _ = h.request("GET", "/api/v1/events?after=0&wait=0")
+        got: dict = {}
+
+        def poll():
+            got["result"] = h.request("GET", f"/api/v1/events?after={data['last']}&wait=600")
+
+        started = time.monotonic()
+        thread = threading.Thread(target=poll)
+        thread.start()
+        time.sleep(0.3)
+        self.assertTrue(thread.is_alive(), "vár (nem 55 mp-re vágja le, és nem küld közben semmit)")
+        h.ui.info("Megjött")
+        thread.join(10)
+        status, again, _ = got["result"]
+        self.assertEqual(status, 200)
+        self.assertIn("Megjött", [e.get("text") for e in again["events"]])
+        self.assertLess(time.monotonic() - started, 10, "az esemény rögtön jön, nem a várakozás végén")
 
     def test_pause_and_resume_from_the_phone(self):
         h = self.h
@@ -403,6 +445,60 @@ class RemoteWindowTests(unittest.TestCase):
             seen += response.read1(65536)
         conn.close()
 
+    def test_the_window_files_are_compressed_and_cached(self):
+        """A távoli eszköznek a felület fájljai és a JSON tömörítve mennek (ha kéri), a felület fájljai ETag-gel: a
+        következő megnyitáskor, ha nem változtak, csak egy „nem változott” (304) válasz megy (eddig minden megnyitás
+        kb. 340 KB-ot töltött le, a mobilnetről is)."""
+        import gzip
+        h = self.h
+        plain = self.get("/ui/work.js")[1]
+        status, packed, headers = self.get("/ui/work.js", headers={"Accept-Encoding": "gzip, deflate, br"})
+        self.assertEqual((status, headers.get("Content-Encoding")), (200, "gzip"))
+        self.assertEqual(gzip.decompress(packed), plain)
+        self.assertLess(len(packed), len(plain) / 2)
+        self.assertIn("Accept-Encoding", headers.get("Vary", ""))
+        tag = headers["ETag"]
+        self.assertEqual(headers["Cache-Control"], "no-cache", "minden megnyitáskor rákérdez, de nem tölti le újra")
+        status, body, headers = self.get("/ui/work.js", headers={"If-None-Match": tag, "Accept-Encoding": "gzip"})
+        self.assertEqual((status, body), (304, b""))
+        status, page, headers = self.get(f"/?t={h.token}", headers={"Accept-Encoding": "gzip"})
+        self.assertEqual((status, headers.get("Content-Encoding")), (200, "gzip"))
+        self.assertIn(b'name="jarvis-remote"', gzip.decompress(page))
+        status, _body, headers = self.get(f"/?t={h.token}", headers={"If-None-Match": headers["ETag"]})
+        self.assertEqual(status, 304, "az oldal is (a kulcs ellenőrzése után)")
+        self.assertEqual(self.get("/?t=rossz", headers={"If-None-Match": headers["ETag"]})[0], 200,
+                         "kulcs nélkül a belépő oldal jön, nem a 304")
+        conn = http.client.HTTPConnection("127.0.0.1", h.api.port, timeout=10)
+        conn.request("GET", f"/api/jobs?t={h.token}", headers={"Accept-Encoding": "gzip"})
+        response = conn.getresponse()
+        data = response.read()
+        conn.close()
+        self.assertEqual(response.getheader("Cache-Control"), "no-store", "az adatokat nem tárolja")
+        self.assertIsNone(response.getheader("ETag"))
+        if response.getheader("Content-Encoding") == "gzip":     # (ha elég nagy: tömörítve)
+            data = gzip.decompress(data)
+        self.assertIn("ready", json.loads(data))
+        status, data, headers = self.get("/manifest.webmanifest", headers={"Accept-Encoding": "identity"})
+        self.assertEqual((status, headers.get("Content-Encoding")), (200, None), "ha nem kéri, nem tömöríti")
+
+    def test_a_remote_window_hears_rarely_from_an_idle_jarvis(self):
+        """A távoli ablak élő csatornáján az életjel ritka (25 mp-enként; a gépen nyitott ablaknál marad 3 mp): a
+        telefonon minden életjel felébreszti a rádiót és a Tailscale-t."""
+        from jarvis_core import gui as gui_module
+        h = self.h
+        with mock.patch.object(gui_module, "REMOTE_PING", 0.6), mock.patch.object(gui_module, "LOCAL_PING", 0.1):
+            conn = http.client.HTTPConnection("127.0.0.1", h.api.port, timeout=10)
+            conn.request("GET", f"/events?t={h.token}")
+            response = conn.getresponse()
+            seen = b""
+            while b'"type": "hello"' not in seen:
+                seen += response.read1(65536)
+            started = time.monotonic()
+            while b": ping" not in seen:
+                seen += response.read1(65536)
+            self.assertGreaterEqual(time.monotonic() - started, 0.45, "a távoli ablaknak ritkán")
+            conn.close()
+
     def test_photos_from_the_phone(self):
         h = self.h
         item = h.app.work.store.create(targets=["vinted"], prompt="póló")
@@ -435,7 +531,6 @@ class TailscaleAddressTests(unittest.TestCase):
         self.assertEqual(remote.serve_address("", 8765), "")
 
     def test_runs_tailscale_when_installed(self):
-        from unittest import mock
         import subprocess
 
         done = subprocess.CompletedProcess(["tailscale"], 0, stdout=self.STATUS, stderr="")
@@ -497,6 +592,42 @@ class RemoteWindowBrowserTests(unittest.TestCase):
                 page.wait_for_selector("text=Szia! Itt vagyok a gépen.", timeout=15000)
                 page.goto(f"http://127.0.0.1:{h.api.port}/")   # a megjegyzett kulccsal egyből belép
                 page.wait_for_selector("#text", timeout=15000)
+                self.assertEqual(errors, [])
+                browser.close()
+        finally:
+            h.close()
+
+    def test_the_window_sleeps_in_the_background_and_catches_up(self):
+        """Háttérben (az Android-alkalmazás jarvisSleep hívása, vagy a böngészőben egy ideig rejtve) a távoli ablak
+        bezárja az élő csatornát, így az életjele nem ébresztgeti a telefont; előjövet (jarvisWake) újracsatlakozik, és
+        a gép visszajátssza, ami közben történt. A gépen nyitott ablak nem alszik el."""
+        from playwright.sync_api import sync_playwright
+        from jarvis_core import gui as gui_module
+
+        h = Harness()
+        try:
+            with mock.patch.object(gui_module, "REMOTE_PING", 0.2), sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                page = browser.new_page(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True,
+                                        user_agent=ANDROID_CHROME + " JarvisAndroid/1")
+                errors: list[str] = []
+                page.on("pageerror", lambda exc: errors.append(str(exc)))
+                page.goto(f"http://127.0.0.1:{h.api.port}/?t={h.token}")
+                page.wait_for_selector('body[data-state="idle"]', state="attached", timeout=15000)
+                h.wait(lambda: h.bus.client_count == 1)
+                page.evaluate("jarvisSleep()")
+                h.wait(lambda: h.bus.client_count == 0)   # (a gép a következő életjelnél veszi észre)
+                h.ui.info("Amíg aludt")
+                page.evaluate("jarvisWake()")
+                h.wait(lambda: h.bus.client_count == 1)
+                page.wait_for_selector("text=Amíg aludt", timeout=15000)
+                self.assertNotEqual(page.inner_text("#state"), "Nincs kapcsolat")
+                local = browser.new_page()
+                local.goto(h.gui.url)
+                local.wait_for_selector('body[data-state="idle"]', state="attached", timeout=15000)
+                local.evaluate("jarvisSleep()")              # a gépen nyitott ablak nem alszik el
+                time.sleep(0.5)
+                self.assertEqual(h.bus.client_count, 2)
                 self.assertEqual(errors, [])
                 browser.close()
         finally:

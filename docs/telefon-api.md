@@ -83,7 +83,7 @@ Siker: `{"ok": true, …}`. Hiba: `{"ok": false, "error": "érthető magyar szö
 | GET | `/ping` | – (kulcs nélkül) | `{name, api}` |
 | GET | `/status` | | `{ready, state, paused, standby, busy, mode, model, work, confirm, scheduler, unread, last_event}` |
 | POST | `/chat` | `{text, mode?: "chat"\|"work", wait?: 0–120, resume?: false}` | `wait` nélkül 202 `{request_id}`; `wait`-tel 200 `{request_id, done, heard, reply, errors}` (`heard`: a kérésed, ahogy a naplóba került) |
-| GET | `/events?after=&wait=` | `after`: az utolsó látott sorszám, `wait`: legfeljebb 55 mp | `{events: [...], last, gap}` |
+| GET | `/events?after=&wait=` | `after`: az utolsó látott sorszám, `wait`: legfeljebb 900 mp | `{events: [...], last, gap}` |
 | POST | `/stop` | | Állj: megszakítja, amit épp csinál |
 | POST | `/pause` | | Szünet: minden modell leáll, a VRAM és a memória felszabadul |
 | POST | `/resume` | | Folytatás: újra betölti a modelleket (10–20 mp) |
@@ -255,6 +255,16 @@ Ha nincs új esemény, a kérés legfeljebb `wait` másodpercig vár, aztán ür
 értékkel kérd újra. Ha `gap: true`, közben események vesztek el (pl. sokáig nem kérdezted): töltsd újra a
 `/status`-t és a `/work`-öt.
 
+A `wait` legfeljebb 900 mp. Ha valami történik, a válasz rögtön megy (a várakozás nem késlelteti az eseményt), így
+egy hosszú `wait` csak kevesebb kérést jelent: telefonon érdemes perceket várni (az Android-alkalmazás 600 mp-et
+kér), mert a várakozás alatt nem megy adat, és a telefon rádiója meg a Tailscale is pihenhet. A kérés olvasási
+időkorlátja legyen a `wait`-nél egy perccel hosszabb.
+
+A sorszám (`seq`, `last`) a Jarvis indulásának pillanatától (ezredmásodpercben) számol, így egy újraindítás után is
+nagyobb, mint az előző futás sorszámai: a régi `last` értékkel kérve az újraindítás utáni események mind megjönnek
+(`gap: true`-val). Ha a kért `after` nagyobb a mostani utolsó sorszámnál (pl. a gépen azóta visszaállt az óra),
+az összes megőrzött eseményt kapod.
+
 | type | Mezők | Jelentése |
 |---|---|---|
 | `hello` | `name, model, work, paused, standby, api` | mi fut (szünet után is jön) |
@@ -300,6 +310,11 @@ Ugyanezen a porton (a Tailscale-en át) a Jarvis teljes ablaka is elérhető: `G
 (itt a 6 jegyű kóddal párosíthatsz, a kulcs a böngésző tárában marad), a kulccsal (`/?t=<kulcs>`) a gép felülete.
 A felület kérései (`/events`, `/api/...`, kulccsal a címben vagy az `X-Jarvis-Token` fejlécben) a gépen futó
 felülethez mennek tovább; ami csak a gép előtt ülve szabad (kilépés, új párosító kód), az 403.
+A szöveges válaszok (a felület fájljai, a JSON) tömörítve mennek, ha az eszköz kéri (`Accept-Encoding: gzip`, 1 KB
+fölött); a felület fájljai `ETag`-gel, és ha az eszköznél már megvan ugyanez (`If-None-Match`), 304 a válasz. Az élő
+csatorna (`/events`) életjele a távoli ablaknak 25 mp-enként megy (a gépen nyitott ablaknak 3 mp-enként). A felület
+háttérben bezárja ezt a csatornát (a böngészőben 5 perc, az Android-alkalmazásban 1 perc után; `window.jarvisSleep()`),
+és ha újra előjön, újranyitja (`window.jarvisWake()`): a gép újracsatlakozáskor visszajátssza, ami közben történt.
 Telepíthető alkalmazás (PWA): `/manifest.webmanifest`, `/sw.js`, `/icon-192.png`, `/icon-512.png`. Az
 Android-alkalmazás (android/) ezt mutatja, és a `GET /api/v1/events` hosszú lekérdezéssel értesít a háttérben
 (`confirm`, `confirm_done`, `notification`, és a `state` alapján az állandó értesítés Szünet / Folytatás gombja). Egy

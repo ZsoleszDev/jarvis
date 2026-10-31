@@ -42,8 +42,16 @@ async function postJson(path, body) {
   try { return await response.json(); } catch { return { ok: response.ok }; }
 }
 
+// Az élő események csatornája. A távoli ablak (telefon, laptop) háttérben bezárja (jarvisSleep), és ha újra előjön,
+// újranyitja (jarvisWake): a gép újracsatlakozáskor visszajátssza, ami közben történt. A telefonon ez a rádiót és a
+// Tailscale-t kíméli (a nyitott csatorna életjele is felébreszti); az értesítések közben is megjönnek (az alkalmazás
+// háttérszolgáltatása, a laptopon a Web Push hozza őket).
+let events = null;
+let sleeping = false;
+
 function connect() {
-  const events = new EventSource("/events?t=" + encodeURIComponent(token));
+  if (events) events.close();
+  events = new EventSource("/events?t=" + encodeURIComponent(token));
   events.onopen = () => { linkDown = false; };
   events.onmessage = (message) => {
     const event = JSON.parse(message.data);
@@ -51,10 +59,37 @@ function connect() {
     if (handle) handle(event);
   };
   events.onerror = () => {
+    if (sleeping) return;
     linkDown = true;
     $("state").textContent = "Nincs kapcsolat";
     $("detail").textContent = "Fut még a Jarvis? Újracsatlakozom…";
   };
+}
+
+function jarvisSleep() {
+  if (!remote || sleeping) return;
+  sleeping = true;
+  if (events) { events.close(); events = null; }
+}
+
+function jarvisWake() {
+  clearTimeout(sleepTimer);
+  if (!sleeping) return;
+  sleeping = false;
+  connect();
+  pollGpus();
+}
+window.jarvisSleep = jarvisSleep;    // az Android-alkalmazás hívja, amikor háttérbe kerül, illetve előjön
+window.jarvisWake = jarvisWake;
+// A böngészőben (laptop, telefonos böngésző): ha az ablak HIDDEN_SLEEP ideig nem látszik, a csatorna bezárul.
+const HIDDEN_SLEEP = 5 * 60 * 1000;
+let sleepTimer = null;
+if (remote) {
+  document.addEventListener("visibilitychange", () => {
+    clearTimeout(sleepTimer);
+    if (document.hidden) sleepTimer = setTimeout(jarvisSleep, HIDDEN_SLEEP);
+    else jarvisWake();
+  });
 }
 
 // --- napló ------------------------------------------------------------------------
@@ -865,7 +900,7 @@ function renderGpus(info) {
 }
 
 async function pollGpus() {
-  if (document.hidden || gpuTimer === null) return;
+  if (document.hidden || gpuTimer === null || sleeping) return;
   let info = null;
   try {
     const response = await fetch("/api/gpus?t=" + encodeURIComponent(token));
@@ -944,7 +979,8 @@ function drawGpu(strip, now) {
   ctx.stroke();
 }
 
-gpuTimer = setInterval(pollGpus, 1000);
+// a távoli ablakban (telefon, laptop) ritkábban: minden lekérdezés adatforgalom, és felébreszti a Tailscale-t
+gpuTimer = setInterval(pollGpus, remote ? 5000 : 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) pollGpus(); });
 
 // --- az Android-alkalmazás kérései ----------------------------------------------------------
