@@ -214,13 +214,21 @@ class AppWindowTests(unittest.TestCase):
     def test_the_window_opens_maximized_by_default(self):
         args = self.launch(GuiCfg())
         self.assertEqual(args[0], "/usr/bin/msedge")
-        self.assertIn("--app=http://127.0.0.1:8765/", args)
+        # (ha az Edge már fut, a kapcsolót nem veszi figyelembe: akkor az oldal tölti ki a képernyőt, a cím fill=1-e
+        # alapján)
+        self.assertIn("--app=http://127.0.0.1:8765/?fill=1", args)
         self.assertIn("--start-maximized", args)
         self.assertIn("--start-maximized", self.launch(GuiCfg(), windows=True))
+        with mock.patch.object(gui_module.shutil, "which", return_value=None), \
+                mock.patch.object(gui_module, "IS_WINDOWS", False), \
+                mock.patch.object(gui_module.webbrowser, "open", return_value=True) as browser:
+            gui_module.open_app_window("http://127.0.0.1:8765/?t=abc", GuiCfg())
+        browser.assert_called_once_with("http://127.0.0.1:8765/?t=abc&fill=1")
 
     def test_a_smaller_window_can_be_asked_for(self):
         args = self.launch(GuiCfg(maximized=False))
         self.assertNotIn("--start-maximized", args)
+        self.assertIn("--app=http://127.0.0.1:8765/", args)
         self.assertTrue(any(a.startswith("--window-size=") for a in args))
 
 
@@ -253,6 +261,29 @@ class GuiBrowserTests(unittest.TestCase):
         deadline = time.monotonic() + 10
         while self.h.app.busy and time.monotonic() < deadline:
             time.sleep(0.02)
+
+    def test_the_window_fills_the_screen_once(self):
+        """Ha az Edge már futott, és kisebb ablakot adott, az oldal maga tölti ki a képernyőt (a címben fill=1): egyszer,
+        a cím utána tiszta (a kulcs marad), és a frissítés már nem méretez újra."""
+        page = self.browser.new_page(viewport={"width": 900, "height": 700}, screen={"width": 1920, "height": 1080})
+        page.add_init_script("window.__sized = []; window.moveTo = (x, y) => window.__sized.push(['move', x, y]); "
+                             "window.resizeTo = (w, h) => window.__sized.push(['resize', w, h]);")
+        errors: list[str] = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        try:
+            page.goto(self.h.server.url + "&fill=1")
+            page.wait_for_selector("#meta:has-text('qwen')")
+            sized = page.evaluate("window.__sized")
+            self.assertEqual([step[0] for step in sized], ["move", "resize"])
+            self.assertEqual(sized[1][1], 1920)
+            self.assertNotIn("fill", page.url)
+            self.assertIn("t=" + self.h.server.token, page.url)
+            page.reload()
+            page.wait_for_selector("#meta:has-text('qwen')")
+            self.assertEqual(page.evaluate("window.__sized"), [], "a frissítés nem méretez újra")
+            self.assertEqual(errors, [])
+        finally:
+            page.close()
 
     def test_header_and_start(self):
         self.assertEqual(self.page.title(), "Jarvis")

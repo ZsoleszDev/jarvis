@@ -10,6 +10,31 @@ const $ = (id) => document.getElementById(id);
 const remote = !!document.querySelector('meta[name="jarvis-remote"]');
 const inAndroid = /JarvisAndroid/.test(navigator.userAgent);   // az Android-alkalmazás maga értesít
 
+// A gépen az alkalmazásablak kitölti a képernyőt ([gui] maximized: a címben fill=1). Az Edge a --start-maximized
+// kapcsolót csak akkor veszi figyelembe, ha még nem fut (ha már fut, pl. az indítási gyorsítás miatt, a meglévő
+// folyamat a saját méretével nyitja az ablakot), ezért ha kisebb ablakot kaptunk, az ablak maga tölti ki a
+// munkaterületet: egyszer, a megnyitáskor; utána szabadon átméretezhető, és a frissítés sem méretezi újra.
+(function fillScreen() {
+  const params = new URLSearchParams(location.search);
+  if (params.get("fill") !== "1") return;
+  params.delete("fill");
+  history.replaceState(null, "", location.pathname + "?" + params.toString() + location.hash);
+  if (remote) return;
+  let tries = 0;
+  const fill = () => {
+    const s = window.screen;
+    // a betöltés legelején az ablak mérete még 0: kivárjuk, amíg megkapja
+    if (!window.outerWidth && tries++ < 30) { setTimeout(fill, 100); return; }
+    if (window.outerWidth >= s.availWidth - 16 && window.outerHeight >= s.availHeight - 16) return;   // már kitölti
+    try {
+      window.moveTo(s.availLeft || 0, s.availTop || 0);
+      window.resizeTo(s.availWidth, s.availHeight);
+    } catch { /* nem alkalmazásablak (pl. egy böngészőfül): marad a mérete */ }
+  };
+  if (document.readyState === "complete") fill();
+  else window.addEventListener("load", fill, { once: true });
+})();
+
 const logs = { chat: $("log"), work: $("w-log"), creative: $("c-notes") };
 const openSeg = { chat: null, work: null, creative: null };   // a most íródó Jarvis-üzenet menünként
 const tools = { chat: new Map(), work: new Map(), creative: new Map() };

@@ -203,10 +203,12 @@
   (selling.reserved, instant.SEEN_RESERVED, listings.classify); a leárazás az eladós kártyán is számít (PriceBook.add:
   eddig az eladó neve kizárta); valódi Hardverapró-címeken talált téves kizárások javítva („Shadow 2X”, „SWFT 210”,
   „Nitro+ … /Samsung/”, „/EX-GTX1060-6G/”), és a Vega 56 kulcsából kimarad a kereskedő cikkszáma.
-- Teljes képernyő a gépen: az alkalmazásablak teljes méretben nyílik meg (`[gui] maximized`, Edge `--start-maximized`),
-  a felület kitölti az ablakot (eddig 760/1120/1180 px széles hasáb volt középen): a Munka és a Kreatív menü a teljes
-  szélességet használja, az Automata kereskedés találatai, tippjei és licitjei széles képernyőn két-három hasábban
-  (.dealist.wide), a Beszélgetés szövege egy 900 px-es, középre igazított hasábban; telefonon nem változott.
+- Teljes képernyő a gépen: az alkalmazásablak teljes méretben nyílik meg (`[gui] maximized`, Edge `--start-maximized`;
+  ha az Edge már fut, a kapcsolót nem veszi figyelembe, ezért a cím fill=1-et kap, és az oldal egyszer maga tölti ki a
+  munkaterületet: window.resizeTo, egy valódi Chromium-alkalmazásablakban kipróbálva), a felület kitölti az ablakot
+  (eddig 760/1120/1180 px széles hasáb volt középen): a Munka és a Kreatív menü a teljes szélességet használja, az
+  Automata kereskedés találatai, tippjei és licitjei széles képernyőn két-három hasábban (.dealist.wide), a
+  Beszélgetés szövege egy 900 px-es, középre igazított hasábban; telefonon nem változott.
 - Takarékos telefonos kapcsolat (akku, mobilnet): a háttérszolgáltatás egy kérésben 10 percig vár az eseményekre (eddig
   50 mp; api.EVENTS_WAIT_MAX 900), így nincs folyamatos forgalom, és a Tailscale sem küld három másodpercenként
   életjelet; a távoli ablak élő csatornájának életjele 25 mp (eddig 3), a videókártyák adatai 5 mp-enként (eddig 1);
@@ -222,7 +224,8 @@
   és a Tailscale): becslés szerint a háttérben naponta 1–2 MB. Hogy a 10 perces kérés a Tailscale-en át (mobilneten,
   hálózatváltáskor) kitart-e, és hogy a WebView a pauseTimers után rendben felébred-e. Az APK-t a GitHub Actions
   fordítja.
-- A teljes méretű ablak és a széles elrendezés a valódi gépen (Edge `--app` + `--start-maximized`, több monitornál is).
+- A teljes méretű ablak és a széles elrendezés a valódi gépen (Edge `--app` + `--start-maximized`, és ha az Edge már
+  fut, a fill=1 utáni átméretezés; több monitornál is).
 - Az azonnali figyelő két értékelő szála élesben: a napló „jelzés az észlelés után” értéke (a fülön), és hogy a modell
   szála (megnevezés) mennyi ideig dolgozik egy kötegen. Ha az árkutatás kerete (a fülön „árkutatás az utóbbi órában”)
   rendszeresen betelik, a POLL_MARGIN vagy a figyelők száma hangolandó; ha sok hirdetés vár a kéréskeretre, a

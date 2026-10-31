@@ -64,6 +64,7 @@ LOCAL_PING = 3.0
 REMOTE_PING = 25.0
 # Az alkalmazásablak (Edge --app) teljes méretben nyílik meg (GuiCfg.maximized); ha kicsinyíted, ekkora lesz.
 WINDOW_SIZE = "1280,900"
+FILL_PARAM = "fill=1"       # a címben: az oldal az első betöltéskor kitölti a képernyőt (lásd open_app_window)
 CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
        "connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'")
 
@@ -1176,7 +1177,13 @@ class _Handler(BaseHTTPRequestHandler):
 
 def open_app_window(url: str, cfg: GuiCfg) -> bool:
     """Alkalmazásablakként nyitja meg (címsor és fülek nélkül), alapból teljes méretben (cfg.maximized); ha nem megy,
-    a böngészőben."""
+    a böngészőben.
+
+    Az Edge a --start-maximized (és a --window-size) kapcsolót csak akkor veszi figyelembe, ha még nem fut; ha már fut
+    (pl. az indítási gyorsítás miatt a háttérben), a meglévő folyamat nyitja az ablakot, a saját méretével. Ezért a cím
+    is kapja (FILL_PARAM): az oldal az első betöltéskor maga tölti ki a képernyőt (app.js)."""
+    if cfg.maximized:
+        url += ("&" if "?" in url else "?") + FILL_PARAM
     if cfg.window and cfg.browser:
         args = [f"--app={url}", f"--window-size={WINDOW_SIZE}"] + (["--start-maximized"] if cfg.maximized else [])
         try:
