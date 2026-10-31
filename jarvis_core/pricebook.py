@@ -960,6 +960,19 @@ class PriceBook:
             entry["samples"] = [s for s in entry["samples"] if listing_key(str(s.get("url") or "")) != ident]
             self._dirty = True
         where.pop(ident, None)
+
+    def _forget(self, samples: list[dict[str, Any]], key: str) -> None:
+        """(zár alatt) A kieső árak hirdetései (egy betelt termék legrégebbi árai, egy kieső termék árai) ki a
+        hirdetés → termék térképből, ha már felépült (_locate), és még ehhez a termékhez tartoznak. Így a térkép nem
+        épül újra egészében: egy beérett árbázisban az több tízezer webcím, és egy betelt termék minden új ára után
+        újraépülne (egy 100 hirdetéses találati oldal így másodpercekig fogná az árbázist)."""
+        if self._where is None:
+            return
+        for sample in samples:
+            ident = listing_key(str(sample.get("url") or ""))
+            if self._where.get(ident) == key:
+                self._where.pop(ident, None)
+
     def save(self) -> None:
         with self._lock:
             if not self._dirty:
@@ -1079,14 +1092,14 @@ class PriceBook:
                 sample.pop("gone", None)
                 if len(entry["samples"]) > MAX_SAMPLES:
                     entry["samples"].sort(key=lambda s: -float(s.get("last") or 0))
+                    self._forget(entry["samples"][MAX_SAMPLES:], key)
                     del entry["samples"][MAX_SAMPLES:]
-                    self._where = None
                 entry["seen"] = now
                 added += 1
             if len(self._keys) > MAX_KEYS:
                 for key in sorted(self._keys, key=lambda k: float(self._keys[k].get("seen") or 0))[:len(self._keys) - MAX_KEYS]:
-                    self._keys.pop(key, None)
-                self._by_base = self._where = None
+                    self._forget((self._keys.pop(key, None) or {}).get("samples") or [], key)
+                self._by_base = None
             self._dirty = self._dirty or bool(added)
         return added
 

@@ -1481,6 +1481,45 @@ class PriceBookTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_a_full_price_book_stays_fast(self):
+        """Egy beérett árbázisban (a termékek tele: MAX_SAMPLES ár; és elérte a MAX_KEYS-t) egy találati oldal árainak
+        beírása nem dolgozza fel újra az egész árbázist: a hirdetés → termék térkép csak a kieső árakkal változik (eddig
+        egy betelt termék minden új ára után újraépült, és egy 100 hirdetéses oldal 1000 terméknél kb. 10 másodpercig
+        fogta az árbázist). A térkép közben pontos marad."""
+        book = PriceBook(Path(self.tmp.name) / "arak.json", clock=self.clock)
+        with mock.patch.object(pricebook_module, "MAX_KEYS", 60):
+            for n in range(60):
+                book.add([{"text": f"Ryzen 5 {1000 + n}X", "price": 50000 + j,
+                           "url": f"https://hardverapro.hu/apro/r{n}_{j}/friss.html"}
+                          for j in range(pricebook_module.MAX_SAMPLES)])
+                self.clock.now += 1
+            book._locate()
+            calls = Counter()
+            real = pricebook_module.listing_key
+
+            def counted(url):
+                calls["n"] += 1
+                return real(url)
+
+            page = [{"text": f"Ryzen 5 {1000 + n % 5}X", "price": 52000,
+                     "url": f"https://hardverapro.hu/apro/u{n}/friss.html"} for n in range(90)]
+            page += [{"text": f"Ryzen 7 {7000 + n}X", "price": 90000,            # 10 új termék: 10 régi kiesik
+                      "url": f"https://hardverapro.hu/apro/v{n}/friss.html"} for n in range(10)]
+            self.clock.now += 1
+            with mock.patch.object(pricebook_module, "listing_key", counted):
+                self.assertEqual(book.add(page), 100)
+            self.assertLess(calls["n"], 100 * (pricebook_module.MAX_SAMPLES + 5),
+                            "hirdetésenként csak a saját termékének árai, nem az egész árbázis")
+            self.assertEqual(len(book._keys), 60)
+            self.assertEqual(len(book._keys[book.key("Ryzen 5 1000X")[0]]["samples"]), pricebook_module.MAX_SAMPLES)
+            self.assertNotIn(book.key("Ryzen 5 1005X")[0], book._keys, "a legrégebben látott termék kiesett")
+            built = dict(book._where)
+            book._where = None
+            self.assertEqual(built, book._locate(), "a fokozatosan frissített térkép ugyanaz, mint az újraépített")
+            self.assertIn(listing_key("https://hardverapro.hu/apro/u0/friss.html"), built)
+            self.assertNotIn(listing_key("https://hardverapro.hu/apro/r0_29/friss.html"), built,
+                             "a kiszorult ár nincs benne")
+
     def test_only_really_comparable_prices_count(self):
         """Csak az számít összehasonlítónak (és kerül az árbázisba), ami egy működő, egy darab, meghatározott termék ára;
         a kizárásnak oka van (a találat ablakában látszik). A készlet változat: a 2×4 GB nem a 2×8 GB."""
