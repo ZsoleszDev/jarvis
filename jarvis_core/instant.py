@@ -14,7 +14,9 @@ a megérő jelölt oldalát átnézi (elkelt, hibás, gyanús?), és egy rövid 
 ennyiért) fölötti hirdetést meg sem nézi. Ha épp dolgozol a Jarvisszal, a modellt nem zavarja: ami csak a modellel
 ismerhető fel, az utána jön (legfeljebb WAIT_MAX-ig); a modell nélkül felmérhető megérőről rögtön szól, és a modell
 ráérő időben utólag nézi meg (_followups). A letöltések a keretből egyenletesen oszlanak el (_floor), csúcsidőben a
-leggyorsabb ütemben; az új hirdetések késését (a kártyán lévő feltöltési idő óta) feljegyzi (delay).
+leggyorsabb ütemben; az új hirdetések késését (a kártyán lévő feltöltési idő óta) feljegyzi (delay). Az értékelés két
+szálon, fontosság szerint megy (LEVEL_*): a biztos árú megérő új hirdetés nem vár egy hosszú modellhívásra vagy
+árkutatásra; az árkutatás pedig nem eheti el a letöltések elől a keretet (_research_cap).
 
 Csak olvas: semmit nem vesz meg, nem ír senkinek. Az Automata kereskedés Indítás gombjával indul, a Leállítással és a
 Szünettel áll le. Ha egy oldal tilt vagy robot-ellenőrzést kér, azon egy ideig nem próbálkozik (a SiteFetcher), és egyszer
@@ -22,7 +24,9 @@ szól.
 """
 from __future__ import annotations
 
+import collections
 import json
+import math
 import os
 import queue
 import random
@@ -40,7 +44,7 @@ from .deals import (DEALS_ACTION, DROP, MAX_EXCLUDE, VERIFIED_TEXT, DealError, D
 from .feeds import FAST_SITES, FeedError, Quota
 from .pricebook import wearable
 from .llm import background_calls
-from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price
+from .selling import _WANTED_RE, ItemError, Platform, format_price, listing_key, parse_price, reserved
 from .textutil import fold
 
 MAX_ALERTS = 12
@@ -94,8 +98,36 @@ MAX_EVERY = 30
 POLL_SHARE = 0.75
 PEAK_EVERY = 1
 BURST = 0.5
+# Árkutatás (mennyiért adják máshol, az összehasonlítók leírása, az eladó többi hirdetése, az előmelegítés): külön
+# címkével számít (RESEARCH_TAG), és oldalanként óránként legfeljebb annyi lehet, amennyi a figyelők letöltései mellett
+# még belefér (_research_cap: a keretből a letöltések várható száma, POLL_MARGIN ráhagyással; de legalább RESEARCH_MIN,
+# a keret POLL_SHARE fölötti része). Így egy árkutatással teli óra sem hagyja keret nélkül az új hirdetéseket kereső
+# letöltést. A letöltő sorában is a többi kérés után jön (low). A várakozó hirdetésnél a RESEARCH_NEED előtag jelzi, hogy
+# ennek az oldalnak az árkutatási kerete kell hozzá (nem csak a letöltéseké). Ugyanazt a keresést SEARCH_REUSE
+# másodpercen belül nem kéri le újra (pl. egy félbeszakított árkutatás folytatásakor).
+RESEARCH_TAG = "azonnali-ar"
+RESEARCH_MIN = round(INSTANT_HOURLY * (1 - POLL_SHARE))
+POLL_MARGIN = 1.25
+RESEARCH_NEED = "ar:"
+SEARCH_REUSE = 120
+# Elsőbbség: a friss hirdetések felmérése fontossági szintenként (DealHunter.urgency), két szálon. LEVEL_SURE: modell
+# nélkül, biztos árral megérőnek látszik (már csak az adatlapja kell, és szól); LEVEL_KNOWN: modell nélkül eldől, mi lesz
+# vele (árkutatás, vagy nem éri meg); LEVEL_MODEL: csak a modell tudja megnevezni. A gyors szál (FAST_LEVELS) a biztos és
+# az ismert hirdetéseket veszi, a biztosat mindig előbb; a modell szála (MODEL_LEVELS) a megnevezendőket, és ha ráér, az
+# ismerteket is; a ráérő munka (az utólagos modellellenőrzés, az eladó többi hirdetése, az előmelegítés) is az övé. Így
+# egy hosszú modellhívás vagy árkutatás alatt is rögtön sorra kerül egy biztos árú, megérő új hirdetés. Egy lassabb lépés
+# (árkutatás, megnevezés, egy összehasonlító leírása) előtt a szál ránéz a sorra: ha olyan sürgősebb jött, amit ő vehet
+# el, a mostani munka félbeszakad, a maradéka a saját szintje elejére kerül vissza, és utána folytatódik (a modell
+# megnevezése megmarad). Az eladó többi hirdetése legfeljebb CHORE_MAX másodperccel a találat után jön (utána elavult).
+LEVEL_SURE, LEVEL_KNOWN, LEVEL_MODEL = 0, 1, 2
+LEVELS = (LEVEL_SURE, LEVEL_KNOWN, LEVEL_MODEL)
+FAST_LEVELS = (LEVEL_SURE, LEVEL_KNOWN)
+MODEL_LEVELS = (LEVEL_KNOWN, LEVEL_MODEL)
+CHORE_MAX = 600
 # Késés: a Hardverapró és a Jófogás kártyáján ott a feltöltés ideje („ma 14:07”); az új hirdetésnél feljegyzi, mennyivel
-# utána vette észre (oldalanként a legutóbbi MAX_DELAYS), a felületen az elmúlt DELAY_WINDOW középértéke látszik.
+# utána vette észre (oldalanként a legutóbbi MAX_DELAYS), a felületen az elmúlt DELAY_WINDOW középértéke látszik. A
+# megérő hirdetésnél azt is, mennyivel az észlelés után szólt (told: az értékelés ideje, a várakozással együtt); a
+# találatban az időrend (posted_at: a kártya szerint mikor került fel, seen_at: mikor vette észre, told_at: mikor szólt).
 MAX_DELAYS = 300
 DELAY_WINDOW = 6 * 3600
 # Kiemelt hirdetések elöl: a Hardverapró egy kategóriájának elején az „Előresorolt” (fizetett) hirdetések akár egy fél
@@ -121,7 +153,9 @@ COVER_STALE = 20 * 60
 # SEEN_LISTED (letöltve: az első letöltésnél fent volt, vagy nem illik a figyelőhöz, nincs mit felmérni), SEEN_QUEUED
 # (felmérésre vár: ez a figyelő, vagy a közös lista értékeli, owner), SEEN_DONE (felmérve). A régi, kételemű bejegyzés
 # felmértnek számít. Ami PENDING_STALE-nél régebben vár (pl. a közös lista értékelése elmaradt), az újra új.
-SEEN_LISTED, SEEN_QUEUED, SEEN_DONE = "l", "v", "e"
+# SEEN_RESERVED: foglalt volt (a Hardveraprón „jegelve”, selling.reserved): nem mérte fel; ha a foglalás megszűnik,
+# újra új hirdetésként jön (a vevő visszaléphetett, és akkor megint megvehető).
+SEEN_LISTED, SEEN_QUEUED, SEEN_DONE, SEEN_RESERVED = "l", "v", "e", "j"
 PENDING_STALE = WAIT_MAX + 600
 _POSTED_RE = re.compile(r"\b(ma|tegnap),?\s+(\d{1,2})[:.](\d{2})\b")
 
@@ -155,6 +189,12 @@ def leading_promoted(rows: list[dict[str, Any]]) -> int:
     return next((n for n, row in enumerate(rows) if not row.get("promoted")), len(rows))
 
 
+def since_text(seconds: float) -> str:
+    """Mennyi ideje („3 perce”, „1 órája”), az értesítés szövegéhez."""
+    minutes = max(1, round(seconds / 60))
+    return f"{minutes} perce" if minutes < 90 else f"{round(minutes / 60)} órája"
+
+
 def posted_ago(text: str, now: float) -> float | None:
     """Mennyi ideje került fel a hirdetés (másodperc), a kártyán lévő időből („ma 14:07”, „tegnap 23:50”, helyi idő);
     None, ha nincs benne, vagy nem hihető (a jövőben, vagy 12 óránál régebben)."""
@@ -170,6 +210,50 @@ def posted_ago(text: str, now: float) -> float | None:
         posted -= 86400
     ago = now - posted
     return max(0.0, ago) if -120 <= ago <= 12 * 3600 else None
+
+
+class _Jobs:
+    """Az értékelő szálak sora fontossági szintenként (LEVEL_*): a kisebb szint előbb, egy szinten belül érkezési
+    sorrendben; egy félbeszakított feladat maradéka (front) a saját szintje elejére kerül vissza. Minden szál a neki való
+    szintekről vesz (take)."""
+
+    def __init__(self) -> None:
+        self._lanes: list[collections.deque] = [collections.deque() for _ in LEVELS]
+        self._ready = threading.Condition()
+
+    def put(self, job: tuple[Any, ...], level: int = LEVEL_MODEL, front: bool = False) -> None:
+        with self._ready:
+            lane = self._lanes[min(max(int(level), LEVEL_SURE), LEVEL_MODEL)]
+            if front:
+                lane.appendleft(job)
+            else:
+                lane.append(job)
+            self._ready.notify_all()           # (a két szál más-más szintekre vár)
+
+    def best(self, levels: tuple[int, ...] = LEVELS) -> int | None:
+        """A legsürgősebb várakozó feladat szintje ezek közül; None, ha egyiken sincs."""
+        with self._ready:
+            return next((level for level in sorted(levels) if self._lanes[level]), None)
+
+    def take(self, levels: tuple[int, ...] = LEVELS, timeout: float | None = None) -> tuple[tuple[Any, ...], int]:
+        """A következő feladat ezekről a szintekről, és a szintje; queue.Empty, ha timeout alatt sem jött."""
+        with self._ready:
+            if not self._ready.wait_for(lambda: any(self._lanes[level] for level in levels), timeout):
+                raise queue.Empty
+            level = min(level for level in levels if self._lanes[level])
+            return self._lanes[level].popleft(), level
+
+    def get_nowait(self) -> tuple[Any, ...]:
+        return self.take(timeout=0)[0]
+
+    def qsize(self) -> int:
+        with self._ready:
+            return sum(len(lane) for lane in self._lanes)
+
+    def rows(self) -> int:
+        """Hány hirdetés vár összesen a sorban (a felületnek)."""
+        with self._ready:
+            return sum(len(job[2]) for lane in self._lanes for job in lane)
 
 
 class InstantError(DealError):
@@ -211,10 +295,15 @@ class InstantWatch:
         self._linked_at = float("-inf")        # mikor nézte meg utoljára a kereséseket (link_searches)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        # Az új hirdetések értékelése (árbázis, modell, a hirdetés oldala) a saját szálán, hogy egy lassú értékelés ne
-        # késleltesse a következő letöltést (start; a tesztekben, ha nem indul el, a letöltés szálán megy).
-        self._jobs: queue.Queue = queue.Queue()
+        # Az új hirdetések értékelése (árbázis, modell, a hirdetés oldala) a saját szálain, hogy egy lassú értékelés ne
+        # késleltesse a következő letöltést (start; a tesztekben, ha nem indul el, a letöltés szálán megy): a gyors szál
+        # (_worker, FAST_LEVELS) és a modell szála (_model_worker, MODEL_LEVELS), fontosság szerint (_Jobs).
+        self._jobs = _Jobs()
         self._worker: threading.Thread | None = None
+        self._model_worker: threading.Thread | None = None
+        self._local = threading.local()        # szálanként: melyik szinteket veszi (levels), min dolgozik most (level)
+        self._followup_soon = False            # egy köteg után: a modell szála nézze meg a gyors riasztással jelzetteket
+        self._chores: queue.SimpleQueue = queue.SimpleQueue()   # a modell szálának ráérő munkája (_chore)
         self._followed_at = float("-inf")     # mikor nézte meg utoljára az utólag ellenőrizendőket (_followups)
         self._warmed_at = float("-inf")       # mikor melegített elő utoljára (_warm)
         self._data = self._load()
@@ -236,6 +325,8 @@ class InstantWatch:
                 "hits": [h for h in data.get("hits") or [] if isinstance(h, dict) and h.get("url")],
                 "delays": {str(k): [list(x)[:2] for x in v if isinstance(x, (list, tuple)) and len(x) >= 2][-MAX_DELAYS:]
                            for k, v in (data.get("delays") or {}).items() if isinstance(v, list)},
+                "told": {str(k): [list(x)[:2] for x in v if isinstance(x, (list, tuple)) and len(x) >= 2][-MAX_DELAYS:]
+                         for k, v in (data.get("told") or {}).items() if isinstance(v, list)},
                 "rhythm": {str(k): [float(x) for x in v][:24] for k, v in (data.get("rhythm") or {}).items()
                            if isinstance(v, list) and len(v) == 24}}
 
@@ -315,15 +406,22 @@ class InstantWatch:
                 alert["covered"] = [k for k in alert.get("sites") or [] if self._covered(alert, k)]
             hits = [dict(h) for h in self._data["hits"]]
             enabled = self._data["enabled"]
+            waiting = list(self._waiting)
         status = self.fetcher.status() if self.fetcher is not None else {}
         load = self._load_per_hour(alerts)
+        used = getattr(self.fetcher, "used", None)
         return {"enabled": enabled, "alerts": alerts, "hits": hits, "every_choices": list(EVERY_CHOICES),
                 "sites": [{"key": k, "name": p.name, **status.get(k, {}), "per_hour": load.get(k, 0),
                            "rhythm": RHYTHM_TEXT.get(self._factor(k, self.clock()), ""), "delay": self.delay(k),
-                           "every_s": round(self._floor(k))}
+                           "told": self.delay(k, key="told"),
+                           "every_s": round(self._floor(k)),
+                           # az árkutatás az utóbbi órában, és a kerete (amennyi a letöltések mellett belefér)
+                           "research": {"used": used(k, RESEARCH_TAG) if used else 0, "cap": self._research_cap(k)}}
                           for k, p in self.platforms.items()],
                 "hourly": INSTANT_HOURLY, "presets": self.presets(), "working": self.working(),
-                "waiting": len(self._waiting)}
+                # a várakozók (a modellre vagy a Szünet miatt; budget: a kéréskeretre), és a felmérésre sorban állók
+                "waiting": len(waiting), "waiting_budget": sum(1 for entry in waiting if entry[4]),
+                "queued": self._jobs.rows()}
 
     def working(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -476,24 +574,42 @@ class InstantWatch:
             self.start_worker()
 
     def start_worker(self) -> None:
-        """Az értékelő szál: a letöltés szála csak beteszi az új hirdetéseket, ez méri fel őket (DealHunter.appraise)."""
+        """Az értékelő szálak: a letöltés szála csak beteszi az új hirdetéseket (fontosság szerint, _enqueue), ezek mérik
+        fel őket (DealHunter.appraise): a gyors szál a biztos és az ismert árúakat, a modell szála a megnevezendőket."""
         if self._worker is None or not self._worker.is_alive():
-            self._worker = threading.Thread(target=self._evaluate, name="jarvis-azonnali-ertekeles", daemon=True)
+            self._worker = threading.Thread(target=self._evaluate, args=(FAST_LEVELS,),
+                                            name="jarvis-azonnali-ertekeles", daemon=True)
             self._worker.start()
+        if self._model_worker is None or not self._model_worker.is_alive():
+            self._model_worker = threading.Thread(target=self._evaluate, args=(MODEL_LEVELS, True),
+                                                  name="jarvis-azonnali-modell", daemon=True)
+            self._model_worker.start()
 
-    def _evaluate(self) -> None:
-        """A sorból egyenként: leállítva (vagy ha a figyelőt törölted) elmarad; ha ezt a figyelőt szünetelteted, a
-        várakozók közé kerül (a folytatásakor jön, WAIT_MAX-ig); Szünet alatt, kikapcsolt háttérmunkával vagy az
-        üzemidőn kívül megtartja, és vár (nem kérdezi a modellt, nem tölt le, nem szól)."""
+    def _threaded(self) -> bool:
+        """Az értékelés a saját szálain megy-e (start): akkor a letöltés szála csak sorba teszi az új hirdetéseket."""
+        return self._worker is not None and self._worker.is_alive()
+
+    def _evaluate(self, levels: tuple[int, ...] = FAST_LEVELS, spare: bool = False) -> None:
+        """Egy értékelő szál: a sorból a neki való szintekről (levels), a sürgősebbet előbb. Leállítva (vagy ha a
+        figyelőt törölted) elmarad; ha ezt a figyelőt szünetelteted, a várakozók közé kerül (a folytatásakor jön,
+        WAIT_MAX-ig); Szünet alatt, kikapcsolt háttérmunkával vagy az üzemidőn kívül megtartja, és vár (nem kérdezi a
+        modellt, nem tölt le, nem szól). spare: ez a szál végzi a ráérő munkát is (az utólagos modellellenőrzés a
+        köteg után, az eladó többi hirdetése, az előmelegítés)."""
+        self._local.levels = levels
         with background_calls():       # a modellhívásai háttérhívások: a feltöltés és a beszélgetés előbb jön
-            job = None
+            job, level = None, LEVEL_MODEL
             while not self._stop.is_set():
+                if spare and self._followup_soon:
+                    self._followup_soon = False
+                    self._followups(force=True)    # a gyors riasztással jelzetteket a modell most nézi meg
                 if job is None:
                     try:
-                        job = self._jobs.get(timeout=0.5)
+                        job, level = self._jobs.take(levels, timeout=0.5)
                     except queue.Empty:
-                        self._followups()
-                        self._warm()
+                        if spare:
+                            self._chore()
+                            self._followups()
+                            self._warm()
                         continue
                 _alert, site, rows = job
                 with self._lock:
@@ -512,11 +628,65 @@ class InstantWatch:
                     continue
                 job = None
                 try:
-                    self._report(stored, site, rows)
+                    self._report(stored, site, rows, level=level)
                 except _Stop:
                     return
                 except Exception:  # noqa: BLE001 - az értékelés egy hiba miatt ne álljon le
                     pass
+
+    def _chore(self) -> None:
+        """A modell szálának ráérő munkája, egyszerre egy: egy jó találat eladójának többi hirdetése (_seller), ha még
+        friss (CHORE_MAX); a gyors szál így a következő új hirdetéssel foglalkozhat."""
+        try:
+            at, deal = self._chores.get_nowait()
+        except queue.Empty:
+            return
+        if self.clock() - at > CHORE_MAX or not self._on() or not self._may_work():
+            return
+        self._working(LEVEL_MODEL + 1)          # bármi friss előbb jön
+        try:
+            self._seller(deal)
+        except Deferred:
+            self._chores.put((at, deal))       # sürgősebb jött: legközelebb
+        except Exception:  # noqa: BLE001 - (a leállítás, kilépés: a szál ciklusa nézi) ráér
+            pass
+
+    def _working(self, level: int) -> dict[str, bool]:
+        """Ez a szál most ilyen szintű munkán dolgozik (_rush ehhez méri, mi sürgősebb); visszaadja a jelzőjét: yielded,
+        ha a munka átadta a helyét egy sürgősebbnek."""
+        self._local.level = level
+        self._local.mark = {"yielded": False}
+        return self._local.mark
+
+    def _outranked(self, levels: tuple[int, ...] | None, level: int) -> bool:
+        """Vár-e a sorban sürgősebb (kisebb szintű) feladat, mint level, amit ez a szál (levels) elvehet."""
+        if levels is None:
+            return False
+        best = self._jobs.best(levels)
+        return best is not None and best < level
+
+    def _rush(self) -> None:
+        """Egy lassabb lépés (árkutatás, megnevezés, egy összehasonlító leírása) előtt: ha közben sürgősebb friss
+        hirdetés jött, amit ez a szál vehet el, a mostani munka átadja a helyét (Deferred „elsőbbség”: a maradéka a
+        szintje elejére kerül vissza, _report). Az értékelő szálakon kívül (pl. a letöltés szálán) nem szakít félbe."""
+        self._research_check(stop=False)()
+
+    def _research_check(self, stop: bool = True) -> Callable[[], None]:
+        """Egy ráérő kérés (árkutatás) ellenőrzése a letöltő várakozása közben, ennek az értékelő szálnak az állapotával
+        (a letöltő más szálon is hívhatja, pl. a keresés oldalanként): a kilépés és a Leállítás (stop, _check_on), és ha
+        közben sürgősebb jött, amit ez a szál elvehet, a kérés elmarad (Deferred „elsőbbség”), így az előbb sorra kerül."""
+        levels = getattr(self._local, "levels", None)
+        level = getattr(self._local, "level", LEVEL_MODEL)
+        mark = getattr(self._local, "mark", None)
+
+        def check() -> None:
+            if stop:
+                self._check_on()
+            if self._outranked(levels, level):
+                if mark is not None:
+                    mark["yielded"] = True
+                raise Deferred("elsőbbség")
+        return check
 
     def _followups(self, force: bool = False) -> None:
         """Ráérő időben (üres sornál, legfeljebb FOLLOWUP_EVERY másodpercenként; force: rögtön, egy köteg után): amit
@@ -535,10 +705,10 @@ class InstantWatch:
     def _spare(self, site: str, now: float) -> bool:
         """Van-e most kimaradó keret ezen az oldalon az előmelegítéshez: nincs csúcsidő, a figyelő keretének kevesebb mint
         WARM_BELOW része ment el ebben az órában, és az oldal most rögtön kérhető."""
-        if self._factor(site, now) < 1 or not self._has_budget(site, now):
+        if self._factor(site, now) < 1 or not self._room([site], research=True):
             return False
         used = getattr(self.fetcher, "used", None)
-        if used is not None and used(site, QUOTA.tag) >= INSTANT_HOURLY * WARM_BELOW:
+        if used is not None and used(site, QUOTA.tag) + used(site, RESEARCH_TAG) >= INSTANT_HOURLY * WARM_BELOW:
             return False
         ready = getattr(self.fetcher, "ready", None)
         return ready is None or bool(ready(site))
@@ -558,6 +728,7 @@ class InstantWatch:
             if not spare:
                 return ""
             quiet = len(spare) == len(self.platforms) and all(self._factor(site, now) > 1 for site in self.platforms)
+            self._working(LEVEL_MODEL + 1)          # egy közben jött friss hirdetés megszakítja (_rush)
 
             def read(row: dict[str, Any]) -> dict[str, Any] | None:
                 site = str(row.get("platform") or "")
@@ -634,15 +805,43 @@ class InstantWatch:
         with self._lock:
             return any(a.get("id") == alert_id and a.get("off") for a in self._data["alerts"])
 
-    def _room(self, sites: list[str] | tuple[str, ...]) -> bool:
-        """Van-e hely ezeken az oldalakon a figyelő keretében (_has_budget); a kérést a letöltő is ellenőrzi (QUOTA)."""
+    def _room(self, needs: list[str] | tuple[str, ...], research: bool = False) -> bool:
+        """Van-e hely ezeken az oldalakon a figyelő keretében (_has_budget); research (vagy az oldal előtt RESEARCH_NEED):
+        az árkutatás keretében is (_research_cap). A kérést a letöltő is ellenőrzi (QUOTA, _research_quota)."""
         now = self.clock()
-        return all(self._has_budget(site, now) for site in sites)
+        for need in needs:
+            site, more = (need[len(RESEARCH_NEED):], True) if need.startswith(RESEARCH_NEED) else (need, research)
+            if not self._has_budget(site, now) or (more and not self._research_ok(site, now)):
+                return False
+        return True
+
+    def _research_ok(self, site: str, now: float) -> bool:
+        used = getattr(self.fetcher, "used", None)
+        return used is None or used(site, RESEARCH_TAG) < self._research_cap(site, now)
+
+    def _research_cap(self, site: str, now: float | None = None) -> int:
+        """Óránként legfeljebb ennyi árkutatási kérés ezen az oldalon: a figyelő keretéből, ami a letöltések várható száma
+        (POLL_MARGIN ráhagyással) mellett marad, de legalább RESEARCH_MIN."""
+        now = self.clock() if now is None else now
+        return max(RESEARCH_MIN, INSTANT_HOURLY - math.ceil(self._poll_need(site, now) * POLL_MARGIN))
+
+    def _poll_need(self, site: str, now: float) -> float:
+        """Hány letöltésre lesz szükség óránként ezen az oldalon a mostani ütemben (a bekapcsolt figyelők, _pace)."""
+        with self._lock:
+            alerts = [a for a in self._data["alerts"] if not a.get("off") and site in (a.get("sites") or [])]
+        if not alerts:
+            return 0.0
+        floor, factor = self._floor(site), self._factor(site, now)
+        return sum(3600 / max(1.0, self._pace(alert, site, now, floor, factor)) for alert in alerts)
+
+    def _research_quota(self, site: str) -> Quota:
+        """Az árkutatás része a letöltő keretéből ezen az oldalon (a letöltő is ehhez tartja magát)."""
+        return Quota(RESEARCH_TAG, cap=self._research_cap(site), reserve=ROUND_RESERVE)
 
     def stop(self) -> None:
-        """Leállítja a szálat, és megvárja (legfeljebb pár másodpercig), hogy a mostani letöltését befejezze."""
+        """Leállítja a szálakat, és megvárja (legfeljebb pár másodpercig), hogy a mostani letöltésüket befejezzék."""
         self._stop.set()
-        for thread in (self._thread, self._worker):
+        for thread in (self._thread, self._worker, self._model_worker):
             if thread is not None and thread.is_alive() and thread is not threading.current_thread():
                 thread.join(timeout=5)
         try:
@@ -696,11 +895,16 @@ class InstantWatch:
         return 0.5 if ratio >= PEAK else 2.0 if ratio <= QUIET else 1.0
 
     def _interval(self, alert: dict[str, Any], site: str, now: float) -> float:
-        """A következő letöltésig (másodperc): a beállított gyakoriság a tanult ritmus szerint, de nem sűrűbben, mint
-        ahogy a keret egyenletesen elosztva engedi (_floor); csúcsidőben a keret szerinti leggyorsabb ütem (legalább
-        PEAK_EVERY perc). Egy kis véletlennel."""
-        factor = self._factor(site, now)
-        floor = self._floor(site)
+        """A következő letöltésig (másodperc): az ütem (_pace), egy kis véletlennel."""
+        return self._pace(alert, site, now) * self.rng.uniform(*JITTER)
+
+    def _pace(self, alert: dict[str, Any], site: str, now: float, floor: float | None = None,
+              factor: float | None = None) -> float:
+        """Két letöltés között (másodperc): a beállított gyakoriság a tanult ritmus szerint, de nem sűrűbben, mint ahogy
+        a keret egyenletesen elosztva engedi (_floor); csúcsidőben a keret szerinti leggyorsabb ütem (legalább
+        PEAK_EVERY perc). (floor, factor: ha a hívó már kiszámolta, az oldal összes figyelőjére egyszer.)"""
+        factor = self._factor(site, now) if factor is None else factor
+        floor = self._floor(site) if floor is None else floor
         if factor < 1:
             seconds = max(floor, PEAK_EVERY * 60)
         else:
@@ -708,7 +912,7 @@ class InstantWatch:
             seconds = max(minutes * 60, floor)
         if self._covered(alert, site):         # a közös lista hozza a találatait: külön csak biztonsági hálónak
             seconds = max(seconds, COVERED_EVERY * 60)
-        return seconds * self.rng.uniform(*JITTER)
+        return seconds
 
     def _floor(self, site: str) -> float:
         """A legrövidebb idő két letöltés között egy figyelőnél (másodperc): az oldal figyelői (a bekapcsoltak) a keret
@@ -775,7 +979,8 @@ class InstantWatch:
         if used is None:
             return True
         hourly = int(getattr(self.fetcher, "hourly", 0) or 0)
-        return used(site, QUOTA.tag) < INSTANT_HOURLY and (not hourly or used(site) < hourly - ROUND_RESERVE)
+        mine = used(site, QUOTA.tag) + used(site, RESEARCH_TAG)     # a letöltések és az árkutatás együtt
+        return mine < INSTANT_HOURLY and (not hourly or used(site) < hourly - ROUND_RESERVE)
 
     def _url(self, alert: dict[str, Any], site: str) -> str:
         """A figyelt találati oldal címe, a legújabb hirdetésekkel elöl (deals.NEWEST; a Jófogáson, ha nem adtál meg
@@ -830,11 +1035,27 @@ class InstantWatch:
                                     + f"; {len(rows)} hirdetést már ismerek.")
             return []
         self.hunter.tally("new", fresh)
-        if self._worker is not None and self._worker.is_alive():
+        if self._threaded():
             if fresh:
-                self._jobs.put((alert, site, fresh))   # az értékelés a saját szálán: a letöltés közben mehet tovább
+                self._enqueue(alert, site, fresh)     # az értékelés a saját szálain: a letöltés közben mehet tovább
             return []
         return self._report(alert, site, fresh)
+
+    def _enqueue(self, alert: dict[str, Any], site: str, rows: list[dict[str, Any]], front: bool = False) -> None:
+        """Hirdetések az értékelő szálak sorába, fontosság szerint szétválogatva (_urgency): a biztos árú megérők külön
+        feladatként előre kerülnek. front: egy félbeszakított munka maradéka (a szintje elejére)."""
+        groups: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            groups.setdefault(self._urgency(row), []).append(row)
+        for level, group in groups.items():
+            self._jobs.put((alert, site, group), level, front=front)
+
+    def _urgency(self, row: dict[str, Any]) -> int:
+        """Egy friss hirdetés fontossági szintje (LEVEL_*, DealHunter.urgency); ha nem tudni, a modell szála méri fel."""
+        try:
+            return min(max(int(self.hunter.urgency(row)), LEVEL_SURE), LEVEL_MODEL)
+        except Exception:  # noqa: BLE001
+            return LEVEL_MODEL
 
     def _fetch_rows(self, alert: dict[str, Any], site: str, base: str) -> tuple[list[dict[str, Any]], str]:
         """A figyelő oldalának letöltése; ahol lehet (LEAD_SITES), az elején álló kiemelt hirdetések nélkül (lásd
@@ -911,17 +1132,24 @@ class InstantWatch:
                 old = seen.get(ident)
                 if not row.get("promoted"):
                     fresh_rows.append(old is None)
-                if first:
-                    seen[ident] = [now, row["price"], SEEN_LISTED]
+                if first:                             # (a foglaltat úgy, hogy ha megszűnik a foglalás, felmérje)
+                    seen[ident] = [now, row["price"], SEEN_RESERVED if reserved(str(row.get("text") or "")) else SEEN_LISTED]
                     continue
                 drop = isinstance(old, list) and len(old) > 1 and row["price"] <= int(old[1]) * (1 - DROP)
                 if row.get("promoted") and skips:
                     seen[ident] = self._seen_again(old, now, row["price"])
                     continue                          # a kiemeltek blokkját átugorja: ezek nem új hirdetések
-                # új, ami még nem jött; és ami felmérésre várt, de az elmaradt (a közös lista leállt, szünetel, elfelejtette)
-                unseen = old is None or self._stale_pending(old, now)
+                was_reserved = isinstance(old, list) and len(old) > 2 and old[2] == SEEN_RESERVED
+                if reserved(str(row.get("text") or "")):
+                    seen[ident] = [now, row["price"], SEEN_RESERVED]   # foglalt: most nem vehető meg, nem méri fel
+                    continue
+                # új, ami még nem jött; ami felmérésre várt, de az elmaradt (a közös lista leállt, szünetel, elfelejtette);
+                # és ami foglalt volt, de már nem az
+                unseen = old is None or self._stale_pending(old, now) or was_reserved
                 if (unseen or drop) and self._fits(stored, row):
-                    fresh.append({**row, "drop": int(old[1]) if drop else None})
+                    ago = posted_ago(str(row.get("text") or ""), now)     # (az időrendhez: mikor került fel, mikor láttuk)
+                    fresh.append({**row, "drop": int(old[1]) if drop else None, "seen_at": now,
+                                  **({"posted_at": round(now - ago)} if ago is not None else {})})
                     seen[ident] = [now, row["price"], SEEN_QUEUED, stored["id"], now]
                 elif unseen:
                     seen[ident] = [now, row["price"], SEEN_LISTED]   # nem illik ehhez a figyelőhöz: csak letöltve
@@ -1042,12 +1270,12 @@ class InstantWatch:
                 delays.append([round(now), round(ago)])
         del delays[:-MAX_DELAYS]
 
-    def delay(self, site: str, now: float | None = None) -> dict[str, Any] | None:
-        """Mennyivel a feltöltés után vette észre az új hirdetéseket ezen az oldalon az elmúlt DELAY_WINDOW-ban: {median,
-        n} másodpercben; None, ha nincs adat."""
+    def delay(self, site: str, now: float | None = None, key: str = "delays") -> dict[str, Any] | None:
+        """Mennyivel a feltöltés után vette észre az új hirdetéseket ezen az oldalon az elmúlt DELAY_WINDOW-ban (key
+        „told”: a megérőkről mennyivel az észlelés után szólt): {median, n} másodpercben; None, ha nincs adat."""
         now = self.clock() if now is None else now
         with self._lock:
-            recent = sorted(ago for at, ago in (self._data.get("delays") or {}).get(site) or []
+            recent = sorted(ago for at, ago in (self._data.get(key) or {}).get(site) or []
                             if now - float(at) <= DELAY_WINDOW)
         if not recent:
             return None
@@ -1103,11 +1331,15 @@ class InstantWatch:
                     "utána újra próbálom; addig a szokásos (böngészős) keresés marad.", actions=[DEALS_ACTION],
                     quiet=True)
 
-    def _report(self, alert: dict[str, Any], site: str, fresh: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _report(self, alert: dict[str, Any], site: str, fresh: list[dict[str, Any]],
+                level: int | None = None) -> list[dict[str, Any]]:
         """Az új hirdetések felmérése (DealHunter.appraise): amelyik megéri, arról rögtön szól (ahogy kiderül), és a friss
-        hirdetések közé teszi; ami a modellre vár, az a várakozók közé kerül. Visszaadja a megérőket."""
+        hirdetések közé teszi; ami a modellre vár, az a várakozók közé kerül. Visszaadja a megérőket. level: a feladat
+        szintje (az értékelő szálakon): ha közben sürgősebb jött, egy lassabb lépése előtt átadja a helyét (_rush), és a
+        maradéka a szintje elejére kerül vissza."""
         source = f"azonnali figyelő: {alert['name']}"
         hits: list[dict[str, Any]] = []
+        lane = getattr(self._local, "levels", None) is not None      # az értékelő szálak egyikén fut
 
         def found(deal: dict[str, Any]) -> None:
             if not self._on(alert["id"]):      # közben leállítottad (vagy törölted a figyelőt): nem szól
@@ -1115,6 +1347,7 @@ class InstantWatch:
             hit = {"id": secrets.token_hex(5), "alert": alert["id"], "alert_name": alert["name"], "at": self.clock(),
                    "deal": deal["id"], "cheap": True,
                    **{k: deal.get(k) for k in ("site", "platform", "text", "title", "price", "url", "drop", "note")},
+                   **{k: deal[k] for k in ("posted_at", "seen_at", "told_at") if deal.get(k)},
                    "reference": deal["median"], "profit": deal["profit"], "n": deal.get("similar"),
                    "sites": deal.get("sites") or [], "safety": deal.get("safety"),
                    "warnings": deal.get("warnings") or [], "verified": bool(deal.get("verified")),
@@ -1128,28 +1361,44 @@ class InstantWatch:
                     if stored.get("id") == alert["id"]:
                         stored["found"] = int(stored.get("found") or 0) + 1
                         stored["found_at"] = self.clock()
+                if hit.get("seen_at") and hit.get("platform"):    # mennyivel az észlelés után szólt
+                    told = self._data.setdefault("told", {}).setdefault(str(hit["platform"]), [])
+                    told.append([round(hit["at"]), max(0, round(hit["at"] - float(hit["seen_at"])))])
+                    del told[:-MAX_DELAYS]
                 self._save()
             self._tell(alert, hit)
-            self._seller(deal)                 # az eladó többi hirdetése: közös vétellel jobban megéri?
+            if lane:                           # az eladó többi hirdetése (közös vétellel jobban megéri?): ráér, a
+                self._chores.put((self.clock(), deal))   # modell szála nézi meg, a gyors szál megy tovább
+            else:
+                self._seller(deal)
 
         def ping(*args: Any, **extra: Any) -> None:
             if self._on(alert["id"]):          # a gyors jelzés („Ígéretes …, ellenőrzés folyamatban”), ha még fut
                 self.notify(*args, **extra)
 
         # go: Szünetben (vagy ha a kéréskeret elfogyott: _look, _search) az értékelés megáll, a többi megmarad; ha
-        # közben leállítottad a figyelőt, a hátralévő rész elmarad (minden letöltés, modellkérdés és szólás előtt nézi)
+        # közben leállítottad a figyelőt, a hátralévő rész elmarad (minden letöltés, modellkérdés és szólás előtt nézi);
+        # rush: ha közben sürgősebb jött, a lassabb lépések előtt átadja a helyét
+        mark = self._working(LEVEL_MODEL if level is None else level)
         try:
             waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found,
                                            go=lambda: self._go(alert["id"]),
-                                           wear=wearable(str(alert.get("query") or "")), ping=ping)
+                                           wear=wearable(str(alert.get("query") or "")), ping=ping, rush=self._rush)
         except _Off:
             return hits
         if hasattr(self.hunter, "flush_tips"):
             self.hunter.flush_tips(self.notify)     # a bizonytalan árú tippek („Érdemes megnézni”)
         later = {listing_key(row["url"]) for row in waiting or []}
         self._mark_done(alert["id"], [row for row in fresh if listing_key(row["url"]) not in later])
-        self._followups(force=True)                 # a gyors riasztással jelzetteket a modell most nézi meg
-        if waiting:
+        if lane:
+            self._followup_soon = True              # a gyors riasztással jelzetteket a modell szála most nézi meg
+        else:
+            self._followups(force=True)
+        if waiting and mark["yielded"]:
+            # a sürgősebb után folytatja (a modell megnevezése megmarad: named)
+            self._enqueue(alert, site, [{k: v for k, v in row.items() if k != "wait_for"} for row in waiting],
+                          front=True)
+        elif waiting:
             self._keep_waiting(alert["id"], site, waiting)
         return hits
 
@@ -1165,54 +1414,70 @@ class InstantWatch:
             expired = [entry for entry in self._waiting if now - entry[3] >= WAIT_MAX]
             self._waiting = [entry for entry in self._waiting if now - entry[3] < WAIT_MAX]
         self._forget(expired)
-        if not self.model_ok():
-            return
         with self._lock:
             # a szüneteltetett figyelő hirdetései várnak (a folytatásáig, WAIT_MAX-ig), és az is, amelyikhez szükséges
-            # oldal kerete még nem szabadult fel (csak a sajátja számít: egy másik oldalé nem akasztja meg)
+            # oldal kerete még nem szabadult fel (csak a sajátja számít: egy másik oldalé nem akasztja meg; az
+            # árkutatáshoz az árkutatás kerete, RESEARCH_NEED)
             ready = [entry for entry in self._waiting
                      if not (alerts.get(entry[0]) or {}).get("off") and self._room(entry[4])]
+        if ready and not self.model_ok():      # amíg a modell foglalt, csak ami nélküle is felmérhető
+            ready = [entry for entry in ready if self._urgency(entry[2]) < LEVEL_MODEL]
+        if not ready:
+            return
+        with self._lock:
             taken = {id(entry) for entry in ready}
             self._waiting = [entry for entry in self._waiting if id(entry) not in taken]
         groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for alert_id, site, row, _at, _needs in ready:
             if alert_id in alerts:
                 groups.setdefault((alert_id, site), []).append(row)
-        threaded = self._worker is not None and self._worker.is_alive()
         for (alert_id, site), rows in groups.items():
-            if threaded:
-                self._jobs.put((alerts[alert_id], site, rows))
+            if self._threaded():
+                self._enqueue(alerts[alert_id], site, rows)
             else:
                 self._report(alerts[alert_id], site, rows)
 
     def _look(self, row: dict[str, Any]) -> dict[str, Any] | None:
         """Egy hirdetés oldala böngésző nélkül (None, ha most nem sikerült). A figyelő keretéből megy: ha nincs hely
-        (vagy Szünet van), Deferred (a hirdetés vár). A jelölt adatlapja (row urgent) a letöltő sorában elsőbbséggel."""
+        (vagy Szünet van), Deferred (a hirdetés vár). A jelölt adatlapja (row urgent) a letöltő sorában elsőbbséggel, a
+        letöltések keretéből; minden más (egy összehasonlító leírása) árkutatás: ráér (low), az árkutatás keretéből megy,
+        és előtte átadja a helyét, ha közben sürgősebb jött (_rush)."""
         self._go()
         site = str(row.get("platform") or "")
-        if not self._room([site]):
-            raise Deferred("kéréskeret", sites=[site])
+        urgent = bool(row.get("urgent"))
+        need = site if urgent else RESEARCH_NEED + site
+        if not urgent:
+            self._rush()
+        if not self._room([need]):
+            raise Deferred("kéréskeret", sites=[need])
         try:
-            return self.fetcher.page(row["url"], site, self._check_on, quota=QUOTA, urgent=bool(row.get("urgent")))
+            return self.fetcher.page(row["url"], site, self._check_on if urgent else self._research_check(),
+                                     quota=QUOTA if urgent else self._research_quota(site), urgent=urgent,
+                                     low=not urgent)
         except FeedError as exc:
             if exc.kind == "busy":                 # a letöltő szerint sincs hely: a hirdetés vár
-                raise Deferred("kéréskeret", sites=[site]) from None
+                raise Deferred("kéréskeret", sites=[need]) from None
             return None
 
     def _search(self, query: str) -> list[dict[str, Any]]:
         """Mennyiért adják máshol: a keresőszó találatai a gyors oldalakon (böngésző nélkül), az oldalak egyszerre (a
         letöltő oldalanként egy kérést enged, a szünetekkel), a legújabb hirdetések elöl (newest_first: a mostani árak, nem
-        a régóta fent lévők vagy a fizetett kiemelések). A figyelő keretéből megy (mindkét oldalon): ha nincs hely (vagy
-        Szünet van), Deferred (a hirdetés vár)."""
+        a régóta fent lévők vagy a fizetett kiemelések). Az árkutatás keretéből megy (mindkét oldalon), a letöltő sorában
+        a többi kérés után (low): ha nincs hely (vagy Szünet van), Deferred (a hirdetés vár); ha közben sürgősebb jött,
+        előbb az jön (_rush). Ugyanazt a keresést SEARCH_REUSE-on belül nem kéri le újra."""
         self._go()
+        self._rush()
         sites = list(self.platforms)
-        if not self._room(sites):
-            raise Deferred("kéréskeret", sites=sites)
+        needs = [RESEARCH_NEED + site for site in sites]
+        if not self._room(needs):
+            raise Deferred("kéréskeret", sites=needs)
+        check = self._research_check()          # (a keresések a saját szálaikon várnak a sorukra)
 
         def one(site: str, platform: Platform) -> list[dict[str, Any]]:
             try:
                 rows = self.fetcher.listings(newest_first(platform.search_url.format(q=urllib.parse.quote(query)), site),
-                                             site, self._check_on, quota=QUOTA)
+                                             site, check, max_age=SEARCH_REUSE,
+                                             quota=self._research_quota(site), low=True)
             except FeedError as exc:
                 if exc.kind == "busy":
                     raise
@@ -1228,16 +1493,17 @@ class InstantWatch:
             try:
                 return [row for job in jobs for row in job.result()]
             except FeedError:                      # a letöltő szerint nincs hely: a hirdetés vár
-                raise Deferred("kéréskeret", sites=sites) from None
+                raise Deferred("kéréskeret", sites=needs) from None
 
     def _seller(self, deal: dict[str, Any]) -> None:
         """Egy jó találat eladójának többi hirdetése (a hirdetés oldaláról: seller_url), a figyelő kéréskeretéből: ha
         ezekből is megéri még valami, és együtt több a haszon (DealHunter.seller_bundle), csendesen szól róla."""
         url, site = str(deal.get("seller_url") or ""), str(deal.get("platform") or "")
-        if not url or site not in self.platforms or deal.get("auction") or not self._room([site]):
+        if not url or site not in self.platforms or deal.get("auction") or not self._room([site], research=True):
             return
         try:
-            listings = self.fetcher.listings(url, site, self._check_on, quota=QUOTA)
+            listings = self.fetcher.listings(url, site, self._research_check(), quota=self._research_quota(site),
+                                             low=True)
         except FeedError:
             return
         name = self.platforms[site].name
@@ -1259,7 +1525,9 @@ class InstantWatch:
 
     @staticmethod
     def _line(hit: dict[str, Any]) -> str:
-        text = f"{hit['site']}: „{hit['title'][:80]}” {format_price(hit['price'])}, most került fel"
+        posted = float(hit.get("posted_at") or 0)
+        when = since_text(hit["at"] - posted) if posted and hit["at"] - posted >= 120 else "most"
+        text = f"{hit['site']}: „{hit['title'][:80]}” {format_price(hit['price'])}, {when} került fel"
         if hit.get("drop"):
             text += f" (leárazta: {format_price(hit['drop'])} → {format_price(hit['price'])})"
         if hit.get("reference"):

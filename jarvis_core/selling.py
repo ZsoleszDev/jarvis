@@ -1592,6 +1592,16 @@ _STOPWORDS = {
 _WANTED_RE = re.compile(r"\b(keresek|keresem|keresunk|veszek|vennek|vennem|megvennem|felvasar\w*)\b")
 _SWAP_RE = re.compile(r"\b(csere|cseret|csereben|cserere|cserelnem|cserelnek|cserelek|elcserelnem|cserebere)\b")
 _SALE_RE = re.compile(r"\belad")
+# Foglalt hirdetés: a Hardveraprón „jegelve” (az eladó egy vevőnek félretette: az ár mellett és a cím elején), a
+# Vinteden „Foglalt” („Reserved”). Az ára valódi kínálati ár (az árbázisba bekerül), de most nem vehető meg: nem jelölt,
+# nem szól róla (ha a foglalás megszűnik, újra felméri).
+_RESERVED_RE = re.compile(r"\b(jegelve|lefoglalva|foglalt|reserved)\b")
+
+
+def reserved(text: str) -> bool:
+    """Foglalt-e a hirdetés a kártyája (vagy a címe) szerint (_RESERVED_RE)."""
+    return bool(_RESERVED_RE.search(fold(text or "")))
+
 # Csomag vagy több darab egyben: az ár nem egy darabé. A darabszám („3 db”, „x2”) csak elektronikán kívül
 # számít: ott a „2 db ventilátorral” vagy a „PCIe x4” a tárgy leírása, nem csomag.
 _LOT_RE = re.compile(r"\b(csomag|csomagban|csomagot|csomagkent|szett|szettben|lot|kotegben|tetelben)\b|"

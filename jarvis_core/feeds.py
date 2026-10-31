@@ -53,6 +53,12 @@ BLOCK_FIRST = 3600         # tiltás után ennyi szünet (másodperc); ismétlé
 BLOCK_MAX = 86400
 EMPTY_PAUSE = 6 * 3600     # ha egymás után EMPTY_LIMIT-szer nem talál hirdetést, ennyi ideig a böngésző marad
 EMPTY_LIMIT = 3
+# Egy keresésnek (a címben keresőszó: SEARCH_PARAM) tényleg lehet, hogy nincs találata (pl. az árkutatás egy ritka
+# termékre a másik oldalon): ez nem jelenti, hogy nem tudjuk értelmezni az oldalt. A keresések üres oldalai külön
+# számítanak, és csak SEARCH_EMPTY_LIMIT egymás utáni üres keresés után adja át a böngészőnek (egy kategória- vagy
+# eladói oldal üressége EMPTY_LIMIT után, mert az soha nem üres); bármelyik oldal, amin talált hirdetést, nullázza.
+SEARCH_EMPTY_LIMIT = 12
+SEARCH_PARAM = re.compile(r"^(?:stext|q|query|search_text|keyword|kw|kereses|search)$", re.IGNORECASE)
 MAX_ROWS = 120            # egy találati oldal összes hirdetése (a Hardverapró 100-at mutat egy oldalon)
 # A hirdetések címe az oldalon (ha ilyen link is van a kártyák között, csak ezek számítanak; ha egy sem, mind).
 LISTING_URL = {"hardverapro": re.compile(r"/apro/[^/]+/"), "jofogas": re.compile(r"_\d+\.htm")}
@@ -737,6 +743,12 @@ def _find(node: Node, wanted: Callable[[Node], bool]) -> Node | None:
 
 # --- letöltés oldalanként, tempóval ------------------------------------------------------------------------
 
+def is_search(url: str) -> bool:
+    """Keresés-e a cím (van benne nem üres keresőszó, SEARCH_PARAM), nem egy kategória- vagy eladói oldal."""
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    return any(SEARCH_PARAM.match(key) and any(value.strip() for value in values) for key, values in query.items())
+
+
 class Quota(NamedTuple):
     """Egy hívó része a letöltő óránkénti keretéből (pl. az azonnali figyelő): a kérései ezzel a címkével számítanak
     (tag), oldalanként legfeljebb cap kérés óránként, és a közös keretből reserve mindig a többieké (a köröké) marad.
@@ -772,7 +784,7 @@ class SiteFetcher:
         self._recent: dict[str, deque] = {site: deque() for site in self.sites}
         self._tagged: dict[tuple[str, str], deque] = {}   # (oldal, címke) → a hívó kéréseinek ideje (Quota)
         self._blocked: dict[str, dict[str, Any]] = {}   # oldal → {until, reason, strikes}
-        self._empty: dict[str, int] = {}             # oldal → hányszor egymás után nem talált hirdetést
+        self._empty: dict[tuple[str, bool], int] = {}   # (oldal, keresés-e) → hányszor egymás után nem talált
         self._empty_until: dict[str, float] = {}
         self._slow: dict[str, float] = {}            # oldal → a szünetek szorzója (lassú válasz után nagyobb)
         self._cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}   # cím → (mikor, hirdetések)
@@ -826,11 +838,11 @@ class SiteFetcher:
             return sum(1 for t in stamps or () if now - t <= 3600)
 
     def listings(self, url: str, platform: str, check: Callable[[], None] = lambda: None,
-                 max_age: float = 0.0, quota: Quota | None = None) -> list[dict[str, Any]]:
+                 max_age: float = 0.0, quota: Quota | None = None, low: bool = False) -> list[dict[str, Any]]:
         """Egy találati oldal hirdetései böngésző nélkül. FeedError, ha nem sikerült (a hívó a böngészővel próbálja).
         max_age: ha ezt az oldalt legfeljebb ennyi másodperce már letöltötte (pl. az azonnali figyelő), azt adja vissza,
         nem kéri le újra (a kereskedés köre így nem tölti le kétszer ugyanazt). quota: a hívó része a keretből (minden
-        kérésre, a lista beállításáéra is)."""
+        kérésre, a lista beállításáéra is). low: ráérő kérés (pl. árkutatás): a várakozók közül a többi előtte megy."""
         now = self.clock()
         if max_age > 0:
             with self._state_lock:
@@ -839,14 +851,14 @@ class SiteFetcher:
                 return [dict(row) for row in cached[1]]
         with self._state_lock:
             target = self._sorted.get(url) or url   # ha az oldal kínál „legújabb elöl” rendezést, azzal
-        final, html = self._fetch(target, platform, check, quota)
+        final, html = self._fetch(target, platform, check, quota, low=low)
         tree = parse(html)
         setter, current, view = list_prefs(tree)
         if setter and not prefs_ok(current) and self._may_set_prefs(platform):
             # a lista nem az új hirdetésekkel elöl (vagy kevés van egy oldalon): beállítja, és újra letölti
             try:
                 if self._set_prefs(urllib.parse.urljoin(final, setter), final, platform, check, quota):
-                    reloaded, html = self._fetch(target, platform, check, quota)
+                    reloaded, html = self._fetch(target, platform, check, quota, low=low)
                     final, tree = reloaded, parse(html)
                     setter, current, view = list_prefs(tree)
                 with self._state_lock:
@@ -878,12 +890,15 @@ class SiteFetcher:
                         self._cache.pop(old, None)
         with self._state_lock:
             if rows:
-                self._empty.pop(platform, None)
+                for searched in (False, True):
+                    self._empty.pop((platform, searched), None)
             else:
-                self._empty[platform] = self._empty.get(platform, 0) + 1
-                if self._empty[platform] >= EMPTY_LIMIT:     # egymás után többször semmi: inkább a böngésző
-                    self._empty_until[platform] = self.clock() + EMPTY_PAUSE
-                    self._empty.pop(platform, None)
+                key = (platform, is_search(url))
+                self._empty[key] = self._empty.get(key, 0) + 1
+                if self._empty[key] >= (SEARCH_EMPTY_LIMIT if key[1] else EMPTY_LIMIT):
+                    self._empty_until[platform] = self.clock() + EMPTY_PAUSE   # egymás után többször semmi: inkább
+                    for searched in (False, True):                             # a böngésző
+                        self._empty.pop((platform, searched), None)
         if not rows:
             raise FeedError("A letöltött oldalon nem találtam hirdetést.", "empty")
         return rows
@@ -930,20 +945,21 @@ class SiteFetcher:
             return self._next_pages.get(url, "")
 
     def page(self, url: str, platform: str, check: Callable[[], None] = lambda: None,
-             quota: Quota | None = None, urgent: bool = False) -> dict[str, Any]:
+             quota: Quota | None = None, urgent: bool = False, low: bool = False) -> dict[str, Any]:
         """Egy hirdetés oldala böngésző nélkül (mint a browser.look): cím, szöveg, rövid darabok, feliratok. urgent: egy
-        megérő hirdetés adatlapja: a várakozó letöltések előtt megy (TURN_POLL)."""
-        final, html = self._fetch(url, platform, check, quota, urgent)
+        megérő hirdetés adatlapja: a várakozó letöltések előtt megy (TURN_POLL); low: ráérő kérés (egy összehasonlító
+        leírása): a várakozók után."""
+        final, html = self._fetch(url, platform, check, quota, urgent, low)
         return parse_page(html, final)
 
     def _fetch(self, url: str, platform: str, check: Callable[[], None],
-               quota: Quota | None = None, urgent: bool = False) -> tuple[str, str]:
+               quota: Quota | None = None, urgent: bool = False, low: bool = False) -> tuple[str, str]:
         if platform not in self.sites or not self._ours(url, platform):
             raise FeedError("Ezt az oldalt a böngészővel olvasom.", "off")
         if not self.usable(platform):
             raise FeedError("Ez az oldal most csak a böngészővel megy (tiltott, vagy nem találtam rajta hirdetést).",
                             "blocked")
-        final, status, html = self._send(url, platform, check, quota=quota, urgent=urgent)
+        final, status, html = self._send(url, platform, check, quota=quota, urgent=urgent, low=low)
         if status in BLOCKED_STATUS or (status < 400 and len(html) < 20000 and CHALLENGE_RE.search(html[:20000])
                                         and not PRICE_RE.search(html)):
             self._block(platform, f"robot-ellenőrzés vagy tiltás ({status})")
@@ -958,11 +974,13 @@ class SiteFetcher:
 
     def _send(self, url: str, platform: str, check: Callable[[], None], data: dict[str, str] | None = None,
               extra: dict[str, str] | None = None, quota: Quota | None = None,
-              urgent: bool = False) -> tuple[str, int, str]:
+              urgent: bool = False, low: bool = False) -> tuple[str, int, str]:
         """Egy kérés a tempó szerint: oldalanként egyszerre egy, szünettel, az óránkénti kereten belül (quota: a hívó
         része: a címkéje szerinti kerete, és a többieknek meghagyott tartalék). A várakozók közül a sürgős (urgent: egy
-        megérő hirdetés adatlapja) jön előbb, a többi érkezési sorrendben; egy épp a szünetre váró kérés is előreengedi."""
-        ticket = (0 if urgent else 1, next(self._tickets))
+        megérő hirdetés adatlapja) jön előbb, a ráérők (low: árkutatás, összehasonlítók leírása) utoljára, egy szinten
+        belül érkezési sorrendben; egy épp a szünetre váró kérés is előreengedi a fontosabbat. Így az új hirdetéseket
+        kereső letöltés sem vár az árkutatásra."""
+        ticket = (0 if urgent else 2 if low else 1, next(self._tickets))
         with self._state_lock:
             self._turns[platform].append(ticket)
         try:

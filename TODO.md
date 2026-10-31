@@ -188,8 +188,29 @@
   (deal_name), nem a kártya szövegével. A kedvelések száma (LISTINGS_JS: kedvenc-gomb vagy -jelzés számmal, a link
   melletti kártyarészben is) a találatnál és az ablakában látszik; LIKES_HOT (3) fölött az értesítés jelzi, hogy siess.
   A Vinted díja ugyanezeken a kártyákon mérve 280 Ft + 5% (VINTED_FEE_FIXED; eddig 300 Ft-tal számolt).
+- Gyorsaság és frissesség (az azonnali figyelő és a Vinted): az értékelés két szálon, fontosság szerint
+  (DealHunter.urgency, instant.LEVEL_*): a biztos árú megérő a gyors szálon rögtön sorra kerül, nem vár egy modellhívásra
+  (megnevezés) vagy árkutatásra; az árkutatás a következő lépése előtt (és a letöltő sorában várva is) átadja a helyét,
+  és utána folytatódik (Deferred „elsőbbség”, a megnevezés megmarad). Az eladó többi hirdetése és az utólagos
+  modellellenőrzés a modell szálán. A letöltő sorában a ráérő kérés (low: árkutatás) a figyelők letöltései után megy.
+  Az árkutatásnak külön kerete van (RESEARCH_TAG, _research_cap: a letöltések várható száma mellett, legalább a keret
+  negyede), így nem eheti el a letöltések elől a keretet. Az üres keresés nem számít olvashatatlan oldalnak
+  (feeds.SEARCH_EMPTY_LIMIT; eddig három üres árkutatás hat órára leállította a böngésző nélküli olvasást és vele az
+  azonnali figyelőt). A Vinted friss listája igazodik (_glance_interval): csúcsidőben sűrűbben, csendes órában
+  ritkábban, és ha egy pillantáson szinte csupa új jött, hamarabb újra (legalább 5 perc). Időrend a találatban
+  (posted_at, seen_at, told_at), „7 perce került fel” az értesítésben, „jelzés az észlelés után” a fülön.
+- Ítélőképesség: a foglalt („jegelve”) hirdetésről nem szól, és ha a foglalás megszűnik, újra felméri
+  (selling.reserved, instant.SEEN_RESERVED, listings.classify); a leárazás az eladós kártyán is számít (PriceBook.add:
+  eddig az eladó neve kizárta); valódi Hardverapró-címeken talált téves kizárások javítva („Shadow 2X”, „SWFT 210”,
+  „Nitro+ … /Samsung/”, „/EX-GTX1060-6G/”), és a Vega 56 kulcsából kimarad a kereskedő cikkszáma.
 
 ## Élesben kipróbálandó
+- Az azonnali figyelő két értékelő szála élesben: a napló „jelzés az észlelés után” értéke (a fülön), és hogy a modell
+  szála (megnevezés) mennyi ideig dolgozik egy kötegen. Ha az árkutatás kerete (a fülön „árkutatás az utóbbi órában”)
+  rendszeresen betelik, a POLL_MARGIN vagy a figyelők száma hangolandó; ha sok hirdetés vár a kéréskeretre, a
+  DETAIL_READS csökkentendő.
+- A Vinted igazodó tempója: a csúcsidei 10 perces (és a „sok új jött” utáni 5–10 perces) pillantásnál kér-e a Vinted
+  robot-ellenőrzést; ha igen, GLANCE_MIN emelendő.
 - Vinted-kártyák a valódi oldalon: hogy a böngésző a kedvelések számát megtalálja-e (LISTINGS_JS LIKE_HINT:
   data-testid, aria-label, title vagy osztály „favourite”, „kedvenc”, „like”, „heart”); ha a találatoknál soha nem
   látszik kedvelés, a valódi kártya HTML-je kell. A webcímből vett cím kisbetűs, és a „+” jel kimarad belőle (az

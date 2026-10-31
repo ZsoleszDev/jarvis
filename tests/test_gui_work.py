@@ -1804,6 +1804,25 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector("#deal-dialog[open]")
         self.assertIn("8 (ha sok, másnak is feltűnt)", page.inner_text("#deal-body"))
 
+    def test_a_find_shows_how_fast_it_was_found(self):
+        """Az azonnali figyelő találatánál az időrend: mikor került fel (a kártya szerint), mikor vette észre, mikor
+        szólt, és mennyivel utána."""
+        self.h.app.work.instant.allowed = lambda: False
+        told = time.time()
+        self.h.app.work.deals._remember({
+            "id": "t1", "url": "https://hardverapro.hu/apro/palit_rtx_3060_ti_dual_7/friss.html", "site": "Hardverapró",
+            "platform": "hardverapro", "title": "Palit RTX 3060 Ti Dual", "text": "Palit RTX 3060 Ti Dual",
+            "price": 52000, "median": 100000, "margin": 48000, "at": told,
+            "posted_at": told - 7 * 60 - 40, "seen_at": told - 40, "told_at": told})
+        page = self.page
+        page.click("#job-deals")
+        page.wait_for_selector('[data-deal-open="t1"]')
+        page.click('[data-deal-open="t1"]')
+        page.wait_for_selector("#deal-dialog[open]")
+        body = page.inner_text("#deal-body")
+        self.assertRegex(body, r"felkerült \d\d:\d\d · észrevettem \d\d:\d\d \(7 perccel utána\) · szóltam "
+                               r"\d\d:\d\d \(40 mp-cel az észlelés után\)")
+
     def test_review_dialog_saves_only_what_you_changed(self):
         """A Nézd át ablak csak azt menti, amit benne átírtál: ami közben máshol (pl. a telefonon) változott, azt nem
         írja vissza a megnyitáskori értékre."""

@@ -162,6 +162,59 @@ class GlanceTests(HunterCase):
         self.clock.now += 86400
         self.assertTrue(self.hunter.available(), "másnap újra")
 
+    def test_a_page_full_of_new_listings_is_looked_at_again_sooner(self):
+        """Ha egy pillantáson szinte csupa új hirdetés van (két pillantás között több jött, mint amennyi egy oldalon
+        elfér: lemaradhatott valami), a következő fele annyi idő múlva jön (de legalább 5 perc múlva); ha már ismerősek is
+        vannak rajta, a szokásos ütemben."""
+        self.hunter.set_browse(on=True, sites=["vinted"])
+        page = [listing(500 + n, f"Retró kütyü Y{n}", 9000, "www.vinted.hu") for n in range(12)]
+        self.browser.by_url = [("vinted.hu", page)]
+        self.hunter.run(notify=self.notify)
+        mark = self.hunter._data["sites_state"]["glance"]["vinted"]
+        self.assertTrue(8 <= (mark["next"] - mark["at"]) / 60 <= 12, "csupa új: 20 helyett kb. 10 perc múlva")
+        self.assertIn("(sok új jött, hamarabb nézem újra)", self.hunter.note())
+        self.browser.by_url = [("vinted.hu", [listing(600, "Retró kütyü Z", 9000, "www.vinted.hu")] + page[:11])]
+        self.follow(13)
+        self.assertEqual(len(self.vinted()), 2)
+        self.assertTrue(16 <= (mark["next"] - mark["at"]) / 60 <= 24, "egy új a sok ismerős között: a szokásos ütem")
+        self.assertNotIn("sok új jött", self.hunter.note())
+        self.hunter.set_browse(glance=10)
+        self.browser.by_url = [("vinted.hu", [listing(700 + n, f"Retró kütyü W{n}", 9000, "www.vinted.hu")
+                                              for n in range(12)])]
+        while len(self.vinted()) < 3:
+            self.follow(1)
+        self.assertTrue(5 <= (mark["next"] - mark["at"]) / 60 <= 6, "10 percesnél is legalább 5 perc múlva")
+
+    def test_the_glances_follow_the_time_of_day(self):
+        """A pillantások megtanulják, a nap melyik órájában jön sok új hirdetés (percenként, hogy a sűrűbb pillantás ne
+        torzítsa): csúcsidőben fele annyi időnként néz, csendes órában kétszer annyi időnként (legfeljebb óránként), és
+        a felületen látszik, miért. Kevés megfigyelésből még nem."""
+        at = lambda h, m=0: time.mktime((2027, 1, 15, h, m, 0, 0, 0, -1))  # noqa: E731
+        self.hunter.set_browse(on=True, sites=["vinted"])
+        mark = self.hunter._data["sites_state"]["glance"].setdefault("vinted", {})
+        for hour in range(24):                 # este 19–21 óra között jön a legtöbb új, éjjel alig
+            for _ in range(3):
+                fresh = 12 if 19 <= hour <= 21 else 0 if hour < 7 else 3
+                self.hunter._glance_learn(mark, at(hour, 30), fresh, 20.0)
+        with self.hunter._lock:
+            self.assertEqual(self.hunter._glance_factor("vinted", at(20)), 0.5)
+            self.assertEqual(self.hunter._glance_factor("vinted", at(12)), 1.0)
+            self.assertEqual(self.hunter._glance_factor("vinted", at(4)), 2.0)
+            self.assertEqual(self.hunter._glance_interval("vinted", at(20)), 10)
+            self.assertEqual(self.hunter._glance_interval("vinted", at(4)), 40)
+        self.clock.now = at(20)
+        self.hunter.run(notify=self.notify)
+        self.assertTrue(8 <= (mark["next"] - mark["at"]) / 60 <= 12, "csúcsidőben kb. 10 percenként")
+        self.assertIn("(csúcsidő: sűrűbben nézem)", self.hunter.note())
+        self.hunter.set_browse(glance=60)
+        with self.hunter._lock:
+            self.assertEqual(self.hunter._glance_interval("vinted", at(4)), 60, "legfeljebb óránként")
+        fresh_start = {"fresh": [0.0] * 24, "minutes": [0.0] * 24}
+        mark["rhythm"] = fresh_start
+        self.hunter._glance_learn(mark, at(20), 12, 20.0)
+        with self.hunter._lock:
+            self.assertEqual(self.hunter._glance_factor("vinted", at(20)), 1.0, "kevés megfigyelésből még nem")
+
     def test_only_while_the_computer_is_on(self):
         """Csak a gép üzemidejében (a nap órái), mint a böngészés; az este félbemaradt óra reggel kerül a naplóba."""
         at = lambda d, h, m=0: time.mktime((2027, 1, d, h, m, 0, 0, 0, -1))  # noqa: E731

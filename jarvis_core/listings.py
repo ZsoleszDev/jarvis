@@ -28,8 +28,9 @@ CHECK_SECONDS = 24 * 3600    # egy hirdetést naponta legfeljebb egyszer néz me
 # A modellnek és a felületnek: mit látott a háttérellenőrzés.
 CHECK_WORDS = {SOLD: "a háttérellenőrzés szerint elkelt", GONE: "a háttérellenőrzés szerint már nincs fent"}
 
-# „Eladva” címke a hirdetés oldalán (rövid, önálló szövegdarab, nem gomb): a Vinteden „Sold” / „Reserved”.
-_SOLD_RE = re.compile(r"\b(sold(?! by)|eladva|elkelt|reserved|foglalt|lefoglalva)\b")
+# „Eladva” címke a hirdetés oldalán (rövid, önálló szövegdarab, nem gomb): a Vinteden „Sold” / „Reserved”, a
+# Hardveraprón „jegelve” (foglalt: az ár mellett, és a hirdetés címe elején: „Jegelve – …”).
+_SOLD_RE = re.compile(r"\b(sold(?! by)|eladva|elkelt|reserved|foglalt|lefoglalva|jegelve)\b")
 # Lejárt vagy lezárt hirdetés (a Vinted „nem található” szavai mellé).
 _ENDED_RE = re.compile(r"(hirdetes lejart|lejart a hirdetes|lejart hirdetes|mar nem aktiv|hirdetes inaktiv|"
                        r"inaktiv hirdetes|hirdetes lezarult|mar nem vasarolhato)")
@@ -53,6 +54,8 @@ def classify(page: dict[str, Any], url: str, title: str = "", platform: str = ""
         if _SOLD_RE.search(norm_text(str(text))):
             return SOLD, f"„{str(text)[:40]}” jelzés az oldalán"
     heading = norm_text(str(page.get("title") or ""))
+    if heading.startswith("jegelve"):
+        return SOLD, "jegelve (foglalt) a címe szerint"
     head = heading + " " + norm_text(str(page.get("text") or "")[:600])
     own = norm_text(title)[:30]
     if (_GONE_RE.search(head) or _ENDED_RE.search(head)) and not (own and own in heading):
