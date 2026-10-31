@@ -218,6 +218,14 @@
   később) megtudott megérő hirdetés csendben szól, a régi gyors jelzés elmarad. Javítva: az események sorszáma egy
   újraindítás után nulláról indult, és a telefon az újraindítás utáni eseményeket átugorta (most az indulás
   pillanatától, ezredmásodpercben számol, és a túl nagy `after` is mindent visszaad).
+- Folyamatban lévő vételek: az elrejtett találat is megvehető (az eladó napok múlva mégis válaszolt): az Automata
+  kereskedés fülön az Elrejtett találatok (összecsukva, a legutóbb elrejtett elöl) Megvettem és Visszahozom gombbal,
+  és mindkettő visszavonja az elrejtést az öntanulásban (deals.restore, _undismiss; a mark_bought is). Írtam neki
+  (deals.contact): a találat folyamatban, a kártyáján és a találat ablakában; az Elemzés fül Folyamatban szakasza
+  (deals.pending, a Vinted-ajánlat is) a napokkal, Megvettem (vételár, posta) és Nem lett belőle semmi gombbal; a
+  folyamatban lévő nem esik ki a 60-as listából (MAX_PENDING), és az elrejtése nem némítja a terméket. Az Elemzés Új
+  vétele egy hirdetés linkjével: ha a Jarvis találta (az elrejtettek közül is, deals.find_listing), a Megvettem útja
+  a találat adataival, egyszer; különben a megadott névvel, a link és az oldal neve a tárgyon.
 
 ## Élesben kipróbálandó
 - A telefon akkuja és adatforgalma az új kapcsolattal (Android: Beállítások › Akkumulátor és Adathasználat, a Jarvis
@@ -428,6 +436,8 @@
 - A „most kb.” ár (Vételeim) a tárgy címéből vagy termékéből keres kulcsot; a csak leírással (prompt) felvett tárgynál
   az első kiolvasás után jelenik meg.
 - Az azonnali figyelő ütemezése (mikor jön a következő) a memóriában van: újraindítás után rögtön néz egyet.
+- Az Írtam neki kézi jelölés: a Jarvis nem nézi, hogy írtál-e az eladónak (a Vinted-üzenetekből kiolvasható lenne), és
+  ha a folyamatban lévő hirdetés közben elkelt vagy lekerült, arról nem szól (a hirdetés oldalát nem nézi újra).
 
 ### Fotók (photos.py)
 - Két külön elkészített, nagyon hasonló fotót (kicsit elmozdult kamera) nem ismer fel ismétlődőnek.

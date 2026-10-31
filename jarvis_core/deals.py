@@ -87,6 +87,10 @@ DEFAULT_DISCOUNT = 30      # ennyi %-kal a szokásos ár (medián) alatt számí
 FLOOR = 0.15               # a medián 15%-a alatti ár többnyire nem valódi ár (1 Ft, „ár megegyezés szerint”)
 MAX_CHECKS = 8             # egy körben legfeljebb ennyi jelöltet néz meg a modellel (a többi a következő körre marad)
 MAX_DEALS = 60             # ennyi találatot őriz meg a listában
+# A folyamatban lévők (írtál az eladónak, vagy ajánlatot tettél, és még nem vetted meg, nem rejtetted el): ezek a
+# MAX_DEALS fölött is megmaradnak (legfeljebb ennyi), hogy egy napokig hallgató eladó hirdetése ne essen ki a listából.
+MAX_PENDING = 30
+HIDDEN_SHOWN = 30          # az Elrejtett találatok közül ennyi látszik (a legutóbb elrejtett elöl)
 MAX_SEEN = 5000
 EVERY_CHOICES = (30, 60, 180, 360)   # percben: milyen sűrűn nézi meg egy keresés találatait
 DEFAULT_EVERY = 60
@@ -1631,6 +1635,10 @@ class DealHunter:
         """A felületnek: a kapcsoló, a keresések (az állapotukkal) és a talált hirdetések (a legújabb elöl)."""
         with self._lock:
             deals = [d for d in self._data["deals"] if not d.get("dismissed")]
+            # az elrejtettek (a legutóbb elrejtett elöl): innen visszahozható, vagy megvehető, ha az eladó mégis
+            # válaszolt
+            hidden = sorted((dict(d) for d in self._data["deals"] if d.get("dismissed") and not d.get("bought")),
+                            key=lambda d: -float(d.get("dismissed_at") or d.get("at") or 0))
             searches = [{**json.loads(json.dumps(s)), "status": search_status(s)} for s in self._data["searches"]]
             return {"enabled": self._data["enabled"], "running": self._data["enabled"],
                     "started": self._data["started"] or None, "max_buy": self._data["max_buy"],
@@ -1639,6 +1647,7 @@ class DealHunter:
                     "message": self._data["message"], "money": self.money_status(), "searches": searches,
                     "watches": json.loads(json.dumps(self._data["watches"])),
                     "deals": sorted((dict(d) for d in deals), key=lambda d: -float(d.get("at") or 0)),
+                    "hidden": hidden[:HIDDEN_SHOWN], "hidden_count": len(hidden),
                     "sites": [{"key": k, "name": p.name} for k, p in self.platforms.items()],
                     "browser": self.browser is not None, "sale_ratio": SALE_RATIO, "shipping": SHIPPING,
                     "day": list(self._data["day"]), "book": self.book.stats(),
@@ -2400,13 +2409,31 @@ class DealHunter:
                     return dict(deal)
         raise DealError("Ez a találat már nincs meg.")
 
+    def find_listing(self, url: str) -> dict[str, Any] | None:
+        """A találat, ami erről a hirdetésről szól (a webcíme szerint, más paraméterekkel vagy címmel is; az elrejtettek
+        közül is), vagy None: az Elemzés fül Új vétele egy beillesztett linkből így a Megvettem útját járja."""
+        key = listing_key(url) if url else ""
+        if not key:
+            return None
+        with self._lock:
+            found = next((d for d in self._data["deals"] if d.get("url") and listing_key(d["url"]) == key), None)
+            return dict(found) if found is not None else None
+
+    def platform_name(self, url: str) -> str:
+        """Melyik oldal hirdetése (a webcíméből): „Hardverapró”, „Vinted”…; üres, ha egyiké sem."""
+        key = self._platform_of(url) if url else ""
+        return self.platforms[key].name if key else ""
+
     def mark_bought(self, deal_id: str, item_id: str, items: list[str] | None = None) -> dict[str, Any]:
         """Megvetted: a találatból eladási tárgy lett (item_id; egy csomagból több is: items, a darabjai); a listában
-        jelölve marad. Öntanulás: az indulóoldala és a termék jó pontot kap (ha elrejtetted volna, újra szól róla)."""
+        jelölve marad. Öntanulás: az indulóoldala és a termék jó pontot kap (ha elrejtetted volna, újra szól róla). Ha
+        közben elrejtetted (az eladó napokig nem válaszolt, aztán mégis), visszakerül a találatok közé, megvettként, és
+        az elrejtése nem számít."""
         found = None
         with self._lock:
             for deal in self._data["deals"]:
                 if deal.get("id") == deal_id:
+                    self._undismiss(deal)
                     deal["bought"] = item_id
                     if items:
                         deal["bought_items"] = list(items)
@@ -2475,11 +2502,15 @@ class DealHunter:
                 if deal.get("id") != deal_id or deal.get("dismissed"):
                     continue
                 deal["dismissed"] = True
+                deal["dismissed_at"] = self.clock()
                 self._lane_count(deal.get("lane"), "dismissed")
                 key = deal.get("product_key")
-                if key and not deal.get("haggle"):     # egy elrejtett alku nem ítélet a termékről
+                # egy elrejtett alku nem ítélet a termékről, és a folyamatban lévő (írtál az eladónak) sem: az csak nem
+                # jött össze
+                if key and not deal.get("haggle") and not self._open_contact(deal):
                     feedback = self._data["feedback"].setdefault(key, {})
                     feedback["dismissed"] = int(feedback.get("dismissed") or 0) + 1
+                    deal["dismiss_counted"] = True
                     if feedback["dismissed"] >= MUTE_AFTER and not feedback.get("bought") and not feedback.get("muted"):
                         feedback["muted"] = self.clock()
                         muted = self.book.name(key)
@@ -2488,6 +2519,75 @@ class DealHunter:
             self.journal.add(f"Az ilyen találatokat („{muted}”) {MUTE_AFTER}-szer elrejtetted: {MUTE_DAYS} napig nem "
                              "szólok róluk.")
         return self.state()
+
+    def _undismiss(self, deal: dict[str, Any]) -> bool:
+        """(zár alatt) Egy elrejtett találat vissza a listába: az elrejtése nem számít (az indulóoldalánál és a
+        terméknél sem; ha emiatt hallgatott a termékről, újra szól). True, ha el volt rejtve."""
+        if not deal.get("dismissed"):
+            return False
+        # (a régebben elrejtettnél nincs jelölve, számított-e: akkor számított, ha nem alku volt)
+        counted = bool(deal.get("dismiss_counted")) if "dismissed_at" in deal else not deal.get("haggle")
+        for name in ("dismissed", "dismissed_at", "dismiss_counted"):
+            deal.pop(name, None)
+        lane = self._data["lanes"].get(deal.get("lane") or "")
+        if lane and lane.get("dismissed"):
+            lane["dismissed"] = int(lane["dismissed"]) - 1
+        feedback = self._data["feedback"].get(deal.get("product_key") or "")
+        if counted and feedback and feedback.get("dismissed"):
+            feedback["dismissed"] = int(feedback["dismissed"]) - 1
+            if feedback["dismissed"] < MUTE_AFTER:
+                feedback.pop("muted", None)
+        return True
+
+    def restore(self, deal_id: str) -> dict[str, Any]:
+        """Visszahozom: egy elrejtett találat vissza a Legutóbbi találatok közé (pl. az eladó mégis válaszolt)."""
+        with self._lock:
+            deal = next((d for d in self._data["deals"] if d.get("id") == deal_id), None)
+            if deal is None:
+                raise DealError("Ez a találat már nincs meg.")
+            back = self._undismiss(deal)
+            self._save()
+        if back:
+            self.journal.add(f"Visszahoztad: „{str(deal.get('title') or deal['text'])[:60]}”.")
+        return self.state()
+
+    def contact(self, deal_id: str, on: bool = True) -> dict[str, Any]:
+        """Írtam neki: írtál az eladónak (vagy felhívtad), és várod a válaszát; a találat folyamatban van, amíg meg nem
+        veszed vagy el nem rejted. Az Elemzés fülön is látszik (pending), és nem esik ki a listából (MAX_PENDING).
+        on=False: mégsem."""
+        with self._lock:
+            deal = next((d for d in self._data["deals"] if d.get("id") == deal_id), None)
+            if deal is None:
+                raise DealError("Ez a találat már nincs meg.")
+            if on:
+                self._undismiss(deal)
+                deal.setdefault("contacted", self.clock())
+            else:
+                deal.pop("contacted", None)
+            self._save()
+        if on:
+            self.journal.add(f"Írtál az eladónak: „{str(deal.get('title') or deal['text'])[:60]}” "
+                             f"({format_price(deal['price'])}); folyamatban, amíg meg nem veszed vagy el nem rejted.")
+        return self.state()
+
+    @staticmethod
+    def _open_contact(deal: dict[str, Any]) -> float:
+        """Mióta folyamatban egy találat: mikor írtál az eladónak (Írtam neki), vagy mikor tettél ajánlatot (Vinted);
+        0, ha egyik sem."""
+        sent = deal.get("offer_sent") if isinstance(deal.get("offer_sent"), dict) else {}
+        return float(deal.get("contacted") or sent.get("at") or 0)
+
+    def pending(self) -> list[dict[str, Any]]:
+        """A folyamatban lévő vételek (az Elemzés fülnek): írtál az eladónak vagy ajánlatot tettél, de még nem vetted
+        meg, és nem rejtetted el. A legrégebben írt elöl (az vár a legrégebben)."""
+        now = self.clock()
+        with self._lock:
+            rows = [dict(d) for d in self._data["deals"] if self._open_contact(d) and not d.get("bought")
+                    and not d.get("dismissed")]
+        for row in rows:
+            row["since"] = self._open_contact(row)
+            row["days"] = max(0, int((now - row["since"]) // 86400))
+        return sorted(rows, key=lambda r: r["since"])
 
     def _muted(self, key: str | None, now: float) -> bool:
         if not key:
@@ -7030,11 +7130,13 @@ class DealHunter:
             if listing_key(deal["url"]) in self._deal_keys():
                 return False
             deals = [deal] + self._data["deals"]
-            haggles = [d for d in deals if d.get("haggle") and not d.get("bought")]
+            busy = lambda d: self._open_contact(d) and not d.get("bought") and not d.get("dismissed")  # noqa: E731
+            haggles = [d for d in deals if d.get("haggle") and not d.get("bought") and not busy(d)]
             if len(haggles) > MAX_HAGGLES:     # az alkuképesek ne szorítsák ki a megérő találatokat
                 old = {id(d) for d in haggles[MAX_HAGGLES:]}
                 deals = [d for d in deals if id(d) not in old]
-            self._data["deals"] = deals[:MAX_DEALS]
+            # a folyamatban lévők (írtál az eladónak) a lista végéről sem esnek ki: az eladó napokig is hallgathat
+            self._data["deals"] = deals[:MAX_DEALS] + [d for d in deals[MAX_DEALS:] if busy(d)][:MAX_PENDING]
             self._save()
         return True
 

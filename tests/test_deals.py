@@ -2670,6 +2670,100 @@ class MoneyTests(HunterCase):
         self.assertFalse(self.hunter.money_status()["over_stock"], "30 000 Ft még belefér")
 
 
+class PendingTests(HunterCase):
+    """Folyamatban lévő vételek: az elrejtett találat visszahozható vagy megvehető (az eladó napok múlva mégis
+    válaszolt), az „Írtam neki” jelölés (az Elemzés fülön is látszik, és nem esik ki a listából), és egy hirdetés
+    linkjéből a találata."""
+
+    def remember(self, deal_id: str, number: int, **values) -> None:
+        self.hunter._remember({"id": deal_id, "url": f"https://hardverapro.hu/apro/{number}/friss.html",
+                               "text": "RTX 3060 Ti", "title": "Gigabyte RTX 3060 Ti", "price": 70000, "median": 100000,
+                               "profit": 20000, "site": "Hardverapró", "platform": "hardverapro",
+                               "product_key": "3060 rtx ti", "at": self.clock.now, **values})
+
+    def feedback(self) -> dict:
+        return self.hunter._data["feedback"].get("3060 rtx ti", {})
+
+    def test_a_hidden_deal_can_be_brought_back_or_bought(self):
+        self.remember("d0", 900)
+        state = self.hunter.dismiss("d0")
+        self.assertEqual(state["deals"], [])
+        [hidden] = state["hidden"]
+        self.assertEqual((hidden["id"], hidden["dismissed_at"], state["hidden_count"]), ("d0", self.clock.now, 1))
+        self.assertEqual(self.feedback()["dismissed"], 1)
+        state = self.hunter.restore("d0")
+        self.assertEqual(([d["id"] for d in state["deals"]], state["hidden"]), (["d0"], []), "vissza a találatok közé")
+        self.assertEqual(self.feedback()["dismissed"], 0, "az elrejtése nem számít")
+        self.assertIn("Visszahoztad: „Gigabyte RTX 3060 Ti”.", self.hunter.journal.entries()[0]["text"])
+        # kétszer elrejtve elhallgat a termékről; ha az egyiket visszahozod, újra szól
+        self.remember("d1", 901)
+        self.hunter.dismiss("d0")
+        self.hunter.dismiss("d1")
+        self.assertTrue(self.hunter._muted("3060 rtx ti", self.clock()))
+        self.hunter.restore("d1")
+        self.assertFalse(self.hunter._muted("3060 rtx ti", self.clock()), "a téves elrejtés nem némít")
+        # az eladó napok múlva mégis válaszolt, és megvetted: az elrejtettből megvett találat lesz
+        self.clock.now += 4 * 86400
+        state = self.hunter.mark_bought("d0", "item1")
+        [bought] = [d for d in state["deals"] if d["id"] == "d0"]
+        self.assertEqual((bought["bought"], "dismissed" in bought), ("item1", False))
+        self.assertEqual(state["hidden"], [])
+        self.assertEqual((self.feedback()["dismissed"], self.feedback()["bought"]), (0, 1))
+        with self.assertRaises(DealError):
+            self.hunter.restore("nincs-ilyen")
+        # a régebben (még az időpont nélkül) elrejtett is visszahozható, és az elrejtése akkor is visszavonódik
+        self.remember("d2", 902)
+        with self.hunter._lock:
+            self.hunter._data["deals"][0]["dismissed"] = True
+            self.hunter._data["feedback"]["3060 rtx ti"]["dismissed"] = 1
+        self.assertEqual([d["id"] for d in self.hunter.state()["hidden"]], ["d2"])
+        self.hunter.restore("d2")
+        self.assertEqual(self.feedback()["dismissed"], 0)
+
+    def test_contacted_deals_are_in_progress_and_stay_in_the_list(self):
+        self.remember("d0", 900)
+        self.remember("d1", 901, offer_sent={"price": 65000, "at": self.clock.now - 86400}, platform="vinted")
+        self.assertEqual([d["id"] for d in self.hunter.pending()], ["d1"], "az ajánlat is folyamatban")
+        state = self.hunter.contact("d0")
+        self.assertEqual(next(d for d in state["deals"] if d["id"] == "d0")["contacted"], self.clock.now)
+        self.assertIn("Írtál az eladónak: „Gigabyte RTX 3060 Ti” (70 000 Ft)", self.hunter.journal.entries()[0]["text"])
+        self.clock.now += 3 * 86400
+        pending = self.hunter.pending()
+        self.assertEqual([(d["id"], d["days"]) for d in pending], [("d1", 4), ("d0", 3)], "a legrégebben írt elöl")
+        self.hunter.contact("d0")
+        self.assertEqual(self.hunter.pending()[1]["since"], self.clock.now - 3 * 86400, "a második jelölés nem írja át")
+        # sok új találat jön, de a folyamatban lévő nem esik ki (a többi régi igen)
+        for n in range(deals_module.MAX_DEALS + 5):
+            self.remember(f"n{n}", 1000 + n)
+        ids = {d["id"] for d in self.hunter._data["deals"]}
+        self.assertTrue({"d0", "d1"} <= ids, "az eladó napokig is hallgathat")
+        self.assertNotIn("n0", ids)
+        self.assertEqual(len(ids), deals_module.MAX_DEALS + 2)
+        # mégsem írtam / nem lett belőle semmi (elrejtve: nem ítélet a termékről) / megvetted: már nincs folyamatban
+        self.hunter.contact("d1", on=False)
+        self.assertEqual([d["id"] for d in self.hunter.pending()], ["d1", "d0"], "az ajánlata még folyamatban")
+        self.hunter.dismiss("d1")
+        self.hunter.dismiss("d0")
+        self.assertEqual(self.hunter.pending(), [])
+        self.assertEqual(self.feedback().get("dismissed", 0), 0, "a folyamatban lévő elrejtése nem némít")
+        self.hunter.restore("d0")
+        self.assertEqual([d["id"] for d in self.hunter.pending()], ["d0"], "visszahozva újra folyamatban")
+        self.hunter.mark_bought("d0", "item1")
+        self.assertEqual(self.hunter.pending(), [])
+        with self.assertRaises(DealError):
+            self.hunter.contact("nincs-ilyen")
+
+    def test_a_listing_link_finds_its_deal(self):
+        self.remember("d0", 900)
+        self.hunter.dismiss("d0")
+        found = self.hunter.find_listing("https://www.hardverapro.hu/apro/900/friss.html?utm_source=x")
+        self.assertEqual(found["id"], "d0", "más alakban, és az elrejtettek közül is")
+        self.assertIsNone(self.hunter.find_listing("https://hardverapro.hu/apro/901/friss.html"))
+        self.assertIsNone(self.hunter.find_listing(""))
+        self.assertEqual(self.hunter.platform_name("https://www.jofogas.hu/budapest/rtx-3060_123456.htm"), "Jófogás")
+        self.assertEqual(self.hunter.platform_name("https://example.com/1"), "")
+
+
 class ProfitTests(unittest.TestCase):
     def test_profit_month_total_days_and_money_still_in_items(self):
         from jarvis_core.deals import profit_report
