@@ -226,6 +226,12 @@
   folyamatban lévő nem esik ki a 60-as listából (MAX_PENDING), és az elrejtése nem némítja a terméket. Az Elemzés Új
   vétele egy hirdetés linkjével: ha a Jarvis találta (az elrejtettek közül is, deals.find_listing), a Megvettem útja
   a találat adataival, egyszer; különben a megadott névvel, a link és az oldal neve a tárgyon.
+- Gyorsabb árbázis: ha egy terméknél betelt a 30 ár (MAX_SAMPLES), vagy egy régi termék kiesett (MAX_KEYS), a
+  hirdetés → termék térkép (PriceBook._locate) eddig egészében újraépült, a következő hirdetésnél az összes tárolt ár
+  webcímével. Egy beérett árbázisban (1000 termék, 30 000 ár) egy 100 hirdetéses találati oldal árainak beírása így kb.
+  10 s volt (a zár alatt: közben az azonnali figyelő értékelése és a párhuzamos sor is várt); most csak a kieső árak
+  kerülnek ki a térképből (PriceBook._forget), és kb. 0,02 s. Egy teljes kör CPU-ideje (3 keresés, 3 oldal, 900
+  hirdetés, letöltés nélkül) 2,2 s helyett 1,0 s üres árbázissal is.
 
 ## Élesben kipróbálandó
 - A telefon akkuja és adatforgalma az új kapcsolattal (Android: Beállítások › Akkumulátor és Adathasználat, a Jarvis
@@ -436,6 +442,12 @@
 - A „most kb.” ár (Vételeim) a tárgy címéből vagy termékéből keres kulcsot; a csak leírással (prompt) felvett tárgynál
   az első kiolvasás után jelenik meg.
 - Az azonnali figyelő ütemezése (mikor jön a következő) a memóriában van: újraindítás után rögtön néz egyet.
+- A keresések élesben (Hardverapró, Jófogás, Vinted): a felhőben futó ellenőrzés nem érte el az oldalakat, így a
+  kiolvasást csak a mentett mintán és valódi méretű, a minta szerkezetével felépített oldalakon mérte (100 hirdetés a
+  Hardveraprón kb. 50 ms, a böngészőben a Vinted 96 hirdetése kb. 20 ms). Élesben érdemes megnézni: a Hardverapró
+  keresőoldalán (keres.php) is beáll-e a „legújabb elöl, 100 db” (a naplóban a lista beállítása), és ha a Vinted
+  kártyáján újra megjelenne az eladó linkje az ár mellett, az ne legyen külön „hirdetés” (a böngészős kiolvasó, a
+  feeds.py-tól eltérően, nem szűr a hirdetéscímre).
 - Az Írtam neki kézi jelölés: a Jarvis nem nézi, hogy írtál-e az eladónak (a Vinted-üzenetekből kiolvasható lenne), és
   ha a folyamatban lévő hirdetés közben elkelt vagy lekerült, arról nem szól (a hirdetés oldalát nem nézi újra).
 
