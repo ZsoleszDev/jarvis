@@ -101,6 +101,7 @@ class GuiCfg:
     port: int = 0
     exit_on_close: bool = True
     gpu_bars: bool = True          # a videókártyák terhelése az ablak tetején (kártyánként egy vékony sáv)
+    maximized: bool = True         # az ablak teljes méretben nyílik meg (a felület kitölti a képernyőt)
 
 
 @dataclass

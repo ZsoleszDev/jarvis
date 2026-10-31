@@ -57,6 +57,14 @@ EDITABLE = {"targets", "prompt", "research_wanted", "product", "title", "descrip
             "sold_price", *LEDGER_FIELDS}
 ACTIONS = {"sell", "reply", "price", "cancel", "post", "research", "login", "delist", "sold", "approve", "refresh"}
 IS_WINDOWS = sys.platform == "win32"
+# Az élő események életjele (mp): a gépen nyitott ablaknál sűrű (így pár másodpercen belül kiderül, ha bezárták); a
+# távoli ablaknál (telefon, laptop, a Tailscale-en át) ritka, mert minden életjel felébreszti a telefon rádióját és a
+# Tailscale-t (az api.py továbbítója 60 mp csend után bontana, ez alatt marad).
+LOCAL_PING = 3.0
+REMOTE_PING = 25.0
+# Az alkalmazásablak (Edge --app) teljes méretben nyílik meg (GuiCfg.maximized); ha kicsinyíted, ekkora lesz.
+WINDOW_SIZE = "1280,900"
+FILL_PARAM = "fill=1"       # a címben: az oldal az első betöltéskor kitölti a képernyőt (lásd open_app_window)
 CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
        "connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'")
 
@@ -545,12 +553,13 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         client = self.gui.bus.subscribe()
+        beat = REMOTE_PING if self.headers.get("X-Jarvis-Remote") == "1" else LOCAL_PING
         try:
             while not self.gui.closing.is_set():
                 try:
-                    event = client.get(timeout=3)
+                    event = client.get(timeout=beat)
                 except queue.Empty:
-                    # Életjel: így néhány másodpercen belül kiderül, ha az ablakot bezárták.
+                    # Életjel: így néhány másodpercen belül kiderül, ha az ablakot bezárták (a távoli ablaknál ritkán).
                     self.wfile.write(b": ping\n\n")
                     self.wfile.flush()
                     continue
@@ -1167,9 +1176,16 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def open_app_window(url: str, cfg: GuiCfg) -> bool:
-    """Alkalmazásablakként nyitja meg (címsor és fülek nélkül); ha nem megy, a böngészőben."""
+    """Alkalmazásablakként nyitja meg (címsor és fülek nélkül), alapból teljes méretben (cfg.maximized); ha nem megy,
+    a böngészőben.
+
+    Az Edge a --start-maximized (és a --window-size) kapcsolót csak akkor veszi figyelembe, ha még nem fut; ha már fut
+    (pl. az indítási gyorsítás miatt a háttérben), a meglévő folyamat nyitja az ablakot, a saját méretével. Ezért a cím
+    is kapja (FILL_PARAM): az oldal az első betöltéskor maga tölti ki a képernyőt (app.js)."""
+    if cfg.maximized:
+        url += ("&" if "?" in url else "?") + FILL_PARAM
     if cfg.window and cfg.browser:
-        args = [f"--app={url}", "--window-size=1000,920"]
+        args = [f"--app={url}", f"--window-size={WINDOW_SIZE}"] + (["--start-maximized"] if cfg.maximized else [])
         try:
             if IS_WINDOWS:
                 subprocess.Popen(["cmd", "/c", "start", "", cfg.browser, *args],

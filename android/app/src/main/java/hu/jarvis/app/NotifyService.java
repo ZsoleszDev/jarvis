@@ -10,6 +10,8 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.drawable.Icon;
 import android.media.AudioAttributes;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -42,6 +44,13 @@ import org.json.JSONObject;
  * „Érdemes megnézni” tipp (bizonytalan ár vagy ellenőrizetlen, notice.tip) és az ígéretes új hirdetés gyors jelzése (még az
  * ellenőrzés előtt, notice.pending) egy nagyon rövid pittyenéssel szól, akkor is, ha az alkalmazás nyitva van.
  *
+ * Takarékos kapcsolat: egy kérésben a gép legfeljebb WAIT_S másodpercig vár az eseményekre, és csak akkor válaszol
+ * előbb, ha történt valami (akkor rögtön). Közben nem megy adat, így a Tailscale is elalszik (a forgalom után még 45
+ * másodpercig három másodpercenként küld „életjelet”: eddig az 50 másodperces kérések miatt szinte folyamatosan), és
+ * a telefon rádiója is pihen. Ha nem éri el a gépet, egyre ritkábban próbálja újra (legfeljebb BACKOFF_MAX), de amint
+ * a telefon újra hálózatra (vagy a Tailscale-re) kapcsolódik, rögtön. Egy STALE_S-nél régebbi megérő hirdetésről (pl.
+ * mert sokáig nem érte el a gépet) csendben szól, nem csenget; a régi gyors jelzések („Ígéretes …”) elmaradnak.
+ *
  * A Jarvis értesítéseinek saját, puha hangja van, hogy hallásra is felismerd, de ne legyen bántó (make_sounds.py): a
  * megérő hirdetésé egy halk, háromhangú csengés, utána csenddel (res/raw/jarvis_alert; a riasztás ezt ismétli), a többié
  * (jóváhagyás, értesítés, alku) két rövid, halk hang (jarvis_ping), a tippé egyetlen pittyenés (jarvis_tip). Az Android
@@ -62,6 +71,9 @@ public class NotifyService extends Service {
     static final long ALERT_MS = 2 * 60 * 1000;     // ennyi ideig csenget (ötmásodpercenként) és rezeg
     static final long QUIET_MS = 10 * 60 * 1000;    // utána ennyi szünet
     static final int ALERT_ROUNDS = 6;              // legfeljebb ennyiszer (kb. egy óra), ha addig nem nyitod meg
+    static final int WAIT_S = 600;                  // egy kérésben ennyi ideig vár a gép az eseményekre (mp)
+    static final long BACKOFF_MAX = 5 * 60 * 1000;  // ha nem éri el a gépet, legfeljebb ennyi időnként próbálja újra
+    static final long STALE_S = 20 * 60;            // ennél régebbi megérő hirdetésnél nem csenget
     static final int ONGOING_ID = 1;
     static final int REVOKED_ID = 2;
     static final int CONFIRM_BASE = 1000;
@@ -76,6 +88,8 @@ public class NotifyService extends Service {
     private final Map<Integer, Notification.Builder> deals = new HashMap<>();    // értesítés → a csendes változata
     private final Map<Integer, Integer> rounds = new HashMap<>();
     private final Map<String, Integer> dealIds = new HashMap<>();   // találat → a riasztó értesítése (a helyesbítéshez)
+    private final Object wake = new Object();       // az újrapróbálásig vár (a hálózat visszatérése felébreszti)
+    private ConnectivityManager.NetworkCallback network;
 
     /** Elindítja (ha párosítva van, és kérted a háttérértesítéseket), különben leállítja. */
     static void start(Context context, Prefs prefs) {
@@ -217,6 +231,20 @@ public class NotifyService extends Service {
     public void onCreate() {
         super.onCreate();
         channels(this);
+        // amint a telefon újra hálózatra (vagy a Tailscale-re) kapcsolódik, nem vár a következő újrapróbálásig
+        network = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network available) {
+                synchronized (wake) {
+                    wake.notifyAll();
+                }
+            }
+        };
+        try {
+            getSystemService(ConnectivityManager.class).registerDefaultNetworkCallback(network);
+        } catch (RuntimeException e) {
+            network = null;                               // (enélkül is megy, csak a megszokott ütemben próbál újra)
+        }
     }
 
     private Notification ongoing() {
@@ -268,6 +296,14 @@ public class NotifyService extends Service {
     public void onDestroy() {
         timers.removeCallbacksAndMessages(null);
         running = false;
+        if (network != null) {
+            try {
+                getSystemService(ConnectivityManager.class).unregisterNetworkCallback(network);
+            } catch (RuntimeException e) {
+                // már nincs regisztrálva
+            }
+            network = null;
+        }
         if (worker != null) {
             worker.interrupt();
         }
@@ -301,8 +337,8 @@ public class NotifyService extends Service {
                     refresh();
                 }
                 long after = prefs.lastEvent();
-                JSONObject result = Api.call(server, token, "GET", "/api/v1/events?after=" + after + "&wait=50",
-                        null, 75000);
+                JSONObject result = Api.call(server, token, "GET",
+                        "/api/v1/events?after=" + after + "&wait=" + WAIT_S, null, (WAIT_S + 60) * 1000);
                 JSONArray events = result.optJSONArray("events");
                 for (int i = 0; events != null && i < events.length(); i++) {
                     handle(events.getJSONObject(i));
@@ -315,16 +351,19 @@ public class NotifyService extends Service {
                         "A párosítás megszűnt. Nyisd meg az alkalmazást, és párosítsd újra.");
                 break;
             } catch (Exception e) {
-                // nincs kapcsolat (a gép ki van kapcsolva, vagy a Tailscale nem fut): később újra
+                // nincs kapcsolat (a gép ki van kapcsolva, vagy a Tailscale nem fut): később újra (vagy amint a telefon
+                // újra hálózatra kapcsolódik)
                 synced = false;
                 connected = false;
                 refresh();
                 try {
-                    Thread.sleep(backoff);
+                    synchronized (wake) {
+                        wake.wait(backoff);
+                    }
                 } catch (InterruptedException stop) {
                     break;
                 }
-                backoff = Math.min(backoff * 2, 60000);
+                backoff = Math.min(backoff * 2, BACKOFF_MAX);
             }
         }
         if (running) {
@@ -442,6 +481,12 @@ public class NotifyService extends Service {
         show(this, CHANNEL_NEWS, id, notice.optString("title", "Mégsem"), notice.optString("text"));
     }
 
+    /** Régi-e az esemény (STALE_S): pl. ha sokáig nem érte el a gépet, és most jön meg egyszerre sok. */
+    private static boolean stale(JSONObject event) {
+        double at = event.optDouble("at", 0);
+        return at > 0 && System.currentTimeMillis() / 1000.0 - at > STALE_S;
+    }
+
     private void handle(JSONObject event) {
         String type = event.optString("type");
         NotificationManager manager = getSystemService(NotificationManager.class);
@@ -479,7 +524,11 @@ public class NotifyService extends Service {
                 && !event.optJSONObject("notice").optString("deal").isEmpty()) {
             JSONObject notice = event.optJSONObject("notice");
             int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
-            timers.post(() -> dealAlert(id, notice));          // megérő hirdetés: akkor is, ha az ablak nyitva van
+            if (stale(event)) {                                // régi: csendben szól, nem csenget
+                timers.post(() -> manager.notify(id, dealBuilder(CHANNEL_DEAL_QUIET, id, notice).build()));
+            } else {
+                timers.post(() -> dealAlert(id, notice));      // megérő hirdetés: akkor is, ha az ablak nyitva van
+            }
         } else if ("notification".equals(type) && event.optJSONObject("notice") != null
                 && !event.optJSONObject("notice").optString("haggle").isEmpty()) {
             JSONObject notice = event.optJSONObject("notice");
@@ -492,8 +541,9 @@ public class NotifyService extends Service {
                     || !event.optJSONObject("notice").optString("pending").isEmpty())) {
             JSONObject notice = event.optJSONObject("notice");
             // érdemes megnézni, vagy egy ígéretes hirdetés, amit most ellenőriz: egy rövid pittyenés, ha nyitva is az
-            // ablak (a sürgős riasztás csak az ellenőrzött ajánlatról jön)
-            if (!notice.optBoolean("quiet")) {
+            // ablak (a sürgős riasztás csak az ellenőrzött ajánlatról jön); a régi gyors jelzés már nem érdekes
+            boolean late = !notice.optString("pending").isEmpty() && stale(event);
+            if (!notice.optBoolean("quiet") && !late) {
                 int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
                 show(this, CHANNEL_TIP, id, notice.optString("title", "Érdemes megnézni"), notice.optString("text"));
             }

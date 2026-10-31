@@ -13,9 +13,14 @@ A telepítés és a párosítás leírása a fő README-ben van (Telefonos és l
 
 - `MainActivity`: a gép felülete egy WebView-ban (a cím: a gép Tailscale-címe, `?t=<eszközkulcs>`), fájlválasztó
   a fotókhoz, letöltések. Párosítás nélkül, vagy ha a gép nem érhető el, a
-  beállító oldal jön (`assets/setup.html`).
+  beállító oldal jön (`assets/setup.html`). Ha az alkalmazás egy percnél tovább háttérben van, a felület elalszik
+  (`window.jarvisSleep()`: bezárja az élő csatornát, és `WebView.pauseTimers()`), előjövetelkor felébred
+  (`window.jarvisWake()`: újracsatlakozik, a gép visszajátssza, ami közben történt); így a háttérben nem forgalmaz.
 - `NotifyService`: háttérszolgáltatás, a gép eseményeit kérdezi le (`/api/v1/events`, hosszú lekérdezéssel), és
-  értesít. Firebase nem kell hozzá. Egy `sold` gombos értesítésnél (`notice.actions`) a gomb a `MainActivity`-t
+  értesít. Firebase nem kell hozzá. Egy kérés 10 percig vár (`WAIT_S`; ha történik valami, a válasz rögtön jön), így
+  a várakozás alatt nem megy adat, és a telefon rádiója meg a Tailscale is pihen. Ha nem éri el a gépet, egyre
+  ritkábban próbálja újra (legfeljebb 5 percenként), de a hálózat visszatérésekor (`NetworkCallback`) rögtön; a 20
+  percnél régebbi megérő hirdetésről (`STALE_S`) csendben szól, a régi gyors jelzés (`notice.pending`) elmarad. Egy `sold` gombos értesítésnél (`notice.actions`) a gomb a `MainActivity`-t
   nyitja meg (`hu.jarvis.app.SOLD`, a tárggyal); a felület a `JarvisApp.pending()` `sold` részéből a tárgy Eladva
   ablakát mutatja. Az értesítésből közvetlenül semmit nem jelöl meg és nem vesz le. Egy megérő, ellenőrzött hirdetés (`notice.deal`)
   a „Megérő hirdetés” csatornán szól, akkor is, ha az alkalmazás nyitva van: `FLAG_INSISTENT`-tel két percig

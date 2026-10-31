@@ -116,6 +116,8 @@ exit_on_close = true
 # Az ablak tetején kártyánként egy vékony sáv: a videókártyák terhelése az utolsó percben
 # (fölé víve az egeret: terhelés, VRAM, hőmérséklet)
 gpu_bars = true
+# Az ablak teljes méretben nyílik meg, és a felület kitölti a képernyőt (false: kisebb ablak)
+maximized = true
 
 [work]
 # A Munka menü. Első munkája az Adás: kipipálod, hova kerüljön, feltöltöd a fotókat, leírod,

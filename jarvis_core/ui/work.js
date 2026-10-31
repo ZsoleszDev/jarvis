@@ -1175,17 +1175,17 @@
       ${((deals.money || {}).warnings || []).map((w) => `<p class="warn"><small>${esc(w)}</small></p>`).join("")}
       ${funnelLine(false) ? `<p class="funnel"><small class="muted">${esc(funnelLine(false))}</small></p>` : ""}
       <h3 class="section-title">Legutóbbi találatok</h3>
-      <ul class="dealist">${found || '<li class="muted">Még nincs találat.</li>'}</ul>
+      <ul class="dealist wide">${found || '<li class="muted">Még nincs találat.</li>'}</ul>
       ${tips ? `<h3 class="section-title">Érdemes megnézni <small class="muted">bizonytalan ár, ellenőrizetlen vagy alkuval</small></h3>
       <p><small class="muted">Olcsónak látszik, de kevés hasonló árat találtam, vagy nem tudtam ellenőrizni (az adatlapját, az
         állapotát), ezért nem biztos, hogy megéri; vagy kicsit drága, de egy kis alkuval megérné. Nézd meg magad; ha közben
         kiderül, újra felmérem, és ha megéri, szólok.</small></p>
-      <ul class="dealist">${tips}</ul>` : ""}
+      <ul class="dealist wide">${tips}</ul>` : ""}
       ${auctions ? `<h3 class="section-title">Licitlista <small class="muted">Vatera</small></h3>
       <p><small class="muted">Ezeknél a licit még nem zárul hamarosan, de megérheti beszállni. Ha az adatlapját már megnéztem, a
         javasolt összeget a Vaterán most legmagasabb ajánlatként beállíthatod (addig licitál helyetted). A zárás előtt még
         egyszer megnézem (a mostani árát és a mostani beállításaidat), és szólok.</small></p>
-      <ul class="dealist">${auctions}</ul>` : ""}
+      <ul class="dealist wide">${auctions}</ul>` : ""}
       ${section("settings", "Beállítások", `
         <div class="fields limits">
           <div class="field"><label for="d-maxbuy">Max. vételár (Ft)</label>
