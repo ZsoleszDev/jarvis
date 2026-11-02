@@ -61,6 +61,14 @@ class WorkHarness:
         self.store.add_photo(item.id, jpeg())
         return self.store.update(item.id, **{**SHIRT, **values})
 
+    def purge(self, *ids: str) -> None:
+        """A teszt tárgyai nyom nélkül (takarítás): törölve, és az eladott tárgyak archívumából is, különben az eladásuk
+        a közös Jarvis havi keretébe és Elemzésébe számítana a következő tesztekben (ItemStore.archived)."""
+        for item_id in ids:
+            self.store.delete(item_id)
+        with self.store._lock:
+            self.store._archive = [r for r in self.store._archive if r.get("id") not in ids]
+
     def close(self) -> None:
         self.app.shutdown()
         self.server.stop()
@@ -234,7 +242,7 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertEqual(self.post("/api/work/update", {"id": item.id, "fields": {"size": "M"}})[0], 200)
         self.assertEqual(json.loads((self.h.store.root / item.id / "item.json").read_text(encoding="utf-8"))["title"],
                          title, "a lemezen sincs ott")
-        self.h.store.delete(item.id)
+        self.h.purge(item.id)
 
     def test_a_purchase_is_booked_once_even_if_sent_twice(self):
         """Megvettem kétszer (dupla kattintás, két egyszerre érkező vagy egy újraküldött kérés): egy találatból egy
@@ -297,8 +305,7 @@ class WorkSecurityTests(unittest.TestCase):
         sold = self.h.store.create(prompt="Eladott", bought_price=1000)
         self.h.store.mark(sold.id, sold=True)
         self.assertEqual(self.post("/api/work/ledger", {"action": "cancel", "id": sold.id})[0], 400)
-        for item in (plain, sold):
-            self.h.store.delete(item.id)
+        self.h.purge(plain.id, sold.id)
         # böngésző nélkül olvasott kártya: a cím kerül a leírásba (a város, az eladó nélkül)
         deals._remember({"id": "d2", "url": "https://hardverapro.hu/apro/2.html", "site": "Hardverapró",
                          "text": "Sony WH-1000XM4 fejhallgató Budapest 30 000 Ft ma 14:01 eladó31",
@@ -352,8 +359,7 @@ class WorkSecurityTests(unittest.TestCase):
         self.h.store.mark(others[0].id, sold=True)
         self.assertEqual(self.post("/api/work/ledger", {"action": "cancel", "id": others[2].id})[0], 400,
                          "egy darabja már elkelt")
-        for item in others:
-            self.h.store.delete(item.id)
+        self.h.purge(*(item.id for item in others))
 
     def test_instant_watch_from_the_window(self):
         """Azonnali figyelő: egy keresőszó két oldalon, egy oldalcím, szünet és törlés; az Indítás és a Leállítás vele együtt
