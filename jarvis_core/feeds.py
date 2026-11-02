@@ -63,7 +63,10 @@ MAX_ROWS = 120            # egy találati oldal összes hirdetése (a Hardverapr
 # A hirdetések címe az oldalon (ha ilyen link is van a kártyák között, csak ezek számítanak; ha egy sem, mind).
 LISTING_URL = {"hardverapro": re.compile(r"/apro/[^/]+/"), "jofogas": re.compile(r"_\d+\.htm")}
 # Az összeg nem kezdődhet egy szám közepén, és nem lehet egy időpont perce: a „ma 12:54 997 Ft” ára 997 Ft, nem 54 997.
-_PRICE = r"(?<![\d:])(\d{1,3}(?:[   .]\d{3})+|\d{2,7})(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])"
+# Az ezres tagolás szóköz vagy pont (magyarul), vagy vessző a tizedespont előtt: a Vinted a hirdetés linkjének
+# leírásában angolul írja („1,490.00 Ft”); eddig ebből 490 Ft lett, és egy 143 401 Ft-os kártya 401 Ft-nak látszott.
+_PRICE = (r"(?<![\d:])(\d{1,3}(?:[   .]\d{3})+|\d{1,3}(?:,\d{3})+(?!\d)|\d{2,7})"
+          r"(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])")
 PRICE_RE = re.compile(_PRICE, re.IGNORECASE)
 FIXED_RE = re.compile(r"(?:villámár|fix ?ár|azonnal megvehető|buy it now)\D{0,4}" + _PRICE, re.IGNORECASE)
 AUCTION_RE = re.compile(r"(licit|aukció|árverés|jelenlegi ár|kikiáltási ár|\bbids?\b|auction)", re.IGNORECASE)

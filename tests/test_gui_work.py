@@ -152,8 +152,9 @@ class WorkSecurityTests(unittest.TestCase):
                          (200, True, ["hardverapro", "vinted"], 8000))
         self.assertEqual(data["journal"][0]["text"], "Bekapcsoltad a napközbeni böngészést.")
         self.assertTrue(any(lane["name"] == "Vinted: Elektronika" for lane in data["lanes"]), "egy egész kategória")
-        # a Vinted friss listájának gyakorisága (alapból 20 perc; 0: a régi, kétóránkénti munkamenetek)
-        self.assertEqual((data["browse"]["glance"], data["browse"]["glance_choices"]), (20, [0, 10, 15, 20, 30, 60]))
+        # a Vinted friss listájának gyakorisága (alapból 5 perc; 0: a régi, kétóránkénti munkamenetek)
+        self.assertEqual((data["browse"]["glance"], data["browse"]["glance_default"], data["browse"]["glance_choices"]),
+                         (5, 5, [0, 3, 5, 10, 15, 20, 30, 60]))
         status, data = self.post("/api/work/deals", {"action": "browse", "glance": 15})
         self.assertEqual((status, data["browse"]["glance"]), (200, 15))
         self.assertEqual(self.post("/api/work/deals", {"action": "browse", "glance": 7})[0], 400)

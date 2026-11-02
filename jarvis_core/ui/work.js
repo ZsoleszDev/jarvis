@@ -1310,9 +1310,12 @@
         <div class="checks">${deals.sites.map((s) => `<label class="check"><input type="checkbox" name="d-bsite" value="${esc(s.key)}" ${(b.sites || []).includes(s.key) ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>
         <div class="row"><button type="button" class="small" id="d-bsave">Oldalak mentése</button></div>
         ${(b.glance_sites || []).some((k) => (b.sites || []).includes(k)) ? `<div class="row"><label>A Vinted legújabb hirdetései:
-          <select id="d-bglance">${(b.glance_choices || [0, 10, 15, 20, 30, 60]).map((m) => `<option value="${m}"${m === (b.glance ?? 20) ? " selected" : ""}>${m ? `${m} percenként egy oldal${m === 20 ? " (alapból)" : ""}` : "kétóránként, hosszabb munkamenetben"}</option>`).join("")}</select></label></div>
-        <p><small class="muted">Ahogy egy ember frissíti: egy oldal a legújabbakkal, a többi oldal munkája közé ékelve. Sűrűbben
-          hamarabb látom az újat, de a Vinted robot-ellenőrzése is hamarabb jöhet (akkor aznap már nem nézem).</small></p>` : ""}
+          <select id="d-bglance">${(b.glance_choices || [0, 3, 5, 10, 15, 20, 30, 60]).map((m) => `<option value="${m}"${m === (b.glance ?? b.glance_default ?? 5) ? " selected" : ""}>${m ? `${m} percenként egy oldal${m === (b.glance_default ?? 5) ? " (alapból)" : ""}` : "kétóránként, hosszabb munkamenetben"}</option>`).join("")}</select></label></div>
+        <p><small class="muted">Ahogy egy ember frissíti: egy oldal a legújabbakkal, a többi oldal munkája közé ékelve, a be nem
+          jelentkezett olvasóprofilban (a fiókodat nem érinti). Sűrűbben hamarabb látom az újat, de a Vinted robot-ellenőrzése
+          is hamarabb jöhet: akkor egy órát várok, ha újra kéri, egyre többet (ugyanerről a netkapcsolatról a saját
+          Vinted-böngészésednél is kérhet ilyet). Egy kategóriát vagy keresést lent, az Indulóoldalaknál vehetsz fel; több
+          Vinted-indulóoldalt felváltva nézek.</small></p>` : ""}
         <details class="setup" data-fold="lanes"${openSections.has("lanes") ? " open" : ""}><summary>Indulóoldalak, és mit hoztak eddig</summary>
           <p><small class="muted">Alapból egész kategóriákat nézek, a legújabb hirdetésekkel elöl: mindent, ami újonnan felkerül.
             Bármelyiket kikapcsolhatod, és felvehetsz sajátot (egy oldal címét vagy egy keresőszót).</small></p>
@@ -2042,8 +2045,8 @@
   async function deleteSold() {
     const n = [...items.values()].filter((item) => item.sold && !item.busy).length;
     const ok = await ask("Eladottak törlése", `Törlöd mind a ${n} eladott tárgyat a hirdetéseid közül?\nAz Elemzés adatai ` +
-      "(a haszon ebben a hónapban, összesen és havonta, a havi keret) megmaradnak; a tárgyak mappája a munka mappán " +
-      "belül a _torolt mappába kerül.", "Törlés");
+      "(a haszon ebben a hónapban, összesen és havonta, a havi keret) megmaradnak; a tárgyak a fotóikkal együtt " +
+      "véglegesen törlődnek a lemezről.", "Törlés");
     if (!ok) return;
     const result = await J.postJson("/api/work/delete", { sold: true });
     if (!result.ok) { J.toast(result.error || "Nem sikerült."); return; }
@@ -2524,8 +2527,9 @@
 
   async function remove(item) {
     const ok = await ask("Hirdetés törlése",
-      `Biztosan törlöd: ${item.name}?\n(Az oldalakról ez nem veszi le. A munka mappán belül a _torolt mappába kerül.` +
-      (item.sold ? " Eladott tárgy: az Elemzésben a haszna megmarad.)" : ")"), "Törlés");
+      `Biztosan törlöd: ${item.name}?\n(Az oldalakról ez nem veszi le. ` + (item.sold
+        ? "Eladott tárgy: a fotóival együtt véglegesen törlődik a lemezről, az Elemzésben a haszna megmarad.)"
+        : "A munka mappán belül a _torolt mappába kerül.)"), "Törlés");
     if (!ok) return;
     const result = await J.postJson("/api/work/delete", { id: item.id });
     if (!result.ok) { J.toast(result.error || "Nem sikerült."); return; }

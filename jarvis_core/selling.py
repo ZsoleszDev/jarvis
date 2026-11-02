@@ -474,8 +474,8 @@ def process_photo(data: bytes) -> tuple[bytes, bytes]:
 # --- tárolás ---------------------------------------------------------------------------
 
 # Az eladott tárgyak archívuma (az eladas mappában): ha egy eladott tárgyat törölsz, eltűnik a hirdetéseid közül (a
-# mappája a _torolt mappába kerül), de az Elemzés adatai (vételár, költségek, eladási ár és nap, eladási költségek,
-# honnan, megjegyzés) itt megmaradnak: a haszon ebben a hónapban, összesen, havonta és a havi keret ugyanaz marad.
+# mappája a fotóival együtt véglegesen törlődik), de az Elemzés adatai (vételár, költségek, eladási ár és nap, eladási
+# költségek, honnan, megjegyzés) itt megmaradnak: a haszon ebben a hónapban, összesen, havonta és a havi keret ugyanaz.
 SOLD_ARCHIVE = "_eladott.json"
 # Ami nem kell az Elemzéshez (a fotók a tárgy mappájával együtt mentek; az árkutatás és a hibacsomag nagy).
 ARCHIVE_DROP = ("photos", "photos_alt", "photo_checks", "research", "pending", "busy")
@@ -928,15 +928,23 @@ class ItemStore:
             return old if old is not None else posted
 
     def delete(self, item_id: str) -> None:
-        """A tárgy a _torolt mappába kerül (onnan kézzel visszahozható). Ha eladott tárgy, előbb az Elemzés adatai
-        az eladások archívumába kerülnek (archived): a haszna a statisztikában marad. Ha ez nem sikerül, nem törli."""
+        """A tárgy a _torolt mappába kerül (onnan kézzel visszahozható). Az eladott tárgy viszont a fotóival együtt
+        véglegesen törlődik a lemezről, de előbb az Elemzés adatai az eladások archívumába kerülnek (archived): a haszna
+        a statisztikában marad; ha ez nem sikerül, nem törli. (Ha a mappáját nem lehet törölni, pl. Windowson egy épp
+        megnyitott fotó miatt, ami megmaradt, a _torolt mappába kerül.)"""
         with self._lock:
             gone = self.get(item_id)
+            folder = self.folder(item_id)
             if gone.sold:
                 self._archive_sold(gone)
-            trash = self.root / "_torolt"
-            trash.mkdir(exist_ok=True)
-            shutil.move(str(self.folder(item_id)), str(trash / f"{item_id}-{int(time.time())}"))
+                try:
+                    shutil.rmtree(folder)
+                except OSError:
+                    pass
+            if folder.exists():
+                trash = self.root / "_torolt"
+                trash.mkdir(exist_ok=True)
+                shutil.move(str(folder), str(trash / f"{item_id}-{int(time.time())}"))
             del self._items[item_id]
             for other in self._relink(gone):     # akiknél ennek a fotója is megvolt
                 self._announce(other)

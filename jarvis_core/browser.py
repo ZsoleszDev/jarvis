@@ -665,7 +665,7 @@ SNAPSHOT_JS = r"""
 # látható ár csak a mostani ajánlat.
 LISTINGS_JS = r"""
 () => {
-  const PRICE = /(?<![\d:])(\d{1,3}(?:[   .]\d{3})+|\d{2,7})(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])/i;
+  const PRICE = /(?<![\d:])(\d{1,3}(?:[   .]\d{3})+|\d{1,3}(?:,\d{3})+(?!\d)|\d{2,7})(?:[,.]\d{1,2})?\s*(?:Ft|HUF|forint)(?![a-zá-ű])/i;
   const FIXED = new RegExp('(?:villámár|fix ?ár|azonnal megvehető|buy it now)\\D{0,4}' + PRICE.source, 'i');
   const AUCTION = /(licit|aukció|árverés|jelenlegi ár|kikiáltási ár|\bbids?\b|auction)/i;
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();

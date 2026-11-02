@@ -242,6 +242,14 @@
 - Az eladott tárgyak törlése (Hirdetéseim › Eladva › Eladottak törlése, vagy egy tárgy Törlése): az Elemzés adatai az
   eladások archívumába kerülnek (eladas/_eladott.json, ItemStore.archived), és a haszon, a havi bontás, a havi keret
   és az Eladva összesítője ugyanúgy számol velük.
+- A Vinted-árak angol számformája: a kártya linkjének leírásában az ár „1,490.00 Ft” alakú, és ebből eddig 490 Ft lett
+  (a „143,401.00 Ft”-ból 401): minden ezer forint fölötti Vinted-hirdetés „nem valódi árnak” látszott, és kiesett, az
+  árbázisba pedig hibás árak kerültek. Az ármintát (feeds._PRICE, browser.LISTINGS_JS) a vesszős ezres tagolásra is
+  felkészítettük, és az árbázis betöltéskor egyszer kidobja a Vintedről jött, 1000 Ft alatti árakat (PRICE_FIX).
+- A Vinted friss listája alapból 5 percenként (eddig 20; 3 perc is választható, GLANCE_MIN 2), a régi alapot (ha nem a
+  felületen állítottad be: glance_set) az új váltja; robot-ellenőrzéskor egy óra szünet, aznap ismételten kétszer
+  annyi (legfeljebb 4 óra), másnap elölről (eddig egész nap).
+- Az eladott tárgy törlése a fotóival együtt véglegesen törli a mappáját (a nem eladotté marad a _torolt mappában).
 
 ## Élesben kipróbálandó
 - A telefon akkuja és adatforgalma az új kapcsolattal (Android: Beállítások › Akkumulátor és Adathasználat, a Jarvis
@@ -458,6 +466,8 @@
   keresőoldalán (keres.php) is beáll-e a „legújabb elöl, 100 db” (a naplóban a lista beállítása), és ha a Vinted
   kártyáján újra megjelenne az eladó linkje az ár mellett, az ne legyen külön „hirdetés” (a böngészős kiolvasó, a
   feeds.py-tól eltérően, nem szűr a hirdetéscímre).
+- A Vinted 5 perces friss listája élesben: a Naplóban látszik, ha robot-ellenőrzést kér (akkor 10 percre érdemes
+  visszavenni a fülön), és hogy a Vinted-találatok ára most egyezik-e a hirdetésével (az angol számforma javítása).
 - A Vinted magyar űrlapja élesben (a hibacsomag elemei alapján tesztelve): hogy a választás után a gomb felirata
   a kiválasztottat mutatja-e (a kitöltő ezt nem igényli), és a márka „Nameless”-féle ritka nevei a keresőben.
 - Az Írtam neki kézi jelölés: a Jarvis nem nézi, hogy írtál-e az eladónak (a Vinted-üzenetekből kiolvasható lenne), és

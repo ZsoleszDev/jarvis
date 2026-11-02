@@ -1,7 +1,7 @@
-"""A Vinted friss listája (deals.GLANCE_*): a legújabb hirdetések alapból 20 percenként, egyetlen oldal, a többi oldal
-munkamenetei közé ékelve, ahogy egy ember frissíti egész nap. Nem kér többet a Vintedtől, mint a régi, kétóránkénti
-munkamenetek, de egy új hirdetés legfeljebb kb. 20 perc múlva kiderül (eddig akár 2,5 óra). A robot-ellenőrzésnél aznap
-leáll; a gyakoriság a felületről állítható, és a régi munkamenetek is visszakapcsolhatók (0)."""
+"""A Vinted friss listája (deals.GLANCE_*): a legújabb hirdetések alapból 5 percenként (2026 novemberéig 20), egyetlen
+oldal, a többi oldal munkamenetei közé ékelve, ahogy egy ember frissíti egész nap; egy új hirdetés legfeljebb pár perc
+múlva kiderül (régen akár 2,5 óra). A robot-ellenőrzésnél egy órát vár, ha újra kéri, egyre többet; a gyakoriság a
+felületről állítható, és a régi munkamenetek is visszakapcsolhatók (0)."""
 from __future__ import annotations
 
 import random
@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_deals import NORMAL, PAGE, HunterCase, listing  # noqa: E402
 
-from jarvis_core.deals import GLANCE_DEFAULT, DealError  # noqa: E402
+from jarvis_core.deals import GLANCE_CHOICES, GLANCE_DEFAULT, DealError  # noqa: E402
 from jarvis_core.journal import day_of  # noqa: E402
 from jarvis_core.selling import vinted_slug_title, vinted_titles  # noqa: E402
 
@@ -57,11 +57,11 @@ class GlanceTests(HunterCase):
                                         "a Vinteden nincs munkamenet")
 
     def test_the_newest_vinted_listings_every_twenty_minutes_between_the_other_sites(self):
-        """Alapból 20 percenként (±20%) egy oldal a Vinted legújabbjaiból (az Elektronika kategória), a Hardverapró
-        munkamenetei közé ékelve; a Vinteden nincs munkamenet, és három óra alatt nem több letöltés, mint régen (egy
-        munkamenet 10 oldal volt, két óra szünettel), csak egyenletesen elosztva."""
+        """20 percre állítva 20 percenként (±20%) egy oldal a Vinted legújabbjaiból (az Elektronika kategória), a
+        Hardverapró munkamenetei közé ékelve; a Vinteden nincs munkamenet, és három óra alatt nem több letöltés, mint
+        régen (egy munkamenet 10 oldal volt, két óra szünettel), csak egyenletesen elosztva."""
         self.assertEqual(self.hunter.state()["browse"]["glance"], GLANCE_DEFAULT)
-        self.hunter.set_browse(on=True, sites=["hardverapro", "vinted"])
+        self.hunter.set_browse(on=True, sites=["hardverapro", "vinted"], glance=20)
         text = self.hunter.run(notify=self.notify)
         self.assertEqual(text, "Vinted, a legújabbak: Vinted: Elektronika: 1 hirdetés, 1 új.")
         self.assertEqual([url for _at, url in self.loads], [ELECTRONICS])
@@ -84,9 +84,28 @@ class GlanceTests(HunterCase):
                          "az első órában a kütyü új volt")
         self.assertRegex(hours[0], r"Vinted, a legújabbak: [34] pillantás, \d+ hirdetés \(0 új\)\.$", "utána már nem")
 
+    def test_every_five_minutes_by_default(self):
+        """Alapból 5 percenként (±20%) néz rá, mert a Vinteden sokan egész nap frissítik a megérő kategóriákat. A régi
+        alapot (20 perc), ha nem te állítottad be, az új váltja; amit a felületen választottál, az marad."""
+        self.assertEqual((GLANCE_DEFAULT, list(GLANCE_CHOICES)), (5, [0, 3, 5, 10, 15, 20, 30, 60]))
+        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.run(notify=self.notify)
+        self.follow(60)
+        looks = self.vinted()
+        gaps = [(b - a) / 60 for a, b in zip(looks, looks[1:])]
+        self.assertTrue(10 <= len(looks) <= 15, looks)
+        self.assertTrue(all(4 <= gap <= 7 for gap in gaps), gaps)
+        with self.hunter._lock:
+            self.hunter._data["browse"]["glance"] = 20      # egy régebbi beállítás: a régi alap, nem te választottad
+            self.hunter._data["browse"].pop("glance_set", None)
+            self.hunter._save()
+        self.assertEqual(self.make().state()["browse"]["glance"], 5, "a régi alap helyett az új")
+        self.hunter.set_browse(glance=20)
+        self.assertEqual(self.make().state()["browse"]["glance"], 20, "amit választottál, az marad")
+
     def test_a_cheap_new_vinted_listing_is_found_on_the_next_glance(self):
         """Egy új, olcsó hirdetés a következő pillantásnál kiderül (nem két óra múlva): az adatlapját megnézi, és szól."""
-        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.set_browse(on=True, sites=["vinted"], glance=20)
         self.hunter.run(notify=self.notify)
         self.assertEqual(self.notices, [])
         self.browser.by_url = [("vinted.hu", [listing(41, "Gigabyte RTX 3060 Ti Gaming OC", 60000, "www.vinted.hu"),
@@ -118,7 +137,7 @@ class GlanceTests(HunterCase):
 
     def test_several_vinted_pages_take_turns(self):
         """Több Vinted-indulóoldal felváltva (a legrégebben nézett jön), így a kérések száma ugyanannyi marad."""
-        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.set_browse(on=True, sites=["vinted"], glance=20)
         self.hunter.lane_add("Lego", "vinted")
         self.follow(70)
         urls = [url for _at, url in self.loads if "vinted.hu" in url]
@@ -127,8 +146,8 @@ class GlanceTests(HunterCase):
         self.assertIn("search_text=Lego", urls[1])
 
     def test_the_cadence_is_set_from_the_screen_and_kept(self):
-        """A gyakoriság a felületről (10, 15, 20, 30, 60 perc, vagy 0: a régi munkamenetek), a naplóba is; az újraindítás
-        után is megmarad. Ami nem ezek közül való, arra hibaüzenet."""
+        """A gyakoriság a felületről (3, 5, 10, 15, 20, 30, 60 perc, vagy 0: a régi munkamenetek), a naplóba is; az
+        újraindítás után is megmarad. Ami nem ezek közül való, arra hibaüzenet."""
         self.hunter.set_browse(on=True, sites=["vinted"])
         self.hunter.run(notify=self.notify)
         first = self.vinted()[-1]
@@ -142,31 +161,49 @@ class GlanceTests(HunterCase):
             self.hunter.set_browse(glance=7)
         state = self.hunter.set_browse(glance=0)
         self.assertEqual(self.journal()[0], "A Vintedet ezentúl kétóránként nézem, hosszabb munkamenetekben.")
-        self.assertEqual(state["browse"]["glance_choices"], [0, 10, 15, 20, 30, 60])
+        self.assertEqual(state["browse"]["glance_choices"], [0, 3, 5, 10, 15, 20, 30, 60])
         before = len(self.vinted())
         self.follow(15, sessions=True)
         self.assertEqual(self.hunter._data["session"].get("site"), "vinted", "a régi mód: munkamenet a Vinteden")
         self.assertGreater(len(self.vinted()), before)
 
-    def test_a_captcha_stops_the_glances_for_the_day(self):
-        """Ha a Vinted robot-ellenőrzést kér, aznap már nem néz rá (nem próbálja megkerülni), szól, és másnap folytatja."""
+    def test_a_captcha_pauses_the_glances_for_a_while(self):
+        """Ha a Vinted robot-ellenőrzést kér, nem próbálja megkerülni: egy órát vár (szól), ha újra kéri, kettőt, aztán
+        négyet; ha elmúlt, a szokásos ütemben folytatja, és másnap elölről számol. (Eddig aznap már nem nézte.)"""
         self.browser.challenge = {"vinted.hu"}
         self.hunter.set_browse(on=True, sites=["vinted"])
         self.hunter.run(notify=self.notify)
         self.assertEqual([t for _k, t, _x, _e in self.notices], ["Vinted: robot-ellenőrzés"])
         self.assertIn("a legújabb hirdetéseit néztem", self.notices[0][2])
-        self.assertEqual(self.hunter.note(), "Vinted: ma robot-ellenőrzést kért, holnap folytatom.")
-        self.follow(120)
-        self.assertEqual(len(self.vinted()), 1, "aznap nem próbálja újra")
+        self.assertRegex(self.hunter.note(), r"^Vinted: robot-ellenőrzést kért, \d\d:\d\d-ig nem nézem\.$")
+        self.follow(59)
+        self.assertEqual(len(self.vinted()), 1, "egy órán át nem nézi")
+        self.follow(2)
+        self.assertEqual(len(self.vinted()), 2, "egy óra múlva újra megpróbálja")
+        self.assertEqual(len(self.notices), 1, "aznap egyszer szól")
+        self.follow(118)
+        self.assertEqual(len(self.vinted()), 2, "másodszorra két órát vár")
+        self.follow(2)
+        self.assertEqual(len(self.vinted()), 3)
         self.browser.challenge = set()
+        self.follow(241)
+        looks = len(self.vinted())
+        self.assertEqual(looks, 4, "harmadszorra négy órát vár, utána megint megy")
+        self.follow(20)
+        self.assertGreaterEqual(len(self.vinted()) - looks, 3, "utána a szokásos 5 perces ütem")
+        mark = self.hunter._data["sites_state"]["glance"]["vinted"]
+        self.assertEqual(mark["strikes"], 3)
+        self.browser.challenge = {"vinted.hu"}
         self.clock.now += 86400
-        self.assertTrue(self.hunter.available(), "másnap újra")
+        self.follow(5)
+        self.assertEqual((mark["strikes"], round((mark["blocked_until"] - self.clock.now) / 60)), (1, 60 - 5 + 1),
+                         "másnap elölről: egy óra")
 
     def test_a_page_full_of_new_listings_is_looked_at_again_sooner(self):
         """Ha egy pillantáson szinte csupa új hirdetés van (két pillantás között több jött, mint amennyi egy oldalon
         elfér: lemaradhatott valami), a következő fele annyi idő múlva jön (de legalább 5 perc múlva); ha már ismerősek is
         vannak rajta, a szokásos ütemben."""
-        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.set_browse(on=True, sites=["vinted"], glance=20)
         page = [listing(500 + n, f"Retró kütyü Y{n}", 9000, "www.vinted.hu") for n in range(12)]
         self.browser.by_url = [("vinted.hu", page)]
         self.hunter.run(notify=self.notify)
@@ -178,19 +215,19 @@ class GlanceTests(HunterCase):
         self.assertEqual(len(self.vinted()), 2)
         self.assertTrue(16 <= (mark["next"] - mark["at"]) / 60 <= 24, "egy új a sok ismerős között: a szokásos ütem")
         self.assertNotIn("sok új jött", self.hunter.note())
-        self.hunter.set_browse(glance=10)
+        self.hunter.set_browse(glance=3)
         self.browser.by_url = [("vinted.hu", [listing(700 + n, f"Retró kütyü W{n}", 9000, "www.vinted.hu")
                                               for n in range(12)])]
         while len(self.vinted()) < 3:
             self.follow(1)
-        self.assertTrue(5 <= (mark["next"] - mark["at"]) / 60 <= 6, "10 percesnél is legalább 5 perc múlva")
+        self.assertTrue(2 <= (mark["next"] - mark["at"]) / 60 <= 2.5, "3 percesnél is legalább 2 perc múlva")
 
     def test_the_glances_follow_the_time_of_day(self):
         """A pillantások megtanulják, a nap melyik órájában jön sok új hirdetés (percenként, hogy a sűrűbb pillantás ne
         torzítsa): csúcsidőben fele annyi időnként néz, csendes órában kétszer annyi időnként (legfeljebb óránként), és
         a felületen látszik, miért. Kevés megfigyelésből még nem."""
         at = lambda h, m=0: time.mktime((2027, 1, 15, h, m, 0, 0, 0, -1))  # noqa: E731
-        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.set_browse(on=True, sites=["vinted"], glance=20)
         mark = self.hunter._data["sites_state"]["glance"].setdefault("vinted", {})
         for hour in range(24):                 # este 19–21 óra között jön a legtöbb új, éjjel alig
             for _ in range(3):
@@ -219,7 +256,7 @@ class GlanceTests(HunterCase):
         """Csak a gép üzemidejében (a nap órái), mint a böngészés; az este félbemaradt óra reggel kerül a naplóba."""
         at = lambda d, h, m=0: time.mktime((2027, 1, d, h, m, 0, 0, 0, -1))  # noqa: E731
         self.hunter.set_day(8, 22)
-        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.set_browse(on=True, sites=["vinted"], glance=20)
         self.clock.now = at(15, 21, 30)
         self.hunter.run(notify=self.notify)
         self.follow(29)                        # 21:59-ig még egy pillantás
