@@ -2,6 +2,7 @@
 keresés ehhez az árhoz mérve, és csak a jelöltekre egy rövid modellkérdés."""
 from __future__ import annotations
 
+import json
 import random
 import re
 import sys
@@ -1481,6 +1482,29 @@ class PriceBookTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_misread_vinted_prices_are_dropped_once(self):
+        """A rosszul olvasott Vinted-árak (az angol számformából csak az utolsó számcsoport: „143,401.00 Ft” → 401 Ft)
+        az árbázis első betöltésekor kikerülnek; a valódi Vinted-árak, a más oldalak olcsó árai, és a javítás után
+        felvett árak maradnak."""
+        path = Path(self.tmp.name) / "arbazis.json"
+        now = self.clock.now
+        samples = [{"p": 401, "url": "https://www.vinted.hu/items/1-rtx", "site": "vinted", "at": now, "last": now},
+                   {"p": 143401, "url": "https://www.vinted.hu/items/2-rtx", "site": "vinted", "at": now, "last": now},
+                   {"p": 900, "url": "https://hardverapro.hu/apro/3/friss.html", "at": now, "last": now}]
+        path.write_text(json.dumps({"kv": pricebook_module.KEY_VERSION, "keys": {
+            "3060 rtx ti": {"name": "RTX 3060 Ti", "samples": samples},
+            "5 ryzen 5600x": {"name": "Ryzen 5 5600X",
+                              "samples": [dict(samples[0], url="https://www.vinted.hu/items/4")]}}}),
+            encoding="utf-8")
+        book = PriceBook(Path(self.tmp.name), clock=self.clock)
+        self.assertEqual(sorted(s["p"] for s in book._keys["3060 rtx ti"]["samples"]), [900, 143401])
+        self.assertNotIn("5 ryzen 5600x", book._keys, "ami kiürült, az kimarad")
+        book.add([{"text": "RTX 3060 Ti kábel nélkül", "price": 650, "url": "https://www.vinted.hu/items/5-rtx"}])
+        book.save()
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["pf"], pricebook_module.PRICE_FIX)
+        again = PriceBook(Path(self.tmp.name), clock=self.clock)
+        self.assertIn(650, [s["p"] for s in again._keys["3060 rtx ti"]["samples"]], "a javítás után felvett marad")
+
     def test_a_full_price_book_stays_fast(self):
         """Egy beérett árbázisban (a termékek tele: MAX_SAMPLES ár; és elérte a MAX_KEYS-t) egy találati oldal árainak
         beírása nem dolgozza fel újra az egész árbázist: a hirdetés → termék térkép csak a kieső árakkal változik (eddig
@@ -1848,8 +1872,10 @@ class BrowseTests(HunterCase):
         self.assertEqual(len(self.hunter._pending), 1)
 
     def test_a_captcha_stops_that_site_for_the_day(self):
+        """Egy munkamenetben a robot-ellenőrzés aznapra leállítja az oldalt (a Vinteden a régi, munkamenetes módban; a
+        friss lista egy óra szünetet tart, lásd test_glance)."""
         self.browser.challenge = {"vinted.hu"}
-        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.set_browse(on=True, sites=["vinted"], glance=0)
         self.hunter.run(notify=self.notify)
         self.assertEqual([t for _k, t, _x, _e in self.notices], ["Vinted: robot-ellenőrzés"])
         self.assertTrue(self.notices[0][3]["quiet"], "holnap magától folytatja: nem fontos értesítés")
@@ -2805,9 +2831,9 @@ class PendingTests(HunterCase):
 
 class ProfitTests(unittest.TestCase):
     def test_deleted_sales_stay_in_the_analysis(self):
-        """Az eladott tárgyak törlése: eltűnnek a hirdetéseid közül (a mappájuk a _torolt mappába), de az Elemzés
-        számai ugyanazok maradnak (haszon a hónapban, összesen, havonta, átlagos napok; a havi keret), egy újraindítás
-        után is. Ha az archívumot nem tudja elmenteni, nem töröl. A meg nem eladott tárgyhoz nem nyúl."""
+        """Az eladott tárgyak törlése: eltűnnek a hirdetéseid közül (a mappájuk a fotóikkal együtt véglegesen), de az
+        Elemzés számai ugyanazok maradnak (haszon a hónapban, összesen, havonta, átlagos napok; a havi keret), egy
+        újraindítás után is. Ha az archívumot nem tudja elmenteni, nem töröl. A meg nem eladott tárgyhoz nem nyúl."""
         from jarvis_core.deals import profit_report
         from jarvis_core.selling import ItemStore, ItemError
         from test_work import jpeg
@@ -2835,7 +2861,11 @@ class ProfitTests(unittest.TestCase):
             self.assertEqual(store.get(rtx.id).sold_price, 95000, "nem törölte, mert a számai elvesztek volna")
             self.assertEqual(sorted(store.delete_sold()), sorted([rtx.id, old.id, blazer.id]))
             self.assertEqual([i.id for i in store.all()], [nike.id], "a meg nem eladott marad")
-            self.assertTrue((root / "_torolt").is_dir() and not (root / rtx.id).exists())
+            self.assertFalse((root / rtx.id).exists() or (root / "_torolt").exists(),
+                             "a fotóival együtt véglegesen törlődött (nem a _torolt mappába)")
+            plain = store.create(title="Régi kábel")
+            store.delete(plain.id)
+            self.assertEqual(len(list((root / "_torolt").iterdir())), 1, "a nem eladott tárgy a _torolt mappába kerül")
             after = profit_report(store.all(), now, archived=store.archived())
             for key in ("month", "total", "months", "days", "stages"):
                 self.assertEqual(after[key], before[key], key)

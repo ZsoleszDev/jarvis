@@ -22,6 +22,7 @@ import re
 import statistics
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,11 @@ SLOW_RATE = 0.25           # ha az újranézett hirdetéseknek legfeljebb ennyi 
 # („Galaxy S21+”); a „kontroller nélkül” konzol; a darabszám a ragozott tartozék előtt („2 kontrollerrel”); a szerszám
 # akku nélküli alapgépe.
 KEY_VERSION = 5
+# A Vinted angol számformájú árait („143,401.00 Ft”) a 2026. novemberi javításig rosszul olvasta: csak az utolsó
+# számcsoport maradt meg (401 Ft). Ezek mind 1000 Ft alattiak: az árbázis betöltésekor egyszer kikerülnek
+# (_drop_misread; a jelzés a fájlban: PRICE_FIX), és ha valódiak voltak, a következő letöltésnél helyesen visszajönnek.
+PRICE_FIX = 1
+MISREAD_BELOW = 1000
 
 # Márkák (ékezet nélkül, kisbetűvel; a több szavasak egybeírva, lásd _ALIASES).
 BRANDS = {
@@ -906,6 +912,24 @@ class PriceBook:
         self._where: dict[str, str] | None = None           # hirdetés → a terméke, ahol az ára van (_locate)
         if data.get("kv") != KEY_VERSION and self._keys:
             self._rekey()
+        if int(data.get("pf") or 0) < PRICE_FIX:
+            self._drop_misread()
+
+    def _drop_misread(self) -> None:
+        """Egyszer: a Vintedről jött, MISREAD_BELOW alatti árak kikerülnek (a rosszul olvasott angol számforma maradéka,
+        PRICE_FIX); a kiürült termékek is. A következő mentés jelzi a fájlban, hogy megvolt."""
+        dropped = False
+        for key in list(self._keys):
+            entry = self._keys[key]
+            kept = [sample for sample in entry["samples"] if not (
+                int(sample.get("p") or 0) < MISREAD_BELOW
+                and "vinted." in (urllib.parse.urlsplit(str(sample.get("url") or "")).hostname or ""))]
+            if len(kept) != len(entry["samples"]):
+                entry["samples"], dropped = kept, True
+                if not kept:
+                    del self._keys[key]
+        self._where = self._by_base = None
+        self._dirty = self._dirty or bool(self._keys) or dropped
 
     def _rekey(self) -> None:
         """A régi kulcsok újraképzése a nevükből (a mostani product_key szerint), és az így egybeeső termékek árainak
@@ -979,7 +1003,8 @@ class PriceBook:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"kv": KEY_VERSION, "keys": self._keys, "brands": sorted(self.brands),
+            tmp.write_text(json.dumps({"kv": KEY_VERSION, "pf": PRICE_FIX, "keys": self._keys,
+                                       "brands": sorted(self.brands),
                                        "brand_counts": self._brand_counts}, ensure_ascii=False, separators=(",", ":")),
                            encoding="utf-8")
             os.replace(tmp, self.path)

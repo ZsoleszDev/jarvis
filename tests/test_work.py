@@ -35,7 +35,7 @@ from test_offline import FakeOllama, make_cfg, reply, tool_reply  # noqa: E402
 from test_streaming import RecordingUI  # noqa: E402
 from test_web_browser import HAS_CHROMIUM  # noqa: E402
 
-from jarvis_core import config, selling  # noqa: E402
+from jarvis_core import config, feeds, selling  # noqa: E402
 from jarvis_core.app import HELD_ITEM, WAKE_FAILED_ITEM, WAKING_ITEM, JarvisApp  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError, is_risky, navigates  # noqa: E402
 from jarvis_core.config import load_config  # noqa: E402
@@ -1459,6 +1459,24 @@ PAGES = {
   <span>Villámár: 5 000 Ft</span></div>
 <div class="item"><a href="/items/8-regi-belyeg">Régi bélyeg</a><span>Jelenlegi ár: 300 Ft, 4 licit</span></div>
 </div></main><footer><a href="/kapcsolat">Szállítás 0 Ft</a></footer></body></html>""",
+    # A Vinted-kártya (2026 novembere): a kártya linkje üres, a leírása (title) a címmel, a márkával és az árral, angol
+    # számformával („143,401.00 Ft”); a kártyán az ár tagolás nélkül, alatta a vevővédelemmel.
+    "vinted-katalogus.html": """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Vinted</title></head>
+<body><main><div class="feed-grid">
+<div class="new-item-box__container"><div class="new-item-box__image-container"><img alt="">
+  <a class="new-item-box__overlay" href="/items/5100000001-gigabyte-rtx-3060-ti-gaming-oc"
+     title="Gigabyte RTX 3060 Ti Gaming OC, márka: Gigabyte, állapot: Kiváló, 143,401.00 Ft, 150,851.00 Ft tartalmazza a Vásárlói védelmet"></a></div>
+  <div class="new-item-box__summary"><button type="button" aria-label="Kedvencekhez adás"><span>9</span></button>
+    <p>Gigabyte</p><p>Kiváló</p><p>143401 Ft</p><p>150851 Ft a következővel:</p></div></div>
+<div class="new-item-box__container"><div class="new-item-box__image-container"><img alt="">
+  <a class="new-item-box__overlay" href="/items/5100000002-primark-szuk-felso"
+     title="Primark szűk felső, márka: Primark, állapot: Jó, méret: S / 36 / 8, 1,490.00 Ft, 1,594.50 Ft tartalmazza a Vásárlói védelmet"></a></div>
+  <div class="new-item-box__summary"><p>Primark</p><p>S / 36 / 8 · Jó</p><p>1490 Ft</p></div></div>
+<div class="new-item-box__container"><div class="new-item-box__image-container"><img alt="">
+  <a class="new-item-box__overlay" href="/items/5100000003-sinsay-farmernadrag"
+     title="Sinsay farmernadrág, márka: Sinsay, állapot: Kiváló, 599.00 Ft, 698.95 Ft tartalmazza a Vásárlói védelmet"></a></div>
+  <div class="new-item-box__summary"><p>Sinsay</p><p>599 Ft</p></div></div>
+</div></main></body></html>""",
     "kiemeltek.html": """<!doctype html><html lang="hu"><head><meta charset="utf-8"><title>Találatok</title></head>
 <body><main><section class="top-block"><h3>Kiemelt hirdetések</h3>
 <div class="item"><a href="/items/11-regi-kamera">Régi kamera</a><span>40 000 Ft</span></div>
@@ -1600,6 +1618,19 @@ class BrowserWorkTests(unittest.TestCase):
                          "csak a villámár nélküli licites kártya jelzett")
         self.assertEqual([r.get("likes") for r in found[:3]], [8, None, None],
                          "a kedvelések száma (a Vinted-kártyán a szív mellett); a szám nélküli szív nem számít")
+
+    def test_vinted_prices_in_english_number_format(self):
+        """A Vinted a kártya linkjének leírásában angol számformával írja az árat („143,401.00 Ft”). Eddig ebből 401 Ft
+        lett (a 1,490.00 Ft-ból 490), így minden ezer forint fölötti Vinted-hirdetés „nem valódi árnak” látszott, és
+        kiesett (az árbázist is elrontotta). A böngésző nélküli olvasó is így olvassa."""
+        found = self.browser.extract_listings(self.pages.url("vinted-katalogus.html"))
+        self.assertEqual([r["price"] for r in found], [143401, 1490, 599])
+        self.assertEqual(found[0].get("likes"), 9)
+        for text, price in (("1,490.00 Ft", 1490), ("29,999.00 Ft", 29999), ("143,401.00 Ft, 150,851.00 Ft", 143401),
+                            ("12 600,00 Ft", 12600), ("1.490.000 Ft", 1490000), ("ma 12:54 997 Ft", 997),
+                            ("12,50 Ft", 12)):
+            self.assertEqual(feeds.parse_listings(f'<div><a href="/x/{price}">Valami</a> <b>{text}</b></div>',
+                                                  "https://example.com/")[0]["price"], price, text)
 
     def test_promoted_listings(self):
         """A fizetett kiemelések (a kiemeltek blokkja, egy „Kiemelt” címke, egy kiemelés-osztály) jelölve jönnek."""
