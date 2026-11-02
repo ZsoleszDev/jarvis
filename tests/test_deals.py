@@ -1872,8 +1872,10 @@ class BrowseTests(HunterCase):
         self.assertEqual(len(self.hunter._pending), 1)
 
     def test_a_captcha_stops_that_site_for_the_day(self):
+        """Egy munkamenetben a robot-ellenőrzés aznapra leállítja az oldalt (a Vinteden a régi, munkamenetes módban; a
+        friss lista egy óra szünetet tart, lásd test_glance)."""
         self.browser.challenge = {"vinted.hu"}
-        self.hunter.set_browse(on=True, sites=["vinted"])
+        self.hunter.set_browse(on=True, sites=["vinted"], glance=0)
         self.hunter.run(notify=self.notify)
         self.assertEqual([t for _k, t, _x, _e in self.notices], ["Vinted: robot-ellenőrzés"])
         self.assertTrue(self.notices[0][3]["quiet"], "holnap magától folytatja: nem fontos értesítés")
