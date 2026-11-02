@@ -124,10 +124,15 @@ PLATFORMS: dict[str, Platform] = {
         "browser_choose a mező számával és a teljes úttal, pl. „Women > Clothing > Jeans” (szintenként nyílik, az "
         "utolsó szint egy választógomb). 4. A kategória után jelenik meg a márka, a méret, az állapot és a szín; "
         "ezekhez is browser_choose kell. Márka: a neve (ha nincs a listában, a „Search brands” keresőbe maga "
-        "beírja). 5. Méret: ha előbb a méretrendszert kéri, az úttal (pl. „EU > EU 40”). 6. Állapot: New with "
-        "tags = Új, címkével; New without tags = Új; Very good = Nagyon jó; Good = Jó; Satisfactory = Elfogadható "
-        "vagy Hibás. 7. Szín (Colours, legfeljebb kettő): színenként egy browser_choose. 8. Csomagméret: Small = "
-        "kicsi, Medium = közepes, Large = nagy. Ami egy oldalon egymás után jön (pl. állapot, szín, csomagméret), "
+        "beírja). A magyar felületen ezek gombja: „Válassz ki egy kategóriát”, „Válaszd ki a márkát”, „Válassz ki "
+        "egy méretet”, „Válaszd ki az állapotát”, „Válassz ki legfeljebb 2 színt”. A kategóriát szintenként "
+        "válaszd; a kategóriakereső találatai mellett a teljes út látszik: csak olyat, aminek az útja illik a "
+        "tárgyhoz (egy hétköznapi ruha nem Sportruházat). 5. Méret: ha előbb a méretrendszert kéri, az úttal (pl. "
+        "„EU > EU 40”). 6. Állapot (a magyar felületen más a felirata): Új, címkével = New with tags = Új, "
+        "címkékkel; Új = New without tags = Új, címkék nélkül; Nagyon jó = Very good = Kiváló; Jó = Good = Jó; "
+        "Elfogadható vagy Hibás = Satisfactory = Kielégítő. 7. Szín (Colours, legfeljebb kettő): színenként egy "
+        "browser_choose. 8. Csomagméret: Small = kicsi, Medium = közepes, Large = nagy. Ami egy oldalon egymás "
+        "után jön (pl. állapot, szín, csomagméret), "
         "az egy browser_do lépésben is mehet. 9. Végül a „Feltöltés” (Upload) gomb; ha utána azt írja, hogy "
         "valamit ki kell tölteni (Fill in …), pótold, és kattints újra.",
         max_photos=20, inbox="https://www.vinted.hu/inbox"),
@@ -468,6 +473,14 @@ def process_photo(data: bytes) -> tuple[bytes, bytes]:
 
 # --- tárolás ---------------------------------------------------------------------------
 
+# Az eladott tárgyak archívuma (az eladas mappában): ha egy eladott tárgyat törölsz, eltűnik a hirdetéseid közül (a
+# mappája a _torolt mappába kerül), de az Elemzés adatai (vételár, költségek, eladási ár és nap, eladási költségek,
+# honnan, megjegyzés) itt megmaradnak: a haszon ebben a hónapban, összesen, havonta és a havi keret ugyanaz marad.
+SOLD_ARCHIVE = "_eladott.json"
+# Ami nem kell az Elemzéshez (a fotók a tárgy mappájával együtt mentek; az árkutatás és a hibacsomag nagy).
+ARCHIVE_DROP = ("photos", "photos_alt", "photo_checks", "research", "pending", "busy")
+
+
 class ItemStore:
     """Az eladásra szánt tárgyak. Több szálról is használható (felület és ágens)."""
 
@@ -485,6 +498,7 @@ class ItemStore:
         self._items: dict[str, Item] = {}
         self._check_failed: set[tuple[str, str]] = set()   # (tárgy, fotó): nem sikerült megmérni, nem próbálja újra
         self._backfilling = False
+        self._archive: list[dict[str, Any]] = self._load_archive()   # a törölt eladott tárgyak (SOLD_ARCHIVE)
         self._load()
         self._relink()
         self._start_backfill()
@@ -914,9 +928,12 @@ class ItemStore:
             return old if old is not None else posted
 
     def delete(self, item_id: str) -> None:
-        """A tárgy a _torolt mappába kerül (onnan kézzel visszahozható)."""
+        """A tárgy a _torolt mappába kerül (onnan kézzel visszahozható). Ha eladott tárgy, előbb az Elemzés adatai
+        az eladások archívumába kerülnek (archived): a haszna a statisztikában marad. Ha ez nem sikerül, nem törli."""
         with self._lock:
             gone = self.get(item_id)
+            if gone.sold:
+                self._archive_sold(gone)
             trash = self.root / "_torolt"
             trash.mkdir(exist_ok=True)
             shutil.move(str(self.folder(item_id)), str(trash / f"{item_id}-{int(time.time())}"))
@@ -928,6 +945,57 @@ class ItemStore:
                 self.on_remove(item_id)
             except Exception:  # noqa: BLE001
                 pass
+
+    def delete_sold(self) -> list[str]:
+        """Az összes eladott tárgy törlése a hirdetéseid közül (delete: az Elemzés adatai megmaradnak). Visszaadja a
+        törölt tárgyak azonosítóit."""
+        with self._lock:
+            sold = [item.id for item in self._items.values() if item.sold and not item.busy]
+        for item_id in sold:
+            self.delete(item_id)
+        return sold
+
+    def archived(self) -> list[Item]:
+        """A törölt eladott tárgyak (az Elemzésnek és a havi keretnek), fotók nélkül. Ha egy tárgyat a _torolt mappából
+        kézzel visszahoztál, az nem számít kétszer."""
+        with self._lock:
+            records = [record for record in self._archive if record.get("id") not in self._items]
+        out = []
+        for record in records:
+            try:
+                item = Item.from_dict(record)
+            except (TypeError, ValueError):
+                continue
+            item.id = str(record["id"])
+            out.append(item)
+        return out
+
+    def _archive_path(self) -> Path:
+        return self.root / SOLD_ARCHIVE
+
+    def _load_archive(self) -> list[dict[str, Any]]:
+        try:
+            data = json.loads(self._archive_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        records = data.get("items") if isinstance(data, dict) else None
+        return [r for r in records or [] if isinstance(r, dict) and ITEM_ID_RE.match(str(r.get("id") or ""))]
+
+    def _archive_sold(self, item: Item) -> None:
+        """(zár alatt) Egy eladott tárgy Elemzés-adatai az archívumba (egy tárgy egyszer: az újabb felülírja). Ha nem
+        sikerül elmenteni, ItemError: a tárgy ilyenkor nem törlődik (a haszna nem veszhet el csendben)."""
+        record = {k: v for k, v in asdict(item).items() if k not in ARCHIVE_DROP}
+        record["archived_at"] = time.time()
+        records = [r for r in self._archive if r.get("id") != item.id] + [record]
+        path = self._archive_path()
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps({"items": records}, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            raise ItemError(f"Nem tudtam elmenteni az eladás adatait az Elemzéshez ({exc}), ezért nem töröltem.") \
+                from None
+        self._archive = records
 
     # --- fotók -----------------------------------------------------------------------------
 

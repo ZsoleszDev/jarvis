@@ -2804,6 +2804,53 @@ class PendingTests(HunterCase):
 
 
 class ProfitTests(unittest.TestCase):
+    def test_deleted_sales_stay_in_the_analysis(self):
+        """Az eladott tárgyak törlése: eltűnnek a hirdetéseid közül (a mappájuk a _torolt mappába), de az Elemzés
+        számai ugyanazok maradnak (haszon a hónapban, összesen, havonta, átlagos napok; a havi keret), egy újraindítás
+        után is. Ha az archívumot nem tudja elmenteni, nem töröl. A meg nem eladott tárgyhoz nem nyúl."""
+        from jarvis_core.deals import profit_report
+        from jarvis_core.selling import ItemStore, ItemError
+        from test_work import jpeg
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "eladas"
+            store = ItemStore(root)
+            now = time.time()
+            rtx = store.create(title="RTX 3060 Ti", price=95000, bought_price=55000, bought_shipping=1500,
+                               bought_at=now - 10 * 86400, sell_fee=2000, trade_note="Foxpost")
+            store.mark(rtx.id, sold=True)
+            old = store.create(title="PS5 kontroller", bought_price=9000, sold_price=12000, bought_at=now - 90 * 86400)
+            store.mark(old.id, sold=True)
+            store.update(old.id, sold_at=now - 60 * 86400)
+            blazer = store.create(title="Zara blézer", price=4500)        # a saját holmid, elkelt
+            store.mark(blazer.id, sold=True)
+            nike = store.create(title="Nike Air Max", bought_price=15000, bought_at=now - 3600)   # még nem kelt el
+            store.add_photo(rtx.id, jpeg())
+            before = profit_report(store.all(), now)
+            hunter = DealHunter(Path(tmp) / "keres", PLATFORMS, lambda: None, None)
+            hunter.items = lambda: store.all() + store.archived()
+            spent = hunter.money_status(now)["spent"]
+            with mock.patch("jarvis_core.selling.os.replace", side_effect=OSError("tele a lemez")):
+                with self.assertRaises(ItemError):
+                    store.delete(rtx.id)
+            self.assertEqual(store.get(rtx.id).sold_price, 95000, "nem törölte, mert a számai elvesztek volna")
+            self.assertEqual(sorted(store.delete_sold()), sorted([rtx.id, old.id, blazer.id]))
+            self.assertEqual([i.id for i in store.all()], [nike.id], "a meg nem eladott marad")
+            self.assertTrue((root / "_torolt").is_dir() and not (root / rtx.id).exists())
+            after = profit_report(store.all(), now, archived=store.archived())
+            for key in ("month", "total", "months", "days", "stages"):
+                self.assertEqual(after[key], before[key], key)
+            self.assertEqual(sorted((r["name"], r["archived"]) for r in after["rows"]),
+                             [("Nike Air Max", False), ("PS5 kontroller", True), ("RTX 3060 Ti", True),
+                              ("Zara blézer", True)])
+            row = next(r for r in after["rows"] if r["name"] == "RTX 3060 Ti")
+            self.assertEqual((row["profit"], row["photo"], row["trade_note"]), (36500, "", "Foxpost"),
+                             "95 000 − 2 000 díj − (55 000 + 1 500); a fotó nélkül")
+            self.assertEqual(hunter.money_status(now)["spent"], spent, "a havi keretből ugyanannyi ment el")
+            reloaded = ItemStore(root)
+            self.assertEqual(profit_report(reloaded.all(), now, archived=reloaded.archived())["total"],
+                             before["total"], "újraindítás után is")
+            self.assertEqual(reloaded.delete_sold(), [], "nincs több eladott a listában")
+
     def test_profit_month_total_days_and_money_still_in_items(self):
         from jarvis_core.deals import profit_report
         from jarvis_core.selling import ItemStore

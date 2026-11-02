@@ -110,6 +110,7 @@
       maxPhotos = data.max_photos || 20;
       messagesOn = !!data.messages;
       todosOpen = data.todos_open || 0;
+      soldArchive = data.sold_archive || null;
       ledgerTab();
       if (!messagesOn && filter === "msgs") filter = "all";
       renderCompose();
@@ -1630,10 +1631,13 @@
     const facts = [r.bought_from, when];
     const now = r.market_now ? `Most kb. <b>${esc(price(r.market_now.price))}</b>-ért adják (${r.market_now.n} ár)${r.market_now.speed ? ` · ${esc(r.market_now.speed)}` : ""}` : "";
     const sellCost = (r.sell_shipping || 0) + (r.sell_fee || 0);
+    const gone = !!r.archived;   // a listából törölt eladott tárgy: csak a számai maradtak meg (nincs lapja, fotója)
     return `<article class="lcard${sold ? " sold" : ""}">
-      <button type="button" class="cardthumb" data-lopen="${esc(r.id)}" aria-label="${esc(r.name)}: részletek">${thumb}</button>
+      ${gone ? '<span class="cardthumb"><span class="nothumb">törölve</span></span>'
+        : `<button type="button" class="cardthumb" data-lopen="${esc(r.id)}" aria-label="${esc(r.name)}: részletek">${thumb}</button>`}
       <div class="body">
-        <div class="lhead"><button type="button" class="linklike title" data-lopen="${esc(r.id)}">${esc(r.name)}</button>
+        <div class="lhead">${gone ? `<b class="title">${esc(r.name)}</b>`
+          : `<button type="button" class="linklike title" data-lopen="${esc(r.id)}">${esc(r.name)}</button>`}
           <span class="chip ${STAGE_CHIP[r.stage]}">${STAGE_TEXT[r.stage]}</span></div>
         <div class="lnums">
           <span><small>Bekerülés</small>${own ? "<b>saját</b><small>nem vetted</small>"
@@ -1646,15 +1650,15 @@
         ${!sold && sale === null ? '<small class="warn">Add meg, mennyiért adnád tovább: abból számolom a várható hasznot.</small>' : ""}
         ${(r.advice || []).map((a) => `<small class="warn">${esc(a)}</small>`).join("")}
         ${r.trade_note ? `<small class="note">${esc(r.trade_note)}</small>` : ""}
-        <div class="row">
+        ${gone ? `<div class="row">${own ? '<span class="chip">saját holmi</span>' : ""}<span class="chip">törölve a listából</span></div>` : `<div class="row">
           <button type="button" class="small" data-lopen="${esc(r.id)}" aria-expanded="${ledgerOpen === r.id}">${ledgerOpen === r.id ? "Bezárás" : "Részletek"}</button>
           ${own ? '<span class="chip">saját holmi</span>' : ""}
           ${r.stage === "úton" ? `<button type="button" class="small" data-larrived="${esc(r.id)}">Megérkezett</button>` : ""}
           <button type="button" class="small quiet" data-open="${esc(r.id)}">A tárgy lapja</button>
           ${sold ? "" : `<button type="button" class="small quiet" data-cancel-bought="${esc(r.id)}" data-name="${esc(r.name)}">Visszamondva</button>`}
-        </div>
+        </div>`}
       </div>
-      ${ledgerOpen === r.id ? ledgerForm(r) : ""}</article>`;
+      ${ledgerOpen === r.id && !gone ? ledgerForm(r) : ""}</article>`;
   }
 
   // Egy tárgy részletei. A data-keep kulcsok a tárgyhoz kötöttek: az újrarajzolás csak a saját, még nem mentett
@@ -2002,15 +2006,21 @@
 
   function renderList() {
     const list = [...items.values()].sort((a, b) => b.created - a.created).filter(matches);
-    $("w-list").innerHTML = (filter === "sold" && list.length ? soldSummary(list) : "") + (list.map(card).join("") ||
-      `<p class="muted">${items.size ? "Nincs ilyen hirdetés." : "Még nincs hirdetésed. Fent kezdheted."}</p>`);
+    const summary = filter === "sold" && (list.length || (soldArchive && soldArchive.count)) ? soldSummary(list) : "";
+    $("w-list").innerHTML = summary + (list.map(card).join("") ||
+      `<p class="muted">${filter === "sold" && summary ? "Az eladott tárgyakat törölted a listából; az Elemzésben megvannak."
+        : items.size ? "Nincs ilyen hirdetés." : "Még nincs hirdetésed. Fent kezdheted."}</p>`);
   }
 
   // Az Eladva szűrő tetején: hány eladás, mennyi a bevétel és a haszon (a saját holmid eladási ára is haszon; amit
-  // megvettél, annál a bekerülés levonódik), összesen és ebben a hónapban; a részletek az Elemzés fülön.
+  // megvettél, annál a bekerülés levonódik), összesen és ebben a hónapban; a részletek az Elemzés fülön. A már törölt
+  // eladott tárgyak is beleszámítanak (soldArchive: a listából törölted őket, az eladásuk megmaradt), és innen az
+  // összes eladott tárgy törölhető a listából (az Elemzés adatai megmaradnak).
+  let soldArchive = null;
   function soldSummary(list) {
     const now = new Date();
-    let count = 0, revenue = 0, profit = 0, month = 0;
+    const gone = soldArchive || { count: 0, revenue: 0, profit: 0, month: 0 };
+    let count = gone.count, revenue = gone.revenue, profit = gone.profit, month = gone.month;
     for (const item of list) {
       if (item.sold_price === null || item.sold_price === undefined) continue;
       const cost = (item.bought_price || 0) + (item.bought_shipping || 0) + (item.bought_extra || 0);
@@ -2021,9 +2031,28 @@
       profit += gain;
       if (when && when.getFullYear() === now.getFullYear() && when.getMonth() === now.getMonth()) month += gain;
     }
+    const deletable = list.filter((item) => item.sold && !item.busy).length;
     return `<div class="soldsum" role="status"><span><b>${count}</b> eladás · <b>${esc(price(revenue) || "0 Ft")}</b> bevétel ·
-      haszon <b>${esc(signed(profit))}</b> · ebben a hónapban <b>${esc(signed(month))}</b></span>
-      <button type="button" class="small" data-job="ledger">Elemzés</button></div>`;
+      haszon <b>${esc(signed(profit))}</b> · ebben a hónapban <b>${esc(signed(month))}</b>${gone.count ? `
+      <small class="muted">(ebből ${gone.count} már törölve a listából)</small>` : ""}</span>
+      <span class="row"><button type="button" class="small" data-job="ledger">Elemzés</button>
+      ${deletable ? `<button type="button" class="small quiet" id="w-sold-delete">Eladottak törlése (${deletable})</button>` : ""}</span></div>`;
+  }
+  // Az összes eladott tárgy törlése a listából (megerősítés után): a haszna az Elemzésben marad.
+  async function deleteSold() {
+    const n = [...items.values()].filter((item) => item.sold && !item.busy).length;
+    const ok = await ask("Eladottak törlése", `Törlöd mind a ${n} eladott tárgyat a hirdetéseid közül?\nAz Elemzés adatai ` +
+      "(a haszon ebben a hónapban, összesen és havonta, a havi keret) megmaradnak; a tárgyak mappája a munka mappán " +
+      "belül a _torolt mappába kerül.", "Törlés");
+    if (!ok) return;
+    const result = await J.postJson("/api/work/delete", { sold: true });
+    if (!result.ok) { J.toast(result.error || "Nem sikerült."); return; }
+    for (const gone of result.removed || []) {
+      items.delete(gone);
+      if (openId === gone) openId = null;
+    }
+    J.toast(`Töröltem ${(result.removed || []).length} eladott tárgyat; az Elemzésben megmaradtak.`);
+    await load();
   }
   const soldDay = (item) => (item.sold_at ? new Date(item.sold_at * 1000).toLocaleDateString("hu-HU") : "");
 
@@ -2495,12 +2524,14 @@
 
   async function remove(item) {
     const ok = await ask("Hirdetés törlése",
-      `Biztosan törlöd: ${item.name}?\n(Az oldalakról ez nem veszi le. A munka mappán belül a _torolt mappába kerül.)`, "Törlés");
+      `Biztosan törlöd: ${item.name}?\n(Az oldalakról ez nem veszi le. A munka mappán belül a _torolt mappába kerül.` +
+      (item.sold ? " Eladott tárgy: az Elemzésben a haszna megmarad.)" : ")"), "Törlés");
     if (!ok) return;
     const result = await J.postJson("/api/work/delete", { id: item.id });
     if (!result.ok) { J.toast(result.error || "Nem sikerült."); return; }
     items.delete(item.id);
     openId = null;
+    if (item.sold) await load();     // az Eladva összesítője a törölt eladásokkal együtt számol
     render();
   }
 
@@ -2638,6 +2669,7 @@
   async function onCardsClick(event) {
     const goto = event.target.closest("[data-job]");     // az Eladva összesítőjének gombja: az Elemzés fül
     if (goto) { setJob(goto.dataset.job); return; }
+    if (event.target.closest("#w-sold-delete")) { deleteSold(); return; }   // az eladottak törlése a listából
     const open = event.target.closest("[data-open]");
     if (open) {
       openId = open.dataset.open;
