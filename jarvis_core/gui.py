@@ -524,7 +524,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "items": [i.public() for i in work.store.all()],
                                     **work.describe()})
         if path == "/api/work/deals":
-            return self._json(200, {"ok": True, **work.deals.state(), "profit": profit_report(work.store.all()),
+            return self._json(200, {"ok": True, **work.deals.state(),
+                                    "profit": profit_report(work.store.all(), archived=work.store.archived()),
                                     "instant": work.instant.state() if work.instant is not None else None})
         if path == "/api/work/ledger":       # Elemzés: a teendők, a haszon, a megvett tárgyak, és mennyiért adják most
             return self._json(200, self._ledger(work))
@@ -735,6 +736,9 @@ class _Handler(BaseHTTPRequestHandler):
                     item = work.store.reorder_photos(item_id, [str(n) for n in order])
                 return self._json(200, {"ok": True, "item": item.public()})
             if path == "/api/work/delete":
+                if body.get("sold") is True and not item_id:
+                    # az összes eladott tárgy törlése (Hirdetéseim › Eladva): az Elemzés adatai megmaradnak
+                    return self._json(200, {"ok": True, "removed": work.store.delete_sold()})
                 work.store.delete(item_id)
                 return self._json(200, {"ok": True})
             if path == "/api/work/mark":
@@ -935,7 +939,7 @@ class _Handler(BaseHTTPRequestHandler):
         work = self._work()
         items, fresh = self._buy(work, deal_id, body)
         reply: dict[str, Any] = {"ok": True, **work.deals.state(), "item": items[0],
-                                 "profit": profit_report(work.store.all())}
+                                 "profit": profit_report(work.store.all(), archived=work.store.archived())}
         if len(items) > 1:
             reply["items"] = items
         if not fresh:
@@ -997,7 +1001,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _ledger(work: Any) -> dict[str, Any]:
-        return {"ok": True, **profit_report(work.store.all(), book=work.deals.book),
+        return {"ok": True, **profit_report(work.store.all(), book=work.deals.book, archived=work.store.archived()),
                 "sites": [p.name for p in work.platforms.values()], "shipping": SHIPPING,
                 "money": work.deals.money_status(), "todos": work.todos.all(),
                 # folyamatban: írtál az eladónak (vagy ajánlatot tettél), de még nem vetted meg

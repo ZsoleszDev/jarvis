@@ -32,7 +32,7 @@ from .dossier import Dossiers
 from . import refresh as refreshing
 from .listings import BLOCKED, CHECK_WORDS, GONE, SOLD, ListingChecker, classify
 from .llm import OllamaError
-from .deals import DealHunter
+from .deals import DealHunter, profit_report
 from .feeds import FAST_SITES, SiteFetcher
 from .instant import InstantWatch
 from .messages import MessageDesk
@@ -229,6 +229,10 @@ class WorkDesk:
         self._current: tuple[str, str] | None = None   # (tárgy, oldal), amit épp feltölt vagy levesz (current)
         self._answered: dict[str, list[str]] = {}     # tárgy → amire a legutóbb visszakérdezett és válaszoltál
         self.approved = False    # feltöltés közben jóváhagytál-e egy kattintást (pl. a közzétételt)
+        # (tárgy, oldal), aminek a legutóbbi feltöltésében a közzététel megtörtént (jóváhagytad, vagy a frissítés
+        # előre jóváhagyta), de a tárgy nem lett feltöltöttnek jelölve: lehet, hogy fent van. Az automatikus frissítés
+        # ilyenkor nem tölti fel újra (kétszer kerülne fel), hanem szól (finish_post állítja).
+        self.unsure_publish: tuple[str, str] | None = None
         # (tárgy, oldal), amiről a modell épp megnézi, fent van-e: ilyenkor újra feltölteni nem szabad.
         self.checking: tuple[str, str] | None = None
         # (tárgy, oldal), amit a Vinted-levevő ebben a kérésben már megpróbált: az item_delist nem kezdi újra.
@@ -256,7 +260,8 @@ class WorkDesk:
             self.researcher = PriceResearcher(llm, self.store, lambda: toolbox.browser, sites, fetcher=self.fetcher)
         self.instant = (InstantWatch(self.root, self.platforms, self.fetcher, self.deals)
                         if self.fetcher is not None else None)
-        self.deals.items = self.store.all      # a havi kerethez: mennyit költöttél ebben a hónapban, mi vár eladásra
+        # a havi kerethez: mennyit költöttél ebben a hónapban (a törölt eladott tárgyakkal együtt), mi vár eladásra
+        self.deals.items = lambda: self.store.all() + self.store.archived()
         # Begyakorolt lépések: a modell sikeres feltöltéseiből és levételeiből tanul (replay.py).
         self.flows = FlowStore(self.root / "folyamatok")
         # A Vinted-kitöltő (vinted.py) választásai, pl. egy tárgyfajta kategóriaútja: legközelebb modell nélkül.
@@ -311,7 +316,15 @@ class WorkDesk:
             "max_photos": self.store.max_photos,
             "messages": bool(self.messages.platforms),
             "todos_open": len(self.todos.waiting()),
+            "sold_archive": self.sold_archive(),
         }
+
+    def sold_archive(self) -> dict[str, int]:
+        """A törölt eladott tárgyak összesítője (a Hirdetéseim Eladva szűrőjének összesítőjéhez: a listából törölted
+        őket, de az eladásuk számít): hány eladás, mennyi bevétel és haszon, ebből mennyi ebben a hónapban."""
+        report = profit_report([], archived=self.store.archived())
+        return {"count": report["total"]["count"], "revenue": report["total"]["revenue"],
+                "profit": report["total"]["profit"], "month": report["month"]["profit"]}
 
     # --- beállítások (alapadatok) ---------------------------------------------------------------
 
@@ -567,12 +580,15 @@ class WorkDesk:
         if self.recorder is not None and self.recorder.task == "post":
             self.recorder = None     # befejezetlen felvétel: nem jegyezzük meg
         approved, self.approved = self.approved, False
+        self.unsure_publish = None
         try:
             item = self.store.get(item_id)
         except ItemError:
             return False
         self.store.set_busy(item_id, "")
-        if item.platforms.get(key, {}).get("status") == POSTED:
+        posted = item.platforms.get(key, {}).get("status") == POSTED
+        self.unsure_publish = (item_id, key) if approved and not posted else None
+        if posted:
             return True
         note = last_reply or "Nem sikerült végigcsinálni."
         if approved:   # a közzétételt jóváhagytad, csak a megjelölés maradt el
@@ -1022,6 +1038,11 @@ class WorkDesk:
             scope_item, scope_key, until = self.refreshing
             if time.time() <= until and self.current == (scope_item, scope_key) and self._on_site(scope_key, url) \
                     and (_DELIST_OK_RE.search(folded) or _PUBLISH_OK_RE.search(folded)):
+                if _PUBLISH_OK_RE.search(folded) and not _DELIST_OK_RE.search(folded):
+                    # a közzététel előre jóváhagyva: ugyanaz, mintha az ablakban jóváhagytad volna. Ha utána nem
+                    # jelöli meg feltöltöttnek, meg kell nézni, fent van-e (unmarked_publish), és újra feltölteni
+                    # nem szabad (kétszer kerülne fel)
+                    self.approved = True
                 return True
         if self.delisting is None or not self._delist_scope(*self.delisting[:2]):
             return False

@@ -54,6 +54,15 @@ FIELDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "color": (("color", "colour"), ("colour", "colours", "color", "colors", "szin", "szinek")),
     "price": (("price",), ("price", "ar")),
 }
+# A választómezők gombja a Vinted mostani (2026 novemberi) űrlapján: a mezőnév egy React-azonosító (_r_g_), a felirat
+# egy felszólítás a mező nevével, tárgyragosan: „Válassz ki egy kategóriát”, „Válaszd ki a márkát”, „Válassz ki egy
+# méretet”, „Válaszd ki az állapotát”, „Válassz ki legfeljebb 2 színt” (angolul „Select a category”). A mező neve az
+# első szó a névelő és a „legfeljebb N” után; a rag (-t, -at, -et, -ot) legfeljebb PICK_SUFFIX betű.
+_PICK_RE = re.compile(r"^(?:valassz|valaszd|valasszon|valassza|select|choose|pick)(?: ki)?"
+                      r"(?: (?:egy|a|az|an|the|your|legfeljebb \d+|max \d+|up to \d+))*\s+(\w+)")
+PICK_SUFFIX = 4
+# A React által adott azonosító (_r_g_, _r_10_, :r1:): nem mezőnév, és a végén álló szám sem egy lista lehetősége.
+_REACT_ID_RE = re.compile(r"^(?:_r_|:r|«r)[0-9a-z]+(?:_|:|»)$")
 TEXT_KINDS = {"input:text", "input:search", "searchbox", "textbox", "combobox", "textarea", "input:number",
               "input:tel"}
 BUTTON_KINDS = {"button", "input:submit", "input:button"}
@@ -81,10 +90,11 @@ _CUSTOM_BRAND_RE = re.compile(r"\b(hasznal|use|hozzaad|add|letrehoz|create|uj ma
 
 # Az állapotaink a Vinteden: a lehetőség azonosítója (condition-N) és a felirat eleje magyarul és angolul.
 # A „Hibás”-nak a Vinteden nincs párja: a legalacsonyabb (Satisfactory / Kielégítő), a hibát a leírás mondja el.
+# A mostani magyar felületen: „Új, címkékkel”, „Új, címkék nélkül”, „Kiváló” (= Very good), „Jó”, „Kielégítő”.
 CONDITIONS: dict[str, tuple[int, tuple[str, ...]]] = {
-    "Új, címkével": (6, ("new with tags", "uj cimkevel")),
-    "Új": (1, ("new without tags", "uj cimke nelkul")),
-    "Nagyon jó": (2, ("very good", "nagyon jo")),
+    "Új, címkével": (6, ("new with tags", "uj cimkevel", "uj cimkekkel")),
+    "Új": (1, ("new without tags", "uj cimke nelkul", "uj cimkek nelkul")),
+    "Nagyon jó": (2, ("very good", "nagyon jo", "kivalo")),
     "Jó": (3, ("good", "jo")),
     "Elfogadható": (4, ("satisfactory", "kielegito", "elfogadhato")),
     "Hibás": (4, ("satisfactory", "kielegito", "elfogadhato")),
@@ -110,6 +120,9 @@ CATEGORY_WORDS = {
     "kiegeszitok": "accessories", "otthon": "home", "elektronika": "electronics", "szorakozas": "entertainment",
     "sport": "sport", "szepseg": "beauty",
 }
+# A magyar Vinted kategóriafájának felirata, ha a tárgy kategóriája másként mondja („Nők” → „Női”).
+CATEGORY_HU = {"no": "noi", "nok": "noi", "ferfiak": "ferfi", "gyerekek": "gyerek", "gyermek": "gyerek",
+               "ruha": "ruhak", "ruhazat": "ruhak", "cipo": "cipok", "taska": "taskak", "kiegeszito": "kiegeszitok"}
 # A méret szavai: betűméret, szám (fél méret is), W30-féle; a magyar rag („M-es”, „38-as”) nem számít.
 _SIZE_TOKEN_RE = re.compile(r"[a-z]*\d+(?:[.,]5)?|[a-z]+")
 _SIZE_SUFFIXES = {"es", "as", "os", "is", "us", "meret", "meretu", "size"}
@@ -166,8 +179,21 @@ def elem_key(el: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def field_words(text: str) -> list[str]:
-    """A mezőnév szavai: a „package-size-1” → package, size, 1."""
-    return [w for w in re.split(r"[\s_\-.:/\[\]]+", (text or "").lower()) if w]
+    """A mezőnév szavai: a „package-size-1” → package, size, 1. A React-azonosító (_r_10_) nem számít."""
+    text = " ".join(part for part in (text or "").split() if not _REACT_ID_RE.match(part))
+    return [w for w in re.split(r"[\s_\-.:/\[\]]+", text.lower()) if w]
+
+
+def picker_of(label: str, aliases: tuple[str, ...]) -> bool:
+    """Egy választómező gombja-e ez a felirat (_PICK_RE): „valassz ki egy kategoriat” → a kategória mezője. Csak az
+    egyszavas, legalább háromkarakteres nevekkel („kategoria”, „marka”, „szin”), hogy egy rövid név (az „ar”) ne
+    illjen akármire, és a „csomagmeretet” ne a méret legyen."""
+    found = _PICK_RE.match(label)
+    if found is None:
+        return False
+    word = found.group(1)
+    return any(word.startswith(alias) and len(word) - len(alias) <= PICK_SUFFIX
+               for alias in (norm_text(a) for a in aliases) if " " not in alias and len(alias) >= 3)
 
 
 def find_field(elements: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
@@ -195,7 +221,7 @@ def find_field(elements: list[dict[str, Any]], name: str) -> dict[str, Any] | No
             score = 3
         else:
             label = norm_text(el.get("label", ""))
-            if any(label == norm_text(alias) for alias in labels):
+            if any(label == norm_text(alias) for alias in labels) or picker_of(label, labels):
                 score = 2
             elif name in ("description", "brand") and any(starts(label, alias) for alias in labels[1:]):
                 score = 1
@@ -334,6 +360,8 @@ def category_words(category: str) -> set[str]:
             out.add(part)
             if part in CATEGORY_WORDS:
                 out.add(CATEGORY_WORDS[part])
+            if part in CATEGORY_HU:
+                out.add(CATEGORY_HU[part])
     return out
 
 
@@ -636,8 +664,18 @@ class VintedFiller:
             if current is not None and (current.get("value") or "") != (opener.get("value") or "") \
                     and not current.get("expanded"):
                 break      # a mező felvette az értéket: kész
-            taken = {norm_text(c["label"]) for c in chosen}
-            options = [o for o in self._options(after, base, name) if norm_text(o["label"]) not in taken]
+            # ami már ki van választva, az nem újabb szint: az azonosítója szerint (a magyar fában a „Ruhák” alatt is
+            # van „Ruhák”: Női › Ruhák › Ruhák › Nyári ruhák, más catalog-azonosítóval), azonosító nélkül a felirata
+            # szerint
+            taken = {c["field"] for c in chosen if c.get("field")}
+            taken_labels = {norm_text(c["label"]) for c in chosen}
+
+            def fresh(option: dict[str, Any]) -> bool:
+                if option.get("field"):
+                    return option["field"] not in taken
+                return norm_text(option.get("label", "")) not in taken_labels
+
+            options = [o for o in self._options(after, base, name) if fresh(o)]
             if not options:
                 break
         else:

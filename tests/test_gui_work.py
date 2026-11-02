@@ -1055,6 +1055,62 @@ class WorkBrowserTests(unittest.TestCase):
         self.wait_for(lambda: deals.state()["deals"] == [])
         self.assertEqual([i.name for i in store.all()], ["Nike Air Max 90"])
 
+    def test_sold_items_can_be_deleted_and_stay_in_the_analysis(self):
+        """Hirdetéseim › Eladva: az Eladottak törlése (megerősítéssel) mind eltünteti a listából, az összesítő és az
+        Elemzés számai ugyanazok maradnak (a törölt tárgy kártyája „törölve a listából”, gombok nélkül). Egy tárgy
+        lapján a Törlés is így megy. Telefonméretben, vízszintes görgetés nélkül."""
+        store = self.h.store
+        now = time.time()
+        rtx = store.create(title="RTX 3060 Ti Gaming OC", price=95000, bought_price=55000, bought_shipping=1500,
+                           bought_at=now - 5 * 86400, targets=["vinted"])
+        store.mark(rtx.id, sold=True)
+        blazer = store.create(title="Zara blézer", price=4500, targets=["vinted"])
+        store.mark(blazer.id, sold=True)
+        nike = store.create(title="Nike Air Max 90", bought_price=15000, price=24000, targets=["vinted"])
+        page = self.page
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.click('[data-filter="sold"]')
+        page.wait_for_selector(".soldsum #w-sold-delete")
+        summary = page.inner_text(".soldsum")
+        self.assertIn("2 eladás", summary)
+        self.assertIn("haszon +43 000 Ft", summary, "95 000 − 56 500 + 4 500")
+        self.assertIn("Eladottak törlése (2)", summary)
+        page.click("#w-sold-delete")
+        page.wait_for_selector("#ask-dialog[open]")
+        self.assertIn("Az Elemzés adatai", page.inner_text("#ask-text"))
+        page.click("#ask-yes")
+        page.wait_for_selector('.toast:has-text("Töröltem 2 eladott tárgyat")')
+        self.wait_for(lambda: [i.id for i in store.all()] == [nike.id])
+        page.wait_for_selector('.soldsum:has-text("ebből 2 már törölve a listából")')
+        self.assertIn("haszon +43 000 Ft", page.inner_text(".soldsum"), "a törölt eladások is benne vannak")
+        self.assertIn("Az eladott tárgyakat törölted a listából", page.inner_text("#w-list"))
+        self.assertEqual(page.locator("#w-sold-delete").count(), 0, "nincs több törölhető")
+        wide = page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        self.assertFalse(wide, "telefonon nincs vízszintes görgetés")
+        page.click("#job-ledger")
+        page.wait_for_selector('.lcard:has-text("RTX 3060 Ti Gaming OC")')
+        self.assertIn("+43 000 Ft", page.inner_text(".tiles"), "a hónap haszna ugyanaz")
+        card = page.locator('.lcard:has-text("RTX 3060 Ti Gaming OC")')
+        self.assertIn("törölve a listából", card.inner_text())
+        self.assertIn("+38 500 Ft", card.inner_text())
+        self.assertEqual(card.locator("[data-lopen], [data-open], [data-cancel-bought]").count(), 0,
+                         "a törölt tárgynak nincs lapja, nem szerkeszthető")
+        self.assertEqual(page.locator('.lcard:has-text("Nike Air Max 90") [data-lopen]').count(), 3,
+                         "a meg nem eladott kártyája a régi (kép, cím, Részletek)")
+        # egy tárgy lapján a Törlés: az eladott tárgy haszna szintén megmarad
+        store.mark(nike.id, sold=True)
+        page.click("#job-sales")
+        page.click('[data-filter="sold"]')
+        page.wait_for_selector(f'.card[data-id="{nike.id}"]')
+        self.open_item(nike.id)
+        page.click('[data-action="delete"]')
+        page.wait_for_selector("#ask-dialog[open]")
+        self.assertIn("az Elemzésben a haszna megmarad", page.inner_text("#ask-text"))
+        page.click("#ask-yes")
+        self.wait_for(lambda: not store.all())
+        page.wait_for_selector('.soldsum:has-text("ebből 3 már törölve a listából")')
+        self.assertIn("3 eladás", page.inner_text(".soldsum"))
+
     def test_in_progress_and_hidden_deals_on_a_phone(self):
         """Írtam neki: a találat folyamatban (a kártyáján és az Elemzés fülön, a napokkal); onnan a Megvettem a
         vételárral felveszi, a „Nem lett belőle semmi” elrejti. Az elrejtett találat az Elrejtett találatok között

@@ -1353,15 +1353,18 @@ def _advice(row: dict[str, Any]) -> list[str]:
     return out
 
 
-def profit_report(items: list[Item], now: float | None = None, book: PriceBook | None = None) -> dict[str, Any]:
+def profit_report(items: list[Item], now: float | None = None, book: PriceBook | None = None,
+                  archived: list[Item] | None = None) -> dict[str, Any]:
     """Haszonkövetés (Elemzés fül) a vételárral megjelölt tárgyakból (Megvettem, vagy a tárgy lapján a Vételár), és a
     saját holmidból, amit a Jarvis adott el (nincs vételára, de elkelt: own). Egy tárgy bekerülése a vételár, a posta és
     az egyéb költség (a saját holminál 0); a haszna az eladási ár, mínusz az eladás költségei (posta, díj) és a
     bekerülés. Ebben a hónapban, összesen és havonta (LEDGER_MONTHS); átlagosan hány nap alatt kelt el (a saját holmi a
     feltöltésétől), mennyi pénz van még bent a meg nem eladott (megvett) tárgyakban, és mennyi haszon várható belőlük
     (sale_estimate). A megtérülés (roi) csak a megvett tárgyakból számol. Ha az árbázis megvan (book), a meg nem eladott
-    tárgyaknál azt is, mennyiért adják most."""
+    tárgyaknál azt is, mennyiért adják most. Az archived a törölt eladott tárgyak (ItemStore.archived): a haszonba,
+    havonta és összesen ugyanúgy beleszámítanak, a soruk „archived” (nincs fotójuk, és a tárgy lapja sincs meg)."""
     now = time.time() if now is None else now
+    gone = {id(item) for item in archived or []}
     month = time.strftime("%Y-%m", time.localtime(now))
     rows: list[dict[str, Any]] = []
     total = {"profit": 0, "count": 0, "spent": 0, "revenue": 0, "roi": None, "own": 0, "own_revenue": 0}
@@ -1371,7 +1374,7 @@ def profit_report(items: list[Item], now: float | None = None, book: PriceBook |
     stages: Counter = Counter()
     days: list[int] = []
     bought_profit = 0
-    for item in items:
+    for item in [*items, *(archived or [])]:
         own = item.bought_price is None
         if own and not (item.sold and item.sold_price is not None):
             continue                # a saját holmid csak akkor számít, ha elkelt (a bevétele a haszna)
@@ -1387,7 +1390,7 @@ def profit_report(items: list[Item], now: float | None = None, book: PriceBook |
             "target_price": item.target_price, "price": item.price, "sold_price": item.sold_price,
             "sold_at": item.sold_at or None, "sell_shipping": item.sell_shipping, "sell_fee": item.sell_fee,
             "in_transit": item.in_transit, "trade_note": item.trade_note, "profit": None, "roi": None,
-            "expected": None, "estimate": None, "market_now": None,
+            "expected": None, "estimate": None, "market_now": None, "archived": id(item) in gone,
             "days": max(0, int(((item.sold_at if item.sold and item.sold_at else now) - bought_at) // 86400))}
         if item.sold and item.sold_price is not None:
             profit = item.sold_price - sell_cost - cost

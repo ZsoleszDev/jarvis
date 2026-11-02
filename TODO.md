@@ -232,6 +232,16 @@
   10 s volt (a zár alatt: közben az azonnali figyelő értékelése és a párhuzamos sor is várt); most csak a kieső árak
   kerülnek ki a térképből (PriceBook._forget), és kb. 0,02 s. Egy teljes kör CPU-ideje (3 keresés, 3 oldal, 900
   hirdetés, letöltés nélkül) 2,2 s helyett 1,0 s üres árbázissal is.
+- Vinted, a 2026. novemberi hibacsomag (újrafeltöltés): a modell nélküli kitöltő nem találta a magyar űrlap
+  választómezőit (a gombjuk „Válassz ki egy kategóriát”, „Válaszd ki az állapotát”… felirattal és React-azonosítóval:
+  vinted.picker_of, _REACT_ID_RE), és a modell rossz kategóriát választott (Sportruházat); az állapotok új magyar
+  felirata („Kiváló” = Nagyon jó, „Új, címkékkel”); a kategóriafában a már választott elemet az azonosítója szerint
+  szűri, így a Női › Ruhák › Ruhák út is választható; a „Nők” a fa „Női” ága (CATEGORY_HU). Frissítéskor az előre
+  jóváhagyott közzététel is jóváhagyásnak számít (work.approved), így utána ellenőrzi, fent van-e, és ha nem derül
+  ki, nem tölti fel újra fél óra múlva (unsure_publish: kétszer kerülne fel), hanem szól.
+- Az eladott tárgyak törlése (Hirdetéseim › Eladva › Eladottak törlése, vagy egy tárgy Törlése): az Elemzés adatai az
+  eladások archívumába kerülnek (eladas/_eladott.json, ItemStore.archived), és a haszon, a havi bontás, a havi keret
+  és az Eladva összesítője ugyanúgy számol velük.
 
 ## Élesben kipróbálandó
 - A telefon akkuja és adatforgalma az új kapcsolattal (Android: Beállítások › Akkumulátor és Adathasználat, a Jarvis
@@ -448,6 +458,8 @@
   keresőoldalán (keres.php) is beáll-e a „legújabb elöl, 100 db” (a naplóban a lista beállítása), és ha a Vinted
   kártyáján újra megjelenne az eladó linkje az ár mellett, az ne legyen külön „hirdetés” (a böngészős kiolvasó, a
   feeds.py-tól eltérően, nem szűr a hirdetéscímre).
+- A Vinted magyar űrlapja élesben (a hibacsomag elemei alapján tesztelve): hogy a választás után a gomb felirata
+  a kiválasztottat mutatja-e (a kitöltő ezt nem igényli), és a márka „Nameless”-féle ritka nevei a keresőben.
 - Az Írtam neki kézi jelölés: a Jarvis nem nézi, hogy írtál-e az eladónak (a Vinted-üzenetekből kiolvasható lenne), és
   ha a folyamatban lévő hirdetés közben elkelt vagy lekerült, arról nem szól (a hirdetés oldalát nem nézi újra).
 

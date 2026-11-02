@@ -2113,6 +2113,13 @@ class JarvisApp:
             store.refresh_reposted(item_id, key)
             which = "a 2. képsorral" if photo_set == 1 else "az alap képsorral"
             return True, f"levettem és újra feltöltöttem ({which})"
+        if work.unsure_publish == (item_id, key):
+            # a közzététel megtörtént, csak nem tudtam ellenőrizni, fent van-e: újra feltölteni nem szabad (kétszer
+            # kerülne fel); a tárgy lapján a „Fent van” gombbal jelölheted, és utána a frissítés megy tovább
+            store.refresh_reposted(item_id, key)
+            return False, ("levettem, és újra közzétettem, de nem tudtam ellenőrizni, hogy fent van-e. Nézd meg a "
+                           "Vinteden: ha fent van, a tárgy lapján nyomd meg a „Fent van” gombot. Nem töltöm fel "
+                           "újra, hogy ne kerüljön fel kétszer")
         return False, ("levettem, de az újrafeltöltés nem sikerült; "
                        f"{int(refreshing.REPOST_RETRY // 60)} perc múlva újra megpróbálom (addig nincs fent)")
 

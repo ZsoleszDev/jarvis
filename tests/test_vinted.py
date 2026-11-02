@@ -320,9 +320,68 @@ PAGES = {
                     "<body><h1>Vinted</h1><p>Valami egészen más oldal.</p></body></html>",
 }
 
+def hungarian_form(form: str) -> str:
+    """A Vinted mai magyar űrlapja, ahogy a 2026. novemberi hibacsomagban (20261102-201016-vinted-…-post) látszott:
+    a választómezők gombok React-azonosítóval (_r_g_…) és „Válassz ki …” felirattal (mezőnév nélkül), a választás után
+    a gomb a kiválasztottat mutatja; a szövegmezők neve marad (title, description, price), a felirat magyar; az
+    állapotok magyarul („Kiváló” = Very good, condition-2), a színek és a kategóriafa is (a Ruhák alatt a Ruhák és a
+    Sportruházat › Ruhák is: a kategóriakeresőben ez kettő); a közzététel gombja „Feltöltés”."""
+    pickers = {"category": ("_r_g_", "Válassz ki egy kategóriát"), "brand": ("_r_k_", "Válaszd ki a márkát"),
+               "size": ("_r_n_", "Válassz ki egy méretet"), "condition": ("_r_q_", "Válaszd ki az állapotát"),
+               "color": ("_r_t_", "Válassz ki legfeljebb 2 színt")}
+    out = form.replace('<html lang="en">', '<html lang="hu">').replace("Sell an item", "Termék eladása")
+    for old, new in (('<label for="title">Title</label>', '<label for="title">Cím</label>'),
+                     ('<label for="description">Describe your item</label>', '<label for="description">Leírás</label>'),
+                     ('<label for="price">Price</label>', '<label for="price">Ár</label>'),
+                     ('aria-label="Search brands"', 'aria-label="Márka keresése"'),
+                     ('<button type="button" onclick="upload()">Upload</button>',
+                      '<button type="button" onclick="upload()">Feltöltés</button>'),
+                     ('Accept all</button>', 'Az összes elfogadása</button>')):
+        assert old in out, old
+        out = out.replace(old, new)
+    for name, (ident, label) in pickers.items():
+        found = re.search(rf'<label for="{name}">[^<]*</label> <input id="{name}" name="{name}" readonly[^>]*>', out)
+        assert found, name
+        out = out.replace(found.group(0), f'<button type="button" id="{ident}">{label}</button>')
+        out = out.replace(f"$('{name}').value = ", f"$('{ident}').textContent = ")
+        out = out.replace(f"$('{name}')", f"$('{ident}')")
+    tree = """const TREE = [
+  {id: 1904, name: 'Női', children: [
+    {id: 4, name: 'Ruhák', children: [
+      {id: 183, name: 'Farmerek', children: [{id: 1845, name: 'Egyenes szárú farmerek'},
+                                             {id: 1844, name: 'Skinny farmerek'}]},
+      {id: 12, name: 'Felsők és pólók', children: [{id: 221, name: 'Pólók'}, {id: 222, name: 'Blúzok'}]},
+      {id: 10, name: 'Ruhák', children: [{id: 1774, name: 'Nyári ruhák'}, {id: 1779, name: 'Hétköznapi ruhák'}]},
+      {id: 73, name: 'Sportruházat', children: [{id: 574, name: 'Ruhák'}]}]},
+    {id: 16, name: 'Cipők', children: [{id: 2632, name: 'Sportcipők'}]}]},
+  {id: 5, name: 'Férfi', children: [{id: 2050, name: 'Ruhák', children: [{id: 76, name: 'Pólók'}]}]},
+  {id: 1918, name: 'Gyerek', children: [{id: 1195, name: 'Játékok'}]},
+];"""
+    out = re.sub(r"const TREE = \[.*?\n\];", lambda _m: tree, out, count=1, flags=re.S)
+    out = out.replace("path.some((n) => n.name === 'Jeans')", "path.some((n) => n.name === 'Farmerek')") \
+             .replace("path.some((n) => n.name.startsWith('Tops'))", "path.some((n) => n.name.startsWith('Felsők'))")
+    conditions = """const CONDITIONS = [
+  [6, 'Új, címkékkel', 'Vadonatúj, sosem használt termék, a címkéi rajta vannak.'],
+  [1, 'Új, címkék nélkül', 'Vadonatúj, sosem használt termék címkék nélkül.'],
+  [2, 'Kiváló', 'Keveset használt termék, esetleges apróbb tökéletlenségekkel, de még mindig jól néz ki.'],
+  [3, 'Jó', 'Használt termék, amelyen tökéletlenségek és kopás látszik.'],
+  [4, 'Kielégítő', 'Gyakran használt termék tökéletlenségekkel és kopással.']];
+const COLORS = [[1, 'Fekete'], [3, 'Szürke'], [12, 'Fehér'], [9, 'Kék'], [26, 'Világoskék'], [27, 'Sötétkék'],
+  [7, 'Piros'], [24, 'Rózsaszín']];"""
+    out = re.sub(r"const CONDITIONS = \[.*?\]\];\nconst COLORS = \[.*?\]\];", lambda _m: conditions, out, count=1,
+                 flags=re.S)
+    assert "Kiváló" in out and "Női" in out
+    return out.replace("done.textContent = 'Done'", "done.textContent = 'Kész'")
+
+
 JEANS = dict(product="hosszú farmer", kind="ruha", title="Hosszú farmer 40-es méret",
              description="40-es méretű hosszú farmer, egyszer hordtam.", category="Nők > Ruhák > Farmerek",
              brand="Zara", size="40", condition="Nagyon jó", color="kék", price=4000, search_query="farmer")
+
+PAGES["vinted-hu.html"] = hungarian_form(PAGES["vinted2.html"])
+# A közzététel után a Vinted nem visz tovább, és hibát sem ír ki (nem tudni, fent van-e).
+PAGES["vinted-stuck.html"] = PAGES["vinted-hu.html"].replace(
+    "location.href = '/member/240394916/?promo_shown=true&' + q;", "document.title = 'Feldolgozás…';")
 
 
 class LocalSite:
@@ -383,6 +442,41 @@ class MatchingTests(unittest.TestCase):
         hungarian = [el("input:text", "Cím"), el("textarea", "Leírás (nem kötelező)"), el("input:text", "Ár")]
         self.assertEqual([find_field(hungarian, n)["label"] for n in ("title", "description", "price")],
                          ["Cím", "Leírás (nem kötelező)", "Ár"])
+
+    def test_the_hungarian_form_of_november_2026(self):
+        """A 2026. novemberi hibacsomag elemei: a választómezők gombja „Válassz ki …” felirattal és React-azonosítóval
+        (mezőnév nélkül). Eddig a kategóriát és az állapotot nem találta (a márka, a méret és a szín csendben kimaradt),
+        és a modell pótolta őket, egy rossz kategóriával."""
+        elements = [el("input:text", "Cím", "title _r_c_"), el("textarea", "Leírás", "description _r_d_"),
+                    el("button", "Válassz ki egy kategóriát", "_r_g_"), el("button", "Válaszd ki a márkát", "_r_k_"),
+                    el("button", "Válassz ki egy méretet", "_r_n_"), el("button", "Válaszd ki az állapotát", "_r_q_"),
+                    el("button", "Válassz ki legfeljebb 2 színt", "_r_t_"), el("input:text", "Ár", "price _r_h_"),
+                    el("button", "Válaszd ki a csomagméretet", "_r_w_"), el("button", "Válassz ki egy fotót"),
+                    el("input:text", "Kategória keresése", "catalog-search-input catalog-search-inpu"),
+                    el("button", "Feltöltés")]
+        found = {name: (find_field(elements, name) or {}).get("field") for name in vinted.FIELDS}
+        self.assertEqual(found, {"title": "title _r_c_", "description": "description _r_d_", "category": "_r_g_",
+                                 "brand": "_r_k_", "size": "_r_n_", "condition": "_r_q_", "color": "_r_t_",
+                                 "price": "price _r_h_"}, "a csomagméret nem a méret, a kategóriakereső nem a mező")
+        english = [el("button", "Select a category", "_r_1_"), el("button", "Select up to 2 colours", "_r_10_")]
+        self.assertEqual([find_field(english, n)["field"] for n in ("category", "color")], ["_r_1_", "_r_10_"],
+                         "a számra végződő React-azonosító sem egy lista lehetősége (mint a condition-2)")
+        self.assertIsNone(find_field([el("button", "Válassz ki egy fotót")], "price"),
+                          "a rövid „ár” nem illik akármire")
+        self.assertEqual(publish_button(elements)["label"], "Feltöltés")
+        hungarian = [el("radio", f"{name} {text}", f"condition-{n}") for n, name, text in (
+            (6, "Új, címkékkel", "Vadonatúj, sosem használt"), (1, "Új, címkék nélkül", "Vadonatúj"),
+            (2, "Kiváló", "Keveset használt termék"), (3, "Jó", "Használt termék"),
+            (4, "Kielégítő", "Gyakran használt"))]
+        expected = {"Új, címkével": "Új, címkékkel", "Új": "Új, címkék nélkül", "Nagyon jó": "Kiváló", "Jó": "Jó",
+                    "Elfogadható": "Kielégítő", "Hibás": "Kielégítő"}
+        for ours, theirs in expected.items():
+            self.assertEqual(condition_option(hungarian, ours)[1], theirs, ours)
+        no_ids = [{**option, "field": ""} for option in hungarian]
+        self.assertEqual(condition_option(no_ids, "Nagyon jó")[1], "Kiváló", "azonosító nélkül a felirata szerint")
+        words = category_words("Nők > Ruhák > Női ruhák")
+        self.assertEqual(category_option([el("button", "Női"), el("button", "Férfi")], words)["label"], "Női",
+                         "a „Nők” a magyar fa „Női” ága")
 
     def test_conditions_in_english_and_hungarian(self):
         english = [el("radio", f"{name} {text}", f"condition-{n}") for n, name, text in (
@@ -616,6 +710,34 @@ class VintedFlowTests(VintedBrowserBase):
         self.assertEqual([s["field"] for s in self.work.choices.get("category", key)],
                          ["catalog-1904", "catalog-4", "catalog-183", "catalog-1845"], "megjegyezte a kategóriautat")
         self.assertIn("Feltöltés modell nélkül: Hosszú farmer 40-es méret → Vinted", [e[1] for e in self.ui.of("info")])
+
+    def test_the_hungarian_form_is_filled_without_the_model(self):
+        """A Vinted mai magyar űrlapja (hungarian_form): a hibacsomag ruhája a Női › Ruhák › Ruhák ágba kerül (eddig a
+        második „Ruhák” ki sem jöhetett, mert a felirata már ki volt választva), az állapota „Kiváló”, a színe
+        „Rózsaszín”; a farmer mérete a magyar méretválasztóból. A Munka menü modellje nem dolgozik."""
+        self.platform = Platform("vinted", "Vinted", self.site.url("fooldal.html"), self.site.url("vinted-hu.html"),
+                                 "", ("127.0.0.1",), "Vinted: tippek a teszthez.")
+        self.work.platforms["vinted"] = self.platform
+        dress = self.item(product="virágmintás ruha", kind="ruha", title="Virágmintás ruha",
+                          description="Nyári, virágmintás ruha.", category="Nők > Ruhák > Női ruhák", brand="Zara",
+                          size="M", condition="Nagyon jó", color="rózsaszín", price=699)
+        self.fake.chat_script = [pick("Nyári ruhák")]
+        state = self.post(dress)
+        self.assertEqual((state["status"], self.fake.chat_script), (POSTED, []), "egy rövid kérdés: a ruha fajtája")
+        sent = self.sent()
+        self.assertEqual((sent["category"], sent["brand"], sent["condition"], sent["colors"], sent["price"]),
+                         ("Női > Ruhák > Ruhák > Nyári ruhák", "Zara", "Kiváló", "Rózsaszín", "699"))
+        jeans = self.item(**JEANS)
+        self.fake.chat_script = [pick("Farmerek"), pick("Egyenes szárú farmerek"), pick("EU")]
+        self.assertEqual(self.post(jeans)["status"], POSTED)
+        sent = self.sent()
+        self.assertEqual((sent["category"], sent["size"], sent["condition"], sent["colors"]),
+                         ("Női > Ruhák > Farmerek > Egyenes szárú farmerek", "EU 40", "Kiváló", "Kék"))
+        self.assertEqual(self.agent_calls(), [], "a Munka menü modellje (eszközökkel) nem dolgozott")
+        prompt = self.ui.of("confirm")[-1][1]
+        for expected in ("Kategória: Női > Ruhák > Farmerek > Egyenes szárú farmerek", "Állapot: Kiváló", "Szín: Kék",
+                         "Feltöltés"):
+            self.assertIn(expected, prompt)
 
     def test_a_remembered_category_needs_no_model_at_all(self):
         first = self.item(**SHIRT)
@@ -888,6 +1010,34 @@ class VintedRefreshTests(VintedBrowserBase):
         self.assertEqual(self.sent()["price"], "3500", "azzal töltötte fel újra")
         self.assertEqual(self.sent()["photos"], "1", "második képsor nélkül az alap marad")
         self.assertEqual(found.refresh["set"], 0)
+
+    def test_an_unverified_publish_is_not_put_up_twice(self):
+        """A 2026. novemberi hibacsomag esete: levette, újra közzétette, de nem derült ki, hogy fent van-e. A közzététel
+        frissítéskor előre jóvá van hagyva (nem kérdez), és eddig ezért nem is számított jóváhagyottnak: a tárgy hibás
+        lett, és fél óra múlva újra feltöltötte volna (kétszer lett volna fent). Most nem tölti fel újra, és szól."""
+        item = self.refreshed("items/987-hosszu-farmer-40-es-meret/", alt_photos=0)
+        self.platform = Platform("vinted", "Vinted", self.site.url("fooldal.html"), self.site.url("vinted-stuck.html"),
+                                 self.site.url("catalog/?search_text={q}"), ("127.0.0.1",),
+                                 "Vinted: tippek a teszthez.")
+        self.work.platforms["vinted"] = self.platform
+        checks = []
+
+        def unsure(body):
+            checks.append(user_text(body))
+            return 200, reply("Nem látom egyértelműen, hogy fent van-e a hirdetés.")
+
+        self.fake.chat_script = [pick("Farmerek"), pick("Egyenes szárú farmerek"), pick("EU"), unsure]
+        self.app.run_work({"action": "refresh", "ids": [item.id]})
+        self.assertTrue(self.deleted("987"), "levette")
+        self.assertEqual(self.ui.of("confirm"), [], "a közzétételre nem kérdezett (a frissítés jóváhagyta)")
+        self.assertEqual(len(checks), 1, "a modell megnézte, fent van-e")
+        found = self.store.get(item.id)
+        self.assertEqual(found.platforms["vinted"]["status"], FAILED)
+        self.assertTrue(found.platforms["vinted"]["note"].startswith("Lehet, hogy mégis fent van"))
+        self.assertIsNone(found.refresh.get("repost"), "nem tölti fel újra")
+        self.assertIn("nem tudtam ellenőrizni, hogy fent van-e", found.refresh["note"])
+        self.assertNotIn(item.id, [i.id for i in self.store.refresh_due(now=found.refresh["next"] + 86400)],
+                         "amíg nem jelölöd „Fent van”-nak, nem frissíti")
 
     def test_a_sold_listing_is_not_put_up_again(self):
         item = self.refreshed("items/992-hosszu-farmer-40-es-meret/")
