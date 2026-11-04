@@ -1112,7 +1112,7 @@ class WorkDeskTests(unittest.TestCase):
                      gender="férfi", condition="Jó", category="Cipők", search_query="Nike Air Max 90",
                      price_estimate=20000)
         researcher = self.desk.researcher = FakeResearcher(self.store, (11000, 13000, 15000))
-        item = self.store.create(targets=["vinted"], pro=True)
+        item = self.store.create(targets=["vinted"], pro=True, research_wanted=True)   # „Nézz utána az árnak”
         self.store.add_photo(item.id, jpeg())
         self.fake.chat_script = [seen(**shoes)]
         step = self.desk.prepare(item.id, self.steps.append)
@@ -1124,12 +1124,45 @@ class WorkDeskTests(unittest.TestCase):
         self.desk.researcher = FakeResearcher(self.store, (14000,))
         self.desk.deals.book.add([{"text": f"Nike Air Max 90 {n}", "price": p, "url": f"https://x.hu/{n}",
                                    "platform": "vinted"} for n, p in enumerate((15000, 16000, 17000, 18000, 19000))])
-        other = self.store.create(targets=["vinted"], pro=True)
+        other = self.store.create(targets=["vinted"], pro=True, research_wanted=True)
         self.store.add_photo(other.id, jpeg())
         self.fake.chat_script = [seen(**shoes)]
         step = self.desk.prepare(other.id, self.steps.append)
         self.assertEqual(self.store.get(other.id).price, 16500)
         self.assertIn("az árbázisból: a hasonlók most kb. 17 000 Ft-ért mennek (5 ár alapján)", step.text)
+
+    def test_pro_without_price_research_needs_no_browser(self):
+        """A „Nézz utána az árnak” alapból ki: a Pro feltöltés ilyenkor nem keres a hirdetési oldalakon (a Vinteden a
+        böngészővel, ami lassú, és várni kell, amíg a kereskedés átadja), és nem kell hozzá a böngésző sem (az
+        eladás-előkészítő szálon végigmegy): az ár az árbázisból, vagy a fotók alapján becsülve; a Nézd át rögtön jön."""
+        class NoResearch:
+            calls = 0
+
+            def research(self, *args, **kwargs):
+                NoResearch.calls += 1
+                raise AssertionError("nem kérte az árkutatást")
+
+            def needs_browser(self, only=None):
+                return True
+
+        self.desk.researcher = NoResearch()
+        shoes = dict(product="cipő", kind="cipő", title="Nike Air Max 90", brand="Nike", size="42", color="fehér",
+                     gender="férfi", condition="Jó", category="Cipők", search_query="Nike Air Max 90",
+                     price_estimate=20000)
+        item = self.store.create(targets=["vinted"], pro=True)
+        self.store.add_photo(item.id, jpeg())
+        self.fake.chat_script = [seen(**shoes)]
+        step = self.desk.prepare(item.id, self.steps.append, browser=False)
+        self.assertEqual((step.kind, NoResearch.calls, self.store.get(item.id).price), ("review", 0, 20000),
+                         "a böngészőre sem vár (az előkészítő szálon kész)")
+        self.assertIn("becslés a fotók alapján", step.text)
+        self.desk.deals.book.add([{"text": f"Nike Air Max 90 {n}", "price": p, "url": f"https://x.hu/{n}",
+                                   "platform": "vinted"} for n, p in enumerate((15000, 16000, 17000, 18000, 19000))])
+        other = self.store.create(targets=["vinted"], pro=True)
+        self.store.add_photo(other.id, jpeg())
+        self.fake.chat_script = [seen(**shoes)]
+        step = self.desk.prepare(other.id, self.steps.append, browser=False)
+        self.assertEqual((step.kind, self.store.get(other.id).price), ("review", 16500), "az árbázisból, ha ismeri")
 
     def test_research_on_a_bought_item_reads_the_description_first(self):
         """Egy megvett tárgy (Megvettem, vagy az Elemzés Új vétele): a leírásából még nem olvasta ki, mi ez. Az
@@ -2001,10 +2034,10 @@ class SellFlowTests(unittest.TestCase):
         self.assertTrue([n for n in app.notices.list() if n["title"].startswith("Nézd át:")])
 
     def test_a_price_check_in_the_browser_goes_on_on_the_agent_thread(self):
-        """A fotók átnézése az előkészítő szálon megy; a Vinted-árkutatáshoz böngésző kell, az az ágens-szálon
-        folytatódik (elsőbbséggel), és ott a fotókat már nem nézi át újra."""
+        """A fotók átnézése az előkészítő szálon megy; ha kérted az árkutatást, a Vinted-árkutatáshoz böngésző kell, az
+        az ágens-szálon folytatódik (elsőbbséggel), és ott a fotókat már nem nézi át újra."""
         self.start_prep()
-        item = self.store.add_photo(self.store.create(targets=["vinted"], pro=True).id, jpeg())
+        item = self.store.add_photo(self.store.create(targets=["vinted"], pro=True, research_wanted=True).id, jpeg())
         self.fake.chat_script = [seen(**{**{k: v for k, v in SHIRT.items() if k in selling.PRO_FIELDS + ("kind",)},
                                          "price_estimate": 2000})]
         self.app.submit_work("sell", [item.id])

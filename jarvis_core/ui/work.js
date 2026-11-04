@@ -269,7 +269,9 @@
     $("w-mode-pro").setAttribute("aria-selected", String(pro));
     $("w-pro-help").hidden = !pro;
     $("w-camera-row").hidden = !(pro && touchPhone);
-    $("w-research-row").hidden = pro;            // Pro: az árat a hasonlókból úgyis megnézi
+    // az árkutatás (a hasonló hirdetések a böngészővel) mindkét módban kérhető, alapból ki: Pro módban nélküle az ár
+    // az árbázisból vagy a fotók alapján jön, és a Nézd át rögtön megjelenik
+    $("w-research-row").hidden = false;
     $("w-prompt-label").textContent = pro ? "Megjegyzés (nem kötelező)" : "Mit adsz el?";
     $("w-prompt").placeholder = pro ? "Pl. egy kis folt van az ujján; dobozzal együtt adom"
       : "Pl. Zara L-es fekete póló, egyszer hordott, 500 Ft";
@@ -291,7 +293,7 @@
     $("w-sites").innerHTML = platforms.map((p) =>
       `<label class="check"><input type="checkbox" value="${esc(p.key)}"${current.includes(p.key) ? " checked" : ""}>` +
       ` ${esc(p.name)}</label>`).join("");
-    $("w-research").checked = recall("jarvis-research") === "1";
+    $("w-research").checked = recall("jarvis-research-on") === "1";   // (új kulcs: alapból ki, a Pro módban is)
     $("w-research").disabled = !researchOn;
     applyMode();
     renderNeeds();
@@ -351,7 +353,7 @@
     say("Küldöm a fotókat…");
     try {
       const created = await J.postJson("/api/work/new",
-        { targets, prompt, pro, research_wanted: !pro && $("w-research").checked });
+        { targets, prompt, pro, research_wanted: $("w-research").checked });
       if (!created.ok) { say(created.error || "Nem sikerült."); return; }
       items.set(created.item.id, created.item);
       const files = composePhotos;
@@ -2626,7 +2628,7 @@
     store("jarvis-sites", JSON.stringify(selectedSites()));
     renderNeeds();
   });
-  $("w-research").addEventListener("change", () => store("jarvis-research", $("w-research").checked ? "1" : "0"));
+  $("w-research").addEventListener("change", () => store("jarvis-research-on", $("w-research").checked ? "1" : "0"));
   $("w-new-photos").addEventListener("click", (event) => {
     const unpick = event.target.closest("[data-unpick]");
     if (unpick) {

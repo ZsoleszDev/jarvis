@@ -791,7 +791,8 @@ class WorkBrowserTests(unittest.TestCase):
         page = self.page
         self.h.app.work.researcher = None                      # az ár a fotók alapján (a teszt ne böngésszen)
         page.click("#w-mode-pro")
-        self.assertTrue(page.is_visible("#w-pro-help") and page.is_hidden("#w-research-row"))
+        self.assertTrue(page.is_visible("#w-pro-help") and page.is_visible("#w-research-row"))
+        self.assertFalse(page.is_checked("#w-research"), "az árkutatás Pro módban is kérhető, alapból ki")
         self.assertEqual(page.inner_text("#w-prompt-label"), "Megjegyzés (nem kötelező)")
         self.assertTrue(page.is_hidden("#w-camera-row"), "a gépen nincs kamera gomb")
         page.check('#w-sites input[value="vinted"]')
@@ -808,6 +809,7 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector('.card .ask p:has-text("még kell: méret")')
         [item] = self.h.store.all()
         self.assertTrue(item.pro)
+        self.assertFalse(item.research_wanted, "nem kérted: nem böngészik az árért")
         self.h.fake.chat_script = [extracted(size="M")]
         page.fill(f'[data-keep="reply-{item.id}"]', "M-es")
         page.click(f'form[data-reply="{item.id}"] button[type="submit"]')
