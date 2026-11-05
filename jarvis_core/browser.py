@@ -1387,6 +1387,39 @@ def _is_option(el: dict[str, Any]) -> bool:
     return bool(label) and not CONTROL_RE.match(label)
 
 
+def launch_options(cfg: Any, headless: bool | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """A böngésző indításának beállításai, és a sorban kipróbálandó böngészők (a beállított, aztán a Playwright saját
+    Chromiuma). A fő böngésző, az olvasóprofil és a villámfigyelő (sniper.py) is így indul. headless: a beállítás
+    (cfg.headless) helyett."""
+    options: dict[str, Any] = {
+        "headless": bool(cfg.headless if headless is None else headless),
+        "viewport": {"width": int(cfg.width), "height": int(cfg.height)},
+        "locale": "hu-HU",
+        "args": ["--disable-blink-features=AutomationControlled"],
+        "ignore_default_args": ["--enable-automation"],
+    }
+    attempts: list[dict[str, Any]] = []
+    if cfg.executable_path:
+        attempts.append({"executable_path": str(resolve_path(cfg.executable_path))})
+    elif cfg.channel:
+        attempts.append({"channel": cfg.channel})
+    attempts.append({})  # tartalék: a Playwright saját Chromiuma
+    return options, attempts
+
+
+def page_challenged(page: Any) -> bool:
+    """Robot-ellenőrzést (látható captchát) vagy robotvédelmi köztes oldalt mutat-e a lap (mint a
+    BrowserController.challenged, egy tetszőleges lapon). Ha épp továbbirányít, nem."""
+    try:
+        if page.evaluate(f"() => {CAPTCHA_FRAME_JS}"):
+            return True
+        title = page.title() or ""
+        head = page.evaluate("() => (document.body ? document.body.innerText : '').slice(0, 1500)") or ""
+    except Exception:  # noqa: BLE001 - épp továbbirányít
+        return False
+    return bool(_CHALLENGE_RE.search(title)) or (len(head) < 600 and bool(_CHALLENGE_RE.search(head)))
+
+
 def _short(exc: BaseException | None) -> str:
     text = str(exc or "").strip().splitlines()
     return text[0][:200] if text else type(exc).__name__
@@ -1671,21 +1704,7 @@ class BrowserController:
         self.page = pages[0] if pages else self._context.new_page()
 
     def _launch_options(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """A böngésző indításának beállításai, és a sorban kipróbálandó böngészők (a beállított, aztán a Chromium)."""
-        options: dict[str, Any] = {
-            "headless": bool(self.cfg.headless),
-            "viewport": {"width": int(self.cfg.width), "height": int(self.cfg.height)},
-            "locale": "hu-HU",
-            "args": ["--disable-blink-features=AutomationControlled"],
-            "ignore_default_args": ["--enable-automation"],
-        }
-        attempts: list[dict[str, Any]] = []
-        if self.cfg.executable_path:
-            attempts.append({"executable_path": str(resolve_path(self.cfg.executable_path))})
-        elif self.cfg.channel:
-            attempts.append({"channel": self.cfg.channel})
-        attempts.append({})  # tartalék: a Playwright saját Chromiuma
-        return options, attempts
+        return launch_options(self.cfg)
 
     def _reads_apart(self, url: str) -> bool:
         """Ezt a címet az olvasóprofil olvassa-e (cfg.reader, READER_HOSTS)."""

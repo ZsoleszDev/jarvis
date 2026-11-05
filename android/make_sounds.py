@@ -1,11 +1,14 @@
 """A Jarvis értesítési hangjai (Android res/raw): puha, halk, marimbaszerű hangok, hogy hallásra felismerd, de ne
 legyenek bántók. Szinusz alaphang egy halk, gyorsan lecsengő oktáv felhanggal, lágy indulással és lecsengéssel (nincs
-kattanás); 16 bit, mono, a csúcs a teljes hangerő felénél sem több.
+kattanás); 16 bit, mono, a csúcs a teljes hangerő felénél sem több (csak a villámfigyelőé, ami sürgős).
 
 - jarvis_alert: a megérő hirdetés (három emelkedő hang, C-dúr), utána négy másodperc csend. A riasztás (FLAG_INSISTENT)
   a fájlt ismétli: így ötmásodpercenként egy halk csengés jön, nem egy folyamatos csengetés.
 - jarvis_ping: a többi értesítés (jóváhagyás, értesítés, alku): két rövid, halk hang.
 - jarvis_tip: az „Érdemes megnézni” tipp: egyetlen nagyon rövid, halk pittyenés.
+- jarvis_snipe: a villámfigyelő (a Vinted új hirdetése, sietni kell): három gyors, magas hang és egy még magasabb
+  („ti-ti-ti-tá”), hangosabban és élesebben a többinél, hogy hallásra rögtön megkülönböztesd; utána egy kis csend (a
+  riasztás egy percig ismétli).
 
 Újragenerálás (pl. ha más hangot szeretnél): python android/make_sounds.py android/app/src/main/res/raw
 Ha a hang megváltozik, a telefonon az értesítési csatornák azonosítóját is növelni kell (NotifyService), mert az
@@ -59,3 +62,7 @@ if __name__ == "__main__":
     write(raw / "jarvis_ping.wav", [(E5, 0.00, 0.35, 0.9), (A5, 0.10, 0.45, 1.0)], 0.6, 0.4, decay=6.0)
     # érdemes megnézni: egyetlen nagyon rövid pittyenés
     write(raw / "jarvis_tip.wav", [(B5, 0.00, 0.14, 1.0)], 0.16, 0.35, decay=18.0, attack=0.005, bright=0.12)
+    # villámfigyelő: „ti-ti-ti-tá” egy oktávval feljebb (E6, A6), élesebb felhanggal, aztán másfél másodperc csend
+    E6, A6 = 1318.51, 1760.00
+    write(raw / "jarvis_snipe.wav", [(E6, 0.00, 0.12, 0.9), (E6, 0.12, 0.12, 0.9), (E6, 0.24, 0.12, 0.9),
+                                     (A6, 0.36, 0.50, 1.0)], 2.0, 0.6, decay=5.0, attack=0.004, bright=0.45)

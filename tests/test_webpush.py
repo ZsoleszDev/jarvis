@@ -242,6 +242,23 @@ class WebPushTests(unittest.TestCase):
         message = json.loads(browser.decrypt(body))
         self.assertEqual((headers["Urgency"], message["deal"], message.get("urgent")), ("normal", "h1", None))
 
+    def test_a_sniper_find_opens_the_listing_itself(self):
+        """A villámfigyelő találata: sürgős, és a kattintás magát a hirdetést nyitja meg (a link a push üzenetben), nem a
+        Jarvis ablakát; a service worker más rezgéssel jelzi."""
+        browser = Browser()
+        self.push.subscribe("aaaa1111", browser.subscription())
+        url = "https://www.vinted.hu/items/5000200-sony-playstation-4-slim"
+        self.push.on_event({"type": "notification", "notice": {
+            "id": "n9", "kind": "snipe", "title": "⚡ 35 000 Ft · PS4 slim", "text": "Vinted: …", "urgent": True,
+            "snipe": "vinted.hu#5000200", "url": url}})
+        self.service.wait()
+        _url, body, headers = self.service.calls[0]
+        message = json.loads(browser.decrypt(body))
+        self.assertEqual((headers["Urgency"], message["snipe"], message["url"], message["urgent"], message.get("deal")),
+                         ("high", "vinted.hu#5000200", url, True, None))
+        from jarvis_core.remote import SERVICE_WORKER
+        self.assertIn("message.snipe && message.url", SERVICE_WORKER)
+
     def test_confirm_answer_key_is_single_use(self):
         browser = Browser()
         self.push.subscribe("aaaa1111", browser.subscription())

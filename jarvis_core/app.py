@@ -506,6 +506,13 @@ class JarvisApp:
             # egy hívás mehet egyszerre), a modellre váró hirdetés vár, és a figyelő közben nézi tovább az oldalakat
             instant.model_ok = self.llm.gate.background_ok
             instant.start()
+        sniper = getattr(self.work, "sniper", None) if self.work is not None else None
+        if sniper is not None:
+            # Villámfigyelő (Vinted): saját szálon, a saját böngészőablakában, modell nélkül; a beállított időszakban
+            # figyel, a Szünet megállítja (a készenlét nem), és a beszélgetésre sem vár.
+            sniper.notify = self._quick_notify
+            sniper.allowed = self._sniper_allowed
+            sniper.start()
         trading = self.work.deals if self.work is not None else None
         if trading is not None:
             trading.journal.on_add = self._trading_note   # a Munka menü naplójába (és a konzolra) is
@@ -704,6 +711,14 @@ class JarvisApp:
             return False
         scheduler = self.scheduler
         return scheduler is None or float(scheduler.state.get("snoozed_until") or 0) <= now
+
+    def _sniper_allowed(self) -> bool:
+        """A villámfigyelő mehet-e most: nincs Szünet (a készenlét nem számít), és nem függesztetted fel a háttérmunkát.
+        Az aktív órák ([scheduler] active_hours) nem számítanak: a villámfigyelőnek saját időszaka van."""
+        if self.paused and not self.standby:
+            return False
+        scheduler = self.scheduler
+        return scheduler is None or float(scheduler.state.get("snoozed_until") or 0) <= time.time()
 
     def _quick_notify(self, kind: str, title: str, text: str, **extra: Any) -> None:
         """Az azonnali figyelő és a gyors sor értesítése (a saját szálukon): a Munka menü naplójába és a telefonra is."""
@@ -910,6 +925,8 @@ class JarvisApp:
             self.scheduler.stop()
         if self.work is not None and getattr(self.work, "instant", None) is not None:
             self.work.instant.stop()
+        if self.work is not None and getattr(self.work, "sniper", None) is not None:
+            self.work.sniper.stop()
         if self.work is not None:
             self.work.deals.stop_fast_lane()
         if self._prep is not None:

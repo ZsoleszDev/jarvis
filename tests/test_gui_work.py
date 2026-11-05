@@ -428,6 +428,49 @@ class WorkSecurityTests(unittest.TestCase):
         app.cfg.scheduler.active_hours = ""
         self.assertTrue(app._instant_allowed())
 
+    def test_sniper_from_the_window(self):
+        """Villámfigyelő (Vinted): keresőszó az árhatárral, az időszak és a ritmus, szünet, az árhatár kikapcsolása, a
+        próba-értesítés (saját értesítés a hirdetés linkjével), törlés; a Jarvis Szünete őt is megállítja."""
+        sniper = self.h.app.work.sniper
+        self.assertTrue(sniper.working(), "a szála a Jarvisszal együtt indul")
+        sniper.allowed = lambda: False           # a teszt alatt ne nyisson meg semmit (a valódi Vintedet sem)
+        status, data = request(self.port, "GET", f"/api/work/deals?t={self.h.server.token}", self.ok)
+        snipe = json.loads(data)["snipe"]
+        self.assertEqual((status, snipe["enabled"], snipe["start"], snipe["end"], snipe["active"], snipe["pause"]),
+                         (200, False, "16:30", "19:30", 20, 10))
+        status, data = self.post("/api/work/deals", {"action": "snipe_add", "target": "ps4", "max_price": "40000",
+                                                     "min_price": "15000", "exclude": "játék, hibás"})
+        self.assertEqual(status, 200, data)
+        query = data["snipe"]["queries"][0]
+        self.assertEqual((query["text"], query["max_price"], query["max_on"], query["min_price"], query["exclude"]),
+                         ("ps4", 40000, True, 15000, ["játék", "hibás"]))
+        self.assertEqual(self.post("/api/work/deals", {"action": "snipe_add", "target": "https://www.jofogas.hu/x"})[0],
+                         400)
+        status, data = self.post("/api/work/deals", {"action": "snipe_settings", "enabled": True, "start": "17:00",
+                                                     "end": "20:00", "active": "15", "pause": "5", "interval": "20"})
+        self.assertEqual((data["snipe"]["enabled"], data["snipe"]["start"], data["snipe"]["interval"]),
+                         (True, "17:00", 20))
+        status, data = self.post("/api/work/deals", {"action": "snipe_update", "id": query["id"], "max_on": False})
+        self.assertEqual((data["snipe"]["queries"][0]["max_on"], data["snipe"]["queries"][0]["max_price"]), (False, 40000))
+        status, data = self.post("/api/work/deals", {"action": "snipe_update", "id": query["id"], "off": True})
+        self.assertTrue(data["snipe"]["queries"][0]["off"])
+        self.assertEqual(data["snipe"]["phase"], "empty", "minden keresőszó szünetel")
+        self.assertEqual(self.post("/api/work/deals", {"action": "snipe_test"})[0], 200)
+        notice = next(n for n in self.h.app.notices.list() if n.get("snipe"))
+        self.assertEqual((notice["kind"], notice["url"], notice["urgent"]), ("snipe", "https://www.vinted.hu/", True))
+        status, data = self.post("/api/work/deals", {"action": "snipe_remove", "id": query["id"]})
+        self.assertEqual((status, data["snipe"]["queries"]), (200, []))
+        self.post("/api/work/deals", {"action": "snipe_settings", "enabled": False})
+        self.assertEqual(self.post("/api/work/deals", {"action": "snipe_nincs"})[0], 400)
+        app = self.h.app
+        self.assertTrue(app._sniper_allowed())
+        app.scheduler.snooze(30)
+        self.assertFalse(app._sniper_allowed(), "a háttérmunka felfüggesztése őt is megállítja")
+        app.scheduler.snooze(0)
+        app.cfg.scheduler.active_hours = "00:00-00:01" if time.localtime().tm_hour else "23:00-23:59"
+        self.assertTrue(app._sniper_allowed(), "az aktív órák nem számítanak: saját időszaka van")
+        app.cfg.scheduler.active_hours = ""
+
     def test_budget_and_piling_up_from_the_window(self):
         """Elemzés › Keret: a havi keret és a felhalmozódás határa; egy új vétel után rögtön szól, ha átlépte."""
         status, data = self.post("/api/work/ledger", {"action": "money", "budget": "100 000", "stock_count": "1"})
@@ -1261,17 +1304,17 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertEqual(deals.state()["auctions"], [])
 
     def test_trading_sections_are_folded_except_the_finds(self):
-        """Az Automata kereskedés fülön az Indítás és a legutóbbi találatok látszanak, a többi blokk (beállítások,
-        pótlás és javítás, keresések, azonnali figyelő, böngészés, figyelt oldalak, Mennyit ér?, napló) össze van csukva, magyarázó
-        szövegek nélkül; egy blokk kinyitva a következő megnyitáskor is nyitva marad."""
+        """Az Automata kereskedés fülön az Indítás és a legutóbbi találatok látszanak, a többi blokk (villámfigyelő,
+        beállítások, pótlás és javítás, keresések, azonnali figyelő, böngészés, figyelt oldalak, Mennyit ér?, napló) össze
+        van csukva, magyarázó szövegek nélkül; egy blokk kinyitva a következő megnyitáskor is nyitva marad."""
         page = self.page
         page.click("#job-deals")
         page.wait_for_selector("#d-run-toggle")
         self.assertTrue(page.locator("text=Legutóbbi találatok").is_visible())
         titles = [t.strip() for t in page.locator("#w-deals details.fold > summary").all_inner_texts()]
         self.assertEqual([t.split(" (")[0] for t in titles],
-                         ["Beállítások", "Pótlás és javítás", "Eladási költségek", "Keresések", "Csomagbontás",
-                          "Azonnali figyelő", "Böngészés", "Figyelt oldalak", "Mennyit ér?", "Napló"])
+                         ["Villámfigyelő", "Beállítások", "Pótlás és javítás", "Eladási költségek", "Keresések",
+                          "Csomagbontás", "Azonnali figyelő", "Böngészés", "Figyelt oldalak", "Mennyit ér?", "Napló"])
         self.assertEqual(page.locator("#w-deals details.fold[open]").count(), 0)
         for hidden in ("#d-maxbuy", "#d-query", "#dl-query"):
             self.assertTrue(page.locator(hidden).is_hidden(), hidden)
@@ -1408,6 +1451,48 @@ class WorkBrowserTests(unittest.TestCase):
         page.wait_for_selector('#d-run-toggle:has-text("Indítás")')
         self.assertFalse(deals.state()["running"] or instant.state()["enabled"])
         self.assertIn("Áll", page.inner_text(".runstate"))
+
+    def test_sniper_block_and_its_alert(self):
+        """A Villámfigyelő blokk: keresőszó az árhatárral, a napi bekapcsolás és az időszak; a próba-értesítés a felületen
+        egy sávot mutat a hirdetés linkjével (a gépen a saját hangjával is szól)."""
+        sniper = self.h.app.work.sniper
+        sniper.allowed = lambda: False           # a teszt alatt ne nyisson meg semmit
+        page = self.page
+        page.click("#job-deals")
+        page.wait_for_selector("#d-run-toggle")
+        page.click('details[data-fold="snipe"] > summary')
+        self.assertIn("Ki van kapcsolva", page.inner_text('details[data-fold="snipe"]'))
+        page.fill("#ds-target", "ps4")
+        page.fill("#ds-max", "40000")
+        page.fill("#ds-min", "15000")
+        page.fill("#ds-exclude", "játék")
+        page.click('#ds-add button[type="submit"]')
+        page.wait_for_selector('details[data-fold="snipe"] .dealist li:has-text("ps4")')
+        query = sniper.state()["queries"][0]
+        self.assertEqual((query["text"], query["max_price"], query["max_on"], query["min_price"]),
+                         ("ps4", 40000, True, 15000))
+        self.assertEqual(page.input_value(f'[data-snipe-maxprice="{query["id"]}"]'), "40000")
+        self.assertTrue(page.is_checked(f'[data-snipe-maxon="{query["id"]}"]'))
+        page.uncheck(f'[data-snipe-maxon="{query["id"]}"]')
+        page.wait_for_selector('.toast:has-text("bármilyen áron szólok")')
+        self.assertFalse(sniper.state()["queries"][0]["max_on"])
+        page.fill("#ds-start", "17:15")
+        page.select_option("#ds-pause", "0")
+        page.check("#ds-on")
+        page.wait_for_selector('.toast:has-text("Bekapcsolva")')
+        page.click("#ds-save")
+        page.wait_for_selector('.toast:has-text("17:15–19:30 között figyelek")')
+        state = sniper.state()
+        self.assertEqual((state["enabled"], state["start"], state["pause"]), (True, "17:15", 0))
+        self.assertIn("Villámfigyelő (Vinted) ·", page.inner_text('details[data-fold="snipe"] > summary'))
+        page.click("#ds-test")
+        page.wait_for_selector(".snipebar")
+        self.assertIn("Próba", page.inner_text(".snipebar"))
+        self.assertEqual(page.get_attribute(".snipebar a", "href"), "https://www.vinted.hu/")
+        page.click(".snipebar button")
+        page.wait_for_selector(".snipebar", state="hidden")
+        page.click(f'[data-snipe-remove="{query["id"]}"]')
+        page.wait_for_selector('details[data-fold="snipe"] li:has-text("Még nincs keresőszó")')
 
     def test_starting_in_one_window_shows_in_the_other(self):
         """A telefonról indítod: a gép ablakában is rögtön Leállítás lesz (újratöltés nélkül), és fordítva."""

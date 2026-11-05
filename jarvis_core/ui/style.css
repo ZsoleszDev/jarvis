@@ -469,6 +469,14 @@ fieldset.sites legend { padding: 0; margin-bottom: 8px; font-size: 13.5px; color
   .work.log-closed .worklog { border-left-color: transparent; }
 }
 
+/* A villámfigyelő találata (app.js snipeAlert): egy fehér keretes sáv felül, a hirdetés linkjével, amíg be nem zárod
+   (legfeljebb két percig). */
+.snipebar { position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 50; display: flex;
+            gap: 12px; align-items: center; max-width: calc(100% - 32px); padding: 10px 14px; border-radius: 8px;
+            background: var(--graphite); border: 2px solid var(--white); color: var(--white); font-size: 15px; }
+.snipebar b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.snipebar span { display: flex; gap: 10px; align-items: center; flex: 0 0 auto; }
+.snipebar a { color: var(--white); font-weight: 600; }
 .toast { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); padding: 6px 14px;
          border-radius: 6px; background: var(--graphite-hi); border: 1px solid var(--steel);
          font-size: 13.5px; color: var(--paper); pointer-events: none; }

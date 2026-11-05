@@ -55,6 +55,12 @@ import org.json.JSONObject;
  * megérő hirdetésé egy halk, háromhangú csengés, utána csenddel (res/raw/jarvis_alert; a riasztás ezt ismétli), a többié
  * (jóváhagyás, értesítés, alku) két rövid, halk hang (jarvis_ping), a tippé egyetlen pittyenés (jarvis_tip). Az Android
  * egy már létrehozott csatorna hangját nem cseréli le, ezért a csatornák új azonosítót kaptak (-3), a régieket törli.
+ *
+ * A villámfigyelő (notice.snipe: a Vinted egy új hirdetése, amit a megadott keresőszavaidra figyel) a saját csatornáján
+ * szól, a többitől eltérő hanggal (jarvis_snipe: „ti-ti-ti-tá”, magasabban és élesebben) és rezgéssel (egy hosszú,
+ * három rövid): SNIPE_MS ideig ismétli, aztán csendben marad. Rábökve rögtön a hirdetés nyílik meg (a Vinted
+ * alkalmazásában, ha telepítve van, különben a böngészőben): a lényeg a gyorsaság. A SNIPE_STALE_S-nél régebbi
+ * (pl. mert közben nem érte el a gépet) csendben jön.
  */
 public class NotifyService extends Service {
     static final String CHANNEL_LINK = "kapcsolat";
@@ -64,6 +70,7 @@ public class NotifyService extends Service {
     static final String CHANNEL_DEAL_QUIET = "megero-hirdetes-csendes";
     static final String CHANNEL_HAGGLE = "alkukepes-hirdetes-3";
     static final String CHANNEL_TIP = "erdemes-megnezni";
+    static final String CHANNEL_SNIPE = "villamfigyelo";
     // a régi csatornák (a rendszer alaphangjával, majd a korábbi, élesebb saját hangokkal): az új hangok miatt újak
     // lettek, ezeket törli
     static final String[] OLD_CHANNELS = {"jovahagyas", "ertesitesek", "megero-hirdetes", "alkukepes-hirdetes",
@@ -74,6 +81,8 @@ public class NotifyService extends Service {
     static final int WAIT_S = 600;                  // egy kérésben ennyi ideig vár a gép az eseményekre (mp)
     static final long BACKOFF_MAX = 5 * 60 * 1000;  // ha nem éri el a gépet, legfeljebb ennyi időnként próbálja újra
     static final long STALE_S = 20 * 60;            // ennél régebbi megérő hirdetésnél nem csenget
+    static final long SNIPE_MS = 60 * 1000;         // a villámfigyelő találata ennyi ideig szól (ismételve)
+    static final long SNIPE_STALE_S = 5 * 60;       // ennél régebbi villámfigyelő-találatnál nem szól
     static final int ONGOING_ID = 1;
     static final int REVOKED_ID = 2;
     static final int CONFIRM_BASE = 1000;
@@ -150,11 +159,19 @@ public class NotifyService extends Service {
         tip.enableVibration(true);
         tip.setVibrationPattern(new long[]{0, 70});
         tip.setSound(sound(context, R.raw.jarvis_tip), notification);
+        NotificationChannel snipe = new NotificationChannel(CHANNEL_SNIPE, "Villámfigyelő",
+                NotificationManager.IMPORTANCE_HIGH);
+        snipe.setDescription("A Vinted új hirdetése a villámfigyelő keresőszavaira (pl. egy ár alatt): saját, gyors "
+                + "„ti-ti-ti-tá” hang és rezgés egy percig. Rábökve rögtön a hirdetés nyílik meg.");
+        snipe.enableVibration(true);
+        // egy hosszú, három rövid rezgés, aztán szünet: a riasztás ezt ismétli
+        snipe.setVibrationPattern(new long[]{0, 400, 100, 90, 70, 90, 70, 90, 1200});
+        snipe.setSound(sound(context, R.raw.jarvis_snipe), notification);
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         for (String old : OLD_CHANNELS) {
             manager.deleteNotificationChannel(old);
         }
-        manager.createNotificationChannels(Arrays.asList(link, confirm, news, deal, dealQuiet, haggle, tip));
+        manager.createNotificationChannels(Arrays.asList(link, confirm, news, deal, dealQuiet, haggle, tip, snipe));
     }
 
     static PendingIntent openApp(Context context) {
@@ -407,6 +424,43 @@ public class NotifyService extends Service {
                 .setAutoCancel(true);
     }
 
+    /**
+     * A villámfigyelő találatának értesítése: rábökve maga a hirdetés nyílik meg (notice.url: a Vinted alkalmazásában
+     * vagy a böngészőben), különben a Jarvis.
+     */
+    private Notification.Builder snipeBuilder(String channel, int id, JSONObject notice) {
+        String url = notice.optString("url");
+        PendingIntent open = openApp(this);
+        if (url.startsWith("https://")) {
+            Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            open = PendingIntent.getActivity(this, id, view,
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        }
+        String text = notice.optString("text");
+        return new Notification.Builder(this, channel)
+                .setSmallIcon(R.drawable.ic_notify)
+                .setContentTitle(notice.optString("title", "Villámfigyelő"))
+                .setContentText(text)
+                .setStyle(new Notification.BigTextStyle().bigText(text))
+                .setContentIntent(open)
+                .setCategory(Notification.CATEGORY_RECOMMENDATION)
+                .setAutoCancel(true);
+    }
+
+    /** A villámfigyelő riasztása: SNIPE_MS ideig ismétlődő hang és rezgés, aztán csendben marad. Fő szálon fut. */
+    private void snipeAlert(int id, JSONObject notice) {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        Notification loud = snipeBuilder(CHANNEL_SNIPE, id, notice).build();
+        loud.flags |= Notification.FLAG_INSISTENT;
+        manager.notify(id, loud);
+        timers.postDelayed(() -> {
+            if (showing(id)) {                          // még nem nézted meg: csendben marad
+                manager.cancel(id);
+                manager.notify(id, snipeBuilder(CHANNEL_DEAL_QUIET, id, notice).build());
+            }
+        }, SNIPE_MS);
+    }
+
     /** Riasztás: ALERT_MS ideig ismétlődő rezgés (és hang), aztán szünet (quiet). Fő szálon fut. */
     private void dealAlert(int id, JSONObject notice) {
         NotificationManager manager = getSystemService(NotificationManager.class);
@@ -516,6 +570,16 @@ public class NotifyService extends Service {
             manager.notify(CONFIRM_BASE + id, notification);
         } else if ("confirm_done".equals(type)) {
             manager.cancel(CONFIRM_BASE + event.optInt("id"));
+        } else if ("notification".equals(type) && event.optJSONObject("notice") != null
+                && !event.optJSONObject("notice").optString("snipe").isEmpty()) {
+            JSONObject notice = event.optJSONObject("notice");
+            int id = NOTICE_BASE + (notice.optString("id").hashCode() & 0xffff);
+            double at = event.optDouble("at", 0);
+            if (at > 0 && System.currentTimeMillis() / 1000.0 - at > SNIPE_STALE_S) {   // régi: csendben
+                timers.post(() -> manager.notify(id, snipeBuilder(CHANNEL_DEAL_QUIET, id, notice).build()));
+            } else {
+                timers.post(() -> snipeAlert(id, notice));     // akkor is, ha az alkalmazás nyitva van
+            }
         } else if ("notification".equals(type) && event.optJSONObject("notice") != null
                 && !event.optJSONObject("notice").optString("corrects").isEmpty()) {
             JSONObject notice = event.optJSONObject("notice");

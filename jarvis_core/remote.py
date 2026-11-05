@@ -59,6 +59,9 @@ self.addEventListener("push", (event) => {
       options.renotify = true;
       options.vibrate = [200, 150, 200];     // két rövid rezgés (nem bántó, de észreveszed)
     }
+    if (message.snipe) {                   // villámfigyelő: más rezgés (egy hosszú, három rövid), hogy megkülönböztesd
+      options.vibrate = [400, 100, 90, 70, 90, 70, 90];
+    }
     if (message.kind === "confirm" && message.answer) {
       options.actions = [{ action: "approve", title: "Engedélyezem" }, { action: "deny", title: "Mégse" }];
       options.requireInteraction = true;
@@ -110,6 +113,10 @@ self.addEventListener("notificationclick", (event) => {
   const action = button.startsWith("notice-") && (message.actions || [])[Number(button.slice(7))];
   if (action) {
     event.waitUntil(openAction({ ...action, item: message.item || "" }));
+    return;
+  }
+  if (message.snipe && message.url) {       // a villámfigyelő találata: rögtön a hirdetés (a lényeg a gyorsaság)
+    event.waitUntil(self.clients.openWindow(message.url));
     return;
   }
   if (message.deal) {                       // egy megérő hirdetés: a találat ablaka (üzenet az eladónak, a hirdetés)

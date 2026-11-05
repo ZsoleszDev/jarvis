@@ -237,6 +237,7 @@ const handlers = {
     const notice = e.notice || {};
     systemNotify(notice.title || "Jarvis", notice.text || "", "notice-" + (notice.id || ""));
     addNotice(notice);
+    if (notice.snipe && live) snipeAlert(notice);   // villámfigyelő: saját hang és egy sáv a hirdetés linkjével
   },
   confirm(e) {
     pendingConfirm = e.id;
@@ -755,6 +756,56 @@ document.addEventListener("keydown", (event) => {
 });
 
 let toastTimer = null;
+// --- villámfigyelő (sniper.py): a Vinted új hirdetése ------------------------------------------------------------
+// Saját, a többitől eltérő hang (három gyors, magas csippanás és egy még magasabb, kétszer), hogy hallásra is tudd: ez
+// a villámfigyelő, sietni kell. Az Android-alkalmazás maga szól (a Villámfigyelő csatornán, saját hanggal), ott csak a
+// sáv jelenik meg. A böngésző csak egy kattintás után enged hangot: az első kattintásnál felébresztjük.
+let snipeAudio = null;
+function snipeContext() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  if (!snipeAudio) { try { snipeAudio = new Ctx(); } catch { return null; } }
+  if (snipeAudio.state === "suspended") snipeAudio.resume().catch(() => {});
+  return snipeAudio;
+}
+document.addEventListener("pointerdown", () => { if (!inAndroid) snipeContext(); }, { once: true });
+function snipeSound() {
+  const ctx = snipeContext();
+  if (!ctx) return;
+  const notes = [[1318.5, 0], [1318.5, 0.13], [1318.5, 0.26], [1760, 0.39]];
+  for (const round of [0, 0.9]) {
+    for (const [freq, at] of notes) {
+      const start = ctx.currentTime + round + at;
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = "triangle";
+      osc.frequency.value = freq;
+      const length = freq > 1500 ? 0.22 : 0.08;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.35, start + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + length);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + length + 0.02);
+    }
+  }
+}
+function snipeAlert(notice) {
+  if (!inAndroid) snipeSound();
+  let bar = document.querySelector(".snipebar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.className = "snipebar";
+    bar.setAttribute("role", "alert");
+    document.body.appendChild(bar);
+    bar.addEventListener("click", (event) => { if (event.target.closest("button")) bar.hidden = true; });
+  }
+  const link = notice.url ? `<a href="${escHtml(notice.url)}" target="_blank" rel="noopener noreferrer">Megnyitom</a>` : "";
+  bar.innerHTML = `<b>${escHtml(notice.title || "Villámfigyelő")}</b><span>${link}<button type="button" class="small quiet">Bezár</button></span>`;
+  bar.hidden = false;
+  clearTimeout(snipeAlert.timer);
+  snipeAlert.timer = setTimeout(() => { bar.hidden = true; }, 120000);
+}
+
 function toast(text) {
   let el = document.querySelector(".toast");
   if (!el) {

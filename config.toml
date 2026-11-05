@@ -83,6 +83,11 @@ profile_dir = ""
 # ajánlattétel a bejelentkezett profilban. Ebbe a profilba ne jelentkezz be. false = minden egy profilban (a régi mód).
 reader = true
 reader_profile_dir = ""
+# Villámfigyelő (Munka › Automata kereskedés › Villámfigyelő): saját, be nem jelentkezett profil és ablak; üresen
+# %LOCALAPPDATA%\Jarvis\browser_profile_villam. sniper_headless = true: ablak nélkül (a Vinted így hamarabb kérhet
+# robot-ellenőrzést).
+sniper_profile_dir = ""
+sniper_headless = false
 width = 1280
 height = 800
 # Egy oldalnézetben legfeljebb ennyi kezelhető elem (link, gomb, mező)
@@ -153,6 +158,10 @@ temperature = 0.3
 # 2–15 percenként nézi a figyelt kereséseket, és rögtön szól az új hirdetésekről. Oldalanként egyszerre egy kérés, 8–16
 # másodperc szünetekkel, óránként legfeljebb 90; ha egy oldal tilt, ott magától a böngésző marad. false = csak böngészővel.
 fast_fetch = true
+# Villámfigyelő: a megadott keresőszavakra (pl. ps4) a Vinted legújabb hirdetéseit a beállított időszakban (alapból
+# 16:30–19:30) szinte folyamatosan frissíti, és amint új jön, ami illik (pl. egy ár alatt), rögtön szól, saját hanggal.
+# A Munka › Automata kereskedés › Villámfigyelő blokkban állítható. false = nincs villámfigyelő.
+sniper = true
 
 [creative]
 # A Kreatív menü: közös történetmesélés (kaland, mint az AI Dungeon) és beszélgetés egy karakterrel

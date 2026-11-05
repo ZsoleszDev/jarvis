@@ -271,7 +271,12 @@ class WebPush:
             message = {"kind": "notice", "title": str(notice.get("title") or "Jarvis")[:80],
                        "text": str(notice.get("text") or "")[:300], "tag": f"notice-{notice.get('id') or ''}"}
             actions = notice_actions(notice)
-            if notice.get("deal"):                 # egy megérő találat: a kattintás a találat ablakát nyitja meg
+            if notice.get("snipe"):                # a villámfigyelő találata: a kattintás magát a hirdetést nyitja meg
+                message["snipe"] = str(notice["snipe"])[:40]
+                message["urgent"] = True
+                if str(notice.get("url") or "").startswith("https://"):
+                    message["url"] = str(notice["url"])[:300]
+            elif notice.get("deal"):               # egy megérő találat: a kattintás a találat ablakát nyitja meg
                 message["deal"] = str(notice["deal"])[:16]
                 message["urgent"] = True
             elif notice.get("haggle"):             # egy alkuképes hirdetés: ugyanaz az ablak, de nem sürgős (nem riaszt)
