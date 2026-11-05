@@ -1304,17 +1304,17 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertEqual(deals.state()["auctions"], [])
 
     def test_trading_sections_are_folded_except_the_finds(self):
-        """Az Automata kereskedés fülön az Indítás és a legutóbbi találatok látszanak, a többi blokk (beállítások,
-        pótlás és javítás, keresések, azonnali figyelő, böngészés, figyelt oldalak, Mennyit ér?, napló) össze van csukva, magyarázó
-        szövegek nélkül; egy blokk kinyitva a következő megnyitáskor is nyitva marad."""
+        """Az Automata kereskedés fülön az Indítás és a legutóbbi találatok látszanak, a többi blokk (villámfigyelő,
+        beállítások, pótlás és javítás, keresések, azonnali figyelő, böngészés, figyelt oldalak, Mennyit ér?, napló) össze
+        van csukva, magyarázó szövegek nélkül; egy blokk kinyitva a következő megnyitáskor is nyitva marad."""
         page = self.page
         page.click("#job-deals")
         page.wait_for_selector("#d-run-toggle")
         self.assertTrue(page.locator("text=Legutóbbi találatok").is_visible())
         titles = [t.strip() for t in page.locator("#w-deals details.fold > summary").all_inner_texts()]
         self.assertEqual([t.split(" (")[0] for t in titles],
-                         ["Beállítások", "Pótlás és javítás", "Eladási költségek", "Keresések", "Csomagbontás",
-                          "Azonnali figyelő", "Böngészés", "Figyelt oldalak", "Mennyit ér?", "Napló"])
+                         ["Villámfigyelő", "Beállítások", "Pótlás és javítás", "Eladási költségek", "Keresések",
+                          "Csomagbontás", "Azonnali figyelő", "Böngészés", "Figyelt oldalak", "Mennyit ér?", "Napló"])
         self.assertEqual(page.locator("#w-deals details.fold[open]").count(), 0)
         for hidden in ("#d-maxbuy", "#d-query", "#dl-query"):
             self.assertTrue(page.locator(hidden).is_hidden(), hidden)
