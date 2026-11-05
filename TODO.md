@@ -250,6 +250,10 @@
   felületen állítottad be: glance_set) az új váltja; robot-ellenőrzéskor egy óra szünet, aznap ismételten kétszer
   annyi (legfeljebb 4 óra), másnap elölről (eddig egész nap).
 - Az eladott tárgy törlése a fotóival együtt véglegesen törli a mappáját (a nem eladotté marad a _torolt mappában).
+- Pro feltöltés árkutatás nélkül: a „Nézz utána az árnak” négyzet a Pro fülön is látszik, alapból ki (új tárolási
+  kulcs: jarvis-research-on). Nélküle a Pro az árat az árbázisból vagy a fotók becsléséből adja meg, böngésző nélkül
+  (az eladás-előkészítő szálon végigmegy, nem vár a kereskedésre), és a Nézd át rögtön jön. Eddig a Pro mindig
+  böngészős árkutatással kezdett, ami lassú volt, és a kereskedés böngészőhasználata mellett megakadhatott.
 
 ## Élesben kipróbálandó
 - A telefon akkuja és adatforgalma az új kapcsolattal (Android: Beállítások › Akkumulátor és Adathasználat, a Jarvis

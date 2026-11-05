@@ -439,12 +439,14 @@ class WorkDesk:
         return [(need, sites) for need, sites in missing_needs(item, self.settings) if need.field != "price"]
 
     def _pro_price(self, item: Item, progress: Callable[[str], None], browser: bool = True) -> tuple[Item, str]:
-        """Az ár magától, amennyiért jó áron elkel: a hasonló hirdetések alapján (árkutatás a kiválasztott oldalakon;
-        a modell a hasonlók közül választ, és a középérték körül javasol), ha kevés a hasonló, az árbázisból (az
-        Automata kereskedés árai: a középérték és az alsó negyed között), végül a modell becslése a fotókról.
+        """Az ár magától, amennyiért jó áron elkel: ha kérted (research_wanted: „Nézz utána az árnak”), a hasonló
+        hirdetések alapján (árkutatás a kiválasztott oldalakon, a Vinteden a böngészővel; a modell a hasonlók közül
+        választ, és a középérték körül javasol); különben, vagy ha kevés a hasonló, az árbázisból (az Automata
+        kereskedés árai: a középérték és az alsó negyed között), végül a modell becslése a fotókról. Árkutatás nélkül
+        böngésző sem kell: a Nézd át rögtön jön (az ár átírható, és a tárgy lapján az árkutatás később is kérhető).
         Visszaadja a tárgyat és hogy honnan az ár (a Nézd át ablakba)."""
         price, basis = None, ""
-        if self.researcher is not None:
+        if self.researcher is not None and item.research_wanted:
             try:
                 item = self.researcher.research(item.id, lambda detail: progress("árkutatás – " + detail),
                                                 only=item.targets, browser=browser)
