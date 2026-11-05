@@ -180,6 +180,7 @@ def make_cfg(tmp: Path, host: str | None = None) -> Config:
     # a tesztek ne írjanak se a projektmappába, se a valódi adatmappába (bejelentkezések, tárgyak)
     cfg.work.dir = str(tmp / "munka")
     cfg.browser.profile_dir = str(tmp / "browser_profile")
+    cfg.browser.sniper_profile_dir = str(tmp / "browser_profile_villam")
     cfg.data_root = tmp / "adat"
     # Emberi tempó: a mozdulatok (egérút, billentyűnkénti gépelés) a tesztekben is futnak, de várakozás
     # nélkül, és két közzététel között sem kell várni.

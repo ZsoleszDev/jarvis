@@ -35,6 +35,7 @@ from .llm import OllamaError
 from .deals import DealHunter, profit_report
 from .feeds import FAST_SITES, SiteFetcher
 from .instant import InstantWatch
+from .sniper import make_sniper
 from .messages import MessageDesk
 from .replay import (FlowRecorder, FlowStore, Replayer, ReplayOutcome, entry_for, entry_problem, flow_key, item_values,
                      url_shape)
@@ -260,6 +261,10 @@ class WorkDesk:
             self.researcher = PriceResearcher(llm, self.store, lambda: toolbox.browser, sites, fetcher=self.fetcher)
         self.instant = (InstantWatch(self.root, self.platforms, self.fetcher, self.deals)
                         if self.fetcher is not None else None)
+        # Villámfigyelő (sniper.py): a Vinted legújabb hirdetései szinte folyamatosan, a saját böngészőablakában (a
+        # JarvisApp indítja és állítja le).
+        self.sniper = (make_sniper(self.root, cfg.browser)
+                       if self.browser_ready and cfg.work.sniper and "vinted" in self.platforms else None)
         # a havi kerethez: mennyit költöttél ebben a hónapban (a törölt eladott tárgyakkal együtt), mi vár eladásra
         self.deals.items = lambda: self.store.all() + self.store.archived()
         # Begyakorolt lépések: a modell sikeres feltöltéseiből és levételeiből tanul (replay.py).

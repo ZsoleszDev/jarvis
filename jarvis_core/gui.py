@@ -526,7 +526,8 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/work/deals":
             return self._json(200, {"ok": True, **work.deals.state(),
                                     "profit": profit_report(work.store.all(), archived=work.store.archived()),
-                                    "instant": work.instant.state() if work.instant is not None else None})
+                                    "instant": work.instant.state() if work.instant is not None else None,
+                                    "snipe": work.sniper.state() if getattr(work, "sniper", None) else None})
         if path == "/api/work/ledger":       # Elemzés: a teendők, a haszon, a megvett tárgyak, és mennyiért adják most
             return self._json(200, self._ledger(work))
         match = TODO_SHOT_RE.match(path)
@@ -807,11 +808,45 @@ class _Handler(BaseHTTPRequestHandler):
         if str(body.get("action") or "") not in ("journal", "lookup", "offer", "run"):
             self.gui.ui.work_deals()
 
+    def _snipe_action(self, action: str, body: dict[str, Any]) -> None:
+        """A villámfigyelő beállításai (sniper.py): az időszak, a ritmus, a keresőszavak és a szűrőik, a Most is, a
+        Folytatás most (a robot-ellenőrzés után), a próba-értesítés. A hibát (SniperError) a hívó adja vissza."""
+        sniper = getattr(self._work(), "sniper", None)
+        if sniper is None:
+            return self._json(409, {"ok": False, "error": "A villámfigyelő ki van kapcsolva ([work] sniper = false), "
+                                                          "vagy nincs böngésző."})
+        if action == "snipe_settings":
+            state = sniper.configure(enabled=body.get("enabled"), start=body.get("start"), end=body.get("end"),
+                                     active=body.get("active"), pause=body.get("pause"),
+                                     interval=body.get("interval"))
+        elif action == "snipe_add":
+            state = sniper.add(str(body.get("target") or ""), max_price=body.get("max_price"),
+                               min_price=body.get("min_price"), exclude=body.get("exclude"),
+                               strict=body.get("strict", True), max_on=body.get("max_on"))
+        elif action == "snipe_update":
+            state = sniper.update(str(body.get("id") or ""), **{k: body.get(k) for k in (
+                "off", "max_on", "max_price", "min_price", "exclude", "strict") if k in body})
+        elif action == "snipe_remove":
+            state = sniper.remove(str(body.get("id") or ""))
+        elif action == "snipe_burst":
+            state = sniper.burst(bool(body.get("on", True)))
+        elif action == "snipe_resume":
+            state = sniper.resume()
+        elif action == "snipe_clear":
+            state = sniper.clear_hits()
+        elif action == "snipe_test":
+            state = sniper.test()
+        else:
+            return self._json(400, {"ok": False})
+        return self._json(200, {"ok": True, "snipe": state})   # (a többi ablakot a _deals_post értesíti)
+
     def _deals_action(self, body: dict[str, Any], remote: bool = False) -> None:
         app, deals = self.gui.app, self._work().deals
         instant = self._work().instant
         action = str(body.get("action") or "")
         try:
+            if action.startswith("snipe_"):     # villámfigyelő (Vinted: az új hirdetések szinte folyamatosan)
+                return self._snipe_action(action, body)
             if action.startswith("instant_"):   # azonnali figyelő (Hardverapró, Jófogás; böngésző nélkül)
                 if instant is None:
                     return self._json(409, {"ok": False, "error": "Az azonnali figyelő ki van kapcsolva ([work] "

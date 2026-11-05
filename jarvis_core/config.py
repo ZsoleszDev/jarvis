@@ -77,6 +77,10 @@ class BrowserCfg:
     # be nem jelentkezett profilban megy (browser.READER_HOSTS); a feltöltés, az üzenetek, az ajánlat a bejelentkezettben.
     reader: bool = True
     reader_profile_dir: str = ""   # üres = az adatmappában (browser_profile_olvaso)
+    # A villámfigyelő (sniper.py: a Vinted új hirdetései szinte folyamatosan) saját, be nem jelentkezett profilja és
+    # ablaka; sniper_headless = true: ablak nélkül (a Vinted így könnyebben robotnak nézheti).
+    sniper_profile_dir: str = ""   # üres = az adatmappában (browser_profile_villam)
+    sniper_headless: bool = False
     width: int = 1280
     height: int = 800
     max_elements: int = 60
@@ -125,6 +129,9 @@ class WorkCfg:
     # A Hardverapró és a Jófogás találati oldalait (és hirdetéseit) böngésző nélkül is olvashatja (feeds.py): gyorsabb,
     # párhuzamosan megy a böngészővel, és erre épül az azonnali figyelő. Ha egy oldal tilt, ott magától a böngésző marad.
     fast_fetch: bool = True
+    # Villámfigyelő (Munka › Automata kereskedés): a megadott keresőszavakra a Vinted legújabb hirdetéseit szinte
+    # folyamatosan frissíti a beállított időszakban, és rögtön szól (saját hanggal), ha új jön. false = nincs.
+    sniper: bool = True
 
 
 @dataclass

@@ -765,6 +765,65 @@
       </form>
       ${hits ? `<details class="setup" data-fold="fresh"${openSections.has("fresh") ? " open" : ""}><summary>Friss hirdetések (${(I.hits || []).length})</summary><ul class="dealist">${hits}</ul></details>` : ""}`;
   }
+  // Villámfigyelő (sniper.py): a megadott keresőszavakra a Vinted legújabb hirdetései szinte folyamatosan, a beállított
+  // időszakban (alapból 16:30–19:30, 20 perc figyelés, 10 perc szünet); ha új jön, ami illik (pl. egy ár alatt), rögtön
+  // szól, a saját hangjával. A saját ablakában és profiljában fut, a kereskedés Indítás gombjától függetlenül.
+  const choiceOptions = (list, current, label) => [...new Set([...(list || []), current])].sort((a, b) => a - b)
+    .map((v) => `<option value="${v}"${v === current ? " selected" : ""}>${esc(label(v))}</option>`).join("");
+  const snipeName = (q) => q.url ? (q.text ? `${q.text} (Vinted-link)` : "Vinted-link") : q.text;
+  function snipeBox() {
+    const S = deals.snipe;
+    if (!S) return "";
+    const queries = (S.queries || []).map((q) => `<li><span><b>${esc(snipeName(q))}</b>
+        <span class="row"><label class="check"><input type="checkbox" data-snipe-maxon="${esc(q.id)}" ${q.max_on ? "checked" : ""}> Csak</label>
+          <input type="number" inputmode="numeric" min="0" data-keep="ds-max-${esc(q.id)}" data-snipe-maxprice="${esc(q.id)}" value="${esc(q.max_price || "")}" placeholder="pl. 40000" style="width: 7em" aria-label="Legfeljebb ár">
+          <small>Ft alatt szóljon${q.max_on ? "" : q.max_price ? " (most bármilyen áron szólok)" : ""}</small></span>
+        <small class="muted">${q.min_price ? `legalább ${esc(price(q.min_price))}` : "alsó határ nélkül"}${(q.exclude || []).length ? ` · kivéve: ${esc(q.exclude.join(", "))}` : ""}${q.strict === false ? " · a címét nem nézem" : ""}</small>
+        <small class="muted">${q.off ? "szünetel" : q.last_ok ? `utoljára ${esc(ago(q.last_ok))}` : "még nem néztem"}${q.found ? ` · eddig ${esc(q.found)} találat` : ""}${q.found_at ? ` (legutóbb ${esc(ago(q.found_at))})` : ""}</small>
+        ${q.error ? `<small class="warn">${esc(q.error)}</small>` : ""}
+        <small><a href="${esc(q.link)}" target="_blank" rel="noopener noreferrer">a keresés a Vinteden</a></small></span>
+      <span class="row"><button type="button" class="small quiet" data-snipe-pause="${esc(q.id)}" data-off="${q.off ? "" : "1"}">${q.off ? "Folytatás" : "Szünet"}</button>
+        <button type="button" class="small quiet" data-snipe-remove="${esc(q.id)}">Törlés</button></span></li>`).join("");
+    const hits = (S.hits || []).slice(0, 20).map((h) => `<li><span><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.title)}</a>
+        <small class="muted"><b>${esc(price(h.price))}</b> (a Vinted-díjjal kb. ${esc(price(h.total))})${h.drop ? ` · leárazta: ${esc(price(h.drop))} helyett` : ""}${h.older ? " · korábbi hirdetés, most került előre" : ""} · ${esc(ago(h.at))} (${esc(hhmmOf(h.at))}) · ${esc(h.query)}</small></span></li>`).join("");
+    const bursting = S.burst_until > Date.now() / 1000;
+    const today = S.loads_today ? `Ma ${esc(S.loads_today)} frissítés${S.hits_today ? `, ${esc(S.hits_today)} találat` : ""}${S.load_ms ? ` · egy oldal kb. ${esc((S.load_ms / 1000).toFixed(1).replace(".", ","))} mp alatt töltődik be` : ""}${S.slow > 1 ? ` · a robot-ellenőrzés miatt ma ${esc(String(S.slow).replace(".", ","))}-szer ritkábban frissítek` : ""}.` : "";
+    return `<p><b>${esc(S.status)}</b>${S.blocked_until ? ' <button type="button" class="small" id="ds-resume">Folytatás most</button>' : ""}</p>
+      ${today ? `<p><small class="muted">${today}</small></p>` : ""}
+      <ul class="dealist">${queries || '<li class="muted">Még nincs keresőszó.</li>'}</ul>
+      ${(S.queries || []).length < (S.max_queries || 8) ? `<form id="ds-add" class="compose" autocomplete="off">
+        <input id="ds-target" data-keep="ds-target" placeholder="Keresőszó (pl. ps4), vagy egy Vinted-keresés linkje (kategóriával, márkával)">
+        <div class="row">
+          <label>Csak <input id="ds-max" data-keep="ds-max" type="number" inputmode="numeric" min="0" placeholder="pl. 40000" style="width: 7em"> Ft alatt szóljon</label>
+          <label>legalább <input id="ds-min" data-keep="ds-min" type="number" inputmode="numeric" min="0" placeholder="0" style="width: 6em"> Ft</label>
+        </div>
+        <label class="field-label">Kizáró szavak <input id="ds-exclude" data-keep="ds-exclude" placeholder="pl. játék, kontroller, doboz, hibás"></label>
+        <label class="check"><input id="ds-strict" type="checkbox" checked> Csak ami a címe szerint is ez (tok, töltő, „PS4-hez” kontroller nem)</label>
+        <div class="row"><button type="submit" class="primary">Keresőszó hozzáadása</button></div>
+      </form>` : ""}
+      <label class="check"><input id="ds-on" type="checkbox" ${S.enabled ? "checked" : ""}> Naponta figyeljen</label>
+      <div class="row">
+        <label>Időszak <input id="ds-start" data-keep="ds-start" type="time" value="${esc(S.start)}"> – <input id="ds-end" data-keep="ds-end" type="time" value="${esc(S.end)}"></label>
+      </div>
+      <div class="row">
+        <label>Figyel <select id="ds-active">${choiceOptions(S.active_choices, S.active, (m) => `${m} percig`)}</select></label>
+        <label>aztán <select id="ds-pause">${choiceOptions(S.pause_choices, S.pause, (m) => m ? `${m} perc szünet` : "nincs szünet (végig figyel)")}</select></label>
+        <label>Frissítés <select id="ds-interval">${choiceOptions(S.interval_choices, S.interval, (sec) => `${sec} mp-enként`)}</select></label>
+      </div>
+      <div class="row"><button type="button" class="small" id="ds-save">Mentés</button>
+        <button type="button" class="small${bursting ? "" : " primary"}" id="ds-burst" data-on="${bursting ? "" : "1"}">${bursting ? "Most is: leállítás" : `Most is (${esc(S.burst_minutes || 20)} percig)`}</button>
+        <button type="button" class="small quiet" id="ds-test">Próba-értesítés</button></div>
+      <p><small class="muted">Felváltva nézem a keresőszavakat, a legújabb hirdetésekkel elöl: két frissítés között kb. ${esc(S.every)} mp
+        telik el, így egy-egy keresőszó kb. ${esc(S.per_query)} mp-enként kerül sorra. Az első frissítésnél csak megjegyzem, ami már
+        fent van; utána minden új hirdetésről rögtön szólok, ami illik (és ha egyet leáraznak, és így illik), a többitől
+        eltérő hanggal: a telefonon a Villámfigyelő csatornán („ti-ti-ti-tá”, egy hosszú és három rövid rezgés), rábökve
+        rögtön a hirdetés nyílik meg. A saját ablakomban, be nem jelentkezett profillal nézem (a fiókodat nem érinti), és
+        nem várok a többi munkámra. Ha a Vinted robot-ellenőrzést kér, nem kerülöm meg: egy darabig várok, és ritkábban
+        frissítek. A Jarvis Szünete ezt is megállítja.</small></p>
+      ${hits ? `<details class="setup" data-fold="snipe-hits"${openSections.has("snipe-hits") ? " open" : ""}><summary>Találatok (${(S.hits || []).length})</summary>
+        <ul class="dealist">${hits}</ul>
+        <div class="row"><button type="button" class="small quiet" id="ds-clear">Lista törlése</button></div></details>` : ""}`;
+  }
   const hhmmOf = (t) => new Date(t * 1000).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit" });
   const whenOf = (t) => new Date(t * 1000).toLocaleString("hu-HU", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
@@ -1219,6 +1278,7 @@
         javasolt összeget a Vaterán most legmagasabb ajánlatként beállíthatod (addig licitál helyetted). A zárás előtt még
         egyszer megnézem (a mostani árát és a mostani beállításaidat), és szólok.</small></p>
       <ul class="dealist wide">${auctions}</ul>` : ""}
+      ${deals.snipe ? section("snipe", `Villámfigyelő (Vinted)${deals.snipe.enabled || deals.snipe.burst_until ? ` · ${esc({ active: "figyel", pause: "szünet", outside: "be", blocked: "vár", held: "szünetel" }[deals.snipe.phase] || "be")}` : ""}`, snipeBox()) : ""}
       ${section("settings", "Beállítások", `
         <div class="fields limits">
           <div class="field"><label for="d-maxbuy">Max. vételár (Ft)</label>
@@ -1375,6 +1435,44 @@
                              safe_only: $("d-safeonly").checked, fast_alert: $("d-fastalert").checked }))
         J.toast($("d-maxbuy").value ? `Rendben: ${price($("d-maxbuy").value)} fölött nem keresek.` : "Rendben: bármilyen árban keresek.");
     });
+    if (deals.snipe) {
+      const snipe = async (body, done) => {
+        const result = await J.postJson("/api/work/deals", body);
+        if (!result.ok) { J.toast(result.error || "Nem sikerült."); render(); return false; }
+        if (result.snipe) deals.snipe = result.snipe;
+        render();
+        if (done) J.toast(done);
+        return true;
+      };
+      if ($("ds-add")) $("ds-add").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const ok = await snipe({ action: "snipe_add", target: $("ds-target").value, max_price: $("ds-max").value,
+                                 min_price: $("ds-min").value, exclude: $("ds-exclude").value, strict: $("ds-strict").checked });
+        if (ok) {
+          for (const id of ["ds-target", "ds-max", "ds-min", "ds-exclude"]) if ($(id)) $(id).value = "";
+          J.toast(deals.snipe.enabled ? "Felvettem: az időszakban figyelem, és ha új jön, ami illik, rögtön szólok."
+            : "Felvettem. Kapcsold be a Naponta figyeljent, vagy próbáld ki a Most is gombbal.");
+        }
+      });
+      $("ds-save").addEventListener("click", () => snipe({ action: "snipe_settings", enabled: $("ds-on").checked,
+        start: $("ds-start").value, end: $("ds-end").value, active: $("ds-active").value, pause: $("ds-pause").value,
+        interval: $("ds-interval").value }, $("ds-on").checked ? `Rendben: naponta ${$("ds-start").value}–${$("ds-end").value} között figyelek.` : "Rendben, a villámfigyelő ki van kapcsolva."));
+      $("ds-on").addEventListener("change", () => snipe({ action: "snipe_settings", enabled: $("ds-on").checked },
+        $("ds-on").checked ? "Bekapcsolva: az időszakban figyelek." : "Kikapcsolva."));
+      $("ds-burst").addEventListener("click", () => {
+        const on = !!$("ds-burst").dataset.on;
+        snipe({ action: "snipe_burst", on }, on ? "Most is figyelek: ha új jön, ami illik, rögtön szólok." : "Leállítottam.");
+      });
+      $("ds-test").addEventListener("click", () => snipe({ action: "snipe_test" }, "Elküldtem: így szól, ha talál."));
+      if ($("ds-resume")) $("ds-resume").addEventListener("click", () => snipe({ action: "snipe_resume" }, "Folytatom."));
+      if ($("ds-clear")) $("ds-clear").addEventListener("click", () => snipe({ action: "snipe_clear" }));
+      for (const b of box.querySelectorAll("[data-snipe-remove]")) b.addEventListener("click", () => snipe({ action: "snipe_remove", id: b.dataset.snipeRemove }));
+      for (const b of box.querySelectorAll("[data-snipe-pause]")) b.addEventListener("click", () => snipe({ action: "snipe_update", id: b.dataset.snipePause, off: !!b.dataset.off }));
+      for (const c of box.querySelectorAll("[data-snipe-maxon]")) c.addEventListener("change", () => snipe({ action: "snipe_update", id: c.dataset.snipeMaxon, max_on: c.checked },
+        c.checked ? "Rendben: csak az ár alattiakról szólok." : "Rendben: bármilyen áron szólok."));
+      for (const i of box.querySelectorAll("[data-snipe-maxprice]")) i.addEventListener("change", () => snipe({ action: "snipe_update", id: i.dataset.snipeMaxprice, max_price: i.value },
+        i.value ? `Rendben: ${price(i.value)} alatt szólok.` : "Rendben: bármilyen áron szólok."));
+    }
     if ($("di-add")) {
       $("di-add").addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -2833,7 +2931,7 @@
   });
   // Új olcsó hirdetés (a háttérben, vagy a Keresés most után): a nyitott lista frissül.
   window.addEventListener("jarvis-notice", (event) => {
-    if (event.detail && event.detail.kind === "deal") loadDeals();
+    if (event.detail && (event.detail.kind === "deal" || event.detail.kind === "snipe")) loadDeals();
   });
   // Egy másik ablakból (pl. a telefonról) elindítottad, leállítottad vagy átírtad: itt is frissül.
   J.on("work_deals", () => {
