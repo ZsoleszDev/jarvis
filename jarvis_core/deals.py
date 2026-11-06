@@ -68,7 +68,7 @@ from .llm import background_calls
 from .journal import Journal, day_of
 from .pricebook import (SOLD_MIN, TITLE_KEEP, PriceBook, _words, basis_entry, fake_prone, implied_size, independent,
                         is_capacity, listed_days, pace, price_scope, product_key, ram_context, size_conflict, sized,
-                        sizes_of, speed_text, unusable, usable, wearable)
+                        non_technical, sizes_of, speed_text, unusable, usable, wearable)
 from .replay import norm_text
 from .selling import (_PARTS_RE, _SALE_RE, _STOPWORDS, _SWAP_RE, _WANTED_RE, ON_SITE, Item, ItemError, Platform, _shared,
                       _tokens, format_price, listing_key, parse_price, prefilter, price_stats, reserved, round_price,
@@ -335,9 +335,9 @@ BUNDLE_SURE = 0.6
 BUNDLE_SAFE_ROI = 1.0
 BUNDLE_BIG = 15
 # A ruhacsomag nincs köztük: ruhával az automata kereskedés nem foglalkozik (pricebook.wearable).
-BUNDLE_PRESETS = (("Lego ömlesztve", "lego ömlesztve", ("jofogas", "vatera")),
-                  ("Videojáték-csomag", "videojáték csomag", ("jofogas", "hardverapro", "vatera")),
-                  ("PC-alkatrészek egyben", "alkatrészek egyben", ("hardverapro", "jofogas")))
+BUNDLE_PRESETS = (("Videojáték-csomag", "videojáték csomag", ("jofogas", "hardverapro", "vatera")),
+                  ("PC-alkatrészek egyben", "alkatrészek egyben", ("hardverapro", "jofogas")),
+                  ("Kontrollerek egyben", "kontroller egyben", ("jofogas", "hardverapro", "vatera")))
 # Csomagra utaló szó (ékezet nélkül): „ruhacsomag”, „csomagban”, „ömlesztve”, „gyűjtemény”, „játékok egyben”,
 # „15 db”. A „csomagolás”, a „csomagautomata” nem; a „szett” sem (a „Lego szett” egy termék).
 _BUNDLE_RE = re.compile(r"\b\w*csomag(?:ban|ot|kent|om|ja)?\b|\b(?:lot|kotegben|tetelben|omlesztve|omlesztett|"
@@ -425,8 +425,22 @@ BROWSE_LANES: dict[str, list[tuple[str, str]]] = {
     "jofogas": [("Műszaki cikkek, elektronika", "https://www.jofogas.hu/magyarorszag/muszaki-cikkek-elektronika?sp=3")],
     "vatera": [("Műszaki cikk és mobil", "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html?ob=5&obd=2")],
 }
-# Saját indulóoldal egy gombnyomással (keresőszó, minden bejelölt oldalon): a korábbi beépített termékkeresések.
-LANE_PRESETS = ("Lego", "PlayStation", "Nintendo Switch", "AirPods", "iPhone", "Dyson", "Makita")
+# Saját indulóoldal egy gombnyomással (keresőszó, minden bejelölt oldalon): konzolok, kontrollerek és gépalkatrészek
+# (2026 novemberéig a Lego, az AirPods, az iPhone, a Dyson és a Makita is itt volt: a felhasználó csak műszaki
+# cikkekkel foglalkozik, az Apple-lel nem).
+LANE_PRESETS = ("PlayStation", "Xbox", "Nintendo Switch", "Steam Deck", "Kontroller", "Videókártya", "Processzor")
+# Csak műszaki cikkek (alapból be; a Beállításokban kikapcsolható): a nem műszaki cikk (pricebook.non_technical: Lego,
+# könyv, parfüm, bútor…) kimarad, mint a ruha; egy kulcsszavas indulóoldal (tanult, saját vagy gyors gomb) a Vinteden az
+# Elektronika kategórián belül keres (TECH_SEARCH: catalog[]=2994, mint a Vinted Elektronika indulóoldala). A többi
+# oldalon a kulcsszavas keresés marad, ott a cím szerinti szűrő dönt.
+TECH_SEARCH = {"vinted": "https://www.vinted.hu/catalog?search_text={q}&catalog[]=2994"}
+# Ezekkel ne foglalkozz (a Beállításokban átírható): ami ezek közül bármelyiket tartalmazza (a szó eleje számít, az
+# ékezet nem: excluded), azt az automata kereskedés sehol nem nézi (böngészés, keresések, figyelt oldalak, azonnali
+# figyelő, alku, csomag, Érdemes megnézni), a kifejezett keresésedben sem; a villámfigyelő nem ezt használja (ott te
+# adod meg a keresőszót). Alapból az Apple termékei: a felhasználó ezekkel nem szeretne foglalkozni.
+DEFAULT_EXCLUDE = ("apple", "iphone", "ipad", "ipod", "airpod", "macbook", "imac", "mac mini", "mac studio", "airtag",
+                   "homepod", "magsafe")
+MAX_FOCUS_EXCLUDE = 40
 MAX_OWN_LANES = 30
 # Öntanulás: a gyorsan kelő (vagy már többször jó találatot hozó) termékekből saját indulóoldal lesz (legfeljebb
 # MAX_LEARNED); ami LEARN_IDLE betöltés után sem hozott semmit, kimarad. Amit MUTE_AFTER-szer elrejtettél (és egyszer
@@ -1282,8 +1296,8 @@ def expected_profit(reference: int, price: int, low: int | None = None) -> int:
     return int(round(safe_sale(reference, low) - price - SHIPPING))
 
 
-def parse_words(value: Any) -> list[str]:
-    """Kizáró szavak („tok, töltő, játék” vagy lista): kisbetűvel, ahogy beírtad, legfeljebb MAX_EXCLUDE (az
+def parse_words(value: Any, limit: int = MAX_EXCLUDE) -> list[str]:
+    """Kizáró szavak („tok, töltő, játék” vagy lista): kisbetűvel, ahogy beírtad, legfeljebb limit (MAX_EXCLUDE; az
     ékezet csak az egyezésnél nem számít, lásd excluded)."""
     parts = re.split(r"[,;\n]+", value) if isinstance(value, str) else \
         [str(v) for v in value] if isinstance(value, (list, tuple)) else []
@@ -1292,7 +1306,7 @@ def parse_words(value: Any) -> list[str]:
         word = " ".join(part.lower().split())[:30]
         if word and fold(word) not in {fold(w) for w in out}:
             out.append(word)
-    return out[:MAX_EXCLUDE]
+    return out[:limit]
 
 
 def excluded(words: list[str], text: str) -> bool:
@@ -1577,7 +1591,9 @@ class DealHunter:
                 "costs": [c for c in data.get("costs") or [] if isinstance(c, dict) and c.get("part")
                           and isinstance(c.get("amount"), int)][:MAX_COSTS],
                 "costs_at": float(data.get("costs_at") or 0),
-                "fees": self._load_fees(data.get("fees"))}
+                "fees": self._load_fees(data.get("fees")),
+                # mivel foglalkozzon: csak műszaki cikkekkel (alapból), és mivel ne (alapból az Apple termékei)
+                "focus": self._load_focus(data.get("focus"))}
 
     def _load_vetted(self) -> dict[str, dict[str, Any]]:
         try:
@@ -1609,6 +1625,13 @@ class DealHunter:
                 "scanned": float(saved.get("scanned") or 0),
                 "done": {str(k): float(v) for k, v in (saved.get("done") or {}).items() if isinstance(v, (int, float))},
                 "told": {"day": str(told.get("day") or ""), "n": int(told.get("n") or 0)}}
+
+    @staticmethod
+    def _load_focus(saved: Any) -> dict[str, Any]:
+        saved = saved if isinstance(saved, dict) else {}
+        words = saved.get("exclude")
+        return {"tech_only": saved.get("tech_only") is not False,
+                "exclude": parse_words(words, MAX_FOCUS_EXCLUDE) if isinstance(words, list) else list(DEFAULT_EXCLUDE)}
 
     @staticmethod
     def _load_fees(saved: Any) -> dict[str, Any]:
@@ -1651,7 +1674,8 @@ class DealHunter:
             # válaszolt
             hidden = sorted((dict(d) for d in self._data["deals"] if d.get("dismissed") and not d.get("bought")),
                             key=lambda d: -float(d.get("dismissed_at") or d.get("at") or 0))
-            searches = [{**json.loads(json.dumps(s)), "status": search_status(s)} for s in self._data["searches"]]
+            searches = [{**json.loads(json.dumps(s)), "status": search_status(s),
+                         "blocked": self.blocked_query(str(s.get("query") or ""))} for s in self._data["searches"]]
             return {"enabled": self._data["enabled"], "running": self._data["enabled"],
                     "started": self._data["started"] or None, "max_buy": self._data["max_buy"],
                     "safe_only": self._data["safe_only"], "turbo": self._data["turbo"],
@@ -1676,7 +1700,8 @@ class DealHunter:
                     "haggle": {"on": self._data["haggle"]["on"], "message": self._data["haggle"]["message"],
                                "per_day": HAGGLE_PER_DAY, "days": HAGGLE_DAYS, "max_cut": HAGGLE_MAX},
                     "costs": [dict(c) for c in self._data["costs"]], "cost_parts": list(COST_PARTS),
-                    "fees": dict(self._data["fees"]), "fee_names": dict(FEE_NAMES)}
+                    "fees": dict(self._data["fees"]), "fee_names": dict(FEE_NAMES),
+                    "focus": {**json.loads(json.dumps(self._data["focus"])), "default_exclude": list(DEFAULT_EXCLUDE)}}
 
     # --- pótlási és javítási költségek (az állapothoz igazított haszonhoz) ---
 
@@ -1820,11 +1845,12 @@ class DealHunter:
                 return []
             return [json.loads(json.dumps(w)) for w in self._data["watches"] if w.get("url")]
 
-    @staticmethod
-    def _search_waits(search: dict[str, Any], now: float) -> bool:
-        """A keresés most nem fut: a szokásos ár jóváhagyásra vár, vagy kevés volt a hasonló (egy nap múlva újra)."""
+    def _search_waits(self, search: dict[str, Any], now: float) -> bool:
+        """A keresés most nem fut: a szokásos ár jóváhagyásra vár, kevés volt a hasonló (egy nap múlva újra), vagy a
+        keresőszava az „Ezekkel ne foglalkozz” listán van (blocked_query; ha onnan törlöd, újra fut)."""
         status, proposal = search_status(search), search.get("proposal") or {}
-        return status == "javaslat" or (status == "kevés" and now - float(proposal.get("at") or 0) < CALIBRATE_RETRY)
+        return status == "javaslat" or (status == "kevés" and now - float(proposal.get("at") or 0) < CALIBRATE_RETRY) \
+            or bool(self.blocked_query(str(search.get("query") or "")))
 
     def browsing(self) -> bool:
         """Most a napközbeni böngészés ideje van-e (be van kapcsolva, és a gép üzemidejében vagyunk): ilyenkor a
@@ -1901,6 +1927,11 @@ class DealHunter:
         target = " ".join(str(target or "").split())[:300]
         if not target:
             raise DealError("Írj egy keresőszót, vagy másold be egy találati oldal vagy kategória címét.")
+        if not re.match(r"https?://", target):
+            self._refuse_blocked(target)
+            if self._lane_off(target):
+                raise DealError("Csak műszaki cikkekkel foglalkozom (Beállítások): ez nem az. Ha mégis kell, kapcsold "
+                                "ki ott a „Csak műszaki cikkek” pipát.")
         added: list[dict[str, Any]] = []
         if re.match(r"https?://", target):
             parts = urllib.parse.urlsplit(target)
@@ -1924,8 +1955,7 @@ class DealHunter:
                 platform = self.platforms.get(key)
                 if platform is None:
                     raise DealError("Ezt az oldalt nem ismerem.")
-                url = platform.search_url.format(q=urllib.parse.quote(keyword))
-                added.append({"site": key, "label": keyword, "url": newest_first(url, key)})
+                added.append({"site": key, "label": keyword, "url": self._keyword_url(key, keyword)})
         names = []
         with self._lock:
             lanes = self._data["lanes"]
@@ -1957,6 +1987,8 @@ class DealHunter:
                 raise DealError("Ilyen indulóoldal nincs.")
             if lane["kind"] == "tanult":
                 raise DealError("A tanult indulóoldalt törölni lehet (és nem tanulja meg újra).")
+            if on and lane.get("blocked"):
+                raise DealError(f"Ez most nem kapcsolható be: {lane['blocked']} (Beállítások).")
             stats = self._data["lanes"].setdefault(lane_id, {})
             if on:
                 stats.pop("disabled", None)
@@ -2038,6 +2070,49 @@ class DealHunter:
                 self._data["fast_alert"] = bool(fast_alert)
             self._save()
         return self.state()
+
+    def set_focus(self, tech_only: Any = None, exclude: Any = None) -> dict[str, Any]:
+        """Mivel foglalkozzon: csak műszaki cikkekkel (tech_only), és az „Ezekkel ne foglalkozz” lista (exclude: szavak
+        vesszővel, pl. „apple, iphone, airpods”; üresen: semmit nem zár ki; None: marad)."""
+        with self._lock:
+            focus = self._data["focus"]
+            if tech_only is not None:
+                focus["tech_only"] = bool(tech_only)
+            if exclude is not None:
+                focus["exclude"] = parse_words(exclude, MAX_FOCUS_EXCLUDE)
+            self._save()
+            words = ", ".join(focus["exclude"]) or "semmi"
+            tech = focus["tech_only"]
+        self.journal.add(("Csak műszaki cikkekkel foglalkozom" if tech else "Nem csak műszaki cikkekkel foglalkozom")
+                         + f"; ezekkel nem: {words}.")
+        return self.state()
+
+    def unwanted(self, title: str, text: str = "", asked: str = "") -> str:
+        """Miért nem foglalkozik egy hirdetéssel (vagy egy termékkel, keresőszóval): „excluded” (az „Ezekkel ne
+        foglalkozz” lista egy szava a címében vagy a kártyáján, pl. az Apple), „clothing” (ruha vagy cipő), „nontech”
+        (nem műszaki cikk, ha a „csak műszaki cikkek” be van kapcsolva); „”, ha nincs baj vele. asked: a kifejezett
+        keresésed (egy Keresés vagy az azonnali figyelő keresőszava), amire a hirdetés illik: ha az maga ruhára vagy
+        nem műszaki cikkre szól (pl. „Nike Air Max”, „Lego 42115”), az ettől még megy; a lista mindig számít."""
+        with self._lock:
+            words, tech = list(self._data["focus"]["exclude"]), self._data["focus"]["tech_only"]
+        if words and excluded(words, f"{title} {text}"):
+            return "excluded"
+        if wearable(title) and not (asked and wearable(asked)):
+            return "clothing"
+        return "nontech" if tech and non_technical(title) and not (asked and non_technical(asked)) else ""
+
+    def blocked_query(self, query: str) -> str:
+        """Ha egy keresőszó (Keresés, figyelő, indulóoldal, csomagkeresés) az „Ezekkel ne foglalkozz” lista egy szavát
+        tartalmazza, a szó (a felületnek és a hibaüzenetnek); különben „”."""
+        with self._lock:
+            words = list(self._data["focus"]["exclude"])
+        return next((word for word in words if excluded([word], query)), "")
+
+    def _refuse_blocked(self, query: str) -> None:
+        word = self.blocked_query(query)
+        if word:
+            raise DealError(f"A(z) „{word}” az „Ezekkel ne foglalkozz” listán van (Beállítások): ha mégis kell, előbb "
+                            "töröld onnan.")
 
     def set_fast_alert(self, on: Any) -> dict[str, Any]:
         """Gyors riasztás be/ki (lásd set_limits)."""
@@ -2274,6 +2349,7 @@ class DealHunter:
                               "discount": discount, "every": every, "min_price": min_price, "min_profit": min_profit,
                               "exclude": exclude or [], "reference": reference})
         self._check_range(search)
+        self._refuse_blocked(search["query"])
         if search.get("reference"):
             now = self.clock()
             search.update(ref_source="kézi", ref_at=now, checked_from=now)
@@ -2296,6 +2372,8 @@ class DealHunter:
         """Egy keresés beállításainak módosítása. A szokásos árat az accept állítja (vagy a recalibrate törli)."""
         fields.pop("reference", None)
         clean = self._clean(fields)
+        if clean.get("query"):
+            self._refuse_blocked(clean["query"])
         with self._lock:
             search = self._search(search_id)
             merged = {**search, **clean}
@@ -2692,6 +2770,10 @@ class DealHunter:
             if not sites:
                 continue
             status, proposal = search_status(search), search.get("proposal") or {}
+            blocked = self.blocked_query(str(search.get("query") or ""))
+            if blocked:                        # az „Ezekkel ne foglalkozz” listán van: nem keres vele
+                game.notes.append(f"„{search['query']}”: a(z) „{blocked}” az „Ezekkel ne foglalkozz” listán van")
+                continue
             if status == "javaslat":           # jóváhagyásig ezzel nem keres (az oldalakat sem tölti be)
                 game.notes.append(f"„{search['query']}”: a szokásos ár ({format_price(proposal['price'])}) "
                                   "jóváhagyásra vár")
@@ -2710,7 +2792,7 @@ class DealHunter:
                 names.append(watch["name"])
                 game.work.append(partial(self._step_watch, game, watch, platform, running))
         bundle_searches = []
-        for bundle_search in bundles["searches"] if bundles["on"] else []:
+        for bundle_search in [b for b in bundles["searches"] if not self._bundle_off(b)] if bundles["on"] else []:
             sites = [key for key in bundle_search.get("sites") or list(self.platforms) if key in self.platforms
                      and (force or self._due(bundle_search, key, now))]
             if sites:
@@ -3421,7 +3503,8 @@ class DealHunter:
         megnézi (_resale). A jelöltek (_candidate) rögtön jönnek; visszaadja az ismeretleneket (ezeket a modell
         nevezheti meg). A már látottak (ha nem árazták le) és a nem eladási árak (kereső, csomag, alkatrész…)
         kimaradnak."""
-        unknown, found, skip, recheck, lots, wear = [], [], [], [], [], []
+        unknown, found, skip, recheck, lots = [], [], [], [], []
+        unwanted: dict[str, list[dict[str, Any]]] = {}     # miért nem foglalkozik vele (unwanted) → a hirdetések
         with self._lock:
             seen, prices, deals = dict(self._data["seen"]), dict(self._data["prices"]), self._deal_keys()
             cancelled = set(self._data["cancelled"])
@@ -3444,8 +3527,11 @@ class DealHunter:
                 continue                       # a vételi limit fölött: nem jegyzi látottnak (ha emeled, sorra kerül)
             search = next((s for s in running if matches_query(s["query"], str(row.get("title") or row["text"]))
                            and not excluded(s.get("exclude") or [], row["text"])), None)
-            if search is None and wearable(row.get("title") or row["text"]):
-                wear.append(row)               # ruhával nem kereskedik (a kifejezett keresésed ettől még mehet)
+            # ruha, nem műszaki cikk (a kifejezett keresésed ettől még mehet), vagy az „Ezekkel ne foglalkozz” listán van
+            why = self.unwanted(str(row.get("title") or row["text"]), row["text"],
+                                asked=search["query"] if search is not None else "")
+            if why:
+                unwanted.setdefault(why, []).append(row)
                 continue
             label = row.get("lane_name") or source["name"]
             if search is not None:             # egy keresésedre illik: annak a szokásos ára dönt
@@ -3484,10 +3570,11 @@ class DealHunter:
                 found.append(({"id": source["id"], "query": reference["name"]}, deal))
         lane = next((row.get("lane_name") for row in lots if row.get("lane_name")), "")
         self.tally("not_cheap", skip)
-        self.tally("clothing", wear)
+        for why, gone in unwanted.items():
+            self.tally(why, gone)
         other = self._to_bundles(lots, f"Böngészés közben ({lane})" if lane else f"Figyelt oldal: {source['name']}")
         self.tally("other", other)
-        self._mark(*skip, *wear, *other)
+        self._mark(*skip, *(row for gone in unwanted.values() for row in gone), *other)
         game.next([partial(self._candidate, game, search, deal) for search, deal in found] + recheck)
         return unknown
 
@@ -4265,7 +4352,8 @@ class DealHunter:
                 caution = (" A címéből nem derül ki, laptop- vagy asztali memória-e: a laptop-memória olcsóbb lehet, "
                            "nézd meg a fotóján.")
         profit = expected_profit(usual, int(row["price"]), low)
-        if profit <= 0 or not row.get("url") or wearable(f"{row.get('title') or row['text']} {query}"):
+        if profit <= 0 or not row.get("url") or self.unwanted(f"{row.get('title') or row['text']} {query}",
+                                                              str(row.get("text") or "")):
             return
         now = self.clock()
         site = row.get("site") or (self.platforms[row["platform"]].name if row.get("platform") in self.platforms
@@ -4324,7 +4412,7 @@ class DealHunter:
             if not self._data["haggle"]["on"]:
                 return False
         offer = self._haggle_reach(price, top)
-        if offer is None or wearable(f"{row.get('title') or row['text']} {query}"):
+        if offer is None or self.unwanted(f"{row.get('title') or row['text']} {query}", str(row.get("text") or "")):
             return False
         profit = expected_profit(usual, offer, low) - buy_fee(platform, offer)
         if profit <= 0:
@@ -4669,7 +4757,7 @@ class DealHunter:
         promote, drop = [], set()
         for tip in tips:
             if now - float(tip.get("at") or 0) > TIP_DAYS * 86400 or listing_key(tip["url"]) in known \
-                    or wearable(f"{tip.get('title') or ''} {tip.get('query') or ''}"):
+                    or self.unwanted(f"{tip.get('title') or ''} {tip.get('query') or ''}", str(tip.get("text") or "")):
                 drop.add(tip["id"])
                 continue
             if tip["id"] in busy or (game.no_browser and not (self.fetcher is not None
@@ -4772,9 +4860,10 @@ class DealHunter:
         self.tally("unknown", skip)            # a modell sem ismerte fel
         steps = []
         for row, query, buy in items:
-            if wearable(query):                # a modell szerint ruha vagy cipő: azzal nem kereskedik
+            why = self.unwanted(query, str(row.get("text") or ""))
+            if why:                            # a modell szerint ruha, nem műszaki, vagy kizárt (pl. Apple)
                 skip.append(row)
-                self.tally("clothing", [row])
+                self.tally(why, [row])
                 continue
             product = self.book.key(query)
             self._note_demand(product[0] if product else None, row["url"])
@@ -4941,8 +5030,8 @@ class DealHunter:
             running = [json.loads(json.dumps(s)) for s in self._data["searches"] if search_status(s) == "fut"]
         out: list[dict[str, Any]] = []
         for key in self.book.keys():
-            if wearable(self.book.name(key)):
-                continue                       # ruhával nem kereskedik
+            if self.unwanted(self.book.name(key)):
+                continue                       # ruha, nem műszaki cikk, vagy kizárt (pl. Apple)
             samples = [sample for sample in self.book.samples(key) if sample["site"] in HAGGLE_SITES
                        and not sample["gone"] and now - sample["last"] <= HAGGLE_FRESH
                        and listing_key(sample["url"]) not in done]
@@ -5184,7 +5273,8 @@ class DealHunter:
         with self._lock:
             bundles = self._data["bundles"]
             return {"on": bundles["on"], "min_profit": bundles["min_profit"],
-                    "searches": json.loads(json.dumps(bundles["searches"])), "waiting": len(bundles["inbox"]),
+                    "searches": [{**s, "off": self._bundle_off(s)} for s in json.loads(json.dumps(bundles["searches"]))],
+                    "waiting": len(bundles["inbox"]),
                     "presets": [{"name": name, "query": query, "sites": [s for s in sites if s in self.platforms]}
                                 for name, query, sites in BUNDLE_PRESETS],
                     "piece_min": PIECE_MIN, "max_searches": MAX_BUNDLE_SEARCHES}
@@ -5197,8 +5287,19 @@ class DealHunter:
             return False
         if bundles["inbox"] and self.llm is not None:
             return True
-        return any(self._due(search, key, now) for search in bundles["searches"]
+        return any(self._due(search, key, now) for search in bundles["searches"] if not self._bundle_off(search)
                    for key in search.get("sites") or list(self.platforms) if key in self.platforms)
+
+    def _bundle_off(self, search: dict[str, Any]) -> str:
+        """Miért nem fut egy csomagkeresés: a keresőszava az „Ezekkel ne foglalkozz” listán van, vagy nem műszaki cikk
+        (pl. „lego ömlesztve”, ha a „csak műszaki cikkek” be van kapcsolva); „”, ha fut."""
+        query = str(search.get("query") or "")
+        word = self.blocked_query(query)
+        if word:
+            return f"a(z) „{word}” az „Ezekkel ne foglalkozz” listán van"
+        with self._lock:
+            tech = self._data["focus"]["tech_only"]
+        return "nem műszaki cikk (csak műszaki cikkekkel foglalkozom)" if tech and non_technical(query) else ""
 
     def set_bundles(self, on: Any = None, min_profit: Any = None) -> dict[str, Any]:
         """Csomagbontás be/ki (kikapcsolva a felmérésre várók is elmaradnak), és legalább mennyi haszonnal szóljon."""
@@ -5225,6 +5326,10 @@ class DealHunter:
                               "every": every})
         if wearable(search["query"]):
             raise DealError("Ruhával és cipővel nem kereskedem (ezt kérted): válassz más csomagot.")
+        self._refuse_blocked(search["query"])
+        if self._bundle_off(search):
+            raise DealError("Csak műszaki cikkekkel foglalkozom (Beállítások): válassz műszaki csomagot (pl. "
+                            "videojáték, kontrollerek, PC-alkatrészek).")
         with self._lock:
             bundles = self._data["bundles"]
             if any(fold(s["query"]) == fold(search["query"]) for s in bundles["searches"]):
@@ -5248,7 +5353,7 @@ class DealHunter:
     def _to_bundles(self, rows: list[dict[str, Any]], label: str) -> list[dict[str, Any]]:
         """A csomagnak látszó hirdetések (bundle_like) a felmérésre várók közé (_inbox); a többit visszaadja (a hívó
         látottnak jegyzi, ahogy eddig). Ha a csomagbontás ki van kapcsolva, mindet visszaadja."""
-        rest = self._inbox(rows, label, lambda row: bundle_like(row["text"]) and not wearable(row["text"]))
+        rest = self._inbox(rows, label, lambda row: bundle_like(row["text"]) and not self.unwanted(row["text"]))
         left = {id(row) for row in rest}
         self.tally("bundle", [row for row in rows if id(row) not in left])   # a mai számokban: a csomagbontásé
         return rest
@@ -5597,7 +5702,7 @@ class DealHunter:
         for row in rows[:SELLER_ROWS]:
             text = str(row.get("title") or row.get("text") or "")
             if not row.get("url") or listing_key(row["url"]) == own or row.get("auction") or unusable(text) \
-                    or wearable(text):
+                    or self.unwanted(text, str(row.get("text") or "")):
                 continue
             value = self.quick_value({**row, "text": text}, 1)
             if value is None:
@@ -5738,14 +5843,39 @@ class DealHunter:
         for ident, lane in list(stats.items()):
             if lane.get("site") != site or not lane.get("url"):
                 continue
+            label = str(lane.get("name") or ident).split(": ", 1)[-1]     # („Vinted: PS5” → „PS5”)
             if lane.get("kind") == "tanult" and not lane.get("off") and not lane.get("removed") \
-                    and not wearable(str(lane.get("name") or "")):
-                out.append({"id": ident, "site": site, "name": str(lane.get("name") or ident), "url": lane["url"],
+                    and not self.unwanted(label):
+                product = self.book.name(lane["key"]) if lane.get("key") else ""
+                url = self._keyword_url(site, product) if product else lane["url"]
+                out.append({"id": ident, "site": site, "name": str(lane.get("name") or ident), "url": url,
                             "kind": "tanult", "on": True})
             elif lane.get("kind") == "sajat":
+                # az „Ezekkel ne foglalkozz” listán lévő (vagy a nem műszaki) saját indulóoldal szünetel, amíg így van
+                why = self._lane_off(label)
                 out.append({"id": ident, "site": site, "name": str(lane.get("name") or ident), "url": lane["url"],
-                            "kind": "sajat", "on": not lane.get("disabled")})
+                            "kind": "sajat", "on": not lane.get("disabled") and not why,
+                            **({"blocked": why} if why else {})})
         return out
+
+    def _lane_off(self, label: str) -> str:
+        """Miért szünetel egy saját indulóoldal (a neve, pl. „Lego” vagy „iPhone” szerint): kizárt szó, vagy nem műszaki
+        cikk, ha a „csak műszaki cikkek” be van kapcsolva; „”, ha mehet."""
+        word = self.blocked_query(label)
+        if word:
+            return f"a(z) „{word}” az „Ezekkel ne foglalkozz” listán van"
+        with self._lock:
+            tech = self._data["focus"]["tech_only"]
+        return "nem műszaki cikk (csak műszaki cikkekkel foglalkozom)" if tech and non_technical(label) else ""
+
+    def _keyword_url(self, site: str, keyword: str) -> str:
+        """Egy kulcsszavas indulóoldal címe a legújabb hirdetésekkel elöl: a „csak műszaki cikkek” beállítással a
+        Vinteden az Elektronika kategórián belül (TECH_SEARCH), máshol az oldal keresője."""
+        with self._lock:
+            tech = self._data["focus"]["tech_only"]
+        template = TECH_SEARCH.get(site) if tech else None
+        url = (template or self.platforms[site].search_url).format(q=urllib.parse.quote(keyword))
+        return newest_first(url, site)
 
     def _lanes(self, site: str) -> list[dict[str, Any]]:
         """Egy oldal bekapcsolt indulóoldalai (_all_lanes): ezek közül választ a böngészés."""
@@ -5962,9 +6092,10 @@ class DealHunter:
         title = " ".join(str(page.get("title") or "").split())[:120]
         better = {**row, "text": f"{title} – {row['text']}"[:180] if title and fold(title) not in fold(row["text"])
                   else row["text"]}
-        if wearable(better["text"]):           # a címéből derült ki, hogy ruha vagy cipő: azzal nem kereskedik
+        why = self.unwanted(better["text"])
+        if why:                                # a címéből derült ki, hogy ruha, nem műszaki vagy kizárt
             self._mark(row)
-            self.tally("clothing", [row])
+            self.tally(why, [row])
             if row in unknown:
                 unknown.remove(row)
             return
@@ -6392,12 +6523,12 @@ class DealHunter:
                 break
             site = self.book.home_site(key)
             if key in have or self._muted(key, now) or site not in self.platforms \
-                    or site not in self._data["browse"]["sites"] or wearable(self.book.name(key)):
+                    or site not in self._data["browse"]["sites"] or self.unwanted(self.book.name(key)):
                 continue
             platform, name = self.platforms[site], self.book.name(key)
             ident = f"tanult:{key}"
             lanes[ident] = {"kind": "tanult", "site": site, "key": key, "at": now, "name": f"{platform.name}: {name}",
-                            "url": newest_first(platform.search_url.format(q=urllib.parse.quote(name)), site)}
+                            "url": self._keyword_url(site, name)}
             learned.append(lanes[ident])
             have.add(key)
             notes.append(f"mostantól figyelem: {name} ({ON_SITE.get(site, platform.name)}; {why})")
@@ -7240,7 +7371,7 @@ class DealHunter:
                  search: Callable[[str], list[dict[str, Any]]], can_ask: Callable[[], bool],
                  found: Callable[[dict[str, Any]], None], go: Callable[[], None] = lambda: None,
                  wear: bool = False, ping: Callable[..., Any] | None = None,
-                 rush: Callable[[], None] = lambda: None) -> list[dict[str, Any]]:
+                 rush: Callable[[], None] = lambda: None, asked: str = "") -> list[dict[str, Any]]:
         """Az azonnali figyelő friss hirdetései: minél hamarabb kideríti, megéri-e megvenni, és csak a megérőkről szól
         (found, rögtön, ahogy egy kiderül). A gyorsabbtól a lassabbig:
         1. modell nélkül: egy felmért keresésed szokásos ára, vagy az árbázis a hirdetés címéből (quick_value); ha az
@@ -7268,7 +7399,7 @@ class DealHunter:
         names: dict[int, str] = {}             # amit a modell már megnevezett
         try:
             return self._appraise(rows, source, look, search, can_ask, found, go, floor, known, done, names, wear,
-                                  ping, rush)
+                                  ping, rush, asked=asked)
         except Deferred as exc:
             # amelyik hirdetésnél elfogyott a keret, az azokra az oldalakra vár; a többi a saját oldalára (a hirdetés
             # oldalát mindenképp meg kell nyitni), így egy másik oldal kerete nem akasztja meg (wait_for). Az árkutatás
@@ -7295,7 +7426,7 @@ class DealHunter:
                   found: Callable[[dict[str, Any]], None], go: Callable[[], None], floor: int, known: set[str],
                   done: set[int], names: dict[int, str], wear: bool = False,
                   ping: Callable[..., Any] | None = None,
-                  rush: Callable[[], None] = lambda: None) -> list[dict[str, Any]]:
+                  rush: Callable[[], None] = lambda: None, asked: str = "") -> list[dict[str, Any]]:
         """Az appraise lépései; amit lezár (látottnak jegyez, felmér, a csomagbontásnak ad), azt done-ba teszi. A
         biztos árú megérők ellenőrzése nem szakad félbe; minden lassabb lépés (árkutatás, megnevezés) előtt rush."""
         def attempt(row: dict[str, Any], call: Callable[[], None]) -> None:
@@ -7316,6 +7447,12 @@ class DealHunter:
             if reserved(row["text"]):          # foglalt (a Hardveraprón „jegelve”): most nem vehető meg
                 self.tally("reserved", [row])
                 done.add(id(row))
+                continue
+            # kizárt (pl. Apple), ruha vagy nem műszaki cikk (a figyelő keresőszava szerint: asked)
+            why = self.unwanted(str(row.get("title") or row["text"]), row["text"], asked=asked)
+            if why:
+                skip.append(row)
+                self.tally(why, [row])
                 continue
             if not usable(row.get("title") or row["text"]):     # a cím dönt, ha van (a kártyán az eladó neve is)
                 lots.append(row)               # a csomagot a csomagbontás méri fel (ha be van kapcsolva)
@@ -7376,9 +7513,11 @@ class DealHunter:
         priced: list[tuple[dict[str, Any], dict[str, Any]]] = []
         elsewhere: list[tuple[dict[str, Any], str, bool]] = []
         for row, query, buy in named:
-            if wearable(query) and not wear:   # ruha vagy cipő: azzal nem kereskedik (hacsak nem ezt figyeled)
+            # a modell szerint ruha, nem műszaki vagy kizárt (hacsak nem ezt figyeled: wear, asked)
+            why = self.unwanted(query, str(row.get("text") or ""), asked=asked)
+            if why and not (why == "clothing" and wear):
                 self._mark(row)
-                self.tally("clothing", [row])
+                self.tally(why, [row])
                 done.add(id(row))
                 continue
             if not row.get("named"):           # (a korábban megnevezettet már feljegyezte)

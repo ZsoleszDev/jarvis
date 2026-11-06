@@ -318,8 +318,10 @@ class BundleSearchTests(BundleCase):
         self.assertEqual([s["query"] for s in reloaded.state()["bundles"]["searches"]], ["konzolcsomag"])
         self.assertNotIn("Ruhacsomag", [p["name"] for p in reloaded.state()["bundles"]["presets"]])
         rest = self.hunter._to_bundles([listing(7, "Márkás ruhacsomag 10 db", 6000, "www.jofogas.hu"),
-                                        listing(8, "Lego ömlesztve 3 kg", 6000, "www.jofogas.hu")], "teszt")
-        self.assertEqual([r["text"] for r in rest], ["Márkás ruhacsomag 10 db"], "a ruhás csomag nem megy oda")
+                                        listing(8, "PS2 játékok egyben 15 db", 6000, "www.jofogas.hu"),
+                                        listing(9, "Lego ömlesztve 3 kg", 6000, "www.jofogas.hu")], "teszt")
+        self.assertEqual([r["text"] for r in rest], ["Márkás ruhacsomag 10 db", "Lego ömlesztve 3 kg"],
+                         "a ruhás csomag nem megy oda, és a nem műszaki sem (csak műszaki cikkek)")
         self.assertEqual(self.hunter.state()["bundles"]["waiting"], 1)
 
     def test_settings_and_limits(self):
@@ -332,7 +334,8 @@ class BundleSearchTests(BundleCase):
             self.hunter.add_bundle_search("még egy")
         state = self.hunter.set_bundles(min_profit="12 000")
         self.assertEqual(state["bundles"]["min_profit"], 12000)
-        self.assertEqual([p["name"] for p in state["bundles"]["presets"]][:2], ["Lego ömlesztve", "Videojáték-csomag"])
+        self.assertEqual([p["name"] for p in state["bundles"]["presets"]],
+                         ["Videojáték-csomag", "PC-alkatrészek egyben", "Kontrollerek egyben"], "csak műszaki")
         search = state["bundles"]["searches"][0]
         self.assertEqual(len(self.hunter.remove_bundle_search(search["id"])["bundles"]["searches"]), 7)
         self.hunter.set_bundles(on=False)
@@ -386,12 +389,13 @@ class BundleSourceTests(BundleCase):
         self.assertEqual(self.browser.looked, [lot["url"]], "a kör végén rögtön")
         self.assertTrue(any(t.startswith("Csomag, nem éri meg: „RTX 3060 Ti + i5 PC alkatrészek egyben”")
                             for t in self.journal()))
-        fresh = [{**listing(41, "Lego ömlesztve 5 kg", 15000, "www.jofogas.hu"), "site": "Jófogás",
+        fresh = [{**listing(41, "Kontrollerek ömlesztve 5 db", 15000, "www.jofogas.hu"), "site": "Jófogás",
                   "platform": "jofogas"}]
-        waiting = self.hunter.appraise(fresh, "Lego", lambda row: None, lambda q: [], lambda: True, lambda d: None)
+        waiting = self.hunter.appraise(fresh, "Kontroller", lambda row: None, lambda q: [], lambda: True,
+                                       lambda d: None)
         self.assertEqual(waiting, [])
         [row] = self.hunter._data["bundles"]["inbox"]
-        self.assertEqual((row["text"], row["from"]), ("Lego ömlesztve 5 kg", "Azonnali figyelő: Lego"))
+        self.assertEqual((row["text"], row["from"]), ("Kontrollerek ömlesztve 5 db", "Azonnali figyelő: Kontroller"))
 
 
 if __name__ == "__main__":

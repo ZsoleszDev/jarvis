@@ -404,6 +404,7 @@ class InstantWatch:
             alerts = json.loads(json.dumps(self._data["alerts"]))
             for alert in alerts:                # amelyik oldalon a közös lista hozza a találatait (ritkábban nézi)
                 alert["covered"] = [k for k in alert.get("sites") or [] if self._covered(alert, k)]
+                alert["blocked"] = self._blocked(alert)
             hits = [dict(h) for h in self._data["hits"]]
             enabled = self._data["enabled"]
             waiting = list(self._waiting)
@@ -440,7 +441,7 @@ class InstantWatch:
     def _load_per_hour(alerts: list[dict[str, Any]]) -> dict[str, int]:
         out: dict[str, int] = {}
         for alert in alerts:
-            if alert.get("off"):
+            if alert.get("off") or alert.get("blocked"):
                 continue
             for site in alert.get("sites") or []:
                 out[site] = out.get(site, 0) + round(60 / max(1, int(alert.get("every") or DEFAULT_EVERY)))
@@ -487,6 +488,11 @@ class InstantWatch:
             chosen = [k for k in self.platforms if k in (sites if isinstance(sites, (list, tuple)) else [])] or \
                 list(self.platforms)
             alert.update(query=target[:80], url="", sites=chosen, name=target[:80])
+            blocked = getattr(self.hunter, "blocked_query", None)
+            word = blocked(alert["query"]) if callable(blocked) else ""
+            if word:
+                raise InstantError(f"A(z) „{word}” az „Ezekkel ne foglalkozz” listán van (Automata kereskedés › "
+                                   "Beállítások): ha mégis kell, előbb töröld onnan.")
         try:
             alert["max_price"] = parse_price(max_price) or None
             alert["min_price"] = parse_price(min_price) or None
@@ -930,14 +936,20 @@ class InstantWatch:
             counts[hour] = round(counts[hour] * RHYTHM_DECAY, 3)
         counts[time.localtime(now).tm_hour] += fresh
 
+    def _blocked(self, alert: dict[str, Any]) -> str:
+        """A figyelő keresőszavának az a szava, ami az „Ezekkel ne foglalkozz” listán van (DealHunter.blocked_query): amíg
+        ott van, a figyelő szünetel; különben „”."""
+        blocked = getattr(self.hunter, "blocked_query", None)
+        return blocked(str(alert.get("query") or "")) if callable(blocked) and alert.get("query") else ""
+
     def due(self, now: float | None = None) -> list[tuple[dict[str, Any], str]]:
         """Az esedékes (figyelő, oldal) párok, a legrégebben esedékes elöl."""
         now = self.clock() if now is None else now
         out = []
         with self._lock:
             for alert in self._data["alerts"]:
-                if alert.get("off"):
-                    continue
+                if alert.get("off") or self._blocked(alert):
+                    continue                   # (a kizárt szóra szólót le sem tölti, amíg a listán van)
                 for site in alert.get("sites") or []:
                     if site not in self.platforms:
                         continue
@@ -1291,8 +1303,7 @@ class InstantWatch:
         except FeedError:
             return []
 
-    @staticmethod
-    def _fits(alert: dict[str, Any], row: dict[str, Any]) -> bool:
+    def _fits(self, alert: dict[str, Any], row: dict[str, Any]) -> bool:
         """Illik-e a figyelőhöz: a keresőszó (ha van) minden szava benne van, nincs benne kizáró szó, az ársávban van,
         és nem kereső hirdetés („Keresek…”). Egy keresőszó nélküli (oldalcímes) figyelőnél a ruha és a cipő kimarad:
         azzal nem kereskedik (a ruhára szóló keresőszavad ettől még megy)."""
@@ -1302,6 +1313,11 @@ class InstantWatch:
         if alert.get("query") and not matches_query(alert["query"], str(row.get("title") or row["text"])):
             return False
         if not alert.get("query") and wearable(str(row.get("title") or row["text"])):
+            return False
+        # az „Ezekkel ne foglalkozz” lista (pl. Apple), és a „csak műszaki cikkek” (DealHunter.unwanted)
+        unwanted = getattr(self.hunter, "unwanted", None)
+        if callable(unwanted) and unwanted(str(row.get("title") or row["text"]), row["text"],
+                                           asked=str(alert.get("query") or "")):
             return False
         if excluded(alert.get("exclude") or [], row["text"]):
             return False
@@ -1383,7 +1399,8 @@ class InstantWatch:
         try:
             waiting = self.hunter.appraise(fresh, source, self._look, self._search, self.model_ok, found,
                                            go=lambda: self._go(alert["id"]),
-                                           wear=wearable(str(alert.get("query") or "")), ping=ping, rush=self._rush)
+                                           wear=wearable(str(alert.get("query") or "")), ping=ping, rush=self._rush,
+                                           asked=str(alert.get("query") or ""))
         except _Off:
             return hits
         if hasattr(self.hunter, "flush_tips"):

@@ -239,6 +239,29 @@ def wearable(text: str) -> bool:
     return bool(_WEAR_RE.search(fold(text or "")))
 
 
+# Nem műszaki cikk (ékezet nélkül): játék és gyűjtemény (Lego, figurák, társasjáték), könyv, szépségápolás és illatszer,
+# ékszer, bútor és lakberendezés, kerékpár, babafelszerelés. Az automata kereskedés alapból csak műszaki cikkekkel
+# foglalkozik (alkatrész, konzol, kontroller, elektronika: DealHunter „csak műszaki cikkek”), a felhasználó így döntött;
+# ezek a kategóriaoldalakon (Vinted Elektronika, Jófogás Műszaki cikkek…) nem is jönnek, csak egy kulcsszavas
+# indulóoldalról, a csomagbontásból, az eladó többi hirdetéséből vagy az árbázisból (alku). A kifejezett keresésed
+# (Keresések, azonnali figyelő keresőszóval) ettől még mehet. A műszaki szavak elé álló alakok nem számítanak: az
+# „e-könyv olvasó”, a „Lego-tartó polc” nem gond, a „kontroller töltő” sem.
+_NON_TECH_RE = re.compile(
+    r"\b(?:lego\w*|duplo|playmobil|funko|barbie|hot ?wheels|lol surprise|pluss\w*|tarsasjatek\w*|puzzle\w*|"
+    r"kirako\w*|jatekfigur\w*|akciofigur\w*|babahaz\w*|"
+    r"(?<!e )(?<!e-)konyv(?!olvaso)\w*|regeny\w*|kepregeny\w*|"
+    r"parfum\w*|kolni\w*|eau de (?:parfum|toilette)|smink\w*|ruzs\w*|szempillaspiral\w*|koromlakk\w*|arckrem\w*|"
+    r"testapolo\w*|ekszer\w*|nyaklanc\w*|karkoto\w*|fulbevalo\w*|penztarca\w*|napszemuveg\w*|borond\w*|"
+    r"butor\w*|kanape\w*|fotel\w*|matrac\w*|szekreny\w*|komod\w*|agynemu\w*|fuggony\w*|szonyeg\w*|"
+    r"festmeny\w*|porcelan\w*|gyertya\w*|vaza\w*|kerekpar\w*|bicikli\w*|babakocsi\w*|autosules\w*)\b")
+
+
+def non_technical(text: str) -> bool:
+    """Nem műszaki cikk-e (a hirdetés címe vagy egy keresőszó alapján: _NON_TECH_RE): a „csak műszaki cikkek”
+    beállítással az automata kereskedés ezekkel nem foglalkozik."""
+    return bool(_NON_TECH_RE.search(fold(text or "")))
+
+
 # Videókártya a családja (RTX, GTX, RX) nélkül („MSI 3060 Ti”, „Sapphire Pulse 6700 XT”, „Zotac 3070 8GB”): az ismert
 # lapkaszám, és mellette egy biztos jel (a lapka jelzője: Ti, Super, XT; egy videókártya-szó; egy csak videókártyát
 # gyártó cég; az NVIDIA-lapkáknál egy kártya- és alaplapgyártó is, a felbontásnak is olvasható 1080 kivételével). Így a

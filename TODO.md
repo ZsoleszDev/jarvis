@@ -17,6 +17,9 @@
 - Azonnali figyelő (instant.py): keresőszó vagy oldalcím, 2–15 percenként, saját szálon; csak akkor szól, ha új ÉS
   megéri (árbázis / keresés → a modell megnevezi → ár a másik oldalon → a hirdetés oldala → rövid modellkérdés); a
   modellre váró hirdetések megvárják, hogy ne zavarja a beszélgetést; sürgős push-értesítés.
+- Automata kereskedés: csak műszaki cikkek (pricebook.non_technical; a Vinteden a kulcsszavas indulóoldal az Elektronika
+  kategórián belül), és az „Ezekkel ne foglalkozz” lista (alapból az Apple termékei) mindenhol, a villámfigyelő kivételével;
+  a régi kizárt keresés, figyelő és indulóoldal szünetel.
 - Villámfigyelő (sniper.py, Vinted): egy vagy több keresőszó (vagy Vinted-link) felváltva, 10–60 mp-enként, naponta a
   beállított időszakban (16:30–19:30) 20 perc figyelés / 10 perc szünet ritmusban, saját szálon és böngészőablakban;
   árhatár (kikapcsolható), alsó határ, kizáró szavak, címegyezés; saját hangú értesítés (Android: Villámfigyelő
