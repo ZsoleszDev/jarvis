@@ -110,7 +110,9 @@ public class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " JarvisAndroid/1");
+        // 2: a villámfigyelő értesítése (saját csatorna és hang, rábökve a hirdetés); a felület ebből tudja, hogy a régebbi
+        // alkalmazásnál szóljon a frissítésről
+        settings.setUserAgentString(settings.getUserAgentString() + " JarvisAndroid/2");
         web.addJavascriptInterface(new Bridge(), "JarvisApp");
         web.setWebViewClient(new Client());
         web.setWebChromeClient(new Chrome());

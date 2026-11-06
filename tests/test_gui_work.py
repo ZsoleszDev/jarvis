@@ -1523,6 +1523,29 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertEqual(page.get_attribute(".snipebar a", "href"), "https://www.vinted.hu/")
         page.click(".snipebar button")
         page.wait_for_selector(".snipebar", state="hidden")
+        # az Értesítések listájában is: rábökve a hirdetés nyílik meg (nem a Jarvis)
+        page.click("#notices")
+        link = page.wait_for_selector('#notices-body a.noticelink:has-text("Megnyitom a hirdetést")')
+        self.assertEqual((link.get_attribute("href"), link.get_attribute("target")), ("https://www.vinted.hu/", "_blank"))
+        page.click("#notices-close")
+        self.assertEqual(page.locator('details[data-fold="snipe"] .warn:has-text("régebbi")').count(), 0,
+                         "a gépen nincs Android-figyelmeztetés")
+        # a régi Android-alkalmazásban (JarvisAndroid/1): a blokk szól, hogy frissítsd (az újban, a 2-esben nem)
+        for version, warned in ((1, True), (2, False)):
+            context = self.browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True,
+                                               user_agent=f"Mozilla/5.0 (Linux; Android 14) Chrome/141.0 Mobile "
+                                                          f"JarvisAndroid/{version}")
+            phone = context.new_page()
+            phone.goto(self.h.server.url)
+            phone.wait_for_selector('body[data-state="idle"]', state="attached", timeout=15000)
+            phone.click("#tab-work")
+            phone.click("#job-deals")
+            phone.click('details[data-fold="snipe"] > summary')
+            hint = phone.locator('details[data-fold="snipe"] .warn:has-text("régebbi, mint a villámfigyelő")')
+            self.assertEqual(hint.count(), 1 if warned else 0, version)
+            if warned:
+                self.assertTrue(hint.locator("a").get_attribute("href").endswith("/android-latest/jarvis.apk"))
+            context.close()
         page.click(f'[data-snipe-remove="{query["id"]}"]')
         page.wait_for_selector('details[data-fold="snipe"] li:has-text("Még nincs keresőszó")')
 

@@ -9,6 +9,9 @@ const $ = (id) => document.getElementById(id);
 // Ilyenkor a fontos dolgokról értesítés jön.
 const remote = !!document.querySelector('meta[name="jarvis-remote"]');
 const inAndroid = /JarvisAndroid/.test(navigator.userAgent);   // az Android-alkalmazás maga értesít
+// Az Android-alkalmazás változata (a felhasználói azonosítóban: JarvisAndroid/2): a 2-estől a villámfigyelő értesítése a
+// saját csatornáján szól, és rábökve a hirdetés nyílik meg; a régebbinél a Villámfigyelő blokk szól, hogy frissítsd.
+const androidVersion = inAndroid ? Number((navigator.userAgent.match(/JarvisAndroid\/(\d+)/) || [])[1] || 1) : null;
 
 // A gépen az alkalmazásablak kitölti a képernyőt ([gui] maximized: a címben fill=1). Az Edge a --start-maximized
 // kapcsolót csak akkor veszi figyelembe, ha még nem fut (ha már fut, pl. az indítási gyorsítás miatt, a meglévő
@@ -235,7 +238,9 @@ const handlers = {
   },
   notification(e) {
     const notice = e.notice || {};
-    systemNotify(notice.title || "Jarvis", notice.text || "", "notice-" + (notice.id || ""));
+    // a villámfigyelő értesítésére bökve maga a hirdetés nyílik meg (a service worker és a sima értesítés is)
+    systemNotify(notice.title || "Jarvis", notice.text || "", "notice-" + (notice.id || ""),
+                 notice.snipe && notice.url ? { snipe: notice.snipe, url: notice.url } : null);
     addNotice(notice);
     if (notice.snipe && live) snipeAlert(notice);   // villámfigyelő: saját hang és egy sáv a hirdetés linkjével
   },
@@ -577,6 +582,7 @@ function renderNotices() {
       <span class="text">${escHtml(n.text)}</span>
       ${noticeButtons(n).length ? `<span class="row">${noticeButtons(n).map((a, j) =>
         `<button type="button" class="small" data-notice="${i}" data-act="${j}">${escHtml(a.label)}</button>`).join("")}</span>` : ""}
+      ${n.snipe && /^https:\/\//.test(n.url || "") ? `<span class="row"><a class="noticelink" href="${escHtml(n.url)}" target="_blank" rel="noopener noreferrer">Megnyitom a hirdetést</a></span>` : ""}
     </li>`).join("")}</ul>`;
 }
 
@@ -659,14 +665,18 @@ if ("serviceWorker" in navigator) {
 // Rendszerértesítés, ha az ablak épp nem látszik (a laptopon; az Android-alkalmazás maga értesít).
 const notifiable = remote && !inAndroid && "Notification" in window;
 
-function systemNotify(title, body, tag) {
+function systemNotify(title, body, tag, data) {
   if (!notifiable || Notification.permission !== "granted" || !document.hidden) return;
   const options = { body: String(body || "").slice(0, 240), tag, icon: "/icon-192.png" };
+  if (data) options.data = data;          // (sw.js: a villámfigyelő értesítésére bökve a hirdetés nyílik meg)
   const worker = navigator.serviceWorker;
   if (worker && worker.controller) {
     worker.ready.then((registration) => registration.showNotification(title, options)).catch(() => {});
   } else {
-    try { new Notification(title, options); } catch { /* pl. a böngésző nem engedi */ }
+    try {
+      const shown = new Notification(title, options);
+      if (data && data.url) shown.onclick = () => { window.open(data.url, "_blank", "noopener"); shown.close(); };
+    } catch { /* pl. a böngésző nem engedi */ }
   }
 }
 
@@ -1095,6 +1105,7 @@ window.Jarvis = {
   get mode() { return mode; },
   get paused() { return paused; },
   get standby() { return standby; },
+  androidVersion,
   setMode,
   on(type, fn) { extraHandlers[type] = fn; },
   onHello(fn) { helloHooks.push(fn); },

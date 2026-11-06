@@ -708,6 +708,44 @@ class RemoteWindowBrowserTests(unittest.TestCase):
             "item": "a1b2c3d4"}}])
         self.assertEqual(result["fetched"], [], "a gomb nem küld semmit a gépnek")
 
+    def test_service_worker_opens_a_sniper_find(self):
+        """A villámfigyelő értesítésére bökve maga a hirdetés nyílik meg, nem a Jarvis ablaka: a Web Push üzenetéből
+        (más rezgéssel), és az ablak saját értesítéséből is (app.js systemNotify: options.data), nyitott ablaknál is."""
+        from playwright.sync_api import sync_playwright
+
+        url = "https://www.vinted.hu/items/5000200-sony-playstation-4-slim"
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            result = page.evaluate("""async ([code, url]) => {
+                const listeners = {}, shown = [], opened = [], posted = [];
+                let windows = [];
+                const worker = { addEventListener: (type, fn) => { listeners[type] = fn; }, skipWaiting() {},
+                  clients: { claim: async () => {}, matchAll: async () => windows,
+                             openWindow: async (u) => { opened.push(u); } },
+                  registration: { showNotification: async (title, options) => { shown.push({ title, options }); } } };
+                new Function("self", "fetch", code)(worker, async () => ({ ok: true }));
+                const run = async (type, event) => {
+                  let wait = null;
+                  event.waitUntil = (p) => { wait = p; };
+                  listeners[type](event);
+                  await wait;
+                };
+                const message = { kind: "notice", title: "⚡ 35 000 Ft · PS4 slim", text: "Vinted: …", tag: "notice-n9",
+                                  snipe: "vinted.hu#5000200", url, urgent: true };
+                await run("push", { data: { json: () => message } });
+                const options = shown[0].options;
+                await run("notificationclick", { action: "", notification: { data: options.data, close() {} } });
+                windows = [{ postMessage: (m) => posted.push(m), focus: async () => {} }];
+                await run("notificationclick", { action: "", notification: { data: { snipe: "vinted.hu#5000200", url },
+                                                                             close() {} } });
+                return { vibrate: options.vibrate, sticky: options.requireInteraction, opened, posted };
+            }""", [remote.SERVICE_WORKER, url])
+            browser.close()
+        self.assertEqual(result["opened"], [url, url], "a push-ból és az ablak saját értesítéséből is a hirdetés")
+        self.assertEqual(result["posted"], [], "nyitott Jarvis-ablaknál sem oda visz")
+        self.assertEqual((result["vibrate"], result["sticky"]), ([400, 100, 90, 70, 90, 70, 90], True))
+
 
 
 @unittest.skipUnless(HAS_CHROMIUM, "Playwright/Chromium nincs telepítve")

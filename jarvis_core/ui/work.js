@@ -789,7 +789,12 @@
         <small class="muted"><b>${esc(price(h.price))}</b> (a Vinted-díjjal kb. ${esc(price(h.total))})${h.drop ? ` · leárazta: ${esc(price(h.drop))} helyett` : ""}${h.older ? " · korábbi hirdetés, most került előre" : ""} · ${esc(ago(h.at))} (${esc(hhmmOf(h.at))}) · ${esc(h.query)}</small></span></li>`).join("");
     const bursting = S.burst_until > Date.now() / 1000;
     const today = S.loads_today ? `Ma ${esc(S.loads_today)} frissítés${S.hits_today ? `, ${esc(S.hits_today)} találat` : ""}${S.load_ms ? ` · egy oldal kb. ${esc((S.load_ms / 1000).toFixed(1).replace(".", ","))} mp alatt töltődik be` : ""}${S.slow > 1 ? ` · a robot-ellenőrzés miatt ma ${esc(String(S.slow).replace(".", ","))}-szer ritkábban frissítek` : ""}.` : "";
-    return `<p><b>${esc(S.status)}</b>${S.blocked_until ? ' <button type="button" class="small" id="ds-resume">Folytatás most</button>' : ""}</p>
+    // a régebbi Android-alkalmazás a villámfigyelő értesítését sima értesítésként mutatja: rábökve a Jarvis nyílik meg
+    const oldApp = J.androidVersion !== null && J.androidVersion !== undefined && J.androidVersion < 2;
+    return `${oldApp ? `<p class="warn"><small>A telefonos Jarvis-alkalmazásod régebbi, mint a villámfigyelő: az értesítésére bökve
+        nem a hirdetés nyílik meg (hanem a Jarvis), és a saját hangja sem szól. Töltsd le az újat, és telepítsd a régire:
+        <a href="${esc(S.apk_url || "")}">jarvis.apk</a>.</small></p>` : ""}
+      <p><b>${esc(S.status)}</b>${S.blocked_until ? ' <button type="button" class="small" id="ds-resume">Folytatás most</button>' : ""}</p>
       ${today ? `<p><small class="muted">${today}</small></p>` : ""}
       <ul class="dealist">${queries || '<li class="muted">Még nincs keresőszó.</li>'}</ul>
       ${(S.queries || []).length < (S.max_queries || 8) ? `<form id="ds-add" class="compose" autocomplete="off">

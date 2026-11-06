@@ -527,7 +527,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, **work.deals.state(),
                                     "profit": profit_report(work.store.all(), archived=work.store.archived()),
                                     "instant": work.instant.state() if work.instant is not None else None,
-                                    "snipe": work.sniper.state() if getattr(work, "sniper", None) else None})
+                                    "snipe": {**work.sniper.state(), "apk_url": remote.APK_URL}
+                                    if getattr(work, "sniper", None) else None})
         if path == "/api/work/ledger":       # Elemzés: a teendők, a haszon, a megvett tárgyak, és mennyiért adják most
             return self._json(200, self._ledger(work))
         match = TODO_SHOT_RE.match(path)
@@ -838,7 +839,8 @@ class _Handler(BaseHTTPRequestHandler):
             state = sniper.test()
         else:
             return self._json(400, {"ok": False})
-        return self._json(200, {"ok": True, "snipe": state})   # (a többi ablakot a _deals_post értesíti)
+        # (a többi ablakot a _deals_post értesíti; az APK címe a régi Android-alkalmazás figyelmeztetéséhez)
+        return self._json(200, {"ok": True, "snipe": {**state, "apk_url": remote.APK_URL}})
 
     def _deals_action(self, body: dict[str, Any], remote: bool = False) -> None:
         app, deals = self.gui.app, self._work().deals
