@@ -477,6 +477,7 @@ fieldset.sites legend { padding: 0; margin-bottom: 8px; font-size: 13.5px; color
 .snipebar b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .snipebar span { display: flex; gap: 10px; align-items: center; flex: 0 0 auto; }
 .snipebar a { color: var(--white); font-weight: 600; }
+.notices .noticelink { color: var(--white); font-weight: 600; }
 .toast { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); padding: 6px 14px;
          border-radius: 6px; background: var(--graphite-hi); border: 1px solid var(--steel);
          font-size: 13.5px; color: var(--paper); pointer-events: none; }
