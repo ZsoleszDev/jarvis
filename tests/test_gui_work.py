@@ -167,16 +167,16 @@ class WorkSecurityTests(unittest.TestCase):
         self.assertEqual((status, data["browse"]["glance"]), (200, 15))
         self.assertEqual(self.post("/api/work/deals", {"action": "browse", "glance": 7})[0], 400)
         # az indulóoldalak a felületről: saját hozzáadása, ki-be kapcsolás, törlés, öntanulás
-        status, data = self.post("/api/work/deals", {"action": "lane_add", "target": "Lego", "site": "vinted"})
+        status, data = self.post("/api/work/deals", {"action": "lane_add", "target": "Xbox", "site": "vinted"})
         [own] = [lane for lane in data["lanes"] if lane["kind"] == "sajat"]
-        self.assertEqual((status, own["name"], own["on"]), (200, "Vinted: Lego", True))
-        self.assertEqual(self.post("/api/work/deals", {"action": "lane_add", "target": "Lego", "site": "vinted"})[0], 400,
+        self.assertEqual((status, own["name"], own["on"]), (200, "Vinted: Xbox", True))
+        self.assertEqual(self.post("/api/work/deals", {"action": "lane_add", "target": "Xbox", "site": "vinted"})[0], 400,
                          "már megvan")
         status, data = self.post("/api/work/deals", {"action": "lane_switch", "id": own["id"], "on": False})
         self.assertEqual((status, [l["on"] for l in data["lanes"] if l["id"] == own["id"]]), (200, [False]))
         status, data = self.post("/api/work/deals", {"action": "lane_remove", "id": own["id"]})
         self.assertEqual((status, [l for l in data["lanes"] if l["kind"] == "sajat"]), (200, []))
-        self.assertEqual(data["lane_presets"][0], "Lego")
+        self.assertEqual(data["lane_presets"][0], "PlayStation")
         status, data = self.post("/api/work/deals", {"action": "browse", "learn": False})
         self.assertEqual((status, data["browse"]["learn"]), (200, False))
         self.assertEqual(self.post("/api/work/deals", {"action": "browse", "sites": []})[0], 400, "legalább egy oldal")
@@ -1324,6 +1324,38 @@ class WorkBrowserTests(unittest.TestCase):
         page.click("#job-deals")
         page.wait_for_selector("#d-query", state="visible")
 
+    def test_only_technical_and_excluded_words_in_the_settings(self):
+        """Beállítások: a „Csak műszaki cikkek” pipa (alapból be) és az „Ezekkel ne foglalkozz” lista (alapból az Apple
+        termékei); átírva elmenti, az „Apple kizárása (alap)” gomb visszateszi az alapszavakat; a kizárt szóra szóló
+        keresés szünetel, és a fülön látszik, miért."""
+        deals = self.h.app.work.deals
+        page = self.page
+        page.click("#job-deals")
+        page.wait_for_selector("#d-run-toggle")
+        page.click('summary:has-text("Beállítások")')
+        self.assertTrue(page.is_checked("#d-techonly"))
+        self.assertTrue(page.input_value("#d-exclude").startswith("apple, iphone, ipad"))
+        page.fill("#d-exclude", "airpods, beats")
+        page.uncheck("#d-techonly")
+        page.click("#d-focus")
+        page.wait_for_selector('.toast:has-text("ezekkel nem foglalkozom")')
+        self.assertEqual(deals.state()["focus"]["exclude"], ["airpods", "beats"])
+        self.assertFalse(deals.state()["focus"]["tech_only"])
+        page.check("#d-techonly")
+        page.click("#d-focus-apple")
+        page.wait_for_selector('.toast:has-text("az Apple termékeivel nem foglalkozom")')
+        focus = deals.state()["focus"]
+        self.assertTrue(focus["tech_only"])
+        self.assertEqual(focus["exclude"][:3], ["airpods", "beats", "apple"])
+        self.assertIn("iphone", focus["exclude"])
+        with deals._lock:
+            deals._data["searches"].append({"id": "s-ip", "query": "iPhone 13", "sites": ["hardverapro"],
+                                            "reference": 150000})
+        page.click('summary:has-text("Keresések")')
+        page.click("#job-sales")
+        page.click("#job-deals")
+        page.wait_for_selector('li:has-text("iPhone 13") .warn:has-text("Ezekkel ne foglalkozz")')
+
     def test_start_pages_from_the_window(self):
         """A Böngészés indulóoldalai a felületről: a beépített kategória kikapcsolható és visszakapcsolható, egy
         keresőszó egy gombnyomással felvehető és törölhető, az öntanulás kikapcsolható."""
@@ -1342,7 +1374,7 @@ class WorkBrowserTests(unittest.TestCase):
         self.assertIn("kikapcsolva", lanes.first.inner_text())
         page.click(f'[data-lane-switch="{first["id"]}"]')
         self.wait_for(lambda: deals.state()["lanes"][0]["on"] is True)
-        page.click('[data-lane-preset="Lego"]')
+        page.click('[data-lane-preset="Xbox"]')
         self.wait_for(lambda: any(lane["kind"] == "sajat" for lane in deals.state()["lanes"]))
         own = [lane for lane in deals.state()["lanes"] if lane["kind"] == "sajat"]
         page.wait_for_selector(f'[data-lane-remove="{own[0]["id"]}"]')
@@ -1675,11 +1707,12 @@ class WorkBrowserTests(unittest.TestCase):
         page.click("#deal-close")
         page.click('details[data-fold="bundles"] > summary')
         page.click('[data-bundle-preset="0"]')
-        page.wait_for_selector('.toast:has-text("Felvettem: Lego ömlesztve.")')
+        page.wait_for_selector('.toast:has-text("Felvettem: Videojáték-csomag.")')
         state = deals.state()["bundles"]
         self.assertEqual((state["on"], state["searches"][0]["query"], state["searches"][0]["sites"]),
-                         (True, "lego ömlesztve", [k for k in ("jofogas", "vatera") if k in deals.platforms]))
-        page.wait_for_selector('#w-deals .dealist li:has-text("lego ömlesztve")')
+                         (True, "videojáték csomag",
+                          [k for k in ("jofogas", "hardverapro", "vatera") if k in deals.platforms]))
+        page.wait_for_selector('#w-deals .dealist li:has-text("videojáték csomag")')
         page.uncheck("#db-on")
         page.click("#db-save")
         page.wait_for_selector('.toast:has-text("Kikapcsoltam a csomagbontást.")')

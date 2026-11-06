@@ -24,11 +24,13 @@ from test_web_browser import HAS_CHROMIUM  # noqa: E402
 from jarvis_core import condition as conditions  # noqa: E402
 from jarvis_core import deals as deals_module  # noqa: E402
 from jarvis_core.browser import BrowserController, BrowserError  # noqa: E402
-from jarvis_core.deals import (SUSPECT_RATIO, DealError, DealHunter, ModelLane, assess, buy_fee, careful_low,  # noqa: E402
+from jarvis_core.deals import (LANE_PRESETS, SUSPECT_RATIO, DealError, DealHunter, ModelLane, assess,  # noqa: E402
+                               buy_fee, careful_low,
                                expected_profit, explore_top, highest_ok, last_chance, left_text, market, matches_query,
                                newest_first, offer_price, parse_auction, profit_floor, safe_sale, safety_text)
 from jarvis_core.journal import Journal  # noqa: E402
-from jarvis_core.pricebook import PriceBook, pace, product_key, sized, unusable, usable, wearable  # noqa: E402
+from jarvis_core.pricebook import (PriceBook, non_technical, pace, product_key, sized, unusable, usable,  # noqa: E402
+                                   wearable)
 from jarvis_core import pricebook as pricebook_module  # noqa: E402
 from jarvis_core.scheduler import Preempted  # noqa: E402
 from jarvis_core.selling import PLATFORMS, listing_key  # noqa: E402
@@ -1079,6 +1081,95 @@ class ExploreTests(HunterCase):
         self.assertTrue([k for k in found if "makita" in k], "a fúrógépre alkudna (a teszt helyes)")
         self.assertFalse([k for k in found if "nike" in k], "ruhára nem alkuszik")
 
+    def test_only_technical_items_and_no_apple(self):
+        """Csak műszaki cikkek, Apple nélkül (alapbeállítás): a figyelt oldal iPhone-ját, AirPodsát, MacBookját (a
+        kártyán a márka is számít) és Legóját kihagyja (a modellhez sem kerül; a mai számokban: „kizárt”, „nem műszaki
+        cikk”), és amit a modell Apple-nek nevez meg, az is kimarad; Apple-re nem alkuszik."""
+        for text in ("Lego Technic 42115", "Harry Potter könyv", "Dior parfüm", "Funko Pop Batman", "IKEA kanapé"):
+            self.assertTrue(non_technical(text), text)
+        for text in ("RTX 3060 Ti", "PS5 kontroller", "Nintendo Switch OLED", "Kindle e-könyv olvasó", "Logitech G502",
+                     "Asztali PC i5", "Xbox Series X"):
+            self.assertFalse(non_technical(text), text)
+        focus = self.hunter.state()["focus"]
+        self.assertTrue(focus["tech_only"])
+        self.assertTrue({"apple", "iphone", "ipad", "airpod", "macbook"} <= set(focus["exclude"]))
+        self.assertFalse({"Lego", "iPhone", "AirPods", "Dyson"} & set(LANE_PRESETS), "a gyors gombok is műszakiak")
+        rows = [listing(60, "Apple iPhone 13 128GB", 150000), listing(61, "AirPods Pro 2 fehér", 30000),
+                {**listing(62, "Air 13 M1 8GB", 150000), "text": "Air 13 M1 8GB | Apple | 150 000 Ft"},
+                listing(63, "Lego Technic 42115", 90000), listing(64, "Retró kütyü", 9000)]
+        self.browser.results = []
+        self.browser.by_url = [("videokartya", PAGE + rows)]
+        self.hunter.add_watch(CATEGORY)
+        self.hunter.set_enabled(True)
+        self.llm.explore = [{"n": 1, "query": "Apple Watch Series 8", "buy": True}]
+        self.hunter.run(notify=self.notify)
+        [explored] = [m[1]["content"] for m in self.llm.calls if "Friss hirdetések" in m[1]["content"]]
+        for name in ("iPhone", "AirPods", "Air 13", "Lego"):
+            self.assertNotIn(name, explored)
+        counts = self.hunter.funnel()["counts"]
+        self.assertEqual((counts["excluded"], counts["nontech"]), (4, 1),
+                         "az iPhone, az AirPods, a MacBook (a kártyán: Apple) és amit a modell Apple Watchnak nevezett")
+        self.assertFalse([u for u in self.browser.urls if "Apple" in u], "az Apple-nek nevezett árát sem keresi")
+        self.hunter.book.add([{**listing(80 + n, f"Apple AirPods Pro 2 {n}", p), "platform": "hardverapro"}
+                              for n, p in enumerate((40000, 41000, 39000, 42000, 40500, 39500, 31000))])
+        self.clock.now += 8 * 86400
+        self.assertFalse([c for c in self.hunter.haggle_candidates() if "airpods" in c["key"]], "Apple-re nem alkuszik")
+
+    def test_excluded_words_searches_and_start_pages(self):
+        """Az „Ezekkel ne foglalkozz” lista átírható (a naplóba is); egy kizárt szóra nem vehető fel keresés, figyelő,
+        indulóoldal vagy csomag, a régi ilyen keresés és saját indulóoldal szünetel (nem tölti be), és ha a szót
+        törlöd a listáról, újra megy. A „csak műszaki cikkek” kikapcsolható; bekapcsolva a Vinteden a kulcsszavas
+        indulóoldal az Elektronika kategórián belül keres."""
+        hunter = self.hunter
+        self.assertEqual(hunter.unwanted("Apple iPhone 13"), "excluded")
+        self.assertEqual(hunter.unwanted("Pro 2 | Apple | 30 000 Ft"), "excluded")
+        self.assertEqual(hunter.unwanted("iphone13 pro"), "excluded", "a szó eleje számít")
+        self.assertEqual(hunter.unwanted("Pineapple Express DVD"), "", "a szó közepe nem")
+        self.assertEqual(hunter.unwanted("Lego Technic 42115"), "nontech")
+        self.assertEqual(hunter.unwanted("Lego Technic 42115", asked="Lego 42115"), "", "a kifejezett keresés megy")
+        self.assertEqual(hunter.unwanted("iPhone 13", asked="iPhone 13"), "excluded", "a lista mindig számít")
+        with self.assertRaisesRegex(DealError, "„iphone” az „Ezekkel ne foglalkozz” listán van"):
+            hunter.add_search("iPhone 13", ["hardverapro"])
+        with self.assertRaises(DealError):
+            hunter.lane_add("AirPods")
+        with self.assertRaisesRegex(DealError, "Csak műszaki cikkekkel foglalkozom"):
+            hunter.lane_add("Lego")
+        with self.assertRaises(DealError):
+            hunter.add_bundle_search("lego ömlesztve")
+        with hunter._lock:                     # a régiek (amikor még nem volt ilyen lista)
+            hunter._data["searches"].append({"id": "s-old", "query": "iPhone 13", "sites": ["hardverapro"],
+                                             "reference": 150000})
+            hunter._data["lanes"]["sajat:jofogas:iphone"] = {"kind": "sajat", "site": "jofogas",
+                                                             "name": "Jófogás: iPhone",
+                                                             "url": "https://www.jofogas.hu/magyarorszag?q=iPhone&sp=3"}
+            hunter._save()
+        hunter.set_enabled(True)
+        state = hunter.state()
+        [old] = [x for x in state["searches"] if x["id"] == "s-old"]
+        self.assertEqual(old["blocked"], "iphone")
+        self.assertEqual(hunter.running_searches(), [], "az azonnali figyelő sem nézi")
+        [lane] = [lane for lane in state["lanes"] if lane["id"] == "sajat:jofogas:iphone"]
+        self.assertEqual((lane["on"], lane["blocked"]), (False, "a(z) „iphone” az „Ezekkel ne foglalkozz” listán van"))
+        with self.assertRaises(DealError):
+            hunter.lane_switch(lane["id"], True)
+        hunter.run(notify=self.notify)
+        self.assertFalse([u for u in self.browser.urls if "iPhone" in u], "a régi keresés sem tölt be semmit")
+        state = hunter.set_focus(exclude="airpods, Beats")
+        self.assertEqual(state["focus"]["exclude"], ["airpods", "beats"])
+        self.assertEqual([x for x in state["searches"] if x["id"] == "s-old"][0]["blocked"], "")
+        self.assertTrue([lane for lane in state["lanes"] if lane["id"] == "sajat:jofogas:iphone"][0]["on"])
+        journal = lambda: [e["text"] for e in hunter.journal.entries()]  # noqa: E731
+        self.assertIn("Csak műszaki cikkekkel foglalkozom; ezekkel nem: airpods, beats.", journal())
+        self.assertEqual(self.make().state()["focus"]["exclude"], ["airpods", "beats"], "megmarad")
+        state = hunter.lane_add("PlayStation", "vinted")
+        [ps] = [lane for lane in state["lanes"] if lane["name"] == "Vinted: PlayStation"]
+        self.assertEqual(ps["url"], "https://www.vinted.hu/catalog?search_text=PlayStation&catalog[]=2994"
+                                    "&order=newest_first")
+        hunter.set_focus(tech_only=False)
+        self.assertEqual(hunter.unwanted("Lego Technic 42115"), "")
+        self.assertIn("Vinted: Lego", [lane["name"] for lane in hunter.lane_add("Lego", "vinted")["lanes"]])
+        self.assertIn("Nem csak műszaki cikkekkel foglalkozom; ezekkel nem: airpods, beats.", journal())
+
     def test_promoted_listings_come_after_the_rest(self):
         """A fizetett kiemelések (az oldal elején, többnyire régiek) a modellkeret végére kerülnek: egy oldalról
         EXPLORE_ROWS (20) ismeretlen jut a modellhez, ebből előbb a többi."""
@@ -1334,6 +1425,7 @@ class ExploreTests(HunterCase):
         self.assertEqual(book.lookup("WH-1000XM4")[0]["samples"], 1)
 
     def test_vinted_pages_offers_and_fake_prone_brands(self):
+        self.hunter.set_focus(exclude="")      # (az alapból kizárt Apple nélkül: az AirPods itt csak a példa)
         self.hunter.book.add(AIRPODS)
         page = [{**listing(95, "AirPods Pro 2 eladó", 45000, "www.vinted.hu")},
                 {**listing(96, "Airpods pro 2 új", 25000, "www.vinted.hu")}]
@@ -1394,6 +1486,10 @@ class ExploreTests(HunterCase):
 
 
 class SellerTests(HunterCase):
+    def setUp(self):
+        super().setUp()
+        self.hunter.set_focus(exclude="")      # (az alapból kizárt Apple nélkül: az AirPods itt csak a példa)
+
     def test_a_bundle_from_the_same_seller(self):
         """Az eladó többi hirdetése (seller_bundle): ami külön is eladható haszonnal (biztos áron, nem lassan kelő), azt
         hozzáveszi; a Vinteden egy posta és a vevővédelmi díj (kb. fix + 5%) a végösszegre egyszer; darabonként a
@@ -2016,24 +2112,25 @@ class BrowseTests(HunterCase):
         hunter.lane_switch("hardverapro:minden_hardver", True)
         self.assertTrue(names()["Hardverapró: Minden hardver"]["on"])
         # saját: egy keresőszó a bejelölt oldalakon (a legújabb elöl), egy oldal címe a sajátján
-        state = hunter.lane_add("Lego")
+        state = hunter.lane_add("Steam Deck")
         own = [lane for lane in state["lanes"] if lane["kind"] == "sajat"]
-        self.assertEqual([(lane["name"], lane["on"]) for lane in own], [("Hardverapró: Lego", True), ("Jófogás: Lego", True)])
-        self.assertTrue(names()["Jófogás: Lego"]["url"].endswith("?q=Lego&sp=3"))
+        self.assertEqual([(lane["name"], lane["on"]) for lane in own],
+                         [("Hardverapró: Steam Deck", True), ("Jófogás: Steam Deck", True)])
+        self.assertTrue(names()["Jófogás: Steam Deck"]["url"].endswith("?q=Steam%20Deck&sp=3"))
         state = hunter.lane_add("https://www.vinted.hu/catalog?search_text=nintendo%20switch")
         lane = names()["Vinted: nintendo switch"]
         self.assertEqual(lane["url"], "https://www.vinted.hu/catalog?search_text=nintendo%20switch&order=newest_first")
         with self.assertRaises(DealError):
-            hunter.lane_add("Lego", "jofogas")          # már megvan
+            hunter.lane_add("Steam Deck", "jofogas")    # már megvan
         with self.assertRaises(DealError):
             hunter.lane_add("https://example.com/lista")
         with self.assertRaises(DealError):
             hunter.lane_remove("hardverapro:videokartyak")   # a beépítettet kikapcsolni lehet
-        hunter.lane_switch(names()["Jófogás: Lego"]["id"], False)
-        self.assertFalse(names()["Jófogás: Lego"]["on"])
-        hunter.lane_remove(names()["Jófogás: Lego"]["id"])
-        self.assertNotIn("Jófogás: Lego", names())
-        self.assertIn("Új indulóoldal: Hardverapró: Lego, Jófogás: Lego.", self.journal())
+        hunter.lane_switch(names()["Jófogás: Steam Deck"]["id"], False)
+        self.assertFalse(names()["Jófogás: Steam Deck"]["on"])
+        hunter.lane_remove(names()["Jófogás: Steam Deck"]["id"])
+        self.assertNotIn("Jófogás: Steam Deck", names())
+        self.assertIn("Új indulóoldal: Hardverapró: Steam Deck, Jófogás: Steam Deck.", self.journal())
         self.assertIn("Kikapcsoltad ezt az indulóoldalt: Hardverapró: Minden hardver.", self.journal())
 
     def test_a_removed_learned_page_is_not_learned_again_and_learning_can_be_off(self):

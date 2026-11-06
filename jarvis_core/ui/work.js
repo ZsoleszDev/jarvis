@@ -727,6 +727,7 @@
           <small class="muted">${esc(sites)}${esc(range)}${(a.exclude || []).length ? ` · kivéve: ${esc(a.exclude.join(", "))}` : ""} · ${a.every} percenként</small>
           ${(a.covered || []).length ? '<small class="muted">A közös friss listából jönnek a találatai: külön csak negyedóránként nézem.</small>' : ""}
           ${Math.max(0, ...Object.values(a.lead || {})) > 0 ? `<small class="muted">Az elején álló ${esc(Math.max(...Object.values(a.lead)))} kiemelt hirdetést nem töltöm le.</small>` : ""}
+          ${a.blocked ? `<small class="warn">Szünetel: a(z) „${esc(a.blocked)}” az Ezekkel ne foglalkozz listán van (Beállítások).</small>` : ""}
           <small class="muted">${a.off ? "szünetel" : last ? `utoljára ${esc(ago(last))}` : "még nem nézte"}${a.found ? ` · eddig ${a.found} új` : ""}${a.found_at ? ` (legutóbb ${esc(ago(a.found_at))})` : ""}</small>
           ${Object.values(a.errors || {}).map((e) => `<small class="warn">${esc(e)}</small>`).join("")}
           ${a.url ? `<small><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small>` : ""}</span>
@@ -867,7 +868,8 @@
                       ["unverified", "ellenőrizetlen (Érdemes megnézni)"],
                       ["suspicious", "gyanús"], ["risky", "kockázatos"], ["gone", "elkelt"], ["reserved", "foglalt (jegelve)"], ["defect", "hibás"],
                       ["model_no", "a modell szerint nem az"], ["muted", "elrejtett termék"],
-                      ["bundle", "csomag (a csomagbontásnak)"], ["clothing", "ruha, cipő (azzal nem kereskedem)"]];
+                      ["bundle", "csomag (a csomagbontásnak)"], ["clothing", "ruha, cipő (azzal nem kereskedem)"],
+                      ["nontech", "nem műszaki cikk"], ["excluded", "kizárt (Ezekkel ne foglalkozz)"]];
   // ráérő időben (deals.warm): az összehasonlítók előre elolvasott leírásai és a kevés árú termékek árkeresései
   const FUNNEL_SPARE = [["warm_reads", "előre elolvasott leírás"], ["warm_searches", "árkeresés"]];
   const thousands = (n) => Number(n).toLocaleString("hu-HU");
@@ -1145,9 +1147,9 @@
   function renderDeals() {
     const box = $("w-deals");
     const siteName = (key) => (deals.sites.find((s) => s.key === key) || { name: key }).name;
-    const searches = deals.searches.map((s) => `<li><span><b>${esc(s.query)}</b>
+    const searches = deals.searches.map((s) => `<li${s.blocked ? ' class="muted"' : ""}><span><b>${esc(s.query)}</b>
         <small class="muted">${esc(searchRules(s, siteName))}</small>
-        ${searchState(s)}</span>
+        ${s.blocked ? `<small class="warn">Szünetel: a(z) „${esc(s.blocked)}” az Ezekkel ne foglalkozz listán van (Beállítások).</small>` : searchState(s)}</span>
         <span class="row"><button type="button" class="small quiet" data-deal-edit="${esc(s.id)}">Szerkesztés</button>
         <button type="button" class="small quiet" data-deal-remove="${esc(s.id)}">Törlés</button></span></li>`).join("");
     const p = deals.profit;
@@ -1228,10 +1230,11 @@
     const b = deals.browse || { on: false, sites: [], min_profit: 5000, status: "" };
     // az indulóoldalak: a beépítettek (kategóriák, a legújabb elöl) és a sajátok ki-be kapcsolhatók, a saját és a tanult
     // törölhető (a tanultat nem veszi fel újra)
-    const laneRows = (deals.lanes || []).map((l) => `<li${l.on === false ? ' class="muted"' : ""}><span><b>${esc(l.name)}</b>${l.kind === "tanult" ? ' <small class="warn">tanult</small>' : ""}${l.kind === "sajat" ? ' <small class="tag">saját</small>' : ""}${l.on === false ? ' <small class="muted">kikapcsolva</small>' : ""}
+    const laneRows = (deals.lanes || []).map((l) => `<li${l.on === false ? ' class="muted"' : ""}><span><b>${esc(l.name)}</b>${l.kind === "tanult" ? ' <small class="warn">tanult</small>' : ""}${l.kind === "sajat" ? ' <small class="tag">saját</small>' : ""}${l.on === false && !l.blocked ? ' <small class="muted">kikapcsolva</small>' : ""}
+        ${l.blocked ? `<small class="warn">Szünetel: ${esc(l.blocked)} (Beállítások)</small>` : ""}
         <small class="muted">${l.pages} oldal · ${l.candidates} jelölt · ${l.deals} jó találat${l.bought ? ` · ${l.bought} megvett` : ""}</small>
         <small><a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">az oldal</a></small></span>
-        <span class="row">${l.kind !== "tanult" ? `<button type="button" class="small quiet" data-lane-switch="${esc(l.id)}" data-on="${l.on === false ? "1" : ""}">${l.on === false ? "Bekapcsolás" : "Kikapcsolás"}</button>` : ""}${l.kind !== "page" && l.kind !== "feed" ? `<button type="button" class="small quiet" data-lane-remove="${esc(l.id)}">Törlés</button>` : ""}</span></li>`).join("");
+        <span class="row">${l.kind !== "tanult" && !l.blocked ? `<button type="button" class="small quiet" data-lane-switch="${esc(l.id)}" data-on="${l.on === false ? "1" : ""}">${l.on === false ? "Bekapcsolás" : "Kikapcsolás"}</button>` : ""}${l.kind !== "page" && l.kind !== "feed" ? `<button type="button" class="small quiet" data-lane-remove="${esc(l.id)}">Törlés</button>` : ""}</span></li>`).join("");
     const hhmm = (t) => new Date(t * 1000).toLocaleTimeString("hu-HU", { hour: "2-digit", minute: "2-digit" });
     const entries = (journalDay ? journalEntries : deals.journal) || [];
     const journalRows = entries.map((e) => `<li><span><small class="muted">${esc(hhmm(e.at))}</small> ${esc(e.text)}</span></li>`).join("")
@@ -1244,7 +1247,8 @@
     const alertCount = ((deals.instant || {}).alerts || []).length;
     const bd = deals.bundles || { on: false, min_profit: 8000, searches: [], waiting: 0, presets: [] };
     const bundleSearches = bd.searches.map((s) => `<li><span><b>${esc(s.query)}</b>
-        <small class="muted">${esc((s.sites || []).map(siteName).join(", "))} · ${esc(every(s.every || 60))}${s.max_price ? ` · legfeljebb ${esc(price(s.max_price))}` : ""}</small></span>
+        <small class="muted">${esc((s.sites || []).map(siteName).join(", "))} · ${esc(every(s.every || 60))}${s.max_price ? ` · legfeljebb ${esc(price(s.max_price))}` : ""}</small>
+        ${s.off ? `<small class="warn">Szünetel: ${esc(s.off)}</small>` : ""}</span>
         <button type="button" class="small quiet" data-bundle-remove="${esc(s.id)}">Törlés</button></li>`).join("");
     box.innerHTML = `
       <div class="runbar">
@@ -1291,6 +1295,15 @@
         <label class="check"><input id="d-fastalert" type="checkbox" ${deals.fast_alert !== false ? "checked" : ""}>
           Gyors riasztás: az adatlap után rögtön szólj, a modell utána nézze meg</label>
         <div class="row"><button type="button" class="small" id="d-limits">Mentés</button></div>
+        <label class="check"><input id="d-techonly" type="checkbox" ${(deals.focus || {}).tech_only !== false ? "checked" : ""}>
+          Csak műszaki cikkek (alkatrész, konzol, kontroller, elektronika)</label>
+        <label class="field-label">Ezekkel ne foglalkozz
+          <input id="d-exclude" data-keep="d-exclude" value="${esc(((deals.focus || {}).exclude || []).join(", "))}" placeholder="pl. apple, iphone, airpods"></label>
+        <p><small class="muted">Ami ezek közül bármelyiket tartalmazza (a szó eleje számít, az ékezet nem), azt sehol nem nézem:
+          böngészés, keresések, figyelt oldalak, azonnali figyelő, alku, csomagok. A villámfigyelőre nem vonatkozik.
+          A Lego, a könyv, a parfüm és a hasonló nem műszaki cikkek a pipával maradnak ki.</small></p>
+        <div class="row"><button type="button" class="small" id="d-focus">Mentés</button>
+          ${((deals.focus || {}).default_exclude || []).length ? '<button type="button" class="small quiet" id="d-focus-apple">Apple kizárása (alap)</button>' : ""}</div>
         <label class="check"><input id="d-haggle" type="checkbox" ${(deals.haggle || {}).on !== false ? "checked" : ""}>
           Alkuképes hirdetések is (régóta fent lévő vagy friss, kicsit drága)</label>
         <label class="field-label" for="d-haggle-message">Ajánlat az eladónak ({ár} = a javasolt összeg)</label>
@@ -1429,6 +1442,17 @@
       const on = !deals.turbo;
       if (await dealAction({ action: "turbo", on }))
         J.toast(on ? "Turbó bekapcsolva: gyakrabban kérdezem a modellt." : "Turbó kikapcsolva.");
+    });
+    $("d-focus").addEventListener("click", async () => {
+      if (await dealAction({ action: "focus", tech_only: $("d-techonly").checked, exclude: $("d-exclude").value }))
+        J.toast($("d-exclude").value.trim() ? "Rendben: ezekkel nem foglalkozom." : "Rendben: semmit nem zárok ki.");
+    });
+    if ($("d-focus-apple")) $("d-focus-apple").addEventListener("click", async () => {
+      const words = [...new Set([...$("d-exclude").value.split(",").map((w) => w.trim()).filter(Boolean),
+                                 ...((deals.focus || {}).default_exclude || [])])].join(", ");
+      $("d-exclude").value = words;
+      if (await dealAction({ action: "focus", tech_only: $("d-techonly").checked, exclude: words }))
+        J.toast("Rendben: az Apple termékeivel nem foglalkozom.");
     });
     $("d-limits").addEventListener("click", async () => {
       if (await dealAction({ action: "limits", max_buy: $("d-maxbuy").value, min_profit: $("d-minprofit").value,

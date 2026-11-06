@@ -1025,6 +1025,7 @@ class InstantTests(InstantCase):
         figyelő keretéből): amit külön is haszonnal lehetne továbbadni (itt egy AirPods az árbázis biztos ára alatt), azzal
         együtt több a haszon (egy posta), ezért csendesen szól róla, és a találatba is beírja (a ruha, a tok kimarad, az
         ismeretlen árút csak megszámolja)."""
+        self.hunter.set_focus(exclude="")      # (az alapból kizárt Apple nélkül: az AirPods itt csak a példa)
         self.hunter.book.add([{"text": f"Apple AirPods Pro 2 {n}", "price": p, "platform": site,
                                "url": f"https://www.{site}.hu/a/{900 + n}.htm"}
                               for n, (p, site) in enumerate(zip((50000, 48000, 52000, 49000, 51000),
@@ -1519,14 +1520,36 @@ class InstantTests(InstantCase):
         self.watch.tick()
         self.assertEqual(len(self.notices), 3, "a folytatáskor jött a többi")
 
+    def test_no_apple_and_only_technical_items(self):
+        """Az „Ezekkel ne foglalkozz” lista (alapból az Apple) és a „csak műszaki cikkek” az azonnali figyelőben is: az
+        iPhone és a Lego egy oldalcímes figyelőben sem illik; egy keresőszavas figyelőben a Lego csak akkor, ha arra
+        szól; kizárt szóra figyelő nem vehető fel, és a régi ilyen szünetel (le sem tölti)."""
+        page = {"id": "a1", "name": "Jófogás: elektronika", "url": "https://www.jofogas.hu/magyarorszag/elektronika"}
+        phones = {"id": "a2", "name": "telefon", "query": "telefon"}
+        lego = {"id": "a3", "name": "Lego 42115", "query": "Lego 42115"}
+        self.assertFalse(self.watch._fits(page, {"text": "Apple iPhone 13 128GB", "price": 150000}))
+        self.assertFalse(self.watch._fits(page, {"text": "Lego Technic 42115", "price": 20000}))
+        self.assertFalse(self.watch._fits(phones, {"text": "iPhone 12 telefon", "price": 90000}))
+        self.assertTrue(self.watch._fits(phones, {"text": "Samsung Galaxy S21 telefon", "price": 90000}))
+        self.assertTrue(self.watch._fits(lego, {"text": "Lego Technic 42115", "price": 20000}))
+        with self.assertRaisesRegex(InstantError, "„airpod” az „Ezekkel ne foglalkozz” listán van"):
+            self.watch.add("AirPods Pro 2", ["jofogas"])
+        with self.watch._lock:
+            self.watch._data["alerts"].append({"id": "old", "name": "iPad", "query": "iPad Air", "url": "",
+                                               "sites": ["jofogas"], "every": 3})
+        self.watch.set_enabled(True)
+        self.assertEqual([a["blocked"] for a in self.watch.state()["alerts"] if a["id"] == "old"], ["ipad"])
+        self.assertFalse([alert for alert, _site in self.watch.due(self.clock() + 3600) if alert["id"] == "old"],
+                         "le sem tölti")
+
     def test_clothing_only_when_you_watch_for_it(self):
         """Ruhával nem kereskedik: egy oldalcímes (keresőszó nélküli) figyelő a ruhát és a cipőt kihagyja, és az
         értékelés a modell által ruhának nevezettet is kihagyja; egy ruhára szóló keresőszavas figyelő ettől még megy."""
         page = {"id": "a1", "name": "Jófogás: elektronika", "url": "https://www.jofogas.hu/magyarorszag/elektronika"}
         shoes = {"id": "a2", "name": "Nike Air Max 90", "query": "Nike Air Max 90"}
-        self.assertFalse(InstantWatch._fits(page, {"text": "Nike Air Max 90 42-es", "price": 20000}))
-        self.assertTrue(InstantWatch._fits(page, {"text": "Retró kütyü", "price": 20000}))
-        self.assertTrue(InstantWatch._fits(shoes, {"text": "Nike Air Max 90 42-es", "price": 20000}))
+        self.assertFalse(self.watch._fits(page, {"text": "Nike Air Max 90 42-es", "price": 20000}))
+        self.assertTrue(self.watch._fits(page, {"text": "Retró kütyü", "price": 20000}))
+        self.assertTrue(self.watch._fits(shoes, {"text": "Nike Air Max 90 42-es", "price": 20000}))
         asked = []
         self.hunter.appraise = lambda *args, **kwargs: asked.append(kwargs.get("wear")) or []
         row = {"text": "Nike Air Max 90 42-es", "price": 20000, "url": "https://www.jofogas.hu/1234567.htm"}

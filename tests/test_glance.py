@@ -138,12 +138,13 @@ class GlanceTests(HunterCase):
     def test_several_vinted_pages_take_turns(self):
         """Több Vinted-indulóoldal felváltva (a legrégebben nézett jön), így a kérések száma ugyanannyi marad."""
         self.hunter.set_browse(on=True, sites=["vinted"], glance=20)
-        self.hunter.lane_add("Lego", "vinted")
+        self.hunter.lane_add("Xbox", "vinted")
         self.follow(70)
         urls = [url for _at, url in self.loads if "vinted.hu" in url]
         self.assertEqual(len(urls), 4)
-        self.assertEqual([("Lego" in url) for url in urls], [False, True, False, True])
-        self.assertIn("search_text=Lego", urls[1])
+        self.assertEqual([("Xbox" in url) for url in urls], [False, True, False, True])
+        self.assertIn("search_text=Xbox", urls[1])
+        self.assertIn("catalog[]=2994", urls[1], "csak műszaki cikkek: az Elektronika kategórián belül")
 
     def test_the_cadence_is_set_from_the_screen_and_kept(self):
         """A gyakoriság a felületről (3, 5, 10, 15, 20, 30, 60 perc, vagy 0: a régi munkamenetek), a naplóba is; az

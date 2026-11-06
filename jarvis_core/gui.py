@@ -882,6 +882,8 @@ class _Handler(BaseHTTPRequestHandler):
                                                                        body.get("safe_only"), body.get("fast_alert"))})
             if action == "enable":
                 return self._json(200, {"ok": True, **deals.set_enabled(bool(body.get("on")))})
+            if action == "focus":       # csak műszaki cikkek, és az „Ezekkel ne foglalkozz” lista (alapból az Apple)
+                return self._json(200, {"ok": True, **deals.set_focus(body.get("tech_only"), body.get("exclude"))})
             if action == "auction_dismiss":  # egy licit levétele a licitlistáról
                 return self._json(200, {"ok": True, **deals.dismiss_auction(str(body.get("id") or ""))})
             if action == "tip_dismiss":  # egy „Érdemes megnézni” tipp elrejtése
